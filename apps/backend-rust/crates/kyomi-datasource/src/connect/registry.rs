@@ -983,10 +983,11 @@ mod tests {
     /// Helper to create a test registry with Redis.
     async fn test_registry() -> ConnectRegistry {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
-        ConnectRegistry::new(redis, config.redis_url)
+        ConnectRegistry::new(redis, redis_url)
     }
 
     #[test]
@@ -1114,14 +1115,15 @@ mod tests {
     #[tokio::test]
     async fn cross_replica_command_routing() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
 
         let dsid = "ds-cross-replica-test";
 
         // "Pod A" — holds the WebSocket connection
-        let pod_a = ConnectRegistry::new(redis.clone(), config.redis_url.clone());
+        let pod_a = ConnectRegistry::new(redis.clone(), redis_url.clone());
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<CommandPayload>(16);
         let conn_id = pod_a.register(dsid, cmd_tx).await;
         pod_a.start_command_subscriber(dsid, conn_id);
@@ -1143,7 +1145,7 @@ mod tests {
         });
 
         // "Pod B" — does NOT hold the WebSocket, but can see Redis presence key
-        let pod_b = ConnectRegistry::new(redis.clone(), config.redis_url.clone());
+        let pod_b = ConnectRegistry::new(redis.clone(), redis_url.clone());
 
         // Pod B should see the connection via Redis
         assert!(pod_b.is_connected(dsid).await);
@@ -1179,11 +1181,12 @@ mod tests {
     #[tokio::test]
     async fn redis_presence_keys_lifecycle() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
 
-        let registry = ConnectRegistry::new(redis.clone(), config.redis_url.clone());
+        let registry = ConnectRegistry::new(redis.clone(), redis_url);
         let dsid = "ds-presence-lifecycle";
 
         // Before registration, key should not exist
@@ -1270,14 +1273,15 @@ mod tests {
     #[tokio::test]
     async fn cross_replica_timeout_when_remote_slow() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
 
         let dsid = "ds-cross-timeout-test";
 
         // "Pod A" — holds the connection but the handler is very slow
-        let pod_a = ConnectRegistry::new(redis.clone(), config.redis_url.clone());
+        let pod_a = ConnectRegistry::new(redis.clone(), redis_url.clone());
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<CommandPayload>(16);
         let conn_id = pod_a.register(dsid, cmd_tx).await;
         pod_a.start_command_subscriber(dsid, conn_id);
@@ -1299,7 +1303,7 @@ mod tests {
         });
 
         // "Pod B" — sends command with a short timeout
-        let pod_b = ConnectRegistry::new(redis.clone(), config.redis_url.clone());
+        let pod_b = ConnectRegistry::new(redis.clone(), redis_url.clone());
 
         let request = ConnectRequest {
             id: "cross-timeout-1".into(),

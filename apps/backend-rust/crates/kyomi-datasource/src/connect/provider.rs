@@ -160,22 +160,12 @@ impl DatasourceProvider for ConnectProvider {
         offset: Option<u32>,
         include_total: bool,
     ) -> kyomi_connect_protocol::Result<QueryResult> {
-        let params = QueryParams {
-            sql: sql.to_string(),
-            limit,
-            offset,
-            include_total,
-        };
-        let params_value = serde_json::to_value(&params)?;
-
-        let request = Self::build_request(ConnectOp::ExecuteQuery, Some(params_value));
-        let result = self.send_and_unwrap(request).await?;
-
-        serde_json::from_value::<QueryResult>(result).map_err(|e| {
-            kyomi_connect_protocol::Error::Internal(format!(
-                "Failed to deserialize QueryResult: {e}"
-            ))
-        })
+        // Single code path: always use streaming transport and collect.
+        // The Connect agent streams all query responses.
+        let stream = self
+            .execute_query_stream(sql, limit, offset, include_total, None)
+            .await?;
+        crate::stream::collect_stream_to_result(stream).await
     }
 
     async fn execute_query_stream(
@@ -319,7 +309,7 @@ fn map_response_to_event(
 mod tests {
     use super::*;
     use kyomi_core::connect_protocol::ConnectResponseBody;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::mpsc;
 
     use super::super::registry::{CommandPayload, ConnectRegistry, ResponseChannel};
 
@@ -333,10 +323,11 @@ mod tests {
         F: FnOnce(ConnectRequest, ResponseChannel) + Send + 'static,
     {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
-        let registry = ConnectRegistry::new(redis, config.redis_url);
+        let registry = ConnectRegistry::new(redis, redis_url);
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<CommandPayload>(16);
         let conn_id = registry.register(dsid, cmd_tx).await;
@@ -405,11 +396,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn execute_query_serializes_params_and_deserializes_response() {
+    async fn execute_query_uses_streaming_and_collects() {
         let dsid = "ds-provider-eq";
         let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
-            // Verify the wire format
             assert_eq!(request.op, ConnectOp::ExecuteQuery);
+            assert!(request.streaming);
             let params: QueryParams =
                 serde_json::from_value(request.params.unwrap()).expect("valid QueryParams");
             assert_eq!(params.sql, "SELECT id, name FROM users");
@@ -417,37 +408,48 @@ mod tests {
             assert_eq!(params.offset, Some(10));
             assert!(params.include_total);
 
-            // Send back a QueryResult
-            let query_result = QueryResult {
-                status: crate::provider::QueryStatus::Success,
-                columns: Some(vec![
-                    crate::provider::ColumnInfo {
-                        name: "id".into(),
-                        col_type: crate::provider::SimpleType::Number,
-                    },
-                    crate::provider::ColumnInfo {
-                        name: "name".into(),
-                        col_type: crate::provider::SimpleType::String,
-                    },
-                ]),
-                rows: Some(vec![
-                    vec![serde_json::json!(1), serde_json::json!("Alice")],
-                    vec![serde_json::json!(2), serde_json::json!("Bob")],
-                ]),
-                total_rows: Some(100),
-                has_more: true,
-                bytes_processed: None,
-                execution_time_ms: Some(42),
-                error: None,
-            };
-
-            let response = ConnectResponse {
-                id: request.id,
-                body: ConnectResponseBody::Result {
-                    result: serde_json::to_value(&query_result).unwrap(),
-                },
-            };
-            let _ = response_tx.send(response);
+            // Connect agent always streams: Header → Chunk → Complete
+            let id = request.id;
+            match response_tx {
+                ResponseChannel::Stream(tx) => {
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id.clone(),
+                        body: ConnectResponseBody::StreamHeader {
+                            columns: vec![
+                                kyomi_connect_protocol::stream::ColumnInfo {
+                                    name: "id".into(),
+                                    col_type: kyomi_connect_protocol::stream::SimpleType::Number,
+                                },
+                                kyomi_connect_protocol::stream::ColumnInfo {
+                                    name: "name".into(),
+                                    col_type: kyomi_connect_protocol::stream::SimpleType::String,
+                                },
+                            ],
+                            total_rows: Some(100),
+                        },
+                    });
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id.clone(),
+                        body: ConnectResponseBody::StreamChunk {
+                            rows: vec![
+                                vec![serde_json::json!(1), serde_json::json!("Alice")],
+                                vec![serde_json::json!(2), serde_json::json!("Bob")],
+                            ],
+                            chunk_index: 0,
+                        },
+                    });
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id,
+                        body: ConnectResponseBody::StreamComplete {
+                            execution_time_ms: Some(42),
+                            bytes_processed: None,
+                            total_chunks: 1,
+                            total_rows_returned: 2,
+                        },
+                    });
+                }
+                _ => panic!("expected Stream channel for streaming query"),
+            }
         })
         .await;
 
@@ -457,15 +459,11 @@ mod tests {
             .await
             .expect("should succeed");
 
-        assert_eq!(
-            result.status,
-            crate::provider::QueryStatus::Success
-        );
+        assert_eq!(result.status, crate::provider::QueryStatus::Success);
         assert_eq!(result.columns.as_ref().unwrap().len(), 2);
         assert_eq!(result.columns.as_ref().unwrap()[0].name, "id");
         assert_eq!(result.rows.as_ref().unwrap().len(), 2);
         assert_eq!(result.total_rows, Some(100));
-        assert!(result.has_more);
         assert_eq!(result.execution_time_ms, Some(42));
 
         handle.await.unwrap();
@@ -740,10 +738,11 @@ mod tests {
     #[tokio::test]
     async fn offline_connect_returns_service_unavailable() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
-        let registry = ConnectRegistry::new(redis, config.redis_url);
+        let registry = ConnectRegistry::new(redis, redis_url);
 
         let provider = ConnectProvider::new(registry, "ds-not-connected".to_string());
         let result = provider.test_connection().await;
@@ -759,10 +758,11 @@ mod tests {
     #[tokio::test]
     async fn offline_connect_on_execute_query() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
-        let registry = ConnectRegistry::new(redis, config.redis_url);
+        let registry = ConnectRegistry::new(redis, redis_url);
 
         let provider = ConnectProvider::new(registry, "ds-offline-eq".to_string());
         let result = provider
@@ -815,10 +815,11 @@ mod tests {
     #[tokio::test]
     async fn list_databases_returns_not_supported() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
-        let registry = ConnectRegistry::new(redis, config.redis_url);
+        let registry = ConnectRegistry::new(redis, redis_url);
 
         let provider = ConnectProvider::new(registry, "ds-discovery".to_string());
         let result = provider.list_databases().await;
@@ -831,10 +832,11 @@ mod tests {
     #[tokio::test]
     async fn list_schemas_returns_not_supported() {
         let config = kyomi_core::Config::test_config();
-        let redis = kyomi_core::redis::create_pool(&config.redis_url)
+        let redis_url = config.redis_url.unwrap_or_else(|| "redis://localhost:6380".into());
+        let redis = kyomi_core::redis::create_pool(&redis_url)
             .await
             .expect("test Redis");
-        let registry = ConnectRegistry::new(redis, config.redis_url);
+        let registry = ConnectRegistry::new(redis, redis_url);
 
         let provider = ConnectProvider::new(registry, "ds-discovery-schemas".to_string());
         let result = provider.list_schemas().await;
