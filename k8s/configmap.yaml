@@ -22,6 +22,14 @@ data:
   SAMPLE_CLICKHOUSE_DATABASE: "acme_analytics"
   SAMPLE_CLICKHOUSE_USER: "sample_readonly"
   SAMPLE_CLICKHOUSE_SECURE: "true"
+  # AI credit budgets (monthly USD per tier)
+  AI_BUDGET_FREE: "0.50"
+  AI_BUDGET_STARTER: "3.00"
+  AI_BUDGET_PRO: "9.00"
+  AI_BUDGET_TEAM_BASE: "25.00"
+  AI_BUDGET_TEAM_PER_USER: "5.00"
+  AI_BUDGET_TEAM_BASE_USERS: "5"
+  AI_BUDGET_ENTERPRISE: "40.00"
   # Kyomi Analytics — event collection ClickHouse
   ANALYTICS_CLICKHOUSE_HOST: "analytics-clickhouse"
   ANALYTICS_CLICKHOUSE_PORT: "8443"

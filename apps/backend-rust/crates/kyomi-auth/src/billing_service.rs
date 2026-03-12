@@ -17,16 +17,10 @@ use chrono::{DateTime, Datelike, Timelike, Utc};
 use kyomi_core::DbPool;
 use serde::{Deserialize, Serialize};
 
-// ─── Constants ──────────────────────────────────────────────────────────────
-
-/// Monthly AI credit budgets by tier (in USD).
-pub const FREE_TIER_BUDGET_USD: f64 = 0.50;
-pub const STARTER_TIER_BUDGET_USD: f64 = 3.00;
-pub const PRO_TIER_BUDGET_USD: f64 = 9.00;
-pub const TEAM_TIER_BASE_BUDGET_USD: f64 = 25.00;
-pub const TEAM_TIER_PER_USER_USD: f64 = 5.00;
-pub const ENTERPRISE_TIER_BASE_BUDGET_USD: f64 = 40.00;
-pub const TEAM_TIER_BASE_USERS: i32 = 5;
+// ─── Budget config ─────────────────────────────────────────────────────────
+//
+// Budget values come from environment variables via `kyomi_core::ai_budget::CONFIG`.
+// See that module for the env var names and defaults.
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -131,27 +125,10 @@ impl BillingService {
 
     /// Get the monthly AI budget in USD for a given tier and user limit.
     ///
-    /// For Team tier, the budget scales: `$25 base + $5/user` for users
-    /// beyond the base 5.
+    /// Delegates to `kyomi_core::capability::get_credits_limit()` — single
+    /// source of truth for budget values (read from env vars).
     pub fn get_ai_budget_for_tier(tier: kyomi_core::SubscriptionTier, user_limit: Option<i32>) -> f64 {
-        use kyomi_core::SubscriptionTier::*;
-
-        if tier == Team {
-            let effective_limit = user_limit
-                .filter(|&u| u > 0)
-                .unwrap_or(TEAM_TIER_BASE_USERS);
-            let additional_users = (effective_limit - TEAM_TIER_BASE_USERS).max(0);
-            return TEAM_TIER_BASE_BUDGET_USD
-                + (TEAM_TIER_PER_USER_USD * f64::from(additional_users));
-        }
-
-        match tier {
-            Free => FREE_TIER_BUDGET_USD,
-            Basic | Starter => STARTER_TIER_BUDGET_USD,
-            Pro => PRO_TIER_BUDGET_USD,
-            Enterprise => ENTERPRISE_TIER_BASE_BUDGET_USD,
-            Team => unreachable!(), // handled above
-        }
+        kyomi_core::capability::get_credits_limit(tier, user_limit)
     }
 
     /// Calculate which monthly billing period we are currently in.
@@ -636,55 +613,31 @@ mod tests {
     use kyomi_core::SubscriptionTier;
 
     #[test]
-    fn test_get_ai_budget_free() {
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Free, None);
-        assert!((budget - FREE_TIER_BUDGET_USD).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_starter() {
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Starter, None);
-        assert!((budget - STARTER_TIER_BUDGET_USD).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_basic_alias() {
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Basic, None);
-        assert!((budget - STARTER_TIER_BUDGET_USD).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_pro() {
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Pro, None);
-        assert!((budget - PRO_TIER_BUDGET_USD).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_team_base() {
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(5));
-        assert!((budget - TEAM_TIER_BASE_BUDGET_USD).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_team_with_additional_users() {
-        // 5 base + 3 additional = 8 users
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(8));
-        let additional_users = (8 - TEAM_TIER_BASE_USERS) as f64;
-        let expected = TEAM_TIER_BASE_BUDGET_USD + (additional_users * TEAM_TIER_PER_USER_USD);
-        assert!((budget - expected).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_team_default_user_limit() {
-        // None user_limit defaults to 5 (base)
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, None);
-        assert!((budget - TEAM_TIER_BASE_BUDGET_USD).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_get_ai_budget_enterprise() {
-        let budget = BillingService::get_ai_budget_for_tier(SubscriptionTier::Enterprise, None);
-        assert!((budget - ENTERPRISE_TIER_BASE_BUDGET_USD).abs() < f64::EPSILON);
+    fn test_get_ai_budget_delegates_to_capability() {
+        // BillingService::get_ai_budget_for_tier delegates to capability::get_credits_limit.
+        // Verify they return the same values for all tiers.
+        use kyomi_core::capability::get_credits_limit;
+        for tier in [
+            SubscriptionTier::Free,
+            SubscriptionTier::Starter,
+            SubscriptionTier::Basic,
+            SubscriptionTier::Pro,
+            SubscriptionTier::Enterprise,
+        ] {
+            assert!(
+                (BillingService::get_ai_budget_for_tier(tier, None) - get_credits_limit(tier, None))
+                    .abs()
+                    < f64::EPSILON,
+                "Budget mismatch for {tier:?}"
+            );
+        }
+        // Team tier with user_limit
+        assert!(
+            (BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(8))
+                - get_credits_limit(SubscriptionTier::Team, Some(8)))
+            .abs()
+                < f64::EPSILON
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ use kyomi_core::platform::PlatformRegistry;
 // ---------------------------------------------------------------------------
 
 /// Kyomi email logo PNG, embedded at compile time (~7 KB).
-static LOGO_BYTES: &[u8] = include_bytes!("../../../../../apps/marketing/public/kyomi_email_logo.png");
+static LOGO_BYTES: &[u8] = include_bytes!("../../../../../assets/kyomi_email_logo.png");
 
 /// Content-ID used for the logo in email `<img src="cid:...">` references.
 const LOGO_CID: &str = "kyomi_logo";

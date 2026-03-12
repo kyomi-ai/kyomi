@@ -1,0 +1,25 @@
+# =============================================================================
+# Notify private repo of public repo changes
+# =============================================================================
+# On push to main, dispatches a repository_dispatch event to kyomi-private.
+# The private repo's sync-submodule.yml workflow picks this up, bumps the
+# submodule pointer, and triggers deploy workflows.
+# =============================================================================
+
+name: Notify Private Repo
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to kyomi-private
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          repository: kyomi-ai/kyomi-private
+          event-type: public-repo-updated
+          client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'

@@ -5,6 +5,7 @@
 //! Provides: configuration, database pool, Redis pool, error types,
 //! structured logging setup, and capability service.
 
+pub mod ai_budget;
 pub mod capability;
 pub mod config;
 pub mod connect_protocol;

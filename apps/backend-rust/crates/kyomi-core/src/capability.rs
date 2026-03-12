@@ -115,31 +115,26 @@ fn parse_tier(s: &str) -> Option<SubscriptionTier> {
     }
 }
 
-/// Team tier base budget (USD) and per-user add-on rate.
-/// Duplicated from `BillingService` constants so `kyomi-core` avoids a
-/// dependency on `kyomi-auth`. Keep in sync with `billing_service.rs`.
-const TEAM_TIER_BASE_BUDGET_USD: f64 = 25.0;
-const TEAM_TIER_PER_USER_USD: f64 = 5.0;
-const TEAM_TIER_BASE_USERS: i32 = 5;
-
 /// Get the monthly AI credit budget in USD for a given tier.
 ///
+/// Budget values are read from environment variables via `ai_budget::CONFIG`.
 /// For Team tier, the budget scales with `user_limit`:
-/// `$25 base + $5 * max(0, user_limit - 5)` for additional users.
+/// `base + per_user * max(0, user_limit - base_users)` for additional users.
 /// Pass `user_limit` from `workspace.user_limit` for accurate Team budgets.
 pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64 {
+    let cfg = &crate::ai_budget::CONFIG;
     match tier {
-        SubscriptionTier::Free => 0.50,
-        SubscriptionTier::Basic | SubscriptionTier::Starter => 3.0,
-        SubscriptionTier::Pro => 9.0,
+        SubscriptionTier::Free => cfg.free,
+        SubscriptionTier::Basic | SubscriptionTier::Starter => cfg.starter,
+        SubscriptionTier::Pro => cfg.pro,
         SubscriptionTier::Team => {
             let effective_limit = user_limit
                 .filter(|&u| u > 0)
-                .unwrap_or(TEAM_TIER_BASE_USERS);
-            let additional_users = (effective_limit - TEAM_TIER_BASE_USERS).max(0);
-            TEAM_TIER_BASE_BUDGET_USD + (TEAM_TIER_PER_USER_USD * f64::from(additional_users))
+                .unwrap_or(cfg.team_base_users);
+            let additional_users = (effective_limit - cfg.team_base_users).max(0);
+            cfg.team_base + (cfg.team_per_user * f64::from(additional_users))
         }
-        SubscriptionTier::Enterprise => 40.0,
+        SubscriptionTier::Enterprise => cfg.enterprise,
     }
 }
 
@@ -494,39 +489,47 @@ mod tests {
     #[test]
     fn test_credits_limit_by_tier() {
         use SubscriptionTier::*;
-        assert!((get_credits_limit(Free, None) - 0.50).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Basic, None) - 3.0).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Starter, None) - 3.0).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Pro, None) - 9.0).abs() < f64::EPSILON);
-        // Team with base 5 users = $25
+        let cfg = &crate::ai_budget::CONFIG;
+        assert!((get_credits_limit(Free, None) - cfg.free).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Basic, None) - cfg.starter).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Starter, None) - cfg.starter).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Pro, None) - cfg.pro).abs() < f64::EPSILON);
+        // Team with base users = base budget
         assert!(
-            (get_credits_limit(Team, Some(TEAM_TIER_BASE_USERS)) - TEAM_TIER_BASE_BUDGET_USD)
+            (get_credits_limit(Team, Some(cfg.team_base_users)) - cfg.team_base)
                 .abs()
                 < f64::EPSILON
         );
-        // Team with 8 users = $25 + 3 * $5 = $40
-        let expected_team_8 =
-            TEAM_TIER_BASE_BUDGET_USD + (3.0 * TEAM_TIER_PER_USER_USD);
+        // Team with 3 additional users
+        let extra = 3;
+        let expected_team = cfg.team_base + (f64::from(extra) * cfg.team_per_user);
         assert!(
-            (get_credits_limit(Team, Some(8)) - expected_team_8).abs() < f64::EPSILON
+            (get_credits_limit(Team, Some(cfg.team_base_users + extra)) - expected_team).abs()
+                < f64::EPSILON
         );
         // Team with None defaults to base users
         assert!(
-            (get_credits_limit(Team, None) - TEAM_TIER_BASE_BUDGET_USD).abs() < f64::EPSILON
+            (get_credits_limit(Team, None) - cfg.team_base).abs() < f64::EPSILON
         );
-        assert!((get_credits_limit(Enterprise, None) - 40.0).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Enterprise, None) - cfg.enterprise).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_credits_info_not_exhausted() {
+        // Use compute_capabilities_with_credits to provide explicit budget values,
+        // independent of env-var-driven tier budgets.
         let ws = test_workspace(SubscriptionTier::Pro, 3.0);
-        let info = get_credits_info(&ws, SubscriptionTier::Pro);
-        assert!(!info.exhausted);
-        assert!((info.limit_usd - 9.0).abs() < f64::EPSILON);
-        assert!((info.used_usd - 3.0).abs() < f64::EPSILON);
-        assert!((info.remaining_usd - 6.0).abs() < f64::EPSILON);
-        // 3/9 * 100 = 33.33...
-        assert!((info.percentage_used - 33.333333333333336).abs() < 0.01);
+        let credits = CreditsInfo {
+            limit_usd: 9.0,
+            used_usd: 3.0,
+            remaining_usd: 6.0,
+            exhausted: false,
+            percentage_used: 33.333333333333336,
+        };
+        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        assert!(!caps.credits_exhausted);
+        assert!(caps.ai_chat_enabled);
+        assert!((caps.credits_remaining - 6.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -585,10 +588,17 @@ mod tests {
     #[test]
     fn test_compute_capabilities_free_tier() {
         let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        let caps = compute_capabilities(&ws, false);
+        let credits = CreditsInfo {
+            limit_usd: 1.0,
+            used_usd: 0.0,
+            remaining_usd: 1.0,
+            exhausted: false,
+            percentage_used: 0.0,
+        };
+        let caps = compute_capabilities_with_credits(&ws, false, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Free);
-        assert!(caps.ai_chat_enabled); // Not exhausted yet
+        assert!(caps.ai_chat_enabled); // Not exhausted
         assert!(!caps.multi_user_enabled);
         assert!(!caps.kyomi_watch_enabled);
         assert!(!caps.slack_integration_enabled);
@@ -603,7 +613,14 @@ mod tests {
     #[test]
     fn test_compute_capabilities_pro_tier() {
         let ws = test_workspace(SubscriptionTier::Pro, 0.0);
-        let caps = compute_capabilities(&ws, false);
+        let credits = CreditsInfo {
+            limit_usd: 9.0,
+            used_usd: 0.0,
+            remaining_usd: 9.0,
+            exhausted: false,
+            percentage_used: 0.0,
+        };
+        let caps = compute_capabilities_with_credits(&ws, false, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Pro);
         assert!(caps.ai_chat_enabled);

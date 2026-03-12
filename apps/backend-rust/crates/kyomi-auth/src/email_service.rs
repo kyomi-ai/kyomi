@@ -20,7 +20,7 @@ use lettre::{
 
 /// Kyomi logo PNG, embedded at compile time.
 static LOGO_BYTES: &[u8] =
-    include_bytes!("../../../../../apps/marketing/public/kyomi_email_logo.png");
+    include_bytes!("../../../../../assets/kyomi_email_logo.png");
 
 /// Content-ID used in `<img src="cid:kyomi_logo">`.
 const LOGO_CID: &str = "kyomi_logo";

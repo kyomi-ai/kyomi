@@ -7,7 +7,7 @@ on:
       - 'apps/backend-rust/**'
       - 'apps/mcp-chart-app/**'
       - 'data/chartml-spec/**'
-      - 'apps/marketing/public/kyomi_email_logo.png'
+      - 'assets/kyomi_email_logo.png'
       - 'apps/frontend/**'              # Frontend changes need binary rebuild (rust-embed)
       - 'packages/chart-header/**'      # Local package used by frontend build
       - 'packages/chartml-transform/**' # Local package used by frontend build

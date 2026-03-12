@@ -39,7 +39,7 @@ WORKDIR /build
 COPY apps/backend-rust/ ./apps/backend-rust/
 COPY data/chartml-spec/ ./data/chartml-spec/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
-COPY apps/marketing/public/kyomi_email_logo.png ./apps/marketing/public/kyomi_email_logo.png
+COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 COPY shared/constants.toml ./shared/constants.toml
 
 # Frontend dist — rust-embed reads this at compile time to embed into the binary
