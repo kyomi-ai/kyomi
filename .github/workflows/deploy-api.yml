@@ -77,8 +77,9 @@ jobs:
         env:
           KUBECONFIG: /home/runner/.kube/config
         run: |
-          kubectl apply -f k8s/kyomi-api.yaml -n $K8S_NAMESPACE
-          kubectl rollout restart deployment/kyomi-api -n $K8S_NAMESPACE
+          kubectl set image deployment/kyomi-api \
+            kyomi-api=$REGISTRY/$IMAGE:${{ steps.sha.outputs.short }} \
+            -n $K8S_NAMESPACE
           kubectl rollout status deployment/kyomi-api -n $K8S_NAMESPACE --timeout=300s
 
       - name: Show deployment status

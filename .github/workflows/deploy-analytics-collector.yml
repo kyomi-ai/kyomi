@@ -52,8 +52,9 @@ jobs:
         env:
           KUBECONFIG: /home/runner/.kube/config
         run: |
-          kubectl apply -f k8s/analytics-collector.yaml -n $K8S_NAMESPACE
-          kubectl rollout restart deployment/analytics-collector -n $K8S_NAMESPACE
+          kubectl set image deployment/analytics-collector \
+            analytics-collector=$REGISTRY/$IMAGE:${{ steps.sha.outputs.short }} \
+            -n $K8S_NAMESPACE
           kubectl rollout status deployment/analytics-collector -n $K8S_NAMESPACE --timeout=120s
 
       - name: Show deployment status
