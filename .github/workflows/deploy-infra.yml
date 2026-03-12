@@ -39,16 +39,18 @@ jobs:
           kubectl apply -f k8s/cert-manager.yaml
           kubectl apply -f k8s/trust-bundle.yaml
 
-          echo "Applying k8s manifests..."
+          echo "Applying config-level manifests..."
+          kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/configmap.yaml -n $K8S_NAMESPACE
           kubectl apply -f k8s/storage.yaml -n $K8S_NAMESPACE
+
+          echo "Applying stateful services..."
           kubectl apply -f k8s/postgres.yaml -n $K8S_NAMESPACE
           kubectl apply -f k8s/redis.yaml -n $K8S_NAMESPACE
           kubectl apply -f k8s/analytics-clickhouse.yaml -n $K8S_NAMESPACE
           kubectl apply -f k8s/trial-clickhouse.yaml -n $K8S_NAMESPACE
-          kubectl apply -f k8s/chart-renderer.yaml -n $K8S_NAMESPACE
-          kubectl apply -f k8s/analytics-collector.yaml -n $K8S_NAMESPACE
-          kubectl apply -f k8s/kyomi-api.yaml -n $K8S_NAMESPACE
+
+          echo "Applying routing and backup..."
           kubectl apply -f k8s/ingress.yaml -n $K8S_NAMESPACE
           kubectl apply -f k8s/backup.yaml -n $K8S_NAMESPACE
 
