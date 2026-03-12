@@ -160,14 +160,22 @@ impl DatasourceProvider for ConnectProvider {
         offset: Option<u32>,
         include_total: bool,
     ) -> kyomi_connect_protocol::Result<QueryResult> {
-        // Delegate to the streaming path and collect the result.
-        // The Connect agent may decide to stream (multiple messages) or return
-        // a single buffered result depending on the query size. Using the
-        // streaming transport handles both cases transparently.
-        let stream = self
-            .execute_query_stream(sql, limit, offset, include_total, None)
-            .await?;
-        crate::stream::collect_stream_to_result(stream).await
+        let params = QueryParams {
+            sql: sql.to_string(),
+            limit,
+            offset,
+            include_total,
+        };
+        let params_value = serde_json::to_value(&params)?;
+
+        let request = Self::build_request(ConnectOp::ExecuteQuery, Some(params_value));
+        let result = self.send_and_unwrap(request).await?;
+
+        serde_json::from_value::<QueryResult>(result).map_err(|e| {
+            kyomi_connect_protocol::Error::Internal(format!(
+                "Failed to deserialize QueryResult: {e}"
+            ))
+        })
     }
 
     async fn execute_query_stream(
