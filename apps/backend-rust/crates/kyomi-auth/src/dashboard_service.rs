@@ -280,7 +280,7 @@ pub async fn get_dashboard(
         kyomi_core::models::Dashboard,
         r#"
         SELECT dashboard_id, user_id, workspace_id, title, content,
-               last_change_summary, embedding,
+               last_change_summary,
                created_at, updated_at
         FROM dashboards
         WHERE dashboard_id = $1 AND workspace_id = $2
