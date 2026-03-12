@@ -1,0 +1,337 @@
+# =============================================================================
+# Kyomi — Release Workflow
+# =============================================================================
+# Triggered by version tags (v*). Builds standalone binaries for 4 platforms,
+# publishes a multi-arch Docker image to GHCR, and creates a GitHub Release.
+#
+# Usage:
+#   git tag v1.4.0
+#   git push --tags
+#
+# This workflow is INDEPENDENT of the deploy-*.yml workflows that handle
+# internal infrastructure deployment on push to main.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  BINARY_NAME: kyomi
+  GHCR_REGISTRY: ghcr.io/kyomi-ai
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Extract version from tag
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Build: Linux amd64
+  # ---------------------------------------------------------------------------
+  build-linux-amd64:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: apps/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build MCP chart app
+        working-directory: apps/mcp-chart-app
+        run: |
+          npm install
+          npm run build
+          cp dist/mcp-app.html chart_app.html
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/backend-rust
+
+      - name: Build release binary
+        working-directory: apps/backend-rust
+        run: cargo build --release -p kyomi-api
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          tar -czf kyomi-linux-amd64.tar.gz -C release kyomi
+          rm -rf release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyomi-linux-amd64
+          path: kyomi-linux-amd64.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Build: Linux arm64
+  # ---------------------------------------------------------------------------
+  build-linux-arm64:
+    needs: [prepare]
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: apps/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build MCP chart app
+        working-directory: apps/mcp-chart-app
+        run: |
+          npm install
+          npm run build
+          cp dist/mcp-app.html chart_app.html
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/backend-rust
+
+      - name: Build release binary
+        working-directory: apps/backend-rust
+        run: cargo build --release -p kyomi-api
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          tar -czf kyomi-linux-arm64.tar.gz -C release kyomi
+          rm -rf release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyomi-linux-arm64
+          path: kyomi-linux-arm64.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Build: macOS arm64 (Apple Silicon)
+  # ---------------------------------------------------------------------------
+  build-macos-arm64:
+    needs: [prepare]
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: apps/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build MCP chart app
+        working-directory: apps/mcp-chart-app
+        run: |
+          npm install
+          npm run build
+          cp dist/mcp-app.html chart_app.html
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/backend-rust
+
+      - name: Build release binary
+        working-directory: apps/backend-rust
+        run: cargo build --release -p kyomi-api
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          tar -czf kyomi-macos-arm64.tar.gz -C release kyomi
+          rm -rf release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyomi-macos-arm64
+          path: kyomi-macos-arm64.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Build: macOS amd64 (Intel)
+  # ---------------------------------------------------------------------------
+  build-macos-amd64:
+    needs: [prepare]
+    runs-on: macos-13
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: apps/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build MCP chart app
+        working-directory: apps/mcp-chart-app
+        run: |
+          npm install
+          npm run build
+          cp dist/mcp-app.html chart_app.html
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/backend-rust
+
+      - name: Build release binary
+        working-directory: apps/backend-rust
+        run: cargo build --release -p kyomi-api
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          tar -czf kyomi-macos-amd64.tar.gz -C release kyomi
+          rm -rf release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyomi-macos-amd64
+          path: kyomi-macos-amd64.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Docker: Multi-arch image (linux/amd64 + linux/arm64)
+  # ---------------------------------------------------------------------------
+  docker:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Set up QEMU (for arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.standalone
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.GHCR_REGISTRY }}/kyomi:${{ needs.prepare.outputs.version }}
+            ${{ env.GHCR_REGISTRY }}/kyomi:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [prepare, build-linux-amd64, build-linux-arm64, build-macos-arm64, build-macos-amd64, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          for f in kyomi-*.tar.gz; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### Docker (recommended)
+            ```bash
+            curl -fsSL https://get.kyomi.ai | sh
+            ```
+            Or pull directly:
+            ```bash
+            docker pull ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
+            ```
+
+            ### Standalone binary
+            Download the binary for your platform, extract, and run:
+            ```bash
+            tar -xzf kyomi-<platform>.tar.gz
+            ./kyomi
+            ```
+
+            The binary is fully self-contained — frontend, AI model, and server in a single file.
+            Requires an LLM API key (Anthropic, OpenAI, or Gemini) set via environment variable.
+
+            See [Self-Hosting Guide](https://kyomi.ai/self-hosting) for full setup instructions.
+
+            ## Checksums
+            Verify your download:
+            ```bash
+            sha256sum -c kyomi-<platform>.tar.gz.sha256
+            ```
+          files: |
+            kyomi-*.tar.gz
+            kyomi-*.tar.gz.sha256

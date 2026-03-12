@@ -1,0 +1,132 @@
+# Internal PKI for encrypted service-to-service communication.
+#
+# Uses cert-manager to bootstrap a self-signed root CA, then issues
+# per-service certificates signed by that CA. trust-manager distributes
+# the CA to consumer pods (see trust-bundle.yaml).
+#
+# Prerequisites:
+#   helm install cert-manager jetstack/cert-manager \
+#     --namespace cert-manager --create-namespace --set crds.enabled=true
+
+# ── Step 1: Bootstrap issuer (signs itself) ──────────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+# ── Step 2: Root CA certificate (5-year validity) ────────────────────────────
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kyomi-internal-ca
+  namespace: kyomi
+spec:
+  isCA: true
+  duration: 43800h # 5 years
+  renewBefore: 8760h # 1 year before expiry
+  commonName: kyomi-internal-ca
+  subject:
+    organizations:
+      - Kyomi
+  secretName: kyomi-internal-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# ── Step 3: CA Issuer (signs service certs using the root CA) ────────────────
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: kyomi-ca-issuer
+  namespace: kyomi
+spec:
+  ca:
+    secretName: kyomi-internal-ca
+---
+# ── Service certificates ─────────────────────────────────────────────────────
+
+# Redis
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: redis-tls
+  namespace: kyomi
+spec:
+  secretName: redis-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiry
+  dnsNames:
+    - redis
+    - redis.kyomi.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kyomi-ca-issuer
+    kind: Issuer
+---
+# PostgreSQL
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: postgres-tls
+  namespace: kyomi
+spec:
+  secretName: postgres-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiry
+  dnsNames:
+    - postgres
+    - postgres.kyomi.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kyomi-ca-issuer
+    kind: Issuer
+---
+# Analytics ClickHouse
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: analytics-clickhouse-tls
+  namespace: kyomi
+spec:
+  secretName: analytics-clickhouse-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiry
+  dnsNames:
+    - analytics-clickhouse
+    - analytics-clickhouse.kyomi.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kyomi-ca-issuer
+    kind: Issuer
+---
+# Trial ClickHouse
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: trial-clickhouse-tls
+  namespace: kyomi
+spec:
+  secretName: trial-clickhouse-tls
+  duration: 8760h # 1 year
+  renewBefore: 720h # 30 days before expiry
+  dnsNames:
+    - trial-clickhouse
+    - trial-clickhouse.kyomi.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kyomi-ca-issuer
+    kind: Issuer

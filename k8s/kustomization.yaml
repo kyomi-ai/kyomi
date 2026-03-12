@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kyomi
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - cert-manager.yaml
+  - trust-bundle.yaml
+  - storage.yaml
+  - postgres.yaml
+  - redis.yaml
+  - trial-clickhouse.yaml
+  - analytics-clickhouse.yaml
+  - chart-renderer.yaml
+  - analytics-collector.yaml
+  - kyomi-api.yaml
+  - kyomi-connect.yaml
+  - ingress.yaml
+
+# Secret must be created manually from template:
+# cp secret.yaml.template secret.yaml
+# Edit secret.yaml with base64 encoded values
+# kubectl apply -f secret.yaml

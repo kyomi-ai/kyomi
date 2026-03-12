@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-scripts
+  namespace: kyomi
+data:
+  backup-postgres.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "$(date): Starting PostgreSQL backup"
+
+    # Install restic
+    echo "Installing restic..."
+    apt-get update -qq && apt-get install -yqq curl bzip2 > /dev/null
+    curl -sL https://github.com/restic/restic/releases/download/v0.17.3/restic_0.17.3_linux_amd64.bz2 | bunzip2 > /usr/local/bin/restic
+    chmod +x /usr/local/bin/restic
+
+    # Dump PostgreSQL
+    echo "Dumping PostgreSQL..."
+    pg_dump -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/kyomi-pg.dump
+
+    # Backup to B2
+    echo "Uploading to Backblaze B2..."
+    restic -r "$RESTIC_REPO" backup /tmp/kyomi-pg.dump --tag postgresql --tag kyomi
+
+    # Cleanup
+    rm -f /tmp/kyomi-pg.dump
+
+    # Prune old backups
+    echo "Pruning old backups..."
+    restic -r "$RESTIC_REPO" forget --keep-daily 7 --keep-weekly 4 --keep-monthly 3 --prune
+
+    echo "$(date): PostgreSQL backup completed"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-postgres
+  namespace: kyomi
+spec:
+  schedule: "0 3 * * *"  # Daily at 03:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800  # 30 min max
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: docker.io/pgvector/pgvector:pg15
+              command: ["/bin/bash", "/scripts/backup-postgres.sh"]
+              env:
+                - name: POSTGRES_USER
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kyomi-config
+                      key: POSTGRES_USER
+                - name: POSTGRES_DB
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kyomi-config
+                      key: POSTGRES_DB
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: kyomi-secrets
+                      key: POSTGRES_PASSWORD
+                - name: PGSSLMODE
+                  value: "verify-ca"
+                - name: PGSSLROOTCERT
+                  value: /tls-ca/ca-certificates.crt
+              envFrom:
+                - secretRef:
+                    name: backup-secrets
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                - name: tmp
+                  mountPath: /tmp
+                - name: trust-bundle
+                  mountPath: /tls-ca
+                  readOnly: true
+          volumes:
+            - name: scripts
+              configMap:
+                name: backup-scripts
+                defaultMode: 0755
+            - name: tmp
+              emptyDir:
+                sizeLimit: 5Gi
+            - name: trust-bundle
+              configMap:
+                name: kyomi-trust-bundle

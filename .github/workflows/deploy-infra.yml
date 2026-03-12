@@ -1,0 +1,60 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'k8s/**'
+      - '.github/workflows/deploy-infra.yml'
+  workflow_dispatch:
+
+env:
+  K8S_NAMESPACE: kyomi
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        run: |
+          if ! command -v kubectl &>/dev/null; then
+            curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/kubectl
+          fi
+          kubectl version --client
+
+      - name: Apply k8s manifests
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: |
+          echo "Applying Traefik config (kube-system)..."
+          kubectl apply -f k8s/traefik-config.yaml
+
+          echo "Applying cert-manager resources..."
+          kubectl apply -f k8s/cert-manager.yaml
+          kubectl apply -f k8s/trust-bundle.yaml
+
+          echo "Applying k8s manifests..."
+          kubectl apply -f k8s/configmap.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/storage.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/postgres.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/redis.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/analytics-clickhouse.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/trial-clickhouse.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/chart-renderer.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/analytics-collector.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/kyomi-api.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/ingress.yaml -n $K8S_NAMESPACE
+          kubectl apply -f k8s/backup.yaml -n $K8S_NAMESPACE
+
+      - name: Show deployment status
+        if: always()
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: |
+          kubectl get pods -n $K8S_NAMESPACE || true

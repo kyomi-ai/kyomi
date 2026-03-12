@@ -76,6 +76,7 @@ export default defineConfig({
     nav: [
       { text: 'Features', link: '/features' },
       { text: 'Pricing', link: '/pricing' },
+      { text: 'Self-Host', link: '/self-hosting' },
       { text: 'Blog', link: '/blog' },
       { text: 'Docs', link: '/docs/' }, // Kyomi documentation
       { text: 'Alternatives', link: '/alternatives/metabase' },

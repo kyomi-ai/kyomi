@@ -9,6 +9,9 @@
 #   — or —
 #   sh install.sh
 #
+# Pin to a specific version:
+#   KYOMI_VERSION=1.4.0 curl -fsSL https://get.kyomi.ai | sh
+#
 # Requirements: Docker with Compose plugin, openssl, curl
 # =============================================================================
 set -e
@@ -16,6 +19,7 @@ set -e
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+KYOMI_VERSION="${KYOMI_VERSION:-latest}"
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/kyomi-ai/kyomi/main/deploy"
 INSTALL_DIR="kyomi"
 
@@ -151,7 +155,15 @@ download_files() {
     curl -fsSL "${GITHUB_RAW_BASE}/upgrade.sh" -o "${INSTALL_DIR}/upgrade.sh"
     chmod +x "${INSTALL_DIR}/upgrade.sh"
 
-    ok "Downloaded compose file and .env example"
+    # Pin the image tag if a specific version was requested
+    if [ "$KYOMI_VERSION" != "latest" ]; then
+        sed -i.bak "s|ghcr.io/kyomi-ai/kyomi:latest|ghcr.io/kyomi-ai/kyomi:${KYOMI_VERSION}|g" \
+            "${INSTALL_DIR}/docker-compose.yml"
+        rm -f "${INSTALL_DIR}/docker-compose.yml.bak"
+        ok "Downloaded compose file (pinned to v${KYOMI_VERSION})"
+    else
+        ok "Downloaded compose file (using latest)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -307,7 +319,11 @@ print_success() {
     echo ""
     echo "============================================="
     echo ""
-    ok "Kyomi is installed!"
+    if [ "$KYOMI_VERSION" != "latest" ]; then
+        ok "Kyomi v${KYOMI_VERSION} is installed!"
+    else
+        ok "Kyomi is installed!"
+    fi
     echo ""
     echo "  Open ${KYOMI_URL} in your browser to get started."
     echo "  (It may take a minute for the database to initialize.)"
