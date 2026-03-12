@@ -1,0 +1,82 @@
+<svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="amberGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#d97706;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#b45309;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Animation for sparkle effect -->
+    <style>
+      .ray {
+        fill: url(#amberGradient);
+        animation: sparkle 2s ease-in-out infinite;
+      }
+
+      .ray-1 { animation-delay: 0.6s; }
+      .ray-2 { animation-delay: 1.3s; }
+      .ray-3 { animation-delay: 0.2s; }
+      .ray-4 { animation-delay: 1.7s; }
+      .ray-5 { animation-delay: 0.9s; }
+      .ray-6 { animation-delay: 0.1s; }
+      .ray-7 { animation-delay: 1.4s; }
+      .ray-8 { animation-delay: 0.4s; }
+
+      .center {
+        fill: url(#amberGradient);
+        animation: pulse 2s ease-in-out infinite;
+      }
+
+      @keyframes sparkle {
+        0%, 100% {
+          opacity: 0.4;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.1);
+        }
+      }
+
+      @keyframes pulse {
+        0%, 100% {
+          opacity: 0.6;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.15);
+        }
+      }
+    </style>
+  </defs>
+
+  <!-- Center icon at 30, 30 with scaled up rays -->
+  <g transform="translate(30, 30)">
+    <!-- Ray 1 - Top -->
+    <polygon class="ray ray-1" points="0,-28 4.5,-11 0,-6 -4.5,-11"/>
+
+    <!-- Ray 2 - Top Right -->
+    <polygon class="ray ray-2" points="20,-20 11.5,-4 7,-7 11.5,-11.5"/>
+
+    <!-- Ray 3 - Right -->
+    <polygon class="ray ray-3" points="28,0 11.5,4.5 7,0 11.5,-4.5"/>
+
+    <!-- Ray 4 - Bottom Right -->
+    <polygon class="ray ray-4" points="20,20 4.5,11.5 0,7 4.5,11.5"/>
+
+    <!-- Ray 5 - Bottom -->
+    <polygon class="ray ray-5" points="0,28 -4.5,11.5 0,7 4.5,11.5"/>
+
+    <!-- Ray 6 - Bottom Left -->
+    <polygon class="ray ray-6" points="-20,20 -11.5,4.5 -7,7 -11.5,11.5"/>
+
+    <!-- Ray 7 - Left -->
+    <polygon class="ray ray-7" points="-28,0 -11.5,-4.5 -7,0 -11.5,4.5"/>
+
+    <!-- Ray 8 - Top Left -->
+    <polygon class="ray ray-8" points="-20,-20 -4.5,-11.5 0,-7 -4.5,-11.5"/>
+
+    <!-- Center circle -->
+    <circle class="center" cx="0" cy="0" r="6"/>
+  </g>
+</svg>

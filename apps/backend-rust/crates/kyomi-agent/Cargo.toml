@@ -1,0 +1,37 @@
+[package]
+name = "kyomi-agent"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+kyomi-core = { workspace = true }
+kyomi-auth = { workspace = true }
+kyomi-datasource-server = { workspace = true }
+kyomi-datasource-drivers = { workspace = true }
+kyomi-embed = { workspace = true }
+kyomi-knowledge = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+redis = { workspace = true }
+sqlx = { workspace = true }
+pgvector = { workspace = true }
+web-push-native = { workspace = true }
+http = "1"
+regex = "1"
+serde_yaml = "0.9"
+statrs = { workspace = true }
+lettre = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+kyomi-core = { workspace = true, features = ["test-helpers"] }

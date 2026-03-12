@@ -1,0 +1,19 @@
+{
+  "name": "kyomi-chart-app",
+  "license": "AGPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "INPUT=mcp-app.html vite build"
+  },
+  "dependencies": {
+    "@chartml/core": "^2.2.2",
+    "@kyomi/chart-header": "file:../../packages/chart-header",
+    "@modelcontextprotocol/ext-apps": "^1.0.0",
+    "js-yaml": "^4.1.1"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "vite-plugin-singlefile": "^2.0.0"
+  }
+}

@@ -1,0 +1,49 @@
+transform: visitors
+source: events
+key: visitor_id
+order_by: timestamp
+order_by_type: DateTime64(3)
+
+columns:
+  user_id:
+    type: String
+    strategy: "latest(user_id)"
+  first_seen:
+    type: DateTime64(3)
+    strategy: "min(timestamp)"
+  last_seen:
+    type: DateTime64(3)
+    strategy: "max(timestamp)"
+  first_page:
+    type: String
+    strategy: "earliest(pathname)"
+  first_referrer:
+    type: String
+    strategy: "earliest(referrer)"
+  first_referrer_source:
+    type: String
+    strategy: "earliest(referrer_source)"
+  first_utm_source:
+    type: String
+    strategy: "earliest(utm_source)"
+  first_utm_medium:
+    type: String
+    strategy: "earliest(utm_medium)"
+  first_utm_campaign:
+    type: String
+    strategy: "earliest(utm_campaign)"
+  country_code:
+    type: String
+    strategy: "latest(country_code)"
+  browser:
+    type: String
+    strategy: "latest(browser)"
+  os:
+    type: String
+    strategy: "latest(os)"
+  device_type:
+    type: String
+    strategy: "latest(device_type)"
+  events:
+    type: UInt64
+    strategy: "count()"

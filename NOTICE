@@ -1,0 +1,54 @@
+Kyomi
+Copyright 2025-2026 Alytic Pty Ltd
+
+This product includes software developed by Alytic Pty Ltd (https://kyomi.ai).
+
+Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0-or-later).
+A commercial license is also available — see LICENSE-COMMERCIAL.md.
+
+The enterprise/ directory is separately licensed under a proprietary license.
+See enterprise/LICENSE for details.
+
+================================================================================
+Third-Party Dependencies
+================================================================================
+
+This product depends on the following open source libraries (among others):
+
+Rust Dependencies (Backend):
+  - axum (MIT)                          - Web framework
+  - tokio (MIT)                         - Async runtime
+  - sqlx (MIT OR Apache-2.0)            - SQL toolkit
+  - serde (MIT OR Apache-2.0)           - Serialization
+  - reqwest (MIT OR Apache-2.0)         - HTTP client
+  - jsonwebtoken (MIT)                  - JWT handling
+  - redis (BSD-3-Clause)                - Redis client
+  - fastembed (Apache-2.0)              - Embedding models
+  - webauthn-rs (MPL-2.0)              - WebAuthn/passkeys
+  - tracing (MIT)                       - Logging/tracing
+  - uuid (MIT OR Apache-2.0)            - UUID generation
+  - chrono (MIT OR Apache-2.0)          - Date/time
+  - argon2 (MIT OR Apache-2.0)          - Password hashing
+  - tower-http (MIT)                    - HTTP middleware
+  - rust-embed (MIT)                    - Static asset embedding
+  - async-stripe (Apache-2.0 OR MIT)    - Stripe billing
+  - lettre (MIT)                        - SMTP email
+  - totp-rs (MIT)                       - TOTP/2FA
+  - sqlparser (Apache-2.0)              - SQL parsing
+  - p256 (MIT OR Apache-2.0)            - ECDSA/ECDH
+  - ed25519-dalek (BSD-3-Clause)        - Ed25519 signatures
+  - arrow (Apache-2.0)                  - Apache Arrow IPC
+
+JavaScript Dependencies (Frontend):
+  - React (MIT)                         - UI framework
+  - Vite (MIT)                          - Build tool
+  - Tailwind CSS (MIT)                  - CSS framework
+  - DuckDB WASM (MIT)                   - In-browser analytics
+  - Radix UI (MIT)                      - Accessible components
+  - Recharts (MIT)                      - Charting library
+  - CodeMirror (MIT)                    - Code editor
+  - Zustand (MIT)                       - State management
+
+Full dependency lists are available in:
+  - apps/backend-rust/Cargo.lock (Rust)
+  - apps/frontend/package-lock.json (Frontend)

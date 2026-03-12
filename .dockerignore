@@ -1,0 +1,24 @@
+# Exclude node_modules from all Docker build contexts
+**/node_modules
+
+# Rust build artifacts (large)
+apps/backend-rust/target
+
+# Local dev data
+.data/
+postgres_data/
+.fastembed_cache/
+
+# Git
+.git
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+
+# Test artifacts
+test-results/
+playwright-report/
+htmlcov/
+coverage/

@@ -1,0 +1,1216 @@
+# Kyomi v1.0 - Comprehensive Manual Testing Checklist
+
+**Generated:** 2025-11-17
+**Purpose:** Complete feature testing guide for pre-production release
+**Testing Environments:**
+- Desktop: Chrome, Firefox, Safari (1920x1080)
+- Tablet: iPad/Android (768x1024)
+- Mobile: iPhone/Android (375x812)
+
+---
+
+## Testing Instructions
+
+### Priority Levels
+- 🔴 **CRITICAL** - Must work for v1.0 launch (core functionality)
+- 🟡 **HIGH** - Important but not blocking (quality features)
+- 🟢 **MEDIUM** - Nice to have, test if time permits
+
+### Device Testing Legend
+- **Desktop** - Test on desktop browsers only
+- **Mobile** - Test on mobile devices only
+- **Both** - Test on both desktop and mobile
+
+---
+
+## 1. AUTHENTICATION & USER MANAGEMENT
+
+### 1.1 Registration & Signup (Both) 🔴
+
+#### ~~Password Registration~~ *(Not applicable - Google OAuth only)*
+- ~~[ ] Navigate to signup page~~
+- ~~[ ] Enter new email address~~
+- ~~[ ] System checks if email exists~~
+- ~~[ ] Enter name and password (min 8 chars)~~
+- ~~[ ] Receive verification email (check backend logs in dev mode)~~
+- ~~[ ] Click verification link~~
+- ~~[ ] Email verified successfully~~
+- ~~[ ] Redirect to login page~~
+- ~~[ ] Login with new credentials~~
+
+#### ~~Passkey Registration (Desktop)~~ *(Not applicable - Google OAuth only)*
+- ~~[ ] Navigate to signup page~~
+- ~~[ ] Select passkey option (if browser supports WebAuthn)~~
+- ~~[ ] Enter email, name, device name~~
+- ~~[ ] Complete WebAuthn challenge~~
+- ~~[ ] Receive verification email~~
+- ~~[ ] Click verification link~~
+- ~~[ ] Login with passkey~~
+
+#### Google OAuth Registration (Both) 🔴
+- [X] Click "Sign in with Google"
+- [X] Complete Google OAuth flow
+- [ ] Auto-create personal workspace
+- [ ] Redirect to chat interface
+- [ ] See welcome message
+
+### 1.2 Login Methods (Both) 🔴
+
+#### ~~Password Login~~ *(Not applicable - Google OAuth only)*
+- ~~[ ] Enter email and password~~
+- ~~[ ] Successful login → redirect to chat~~
+- ~~[ ] Invalid email → error message~~
+- ~~[ ] Invalid password → error message~~
+
+#### Google OAuth Login
+- [ ] Click "Sign in with Google"
+- [ ] OAuth redirect and approval
+- [ ] Return to app and login
+- [ ] Access chat interface
+
+#### ~~Passkey Login (Desktop)~~ *(Not applicable - Google OAuth only)*
+- ~~[ ] Click passkey login button~~
+- ~~[ ] Complete WebAuthn authentication~~
+- ~~[ ] Successful login~~
+
+#### ~~2FA/TOTP Login (Both)~~ *(Not applicable - Google OAuth only)*
+- ~~[ ] Login with email/password (2FA enabled account)~~
+- ~~[ ] Prompted for 6-digit TOTP code~~
+- ~~[ ] Enter code from authenticator app~~
+- ~~[ ] Successful login~~
+- ~~[ ] Invalid code → error + retry~~
+
+### ~~1.3 Password Management (Both)~~ *(Not applicable - Google OAuth only)*
+
+#### ~~Set Password (for passkey-only users)~~
+- ~~[ ] Navigate to Settings → Security~~
+- ~~[ ] Click "Set Password"~~
+- ~~[ ] Enter new password (min 8 chars)~~
+- ~~[ ] Confirm password matches~~
+- ~~[ ] Password set successfully~~
+- ~~[ ] Can now login with password~~
+
+#### ~~Change Password~~
+- ~~[ ] Navigate to Settings → Security~~
+- ~~[ ] Click "Change Password"~~
+- ~~[ ] Enter current password~~
+- ~~[ ] Enter new password~~
+- ~~[ ] Confirm new password~~
+- ~~[ ] Password updated~~
+- ~~[ ] Old password no longer works~~
+
+### ~~1.4 Two-Factor Authentication (Both)~~ *(Not applicable - Google OAuth only)*
+
+#### ~~Setup 2FA~~
+- ~~[ ] Navigate to Settings → Security~~
+- ~~[ ] Click "Setup 2FA"~~
+- ~~[ ] QR code displayed~~
+- ~~[ ] Scan with authenticator app (Google Authenticator, Authy)~~
+- ~~[ ] Manual entry key shown~~
+- ~~[ ] Enter verification code~~
+- ~~[ ] 2FA enabled successfully~~
+- ~~[ ] Status shows "Enabled"~~
+
+#### ~~Disable 2FA~~
+- ~~[ ] Click "Disable 2FA"~~
+- ~~[ ] Confirmation dialog appears~~
+- ~~[ ] Confirm disable~~
+- ~~[ ] 2FA disabled~~
+- ~~[ ] Next login doesn't require code~~
+
+### 1.5 Session Management (Both) 🔴
+
+#### View Active Sessions
+- [X] Navigate to Settings → Security
+- [X] View all active sessions
+- [X] See device info (browser, OS)
+- [X] See IP address
+- [X] See last used timestamp
+- [X] Current device marked with badge
+
+#### Logout from All Devices
+- [X] Click "Log Out from All Devices"
+- [X] Confirmation dialog appears
+- [X] Confirm logout all
+- [X] Redirect to login
+- [x] Other sessions terminated
+
+### 1.6 Profile Management (Both) 🔴
+
+- [X] Navigate to Settings → Profile
+- [X] Edit profile name
+- [X] Auto-save triggers (3-second delay)
+- [X] "Saved" indicator appears
+- [X] Email field is read-only
+- [X] Changes persist after refresh
+
+---
+
+## 2. CHAT INTERFACE
+
+### 2.1 Message Sending & Streaming (Both) 🔴
+
+- [X] Type message in textarea
+- [X] Press Enter to send (or tap send on mobile)
+- [X] Message appears as user bubble (orange, right-aligned)
+- [X] Textarea clears after send
+- [X] Assistant response streams in real-time
+- [X] No duplicate messages
+- [X] Timestamp displays correctly
+
+### 2.2 Session Management (Both) 🔴
+
+#### Create New Session
+- [X] Click "New Chat" button
+- [X] Navigate to `/chat` (no session ID)
+- [X] Greeting message displays with user's first name
+- [X] Send first message
+- [x] Session ID created
+- [x] URL updates to `/chat/{sessionId}`
+- [x] Session appears in sidebar
+
+#### Load Existing Session
+- [x] Click session in sidebar
+- [x] URL changes to `/chat/{sessionId}`
+- [x] Messages load from backend
+- [x] Session title displays in header
+- [x] Session marked as active
+
+#### Rename Session
+- [x] Click on session title
+- [x] Enter edit mode
+- [x] Type new title
+- [x] Press Enter or click checkmark
+- [-] Title updates in header and sidebar
+- [ ] Cancel with Escape key
+
+#### Delete Session
+- [x] Navigate to Chats list (`/chats`)
+- [x] Click delete button on session
+- [x] Confirmation dialog appears
+- [x] Confirm delete
+- [x] Session removed from list
+
+### 2.3 Message Interactions (Both) 🔴
+
+#### Pin Messages
+- [X] Hover over assistant message
+- [X] Click pin icon (star)
+- [X] Star becomes filled
+- [X] Click pin filter button in header
+- [X] Only pinned messages shown
+- [x] Click filter again to show all
+
+#### Copy Code Blocks
+- [X] Message with code block appears
+- [-] Click copy button
+- [-] Code copied to clipboard
+- [-] Success feedback shown
+
+### 2.4 Agent Thinking Display (Both) 🔴
+
+- [x] Send message that triggers tools
+- [x] Thinking bubble appears
+- [x] Shows tools count and elapsed time
+- [x] Animated Kyomi logo displays
+- [x] Click to expand thinking details
+- [x] See individual tool events
+- [x] Thinking persists after completion
+- [x] Can review thinking process
+
+### 2.5 Chart Rendering (Both) 🔴
+
+- [x] Agent response includes ChartML chart
+- [x] Chart renders below text
+- [x] Chart header with refresh button
+- [x] "Last refreshed" timestamp
+- [x] Chart responsive on mobile
+- [x] Click refresh to update data
+- [x] Multiple charts render independently
+
+### 2.6 Save to Dashboard (Both) 🔴
+
+#### Create New Dashboard
+- [x] Hover over assistant message
+- [x] Click "Save to Dashboard" button
+- [x] Modal opens
+- [x] Click "Create New Dashboard"
+- [x] Enter dashboard title
+- [x] Click "Create Dashboard"
+- [x] Navigate to new dashboard
+- [x] Message content appears in dashboard
+
+#### Add to Existing Dashboard
+- [x] Open save modal
+- [x] Select existing dashboard from list
+- [x] Click "Add to Dashboard"
+- [x] Navigate to dashboard
+- [x] Content appended to dashboard
+
+### 2.7 Search Functionality (Both) 🟡
+
+- [x] Navigate to `/chats`
+- [x] Type search query
+- [x] Results filter in real-time (300ms debounce)
+- [x] Result count displays
+- [x] Clear search with X button
+- [x] All chats reload
+
+### 2.8 Credits & Subscription Gating (Both) 🔴
+
+- [ ] Free tier: credits exhausted state shows
+- [ ] Alert message displays
+- [ ] Textarea disabled
+- [ ] Send button disabled
+- [ ] Upgrade prompt shown
+
+### 2.9 Mobile-Specific Features (Mobile) 🔴
+
+- [X] Sidebar auto-collapses
+- [X] Hamburger menu toggles sidebar
+- [X] Message bubbles responsive width
+- [X] Input area fits on screen
+- [X] Action buttons accessible on tap
+- [X] Modals fit screen properly
+
+---
+
+## 3. DASHBOARDS
+
+### 3.1 Dashboard List (Both) 🔴
+
+- [x] Navigate to `/dashboards`
+- [x] Dashboards display in grid
+- [x] Card shows title, created date, collection badge
+- [x] Hover shows actions (view, edit, delete)
+- [x] Click dashboard to view
+- [x] Collections sidebar on left
+- [x] Filter by collection works
+- [x] Create new dashboard button
+
+### 3.2 Dashboard Viewer (Both) 🔴
+
+#### Header & Navigation
+- [x] Back button returns to list
+- [x] Title displays correctly
+- [x] Inline title editing works
+- [x] "Refresh All" button broadcasts to charts
+- [x] "Edit" button navigates to editor
+- [x] Created/updated dates display
+
+#### Content Rendering
+- [x] Markdown content renders correctly
+- [x] Charts render in grid layout
+- [x] Parameters render at top
+- [x] Empty state shows when no content
+- [x] Responsive layout on mobile
+
+#### Parameters & Filters
+- [ ] Parameters initialize with defaults
+- [ ] Parameter changes trigger chart updates
+- [ ] URL parameters sync
+- [ ] Multi-select dropdowns work
+- [ ] Date range pickers work
+- [ ] Parameter values persist in URL
+
+#### Charts
+- [x] All chart types render (table, bar, line, area, scatter, pie, metric, gauge)
+- [x] Chart legends work
+- [x] Hover tooltips display
+- [-] Column sorting in tables
+- [x] Chart refresh button works
+- [x] "Last refreshed" timestamp updates
+- [x] Charts responsive on mobile
+
+### 3.3 Dashboard Editor (Desktop) 🔴
+
+#### Editor UI
+- [x] Monaco editor loads
+- [x] Syntax highlighting works
+- [x] Line numbers visible
+- [x] Cursor position tracks
+- [x] 3-view mode toggle (editor/split/preview)
+- [x] Resizable split pane
+- [x] Bidirectional scroll sync
+
+#### Editing Features
+- [x] Type markdown content
+- [x] Live preview updates (3-second debounce)
+- [x] Title editing in header
+- [x] Chart builder modal opens
+- [x] Insert chart from builder
+- [x] Parameter validation with squiggles
+- [x] Column reference validation
+- [x] Save button persists changes
+
+#### Unsaved Changes
+- [-] Unsaved changes tracked
+- [ ] Browser warns before navigation
+- [ ] Can cancel navigation
+
+### 3.4 Collections (Both) 🔴
+
+- [X] Create collection (name, description, color)
+- [x]] Edit collection properties
+- [x] Delete collection (confirmation)
+- [x] Add dashboard to collection
+- [x] Remove dashboard from collection
+- [x] Filter dashboards by collection
+- [x] Public/Private collection visibility
+
+### 3.5 Mobile Responsiveness (Mobile) 🔴
+
+- [x] Dashboard grid: 1 column on mobile
+- [x] Parameters stack vertically
+- [x] Charts fit screen width
+- [x] Touch interactions work
+- [x] Collections sidebar slides in
+- [x] Editor not recommended (desktop only)
+
+---
+
+## 4. SQL EDITOR
+
+### 4.1 Query Editing (Desktop) 🔴
+
+- [x] Monaco SQL editor loads
+- [x] Syntax highlighting works
+- [x] Line numbers visible
+- [x] Cursor position tracked
+- [x] Can select partial query
+- [x] Cmd/Ctrl+Enter executes
+- [x] Run Query button works
+- [x] Query persists after refresh
+
+### 4.2 Query Validation & Dry Run (Desktop) 🔴
+
+- [x] Real-time validation (800ms debounce)
+- [x] Estimated data scanned displays
+- [x] Estimated cost displays
+- [x] Syntax errors show with red squiggles
+- [x] Error messages display
+- [x] Validation clears when fixed
+
+### 4.3 Results Display (Desktop) 🔴
+
+#### Tabbed Results
+- [x] Each query creates new tab
+- [x] Tabs show colored backgrounds
+- [x] Tab shows status (running/success/error)
+- [x] Close tab button works
+- [x] Pin tab keeps result
+- [x] "Clear All" removes unpinned tabs
+- [x] Max 5 unpinned tabs enforced
+
+#### Results Table
+- [x] Columns display correctly
+- [x] Rows display with proper types
+- [x] Null values shown
+- [x] Numbers formatted
+- [x] Horizontal scroll for wide tables
+- [x] Vertical scroll for many rows
+- [x] Sticky column headers
+
+#### Sorting & Pagination
+- [-] Click header to sort
+- [-] Ascending → descending → clear
+- [-] Ctrl+Click for multi-column sort
+- [ ] Page size selector (25/50/100/200)
+- [s] Previous/Next pagination buttons
+- [s] Page indicator displays
+- [s] Page size persists across tabs
+
+### 4.4 Query History (Desktop) 🔴
+
+- [x] History sidebar toggles
+- [x] Infinite scroll loading
+- [x] Shows query preview
+- [x] Full query on hover tooltip
+- [x] Execution timestamp displayed
+- [x] Success/error indicator
+- [x] Click to load query
+- [x] Star/favorite queries
+- [x] Search filters history
+- [x] Delete query with confirmation
+
+### 4.5 Schema Browser (Desktop) 🔴
+
+#### Catalog Tree
+- [x] Projects expand/collapse
+- [x] Datasets expand/collapse
+- [x] Tables expand/collapse
+- [x] Columns expand/collapse
+- [x] Lazy loading works
+- [x] Loading spinners display
+- [x] Click table to insert
+- [x] Click column to insert
+
+#### Search
+- [x] Search input filters catalog
+- [x] Semantic search works (3+ chars)
+- [x] Relevance scores display
+- [x] "No tables found" for empty
+- [x] Clear search shows tree
+
+#### Table Details
+- [-] Info icon opens modal
+- [-] Table name, row count, size display
+- [-] Schema table shows columns/types
+- [-] "Insert into Query" button works
+
+### 4.6 SQL Copilot (Desktop, Pro+ tier) 🔴
+
+- [x] Text input for natural language
+- [x] "Generate" mode when editor empty
+- [x] "Refine" mode with existing SQL
+- [x] Submit button enabled when text entered
+- [x] Cmd/Ctrl+Enter submits
+- [x] "Generating..." spinner shows
+- [x] Generated SQL appears in editor
+- [-] Error alert if generation fails
+- [x] Credits exhausted disables feature
+
+### 4.7 BigQuery Integration (Desktop) 🔴
+
+- [x] BigQuery capability check on load
+- [x] Status indicators for missing setup
+- [x] "Configure BigQuery" button navigates to settings
+- [x] Help links for permission errors
+- [x] Query execution via Direct API
+- [x] Results stream correctly
+- [x] Error handling for permissions
+
+---
+
+## 5. SETTINGS
+
+### 5.1 Profile Tab (Both) 🔴
+
+#### Profile Information
+- [x] Edit profile name (auto-save 3s)
+- [x] "Saved" indicator appears
+- [x] Email field read-only
+- [x] Changes persist after refresh
+
+#### Pending Invitations
+- [ ] Display pending invitations
+- [ ] Accept invitation works
+- [ ] Decline invitation works
+- [ ] Invited-by user shown
+- [ ] Role badge displays
+
+#### Chart Palette
+- [x] Select "Balanced" palette
+- [x] Select "Vibrant" palette
+- [x] Select "Accessible" palette
+- [x] Color swatches display
+- [x] Selection persists
+
+#### SQL Query History
+- [x] Change retention to 1/7/30/90/365 days
+- [x] Setting persists
+- [x] "Saved" indicator shows
+
+#### BigQuery Configuration
+- [x] List Google Cloud projects
+- [x] Select billing project
+- [x] Select default project
+- [x] Switch to custom project input
+- [x] Set query size limit (GB)
+- [x] Settings persist
+
+#### Google Account
+- [x] "Reconnect with Google" button
+- [x] OAuth flow initiates
+- [x] Projects list updates after reconnect
+
+### 5.2 Security Tab (Both) 🔴
+
+#### Active Sessions
+- [x] Load and display sessions
+- [x] Device info displays (browser, OS)
+- [x] Mobile/desktop detection
+- [x] Creation and last active dates
+- [x] "Current Device" badge shown
+- [x] IP address displayed
+- [x] Refresh sessions button
+
+#### Logout All Devices
+- [x] Button appears with multiple sessions
+- [x] Confirmation dialog shown
+- [x] Cancel works
+- [x] Confirm logs out all
+- [x] Redirect to login
+
+### 5.3 Usage Tab (Both) 🔴
+
+#### Workspace AI Usage
+- [x] Overall usage percentage displays
+- [x] Progress bar color changes by threshold
+- [-] Green (<80%), Orange (80-100%), Red (>100%)
+- [x] "Trial AI Usage" for free tier
+- [ ] "AI Usage This Month" for paid tiers
+- [ ] Reset date shown for subscriptions
+- [ ] "Budget exhausted" message when blocked
+
+#### Team Usage Breakdown (Team tier)
+- [ ] Per-user usage breakdown
+- [ ] Current user highlighted with "(you)"
+- [ ] Usage as % of fair share
+- [ ] Warning for over-allocation
+- [ ] Progress bar colors per threshold
+- [ ] Explanation alert for flexibility
+
+#### Usage by Feature
+- [x] Stacked horizontal bar chart
+- [x] Chat Interface usage %
+- [x] SQL Co-pilot usage %
+- [x] Chart Co-pilot usage %
+- [x] Legend with percentages
+- [x] Colors match feature types
+
+### 5.4 Workspace Tab (Admin only) 🔴
+
+#### Workspace Name
+- [ ] Edit workspace name (auto-save 3s)
+- [ ] "Saved" indicator appears
+- [ ] Name persists
+- [ ] Non-admins cannot access tab
+
+#### Fast Data Transfer (Team+ tier)
+- [ ] Arrow download toggle displays
+- [ ] Privacy notice shown
+- [ ] Enable/disable toggle works
+- [ ] Setting persists
+- [ ] Only appears for Team/Enterprise
+
+### 5.5 Team Tab (Team tier, Admin only) 🔴
+
+#### Team Members Invite
+- [ ] "Invite Member" button
+- [ ] Enter email address
+- [ ] Select role (User/Admin)
+- [ ] Role descriptions shown
+- [ ] Send invitation
+- [ ] Success message appears
+
+#### Pending Invitations
+- [ ] List pending invitations
+- [ ] Show invitee email
+- [ ] Show role badge
+- [ ] Show creation/expiration dates
+- [ ] Cancel invitation with trash icon
+- [ ] Confirmation dialog
+- [ ] Cancelled invitation removed
+
+#### Workspace Members
+- [ ] List all members
+- [ ] Show name, email, avatar/initial
+- [ ] Show join date
+- [ ] "Owner" badge on owner
+- [ ] Change role (User ↔ Admin)
+- [ ] Remove member (not self/owner)
+- [ ] Confirmation dialog for removal
+- [ ] Cannot remove owner
+- [ ] Cannot change own role
+
+#### Ownership Transfer (Owner only)
+- [ ] "Transfer Ownership" button
+- [ ] Select new owner from dropdown
+- [ ] Warning about consequences
+- [ ] Proceed to confirmation
+- [ ] Enter workspace name to confirm
+- [ ] Button disabled until match
+- [ ] Complete transfer
+- [ ] Success message with recipient email
+- [ ] View pending transfer in list
+
+#### Pending Ownership Transfers
+- [ ] View initiated transfers
+- [ ] View received transfers
+- [ ] Show requested/expiration dates
+- [ ] "Review & Accept" button (recipient)
+- [ ] Cancel transfer (initiator)
+- [ ] Cancellation confirmation
+
+### 5.6 Billing Tab (Owner only) 🔴
+
+#### Current Plan Display
+- [ ] Display subscription tier
+- [ ] Show billing cycle (Annual/Monthly)
+- [ ] Status badge (Active/Cancelled/Past Due)
+- [ ] Renewal date for active
+- [ ] Next charge amount
+- [ ] Cancellation effective date
+- [ ] Team tier: show team size and additional costs
+
+#### Change Plan Modal (Paid tier)
+- [ ] "Change Plan" button
+- [ ] All plans displayed
+- [ ] Plan features shown
+- [ ] Annual and monthly pricing
+- [ ] Select different tier
+- [ ] Current plan highlighted/disabled
+- [ ] "Current Plan" button for active
+
+#### Team Size Management (Team tier)
+- [ ] Display current team size
+- [ ] Show additional users cost
+- [ ] Cost preview when adjusting
+- [ ] Minus button decreases size
+- [ ] Plus button increases size
+- [ ] Input custom team size
+- [ ] Prorated credit/charge info
+- [ ] Minimum size is 5
+- [ ] "Update Team Size" button
+- [ ] Success message after update
+
+#### Subscription Management
+- [ ] Active: "Change Plan" button
+- [ ] Active: "Cancel Subscription" button
+- [ ] Cancelled: "Reactivate Subscription" button
+- [ ] Cancel confirmation dialog
+- [ ] Success message about billing period
+- [ ] Reactivate confirmation
+- [ ] Success message
+
+#### Invoices Section (Paid tiers)
+- [ ] Invoices table displays
+- [ ] Show date, description, amount
+- [ ] Show status (Paid/Pending/Failed)
+- [ ] Download invoice PDF link
+- [ ] "No invoices yet" for new subscriptions
+
+#### Plan Cards (Free tier)
+- [ ] Starter plan card with pricing
+- [ ] Pro plan with "Best Value" badge
+- [ ] Team plan with pricing
+- [ ] Annual price per month shown
+- [ ] Monthly price alternative
+- [ ] Features list for each
+- [ ] "Choose Annual" for each plan
+- [ ] "Choose Monthly" for each plan
+- [ ] "Current Plan" button for active
+- [ ] Redirect to Stripe checkout
+
+---
+
+## 6. BIGQUERY INTEGRATION
+
+### 6.1 Google OAuth & Authentication (Both) 🔴
+
+- [x] Connect Google account via OAuth
+- [x] Disconnect Google account
+- [x] OAuth token auto-refresh
+- [x] Handle token revocation errors
+- [x] View connected account email
+- [x] Error handling for missing/invalid credentials
+
+### 6.2 Project Selection (Both) 🔴
+
+- [x] List all BigQuery projects
+- [x] Select default project
+- [x] Set billing project
+- [x] View selected projects in settings
+- [x] Handle permission errors
+- [x] Switch between projects
+- [x] Fallback when discovery fails
+
+### 6.3 Catalog Browsing (Desktop) 🔴
+
+- [x] Load projects list on page open
+- [x] Expand project → load datasets
+- [x] Expand dataset → load tables
+- [x] Expand table → load columns
+- [x] Dataset counts next to projects
+- [x] Table counts next to datasets
+- [x] Column types and descriptions
+- [x] Table descriptions on hover
+
+### 6.4 Semantic Search (Desktop) 🔴
+
+- [x] Search tables by description
+- [x] Search by column names
+- [x] Filter by relevance score
+- [x] Include/exclude public datasets
+- [x] 3-character minimum enforced
+- [x] Loading state during search
+- [x] "No results" message
+- [x] Relevance percentage shown
+
+### 6.5 Query Execution (Desktop) 🔴
+
+- [x] Execute simple SELECT query
+- [x] Execute query with joins
+- [x] Execute with GROUP BY/aggregations
+- [x] Execute with ORDER BY
+- [x] Execute with LIMIT
+- [x] Get results with metadata
+- [x] View execution time
+- [x] Pagination works
+- [x] Handle query errors
+- [x] Show bytes processed
+- [x] 60-second timeout
+- [x] Total row count displayed
+
+### 6.6 Arrow Streaming (Pro+ tier, Desktop) 🔴
+
+- [ ] Pro tier: receive Arrow-formatted results
+- [ ] Stream large datasets efficiently
+- [ ] Team tier: same Arrow streaming
+- [ ] Enterprise: unlimited streaming
+- [ ] Free/Starter: Direct API used instead
+- [ ] Load Arrow batches into DuckDB
+- [ ] Execution time in response
+- [ ] Row count estimate
+- [ ] Error handling
+- [ ] Auto-cleanup temp tables
+
+### 6.7 Status Indicators (Both) 🔴
+
+- [ ] No Google account: "Connect" button
+- [ ] No projects: configuration message
+- [ ] No permissions: API setup instructions
+- [ ] Not configured: billing project message
+- [ ] Token expiring: countdown timer
+- [ ] Token expired: reconnect prompt
+- [ ] Catalog refreshing: loading indicator
+- [ ] Connection failed: error + troubleshooting
+
+---
+
+## 7. KNOWLEDGE MANAGEMENT
+
+### 7.1 Knowledge Page Navigation (Both) 🔴
+
+- [x] Click "Workspace Knowledge" tab → URL updates to `/knowledge/workspace`
+- [x] Click "My Knowledge" tab → URL updates to `/knowledge/user`
+- [x] Click "Learnings" tab → URL updates to `/knowledge/learnings`
+- [x] Active tab highlights
+- [x] Default tab is "My Knowledge"
+
+### 7.2 Workspace Knowledge (Desktop, Admin only) 🔴
+
+#### Editor
+- [x] Monaco markdown editor loads
+- [x] Type markdown content
+- [x] Placeholder template on empty
+- [x] Cursor position indicator
+- [x] Non-admins see "Read-only" badge
+- [x] Admins can edit
+
+#### Preview
+- [x] "Show Preview" button
+- [x] Preview updates (300ms debounce)
+- [x] Headings, lists, formatting render
+- [-] Code blocks with syntax highlighting
+- [x] Close preview with X
+- [x] Resizable editor/preview split
+
+#### Auto-Save
+- [x] Type content → "Auto-saves after 2 seconds"
+- [x] After 2s → "Saving..." appears
+- [-] After save → "Saved" checkmark (3s)
+- [-] Error: "Failed to save" (5s)
+- [x] Refresh → content persists
+
+### 7.3 User Knowledge (Desktop) 🔴
+
+- [x] All users can edit their own knowledge
+- [x] Monaco editor with full features
+- [x] Content private to user
+- [x] Preview works
+- [x] Auto-save works (2s debounce)
+- [x] Starter template on first use
+
+### 7.4 Learnings Manager (Desktop) 🔴
+
+#### Display
+- [x] Click "Learnings" tab → list displays
+- [x] Empty state when no learnings
+- [x] Each shows: insight, scope badge, date
+- [x] "X of Y active" count
+- [x] Sorted by creation date (newest first)
+
+#### Search
+- [x] Type search → filters in real-time
+- [x] Matches insight and context text
+- [x] Empty search shows all
+- [x] Case-insensitive
+- [X] "No learnings match" for empty results
+
+#### Filter by Scope
+- [X] "All Learnings" shows both types
+- [X] "Workspace Only" filters workspace
+- [X] "Personal Only" filters personal
+- [X] Filter combines with search
+
+#### Toggle Enable/Disable
+- [x] Admin toggles any learning
+- [x] Regular user toggles own personal
+- [x] Disabled learnings faded
+- [x] Toggle off → not in AI context
+- [x] Toggle on → available for AI
+
+#### Edit Learning
+- [x] Click edit icon → modal opens
+- [x] Shows current insight and context
+- [x] Admin can edit workspace learnings
+- [x] User can edit own personal learnings
+- [x] "Save Changes" updates and closes
+- [x] "Cancel" closes without saving
+- [x] Validation: insight cannot be empty
+
+#### Delete Learning
+- [x] Click delete icon → confirmation
+- [x] "Are you sure?" message
+- [x] "Delete" removes permanently
+- [x] "Cancel" preserves learning
+- [x] Admin can delete any
+- [x] User can delete own personal
+
+#### Metadata
+- [x] "Learned [date]" displays
+- [x] "Used X times" when > 0
+- [x] Date format consistent
+- [x] Scope badges (Workspace/Personal)
+
+---
+
+## 8. WORKSPACE & ORGANIZATION
+
+### 8.1 Workspace Creation (Both) 🔴
+
+- [x] Create personal workspace with random ID
+- [x] Create named workspace with domain
+- [x] Workspace name required
+- [x] Domain uniqueness validation
+- [x] Status tracking (TRIAL/ACTIVE/SUSPENDED)
+
+### 8.2 Workspace Switcher (Both) 🔴
+
+- [ ] View all accessible workspaces
+- [ ] Alphabetically sorted list
+- [ ] Display workspace name
+- [ ] Display member count
+- [ ] Display subscription tier
+- [ ] Checkmark on current workspace
+- [ ] Click to switch workspaces
+
+### 8.3 Workspace Settings (Admin only) 🔴
+
+- [x] Update workspace name (auto-save 3s)
+- [x] Save status indicators
+- [ ] Enable/disable fast data transfer (Team+)
+- [ ] Data privacy notice for arrow
+- [x] Changes persist after refresh
+
+### 8.4 Workspace Invitations (Admin only) 🔴
+
+#### Send Invitation
+- [ ] Enter email address
+- [ ] Select role (User/Admin)
+- [ ] Send invitation
+- [ ] Success message
+- [ ] Appears in pending list
+- [ ] "Already invited" error for duplicates
+- [ ] Blocked when user limit reached
+
+#### Manage Invitations
+- [ ] View pending invitations
+- [ ] Show email, role, dates
+- [ ] Cancel invitation
+- [ ] Cancellation confirmation
+- [ ] Removed from list after cancel
+
+#### Accept/Decline Invitation
+- [ ] Receive invitation email/link
+- [ ] Click accept → join workspace
+- [ ] Click decline → invitation removed
+- [ ] Email verification on acceptance
+- [ ] Auto-expire after 7 days
+
+### 8.5 Team Member Management (Admin only) 🔴
+
+- [ ] View all workspace members
+- [ ] Display name, email, join date
+- [ ] "Owner" badge on owner
+- [ ] Update member role (User ↔ Admin)
+- [ ] Prevent self-demotion if last admin
+- [ ] Remove members
+- [ ] Prevent removal of owner
+- [ ] Prevent removal if last admin
+- [ ] Display member count
+
+### 8.6 Ownership Transfer (Owner only) 🔴
+
+#### Initiate Transfer
+- [ ] "Transfer Ownership" button
+- [ ] Select recipient from dropdown
+- [ ] Warning about consequences
+- [ ] Prevent transfer to self
+- [ ] Prevent to current owner
+- [ ] One pending transfer at a time
+- [ ] Enter workspace name to confirm
+- [ ] Button disabled until match
+- [ ] Transfer initiated
+
+#### Accept/Decline Transfer
+- [ ] Recipient sees notification
+- [ ] "Review & Accept" button
+- [ ] Accept → becomes owner
+- [ ] Decline → transfer cancelled
+- [ ] Initiator can cancel
+- [ ] Auto-expire after 7 days
+- [ ] WebSocket notification
+
+---
+
+## 9. CROSS-CUTTING FEATURES
+
+### 9.1 Responsive Design (Mobile) 🔴
+
+- [x] All pages responsive on mobile
+- [x] Touch targets >= 44px
+- [x] No horizontal scrolling
+- [x] Stacked navigation
+- [x] Sidebars slide in/out
+- [x] Modals fit screen
+- [x] Forms usable on mobile
+
+### 9.2 Error Handling (Both) 🔴
+
+- [x] Clear error messages displayed
+- [x] Network errors handled gracefully
+- [x] 401 errors trigger token refresh
+- [x] Permission errors explain issue
+- [x] Validation errors inline
+- [x] Recovery options provided
+- [x] Error states recoverable
+
+### 9.3 Loading States (Both) 🔴
+
+- [x] Spinners for async operations
+- [x] Skeleton screens where appropriate
+- [x] Progress indicators for long operations
+- [x] Button disabled states during loading
+- [x] "Loading..." messages clear
+
+### 9.4 Accessibility (Both) 🟡
+
+- [x] Aria labels on buttons
+- [x] Keyboard navigation works
+- [x] Focus visible on interactive elements
+- [x] Screen reader compatibility
+- [x] Color contrast meets standards
+
+---
+
+## 10. PERFORMANCE & QUALITY
+
+### 10.1 Page Load Performance (Both) 🔴
+
+- [x] Homepage loads <2s
+- [x] Chat page loads <2s
+- [x] Dashboard list loads <2s
+- [x] SQL editor loads <2s
+- [x] Settings loads <2s
+
+### 10.2 Query Performance (Desktop) 🔴
+
+- [x] Simple queries execute <5s (95th percentile)
+- [x] Complex queries show progress
+- [x] Pagination responsive
+- [x] Chart rendering smooth
+- [x] No UI freezing during operations
+
+### 10.3 Data Persistence (Both) 🔴
+
+- [x] All user data persists after logout/login
+- [x] Session data survives page refresh
+- [x] No data loss on navigation
+- [x] Auto-save works reliably
+- [x] Offline edits recoverable
+
+---
+
+## 11. SUBSCRIPTION TIERS
+
+### 11.1 Free Tier Limits (Both) 🔴
+
+- [x] 27 trial AI messages (7-day expiry)
+- [x] Trial usage displayed
+- [x] AI disabled after exhaustion
+- [x] Upgrade prompt shown
+- [x] 5 dashboard max enforced
+- [x] 1 user limit enforced
+
+### 11.2 Paid Tier Features (Both) 🔴
+
+#### Starter ($15/mo annual, $20/mo monthly)
+- [ ] $3/mo AI budget (~133 conversations)
+- [ ] Unlimited dashboards
+- [ ] 1 user
+- [ ] 30 days query history
+- [ ] Direct BigQuery API
+- [ ] Email support
+
+#### Pro ($29/mo annual, $39/mo monthly)
+- [ ] $9/mo AI budget (~400 conversations, 3x Starter)
+- [ ] Arrow streaming enabled (20-100x faster)
+- [ ] Unlimited query history
+- [ ] All Starter features
+- [ ] Priority email support
+
+#### Team ($99/mo annual, $129/mo monthly)
+- [ ] $25/mo AI budget (~1,111 conversations)
+- [ ] 5 users base
+- [ ] Additional users: $15/user/mo annual or $20/user/mo monthly
+- [ ] AI budget scales: +$5/user per additional user
+- [ ] Shared AI pool (major benefit)
+- [ ] Team management features
+- [ ] Workspace controls
+- [ ] Priority email + chat support
+
+#### Enterprise ($299+/mo)
+- [ ] $40+/mo AI budget (~1,780+ conversations)
+- [ ] Unlimited users
+- [ ] SSO (SAML, Google Workspace, Azure AD)
+- [ ] Audit logs
+- [ ] Advanced permissions
+- [ ] Dedicated account manager + SLA
+
+---
+
+## 12. SECURITY TESTING
+
+### 12.1 Authentication Security (Both) 🔴
+
+- ~~[ ] Passwords hashed (never plaintext)~~ *(Not applicable - Google OAuth only)*
+- [x] Session tokens expire correctly
+- [x] Token refresh works
+- ~~[ ] 2FA codes expire~~ *(Not applicable - Google OAuth only)*
+- ~~[ ] Rate limiting on failed logins~~ *(Not applicable - Google OAuth only)*
+- [x] Secure OAuth flows
+
+### 12.2 Authorization (Both) 🔴
+
+- [ ] Users can only access own workspaces
+- [ ] Admin-only features blocked for non-admins
+- [ ] Owner-only features blocked for non-owners
+- [ ] Workspace data isolated
+- [ ] SQL injection prevented
+- [ ] XSS prevented
+
+### 12.3 Data Privacy (Both) 🔴
+
+- [ ] Chat messages encrypted at rest (AES-256-GCM)
+- [ ] Personal knowledge private per user
+- [ ] Workspace knowledge shared correctly
+- [ ] No data leakage between workspaces
+- [ ] BigQuery credentials secure
+
+---
+
+## Testing Completion Tracker
+
+### Desktop Chrome
+- [ ] Authentication (20 tests)
+- [ ] Chat Interface (40 tests)
+- [ ] Dashboards (50 tests)
+- [ ] SQL Editor (80 tests)
+- [ ] Settings (100 tests)
+- [ ] BigQuery (30 tests)
+- [ ] Knowledge (40 tests)
+- [ ] Workspace (30 tests)
+- [ ] Performance (10 tests)
+- [ ] Security (15 tests)
+
+### Desktop Firefox
+- [ ] Core flows (50 critical tests)
+
+### Desktop Safari
+- [ ] Core flows (50 critical tests)
+
+### Mobile iPhone
+- [ ] Chat Interface (30 tests)
+- [ ] Dashboards (20 tests)
+- [ ] Settings (50 tests)
+- [ ] Authentication (15 tests)
+
+### Mobile Android
+- [ ] Core flows (50 critical tests)
+
+### Tablet iPad
+- [ ] Dashboard viewing (20 tests)
+- [ ] Chat interface (20 tests)
+
+---
+
+## TOTAL TEST COUNT SUMMARY
+
+**Grand Total: ~600+ individual test cases**
+
+**By Priority:**
+- 🔴 CRITICAL: ~450 tests (must pass for v1.0)
+- 🟡 HIGH: ~100 tests (important for quality)
+- 🟢 MEDIUM: ~50 tests (nice to have)
+
+**By Platform:**
+- Desktop Only: ~300 tests
+- Mobile Only: ~50 tests
+- Both Platforms: ~250 tests
+
+**By Feature Area:**
+- Authentication: ~50 tests
+- Chat Interface: ~80 tests
+- Dashboards: ~120 tests
+- SQL Editor: ~100 tests
+- Settings: ~130 tests
+- BigQuery: ~50 tests
+- Knowledge: ~40 tests
+- Workspace: ~40 tests
+- Cross-cutting: ~30 tests
+
+---
+
+## Notes for Testers
+
+1. **Test in incognito/private mode** to avoid cache issues
+2. **Check browser console** for JavaScript errors
+3. **Monitor network tab** for failed API calls
+4. **Take screenshots** of any bugs found
+5. **Record steps to reproduce** any issues
+6. **Test with different data sizes** (small/medium/large datasets)
+7. **Test edge cases** (empty states, max limits, special characters)
+8. **Verify across different screen sizes** within each platform category
+
+---
+
+**End of Manual Testing Checklist**
+
+
+## Issues found
+
+- The chat window doesn't scroll down as the agent responds so it looks like the agent is not responding
+- renaming a session doesn't update teh title in the recent chats in the sidebar
+- agent says that they are claude if you ask them do they know chatgpt, it should say that it is kyomi
+- need to be able to cancel a chat request
+- code blocks are not rendering correctly in the markdown renderer
+- the product tour opens twice in the first thread that contains a chart if ta chart is shown in a subsequent step
+- margin on mobile should go closer to the edge
+- rendered table chart type does not have sorting
+- editor with unsaved changes, reload works, back button loses changes
+- AI Error from sql co-pilot goes straight into editor and is not displayed as an error, e.g. 529 overloaded from claude
+- Lets remove the clear all button in the results tab of the sql editor, not needed
+- table sorting in sql editor results table doesn't work
+- Opening table info screen gives gives console error and breaks app
+- check query history is purged after given time
+- optimise sql copilot llm usage
+- AI usage bar is orange when under 80%, faint yellow when above 80%, breakdown by service is not show when above 80%
+- Need a dismiss button for "AI Budget is above 80% status bar"
+- Inconsistency between different parts of the app, e.g. setting, knowledge = autosave, dashboard not autosave
+- no feedback on knowledge autosave, navigating away too early doesn't save knowledge
+- agent returned json chartml, validator should reject json chartml
+- AI features are not disabled when budget exhausted
+- Charts need a bit of work for various scenarios

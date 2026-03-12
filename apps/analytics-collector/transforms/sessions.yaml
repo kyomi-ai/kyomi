@@ -1,0 +1,64 @@
+transform: sessions
+source: events
+key: session_id
+order_by: timestamp
+order_by_type: DateTime64(3)
+
+columns:
+  visitor_id:
+    type: String
+    strategy: "earliest(visitor_id)"
+  user_id:
+    type: String
+    strategy: "latest(user_id)"
+  started_at:
+    type: DateTime64(3)
+    strategy: "min(timestamp)"
+  ended_at:
+    type: DateTime64(3)
+    strategy: "max(timestamp)"
+  entry_page:
+    type: String
+    strategy: "earliest(pathname)"
+  exit_page:
+    type: String
+    strategy: "latest(pathname)"
+  entry_hostname:
+    type: String
+    strategy: "earliest(hostname)"
+  referrer:
+    type: String
+    strategy: "earliest(referrer)"
+  referrer_source:
+    type: String
+    strategy: "earliest(referrer_source)"
+  utm_source:
+    type: String
+    strategy: "earliest(utm_source)"
+  utm_medium:
+    type: String
+    strategy: "earliest(utm_medium)"
+  utm_campaign:
+    type: String
+    strategy: "earliest(utm_campaign)"
+  country_code:
+    type: String
+    strategy: "earliest(country_code)"
+  browser:
+    type: String
+    strategy: "earliest(browser)"
+  os:
+    type: String
+    strategy: "earliest(os)"
+  device_type:
+    type: String
+    strategy: "earliest(device_type)"
+  screen_width:
+    type: UInt16
+    strategy: "earliest(screen_width)"
+  screen_height:
+    type: UInt16
+    strategy: "earliest(screen_height)"
+  events:
+    type: UInt64
+    strategy: "count()"

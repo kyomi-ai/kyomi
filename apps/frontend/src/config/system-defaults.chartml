@@ -1,0 +1,150 @@
+# ChartML System Defaults
+#
+# This file defines the built-in styles and default configuration for all charts.
+# Users can reference these styles by name (e.g., style: balanced) or override
+# them at workspace/user/dashboard/chart scope levels.
+#
+# Scoping hierarchy: system → workspace → user → dashboard → chart
+#
+# IMPORTANT: Colors are defined ONLY in chartPalettes.js (single source of truth)
+# Styles reference palette names via the 'palette' field
+
+# ==============================================================================
+# Style 1: Balanced (Default)
+# Classic BI palette with varied saturation/luminosity - 12 color system
+# ==============================================================================
+type: style
+version: 1
+name: balanced
+
+# Reference palette from chartPalettes.js (colors defined there)
+palette: balanced
+
+fonts:
+  title:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 18
+    weight: 600
+    color: "#202124"
+
+  axis:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 12
+    color: "#5f6368"
+
+  dataLabel:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 11
+    weight: 500
+
+grid:
+  y: true
+  color: "#e0e0e0"
+  opacity: 0.5
+
+height: 400
+width: 600
+showDots: true
+strokeWidth: 2
+
+legend:
+  position: "top"
+  orientation: "horizontal"
+
+---
+
+# ==============================================================================
+# Style 2: Vibrant
+# Higher saturation palette for modern dashboards - 12 color system
+# ==============================================================================
+type: style
+version: 1
+name: vibrant
+
+# Reference palette from chartPalettes.js (colors defined there)
+palette: vibrant
+
+fonts:
+  title:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 18
+    weight: 600
+    color: "#202124"
+
+  axis:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 12
+    color: "#5f6368"
+
+  dataLabel:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 11
+    weight: 500
+
+grid:
+  y: true
+  color: "#e0e0e0"
+  opacity: 0.5
+
+height: 400
+width: 600
+showDots: true
+strokeWidth: 2
+
+legend:
+  position: "top"
+  orientation: "horizontal"
+
+---
+
+# ==============================================================================
+# Style 3: Accessible
+# Maximum luminosity range for colorblind users - 12 color system
+# ==============================================================================
+type: style
+version: 1
+name: accessible
+
+# Reference palette from chartPalettes.js (colors defined there)
+palette: accessible
+
+fonts:
+  title:
+    family: "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    size: 18
+    weight: 600
+    color: "#202124"
+
+  axis:
+    family: "JetBrains Mono, 'Courier New', monospace"
+    size: 11
+    color: "#5f6368"
+
+  dataLabel:
+    family: "JetBrains Mono, 'Courier New', monospace"
+    size: 10
+    weight: 500
+
+grid:
+  y: true
+  color: "#e0e0e0"
+  opacity: 0.5
+
+height: 400
+width: 600
+showDots: true
+strokeWidth: 2
+
+legend:
+  position: "top"
+  orientation: "horizontal"
+
+---
+
+# ==============================================================================
+# System Configuration
+# Sets the default style for all charts when no other style is specified
+# ==============================================================================
+type: config
+version: 1
+style: balanced

@@ -1,0 +1,11 @@
+[package]
+name = "kyomi-embed"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+kyomi-core = { workspace = true }
+fastembed = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

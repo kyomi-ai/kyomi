@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <style>
+        body { font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+
+        /* Kyomi brand color (#d97706) at low opacity */
+        chart-header-bar {
+            --chb-bg: rgba(217, 119, 6, 0.04);
+            --chb-border: rgba(217, 119, 6, 0.15);
+            --chb-text: #92400e;
+            --chb-text-hover: #78350f;
+            --chb-accent-hover: rgba(217, 119, 6, 0.08);
+            --chb-font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        }
+
+        /* Override chartml-core's blue-slate dark defaults with neutral charcoal.
+           Use :root.dark for higher specificity than the bundled .dark {} from chartml-core. */
+        :root.dark,
+        :root[data-theme="dark"] {
+            --chartml-text: #e5e7eb;
+            --chartml-text-secondary: #9ca3af;
+            --chartml-text-strong: #f3f4f6;
+            --chartml-bg: #262626;
+            --chartml-surface: #262626;
+            --chartml-surface-overlay: rgba(38, 38, 38, 0.8);
+            --chartml-border: #383838;
+            --chartml-border-input: #4a4a4a;
+            --chartml-grid: #383838;
+            --chartml-annotation: #9ca3af;
+            --chartml-separator: #262626;
+            --chartml-axis-line: #9ca3af;
+            --chartml-spinner-track: rgba(255, 255, 255, 0.1);
+            --chartml-spinner-head: #e5e7eb;
+        }
+
+        .dark chart-header-bar,
+        [data-theme="dark"] chart-header-bar {
+            --chb-bg: rgba(217, 119, 6, 0.06);
+            --chb-border: rgba(217, 119, 6, 0.12);
+            --chb-text: #d97706;
+            --chb-text-hover: #fbbf24;
+            --chb-accent-hover: rgba(217, 119, 6, 0.1);
+        }
+
+        /* Kyomi logo button in chart header */
+        .kyomi-logo-link {
+            display: flex;
+            align-items: center;
+            color: #d97706;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 2px;
+            border-radius: 4px;
+            transition: opacity 150ms;
+            opacity: 0.7;
+        }
+        .kyomi-logo-link:hover {
+            opacity: 1;
+        }
+
+        /* Adjust ChartML's own container chrome to connect to the header bar */
+        .chartml-chart {
+            border-top: none !important;
+            border-radius: 0 0 8px 8px !important;
+        }
+
+        /* Transparent body lets the host app's background show through the iframe */
+        body {
+            background: transparent;
+        }
+
+        /* --- Chart Info Panel --- */
+        .chart-info-panel {
+            border-left: 1px solid rgba(217, 119, 6, 0.15);
+            border-right: 1px solid rgba(217, 119, 6, 0.15);
+            background: rgba(217, 119, 6, 0.02);
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .dark .chart-info-panel,
+        [data-theme="dark"] .chart-info-panel {
+            background: rgba(217, 119, 6, 0.04);
+            border-color: rgba(217, 119, 6, 0.12);
+        }
+        .info-section {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .info-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #92400e;
+        }
+        .dark .info-label,
+        [data-theme="dark"] .info-label {
+            color: #d97706;
+        }
+        .info-value {
+            font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+            font-size: 13px;
+            color: #451a03;
+            background: rgba(217, 119, 6, 0.06);
+            padding: 6px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(217, 119, 6, 0.1);
+        }
+        .dark .info-value,
+        [data-theme="dark"] .info-value {
+            color: #fde68a;
+            background: rgba(217, 119, 6, 0.08);
+            border-color: rgba(217, 119, 6, 0.12);
+        }
+        .info-label-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .info-copy-btn {
+            font-size: 11px;
+            font-weight: 500;
+            color: #92400e;
+            background: rgba(217, 119, 6, 0.08);
+            border: 1px solid rgba(217, 119, 6, 0.15);
+            border-radius: 4px;
+            padding: 2px 8px;
+            cursor: pointer;
+            transition: background 150ms, color 150ms;
+        }
+        .info-copy-btn:hover {
+            background: rgba(217, 119, 6, 0.15);
+            color: #78350f;
+        }
+        .info-copy-btn.copied {
+            color: #15803d;
+            background: rgba(21, 128, 61, 0.08);
+            border-color: rgba(21, 128, 61, 0.2);
+        }
+        .dark .info-copy-btn,
+        [data-theme="dark"] .info-copy-btn {
+            color: #d97706;
+            background: rgba(217, 119, 6, 0.1);
+            border-color: rgba(217, 119, 6, 0.15);
+        }
+        .dark .info-copy-btn:hover,
+        [data-theme="dark"] .info-copy-btn:hover {
+            background: rgba(217, 119, 6, 0.2);
+            color: #fbbf24;
+        }
+        .dark .info-copy-btn.copied,
+        [data-theme="dark"] .info-copy-btn.copied {
+            color: #4ade80;
+            background: rgba(74, 222, 128, 0.1);
+            border-color: rgba(74, 222, 128, 0.2);
+        }
+        .info-code {
+            font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #451a03;
+            background: rgba(217, 119, 6, 0.06);
+            border: 1px solid rgba(217, 119, 6, 0.1);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin: 0;
+            max-height: 200px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .dark .info-code,
+        [data-theme="dark"] .info-code {
+            color: #fde68a;
+            background: rgba(217, 119, 6, 0.08);
+            border-color: rgba(217, 119, 6, 0.12);
+        }
+
+        /* --- Dashboard Picker Panel --- */
+        .dashboard-panel {
+            border-left: 1px solid rgba(217, 119, 6, 0.15);
+            border-right: 1px solid rgba(217, 119, 6, 0.15);
+            background: rgba(217, 119, 6, 0.02);
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .dark .dashboard-panel,
+        [data-theme="dark"] .dashboard-panel {
+            background: rgba(217, 119, 6, 0.04);
+            border-color: rgba(217, 119, 6, 0.12);
+        }
+
+        /* Tab bar */
+        .dashboard-tabs {
+            display: flex;
+            gap: 2px;
+            background: rgba(217, 119, 6, 0.06);
+            border-radius: 6px;
+            padding: 2px;
+        }
+        .dashboard-tab {
+            flex: 1;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            background: transparent;
+            color: #92400e;
+            cursor: pointer;
+            transition: background 150ms, color 150ms;
+        }
+        .dashboard-tab:hover {
+            background: rgba(217, 119, 6, 0.08);
+        }
+        .dashboard-tab.active {
+            background: #fff;
+            color: #92400e;
+            font-weight: 600;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+        }
+        .dark .dashboard-tab,
+        [data-theme="dark"] .dashboard-tab {
+            color: #d97706;
+        }
+        .dark .dashboard-tab.active,
+        [data-theme="dark"] .dashboard-tab.active {
+            background: rgba(217, 119, 6, 0.15);
+            color: #fbbf24;
+        }
+        .dark .dashboard-tabs,
+        [data-theme="dark"] .dashboard-tabs {
+            background: rgba(217, 119, 6, 0.08);
+        }
+
+        /* Form area */
+        .dashboard-form {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .dashboard-field-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #92400e;
+        }
+        .dark .dashboard-field-label,
+        [data-theme="dark"] .dashboard-field-label {
+            color: #d97706;
+        }
+        .dashboard-input {
+            font-size: 13px;
+            padding: 8px 10px;
+            border: 1px solid rgba(217, 119, 6, 0.2);
+            border-radius: 6px;
+            background: #fff;
+            color: #451a03;
+            outline: none;
+            transition: border-color 150ms;
+        }
+        .dashboard-input:focus {
+            border-color: #d97706;
+        }
+        .dark .dashboard-input,
+        [data-theme="dark"] .dashboard-input {
+            background: rgba(217, 119, 6, 0.06);
+            border-color: rgba(217, 119, 6, 0.15);
+            color: #fde68a;
+        }
+        .dark .dashboard-input:focus,
+        [data-theme="dark"] .dashboard-input:focus {
+            border-color: #d97706;
+        }
+
+        /* Button row */
+        .dashboard-btn-row {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 4px;
+        }
+        .dashboard-btn-primary {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 7px 16px;
+            border: none;
+            border-radius: 6px;
+            background: #d97706;
+            color: #fff;
+            cursor: pointer;
+            transition: background 150ms, opacity 150ms;
+        }
+        .dashboard-btn-primary:hover:not(:disabled) {
+            background: #b45309;
+        }
+        .dashboard-btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Dashboard list */
+        .dashboard-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .dashboard-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border: 1px solid rgba(217, 119, 6, 0.1);
+            border-radius: 6px;
+            background: transparent;
+            cursor: pointer;
+            text-align: left;
+            transition: background 150ms, border-color 150ms;
+        }
+        .dashboard-item:hover {
+            background: rgba(217, 119, 6, 0.06);
+        }
+        .dashboard-item.selected {
+            border-color: #d97706;
+            background: rgba(217, 119, 6, 0.08);
+        }
+        .dark .dashboard-item,
+        [data-theme="dark"] .dashboard-item {
+            border-color: rgba(217, 119, 6, 0.08);
+        }
+        .dark .dashboard-item:hover,
+        [data-theme="dark"] .dashboard-item:hover {
+            background: rgba(217, 119, 6, 0.08);
+        }
+        .dark .dashboard-item.selected,
+        [data-theme="dark"] .dashboard-item.selected {
+            border-color: #d97706;
+            background: rgba(217, 119, 6, 0.12);
+        }
+        .dashboard-item-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: #451a03;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .dark .dashboard-item-title,
+        [data-theme="dark"] .dashboard-item-title {
+            color: #fde68a;
+        }
+        .dashboard-item-date {
+            font-size: 11px;
+            color: #92400e;
+            white-space: nowrap;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+        .dark .dashboard-item-date,
+        [data-theme="dark"] .dashboard-item-date {
+            color: #b45309;
+        }
+
+        /* Loading & empty states */
+        .dashboard-loading,
+        .dashboard-empty {
+            font-size: 12px;
+            color: #92400e;
+            text-align: center;
+            padding: 16px 8px;
+        }
+        .dark .dashboard-loading,
+        .dark .dashboard-empty,
+        [data-theme="dark"] .dashboard-loading,
+        [data-theme="dark"] .dashboard-empty {
+            color: #d97706;
+        }
+
+        /* Status messages */
+        .dashboard-status {
+            font-size: 12px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .dashboard-status.error {
+            color: #dc2626;
+            background: rgba(220, 38, 38, 0.06);
+            border: 1px solid rgba(220, 38, 38, 0.15);
+        }
+        .dark .dashboard-status.error,
+        [data-theme="dark"] .dashboard-status.error {
+            color: #fca5a5;
+            background: rgba(220, 38, 38, 0.1);
+            border-color: rgba(220, 38, 38, 0.2);
+        }
+
+        /* Success state */
+        .dashboard-success {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            padding: 16px 8px;
+        }
+        .dashboard-success-message {
+            font-size: 13px;
+            font-weight: 600;
+            color: #15803d;
+        }
+        .dark .dashboard-success-message,
+        [data-theme="dark"] .dashboard-success-message {
+            color: #4ade80;
+        }
+    </style>
+</head>
+<body>
+    <div id="chart">
+        <div style="display: flex; align-items: center; justify-content: center; height: 200px;">
+            <svg width="32" height="32" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ag" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient><style>.r{fill:url(#ag);animation:s 2s ease-in-out infinite}.r1{animation-delay:.6s}.r2{animation-delay:1.3s}.r3{animation-delay:.2s}.r4{animation-delay:1.7s}.r5{animation-delay:.9s}.r6{animation-delay:.1s}.r7{animation-delay:1.4s}.r8{animation-delay:.4s}.c{fill:url(#ag);animation:p 2s ease-in-out infinite}@keyframes s{0%,100%{opacity:.4;transform:scale(1)}50%{opacity:1;transform:scale(1.1)}}@keyframes p{0%,100%{opacity:.6;transform:scale(1)}50%{opacity:1;transform:scale(1.15)}}</style></defs><g transform="translate(30,30)"><polygon class="r r1" points="0,-28 4.5,-11 0,-6 -4.5,-11"/><polygon class="r r2" points="20,-20 11.5,-4 7,-7 11.5,-11.5"/><polygon class="r r3" points="28,0 11.5,4.5 7,0 11.5,-4.5"/><polygon class="r r4" points="20,20 4.5,11.5 0,7 4.5,11.5"/><polygon class="r r5" points="0,28 -4.5,11.5 0,7 4.5,11.5"/><polygon class="r r6" points="-20,20 -11.5,4.5 -7,7 -11.5,11.5"/><polygon class="r r7" points="-28,0 -11.5,-4.5 -7,0 -11.5,4.5"/><polygon class="r r8" points="-20,-20 -4.5,-11.5 0,-7 -4.5,-11.5"/><circle class="c" cx="0" cy="0" r="6"/></g></svg>
+        </div>
+    </div>
+    <script type="module" src="/src/mcp-app.js"></script>
+</body>
+</html>

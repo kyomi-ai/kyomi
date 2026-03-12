@@ -1,0 +1,2483 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Catalog management endpoints for datasource catalog browsing, discovery, and refresh.
+//!
+//! Wire-compatible with Python's `routers/catalog.py`.
+//!
+//! ## Endpoints
+//!
+//! - `POST /discover-catalog` — Discover catalog items (projects, databases, schemas)
+//! - `POST /discover` — Discover ALL resources for datasource setup
+//! - `GET /{identifier}/catalog/tree` — Hierarchical catalog tree from cache
+//! - `GET /{identifier}/catalog/status` — Indexing status and statistics
+//! - `GET /{identifier}/schemas` — Live schema list from datasource
+//! - `POST /{identifier}/catalog/refresh` — Trigger manual catalog refresh
+
+use std::collections::{BTreeMap, HashSet};
+use std::str::FromStr;
+
+use axum::{
+    extract::{Path, Query, State},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use kyomi_auth::{
+    credential_service, datasource_service,
+    middleware::AuthUser,
+};
+use kyomi_core::datasource_registry;
+use kyomi_core::enums::WorkspaceRole;
+use kyomi_core::models::table_cache::DatasourceTableCache;
+
+use crate::state::AppState;
+
+/// Build the catalog router.
+///
+/// These routes are nested under `/api/v1/datasources` alongside the existing
+/// datasource management routes. Static paths (`/discover-catalog`, `/discover`)
+/// go first; dynamic paths (`/{identifier}/...`) follow.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        // Static paths — MUST come before /{identifier} captures
+        .route("/discover-catalog", post(discover_catalog))
+        .route("/discover", post(discover_resources))
+        // Dynamic path handlers
+        .route("/{identifier}/catalog/tree", get(get_catalog_tree))
+        .route("/{identifier}/catalog/status", get(get_catalog_status))
+        .route("/{identifier}/schemas", get(list_schemas))
+        .route(
+            "/{identifier}/catalog/refresh",
+            post(refresh_catalog),
+        )
+}
+
+// ===========================================================================
+// Helpers (reuse patterns from datasources.rs)
+// ===========================================================================
+
+/// Extract workspace_id from user, or return 400.
+fn get_workspace_id(user: &AuthUser) -> Result<&str, kyomi_core::Error> {
+    user.workspace
+        .workspace_id
+        .as_deref()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("User not associated with a workspace".into()))
+}
+
+/// Check if user is an admin.
+fn is_admin(user: &AuthUser) -> bool {
+    user.workspace
+        .workspace_roles
+        .contains(&WorkspaceRole::WorkspaceAdmin)
+        || user.workspace.is_owner
+}
+
+/// Resolve a datasource by identifier (slug or UUID), returning 404 with available
+/// slugs on failure.
+async fn resolve_or_404(
+    db: &kyomi_core::DbPool,
+    identifier: &str,
+    workspace_id: &str,
+    include_inactive: bool,
+) -> Result<kyomi_core::models::datasource::DatasourceConfig, kyomi_core::Error> {
+    datasource_service::resolve_datasource(db, identifier, workspace_id, include_inactive).await
+}
+
+/// Build a `UserContext` for BigQuery provider creation.
+async fn build_user_context(
+    state: &AppState,
+    user: &AuthUser,
+) -> Result<Option<kyomi_datasource_server::UserContext>, kyomi_core::Error> {
+    // Use centralized token resolution: reads DB, checks expiry, refreshes, persists.
+    // If the user has no Google OAuth data (e.g. service_account auth), this returns
+    // Err which we map to None — that's fine, BigQuery will use other auth modes.
+    let oauth_data = if let (Some(client_id), Some(client_secret)) = (
+        state.config.google_oauth_client_id.as_deref(),
+        state.config.google_oauth_client_secret.as_deref(),
+    ) {
+        match kyomi_auth::google_oauth::ensure_valid_google_token(
+            &state.db,
+            &user.user_id,
+            &state.encryption_key,
+            client_id,
+            client_secret,
+        )
+        .await
+        {
+            Ok(tokens) => {
+                let data = kyomi_auth::google_oauth::OAuthData {
+                    google_oauth_tokens: Some(tokens),
+                    ..Default::default()
+                };
+                serde_json::to_value(data).ok()
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(kyomi_datasource_server::UserContext {
+        oauth_data,
+        user_email: user.email.clone(),
+        workspace_id: user
+            .workspace
+            .workspace_id
+            .clone()
+            .unwrap_or_default(),
+    }))
+}
+
+// ===========================================================================
+// Request / Response Types
+// ===========================================================================
+
+// -- Discover Catalog --
+
+#[derive(Deserialize)]
+struct DiscoverCatalogRequest {
+    datasource_type: String,
+    #[serde(default)]
+    connection_config: Value,
+    #[serde(default)]
+    credentials: Value,
+    datasource_slug: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CatalogItem {
+    name: String,
+    #[serde(rename = "type")]
+    item_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DiscoverCatalogResponse {
+    success: bool,
+    items: Vec<CatalogItem>,
+    item_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+// -- Discover Resources --
+
+#[derive(Deserialize)]
+struct DiscoverResourcesRequest {
+    datasource_type: String,
+    #[serde(default)]
+    connection_config: Value,
+    #[serde(default)]
+    credentials: Value,
+    datasource_slug: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DiscoverResourcesResponse {
+    success: bool,
+    resources: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+// -- Catalog Tree --
+
+#[derive(Deserialize)]
+struct CatalogTreeParams {
+    #[serde(default)]
+    include_columns: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct CatalogTreeNode {
+    id: String,
+    name: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<CatalogTreeNode>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<Value>,
+}
+
+#[derive(Serialize)]
+struct CatalogTreeResponse {
+    datasource_id: String,
+    datasource_name: String,
+    datasource_type: String,
+    tree: Vec<CatalogTreeNode>,
+    table_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_indexed: Option<String>,
+}
+
+// -- Catalog Status --
+
+#[derive(Serialize)]
+struct CatalogStatusResponse {
+    datasource_id: String,
+    datasource_name: String,
+    datasource_type: String,
+    table_count: usize,
+    schema_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_indexed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indexing_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indexing_progress: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_config: Option<Value>,
+}
+
+// -- Schema List --
+
+#[derive(Serialize)]
+struct SchemaListResponse {
+    datasource_id: String,
+    datasource_type: String,
+    schemas: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+// -- Catalog Refresh --
+
+#[derive(Deserialize, Default)]
+struct CatalogRefreshRequest {
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct CatalogRefreshResponse {
+    pub status: String,
+    pub message: String,
+    pub datasource_id: String,
+}
+
+// ===========================================================================
+// Discovery helpers — delegate to provider trait methods
+// ===========================================================================
+
+/// Call the primary discovery method for a datasource type.
+///
+/// Matches Python's `meta.discovery_method` registry field:
+/// - BigQuery → `list_projects()`
+/// - PostgreSQL, Redshift, SQL Server, Synapse → `list_schemas()`
+/// - MySQL, ClickHouse, Snowflake → `list_databases()`
+/// - Databricks → `list_catalogs()`
+async fn discover_primary(
+    provider: &dyn kyomi_datasource_server::DatasourceProvider,
+    ds_type: &datasource_registry::DatasourceType,
+) -> kyomi_datasource_server::DiscoveryResult {
+    match ds_type.as_str() {
+        "postgres" | "redshift" | "sqlserver" | "synapse" => provider.list_schemas().await,
+        "mysql" | "clickhouse" | "snowflake" => provider.list_databases().await,
+        "databricks" => provider.list_catalogs().await,
+        // BigQuery handled separately via list_projects()
+        _ => kyomi_datasource_server::DiscoveryResult {
+            items: vec![],
+            error: Some(format!(
+                "Discovery not available for datasource type '{}'",
+                ds_type.as_str()
+            )),
+        },
+    }
+}
+
+/// Discover ALL resources for a datasource (for the universal setup flow).
+///
+/// Matches Python's `hasattr(provider, 'list_xxx')` checks in `discover_resources`.
+/// Returns a list of (resource_type, DiscoveryResult) tuples.
+async fn discover_all_resources(
+    provider: &dyn kyomi_datasource_server::DatasourceProvider,
+    ds_type: &datasource_registry::DatasourceType,
+) -> Vec<(&'static str, kyomi_datasource_server::DiscoveryResult)> {
+    match ds_type.as_str() {
+        "postgres" => vec![
+            ("databases", provider.list_databases().await),
+            ("schemas", provider.list_schemas().await),
+        ],
+        "redshift" => vec![("schemas", provider.list_schemas().await)],
+        "mysql" => vec![("databases", provider.list_databases().await)],
+        "clickhouse" => vec![("databases", provider.list_databases().await)],
+        "snowflake" => vec![
+            ("warehouses", provider.list_warehouses().await),
+            ("databases", provider.list_databases().await),
+        ],
+        "databricks" => vec![("catalogs", provider.list_catalogs().await)],
+        "sqlserver" | "synapse" => vec![
+            ("databases", provider.list_databases().await),
+            ("schemas", provider.list_schemas().await),
+        ],
+        // BigQuery handled separately
+        _ => vec![],
+    }
+}
+
+/// Escape a SQL string literal by doubling single quotes.
+///
+/// This is the standard SQL escaping approach — `O'Brien` becomes `O''Brien`.
+/// Safe for use in `WHERE col = '{escaped}'` clauses across all SQL dialects.
+fn escape_sql_literal(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Escape a SQL identifier for safe interpolation into FROM clauses.
+///
+/// Unlike string literals (which use single-quote escaping), identifiers used in
+/// `FROM <identifier>.INFORMATION_SCHEMA.TABLES` must be quoted with the dialect's
+/// identifier quoting mechanism to prevent SQL injection.
+///
+/// - **Snowflake**: Double-quoted identifiers. Internal `"` are escaped as `""`.
+///   Result: `"MY_DATABASE".INFORMATION_SCHEMA.TABLES`
+/// - **Databricks**: Backtick-quoted identifiers. Internal `` ` `` are escaped as ``` `` ```.
+///   Result: `` `my_catalog`.INFORMATION_SCHEMA.TABLES ``
+fn escape_sql_identifier(s: &str, dialect: &str) -> String {
+    match dialect {
+        "snowflake" => {
+            let escaped = s.replace('"', "\"\"");
+            format!("\"{}\"", escaped)
+        }
+        "databricks" => {
+            let escaped = s.replace('`', "``");
+            format!("`{}`", escaped)
+        }
+        _ => s.to_string(),
+    }
+}
+
+/// Return the SQL query to list tables in a specific container (schema/database).
+///
+/// The SQL must return at least one column: the table name.
+/// Container names are escaped via single-quote doubling to prevent SQL injection.
+fn get_tables_in_container_sql(type_id: &str, container: &str) -> Option<String> {
+    let escaped = escape_sql_literal(container);
+
+    match type_id {
+        "postgres" | "redshift" => Some(format!(
+            "SELECT table_name FROM information_schema.tables \
+             WHERE table_schema = '{escaped}' ORDER BY table_name"
+        )),
+        "mysql" => Some(format!(
+            "SELECT TABLE_NAME FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = '{escaped}' ORDER BY TABLE_NAME"
+        )),
+        "clickhouse" => Some(format!(
+            "SELECT name FROM system.tables \
+             WHERE database = '{escaped}' ORDER BY name"
+        )),
+        "sqlserver" | "synapse" => Some(format!(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES \
+             WHERE TABLE_SCHEMA = '{escaped}' ORDER BY TABLE_NAME"
+        )),
+        // Snowflake: container is a database name; list tables across all schemas.
+        // Returns 3 columns: TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE.
+        // The indexing loop handles the multi-column result.
+        "snowflake" => {
+            let quoted = escape_sql_identifier(container, "snowflake");
+            Some(format!(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
+                 FROM {quoted}.INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA') \
+                   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME"
+            ))
+        },
+        // Databricks: container is a catalog name; list tables across all schemas.
+        // Returns 3 columns: TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE.
+        "databricks" => {
+            let quoted = escape_sql_identifier(container, "databricks");
+            Some(format!(
+                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
+                 FROM {quoted}.INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_SCHEMA NOT IN ('information_schema') \
+                   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW', 'MANAGED', 'EXTERNAL') \
+                 ORDER BY TABLE_SCHEMA, TABLE_NAME"
+            ))
+        },
+        // BigQuery: container is "project_id.dataset_id"
+        "bigquery" => Some(format!(
+            "SELECT table_name FROM `{escaped}`.INFORMATION_SCHEMA.TABLES ORDER BY table_name"
+        )),
+        _ => None,
+    }
+}
+
+/// Return the SQL query to list columns for a specific table.
+///
+/// Returns rows with: column_name, data_type, description (if available).
+fn get_columns_sql(type_id: &str, container: &str, table_name: &str) -> Option<String> {
+    let esc_container = escape_sql_literal(container);
+    let esc_table = escape_sql_literal(table_name);
+
+    match type_id {
+        "postgres" | "redshift" => Some(format!(
+            "SELECT column_name, data_type, '' as description \
+             FROM information_schema.columns \
+             WHERE table_schema = '{esc_container}' AND table_name = '{esc_table}' \
+             ORDER BY ordinal_position"
+        )),
+        "mysql" => Some(format!(
+            "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_COMMENT \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = '{esc_container}' AND TABLE_NAME = '{esc_table}' \
+             ORDER BY ORDINAL_POSITION"
+        )),
+        "clickhouse" => Some(format!(
+            "SELECT name, type, comment \
+             FROM system.columns \
+             WHERE database = '{esc_container}' AND table = '{esc_table}' \
+             ORDER BY position"
+        )),
+        "sqlserver" | "synapse" => Some(format!(
+            "SELECT COLUMN_NAME, DATA_TYPE, '' as description \
+             FROM INFORMATION_SCHEMA.COLUMNS \
+             WHERE TABLE_SCHEMA = '{esc_container}' AND TABLE_NAME = '{esc_table}' \
+             ORDER BY ORDINAL_POSITION"
+        )),
+        // Snowflake: container is "database.schema" (set by the indexing loop).
+        // Split to use database as identifier prefix and schema in WHERE clause.
+        "snowflake" => {
+            let parts: Vec<&str> = container.splitn(2, '.').collect();
+            let (db_name, schema_name) = if parts.len() == 2 {
+                (parts[0], parts[1])
+            } else {
+                (container, "PUBLIC")
+            };
+            let quoted_db = escape_sql_identifier(db_name, "snowflake");
+            let esc_schema = escape_sql_literal(schema_name);
+            Some(format!(
+                "SELECT COLUMN_NAME, DATA_TYPE, COMMENT \
+                 FROM {quoted_db}.INFORMATION_SCHEMA.COLUMNS \
+                 WHERE TABLE_SCHEMA = '{esc_schema}' AND TABLE_NAME = '{esc_table}' \
+                 ORDER BY ORDINAL_POSITION"
+            ))
+        },
+        // Databricks: container is "catalog.schema" (set by the indexing loop).
+        // Split to use catalog as identifier prefix and schema in WHERE clause.
+        "databricks" => {
+            let parts: Vec<&str> = container.splitn(2, '.').collect();
+            let (catalog_name, schema_name) = if parts.len() == 2 {
+                (parts[0], parts[1])
+            } else {
+                (container, "default")
+            };
+            let quoted_catalog = escape_sql_identifier(catalog_name, "databricks");
+            let esc_schema = escape_sql_literal(schema_name);
+            Some(format!(
+                "SELECT COLUMN_NAME, DATA_TYPE, COMMENT \
+                 FROM {quoted_catalog}.INFORMATION_SCHEMA.COLUMNS \
+                 WHERE TABLE_SCHEMA = '{esc_schema}' AND TABLE_NAME = '{esc_table}' \
+                 ORDER BY ORDINAL_POSITION"
+            ))
+        },
+        // BigQuery: container is "project_id.dataset_id"
+        "bigquery" => Some(format!(
+            "SELECT column_name, data_type, description \
+             FROM `{esc_container}`.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS \
+             WHERE table_name = '{esc_table}' AND field_path = column_name \
+             ORDER BY ordinal_position"
+        )),
+        _ => None,
+    }
+}
+
+// ===========================================================================
+// Endpoint Handlers
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// POST /discover-catalog — Discover catalog items (projects, databases, schemas)
+// ---------------------------------------------------------------------------
+
+async fn discover_catalog(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(request): Json<DiscoverCatalogRequest>,
+) -> Result<Json<DiscoverCatalogResponse>, kyomi_core::Error> {
+    let workspace_id = get_workspace_id(&user)?;
+
+    // Build credentials — may need to look up OAuth tokens from database
+    let mut credentials = request.credentials.clone();
+    let connection_config = if request.connection_config.is_null() {
+        json!({})
+    } else {
+        request.connection_config.clone()
+    };
+
+    let auth_mode = connection_config
+        .get("auth_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let is_oauth_mode = auth_mode == "oauth" || auth_mode == "enterprise_oauth";
+    let has_oauth_token = credentials
+        .get("oauth_access_token")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+
+    // For OAuth mode, look up credentials from database if datasource_slug provided
+    if let Some(ref slug) = request.datasource_slug {
+        if is_oauth_mode && !has_oauth_token {
+            if let Ok(datasource) = datasource_service::resolve_datasource(
+                &state.db,
+                slug,
+                workspace_id,
+                false,
+            )
+            .await
+            {
+                let user_cred = datasource_service::get_user_credential(
+                    &state.db,
+                    &user.user_id,
+                    &datasource.id,
+                )
+                .await
+                .ok()
+                .flatten();
+
+                if let Some(cred) = user_cred {
+                    if let Ok(db_creds) =
+                        credential_service::decrypt_credentials(&cred.credentials, &state.encryption_key)
+                    {
+                        // Merge OAuth tokens from database
+                        if let Some(obj) = db_creds.as_object() {
+                            if let Some(cred_obj) = credentials.as_object_mut() {
+                                for (k, v) in obj {
+                                    cred_obj.insert(k.clone(), v.clone());
+                                }
+                            } else {
+                                credentials = db_creds;
+                            }
+                        }
+                        tracing::info!(
+                            "[discover-catalog] Loaded OAuth credentials from database for {slug}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Validate datasource type
+    let meta = match datasource_registry::get_metadata_by_str(&request.datasource_type) {
+        Some(m) => m,
+        None => {
+            return Ok(Json(DiscoverCatalogResponse {
+                success: false,
+                items: vec![],
+                item_type: "unknown".into(),
+                message: Some(format!(
+                    "unsupported datasource type: '{}'",
+                    request.datasource_type
+                )),
+            }));
+        }
+    };
+
+    let item_type = format!("{}s", meta.catalog_container_label);
+
+    // Create provider and discover
+    let ds_type = match datasource_registry::DatasourceType::from_str(&request.datasource_type) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(Json(DiscoverCatalogResponse {
+                success: false,
+                items: vec![],
+                item_type,
+                message: Some(e.to_string()),
+            }));
+        }
+    };
+
+    let user_context = build_user_context(&state, &user).await?;
+    let user_context_ref = user_context.as_ref();
+
+    let provider = match kyomi_datasource_server::create_provider(
+        &ds_type,
+        &connection_config,
+        &credentials,
+        user_context_ref,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                datasource_type = %request.datasource_type,
+                error = %e,
+                "Failed to create provider for catalog discovery"
+            );
+            return Ok(Json(DiscoverCatalogResponse {
+                success: false,
+                items: vec![],
+                item_type,
+                message: Some("Failed to connect to datasource".into()),
+            }));
+        }
+    };
+
+    // Discover containers using provider discovery methods.
+    //
+    // Each provider implements list_databases(), list_schemas(), list_catalogs(),
+    // or list_projects() — matching Python's provider methods exactly.
+    // BigQuery uses list_projects() which calls REST API (not SQL).
+    let discovery = if ds_type == datasource_registry::DatasourceType::BigQuery {
+        // BigQuery uses REST API for project discovery
+        match provider.list_projects().await {
+            Ok(projects) => kyomi_datasource_server::DiscoveryResult {
+                items: projects,
+                error: None,
+            },
+            Err(e) => kyomi_datasource_server::DiscoveryResult {
+                items: vec![],
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        discover_primary(provider.as_ref(), &ds_type).await
+    };
+    provider.close().await;
+
+    if let Some(err) = discovery.error {
+        Ok(Json(DiscoverCatalogResponse {
+            success: false,
+            items: vec![],
+            item_type,
+            message: Some(err),
+        }))
+    } else {
+        let items: Vec<CatalogItem> = discovery
+            .items
+            .into_iter()
+            .map(|name| CatalogItem {
+                name,
+                item_type: meta.catalog_container_label.to_string(),
+                description: None,
+            })
+            .collect();
+        let count = items.len();
+        Ok(Json(DiscoverCatalogResponse {
+            success: true,
+            items,
+            item_type,
+            message: Some(format!("Found {count} {}", meta.catalog_container_label)),
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /discover — Discover ALL resources for datasource setup
+// ---------------------------------------------------------------------------
+
+async fn discover_resources(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(request): Json<DiscoverResourcesRequest>,
+) -> Result<Json<DiscoverResourcesResponse>, kyomi_core::Error> {
+    let workspace_id = get_workspace_id(&user)?;
+
+    // Start with request credentials
+    let mut credentials = if request.credentials.is_null() {
+        json!({})
+    } else {
+        request.credentials.clone()
+    };
+    let mut connection_config = if request.connection_config.is_null() {
+        json!({})
+    } else {
+        request.connection_config.clone()
+    };
+    let mut _user_cred_id: Option<i32> = None;
+
+    // For existing datasources (edit mode), load stored credentials first
+    if let Some(ref slug) = request.datasource_slug {
+        if let Ok(datasource) = datasource_service::resolve_datasource(
+            &state.db,
+            slug,
+            workspace_id,
+            false,
+        )
+        .await
+        {
+            // Merge connection_config: database has secrets, request has current UI values
+            let db_config = &datasource.connection_config;
+            let request_config = &request.connection_config;
+
+            // Start with DB config as base
+            let mut merged_config = db_config.clone();
+
+            // Always use request's auth_mode if provided
+            if let Some(am) = request_config.get("auth_mode") {
+                if let Some(obj) = merged_config.as_object_mut() {
+                    obj.insert("auth_mode".to_string(), am.clone());
+                }
+            }
+
+            // For service_account mode, use request's service_account_json if it looks like real JSON
+            if let Some(sa_json) = request_config.get("service_account_json").and_then(|v| v.as_str()) {
+                if sa_json.trim().starts_with('{') {
+                    if let Some(obj) = merged_config.as_object_mut() {
+                        obj.insert("service_account_json".to_string(), json!(sa_json));
+                    }
+                }
+            }
+
+            // Handle OAuth client credentials with mask awareness
+            const MASKED_VALUE: &str = "********";
+            if let Some(oci) = request_config.get("oauth_client_id") {
+                if let Some(obj) = merged_config.as_object_mut() {
+                    obj.insert("oauth_client_id".to_string(), oci.clone());
+                }
+            }
+            if let Some(ocs) = request_config.get("oauth_client_secret").and_then(|v| v.as_str()) {
+                if ocs != MASKED_VALUE {
+                    if let Some(obj) = merged_config.as_object_mut() {
+                        obj.insert("oauth_client_secret".to_string(), json!(ocs));
+                    }
+                }
+            }
+
+            connection_config = merged_config;
+
+            // Look up user's OAuth credentials for this datasource
+            if let Ok(Some(user_cred)) = datasource_service::get_user_credential(
+                &state.db,
+                &user.user_id,
+                &datasource.id,
+            )
+            .await
+            {
+                if let Ok(db_creds) =
+                    credential_service::decrypt_credentials(&user_cred.credentials, &state.encryption_key)
+                {
+                    credentials = db_creds;
+                    _user_cred_id = Some(user_cred.id);
+                    tracing::info!(
+                        "[discover] Loaded stored credentials for {slug}: keys={:?}",
+                        credentials.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                    );
+
+                    // Override stored credentials with non-empty request values
+                    let request_creds = if request.credentials.is_null() {
+                        &json!({})
+                    } else {
+                        &request.credentials
+                    };
+                    if let Some(req_obj) = request_creds.as_object() {
+                        if let Some(cred_obj) = credentials.as_object_mut() {
+                            for (key, value) in req_obj {
+                                if !value.is_null()
+                                    && value.as_str().map(|s| !s.is_empty()).unwrap_or(true)
+                                {
+                                    cred_obj.insert(key.clone(), value.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Validate datasource type
+    let ds_type = match datasource_registry::DatasourceType::from_str(&request.datasource_type) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(Json(DiscoverResourcesResponse {
+                success: false,
+                resources: json!({}),
+                message: Some(e.to_string()),
+            }));
+        }
+    };
+
+    // Refresh OAuth tokens if needed (e.g., Snowflake, Databricks, Synapse)
+    let credentials = match kyomi_datasource_server::ensure_valid_oauth_credentials(
+        &credentials,
+        &connection_config,
+        &ds_type,
+    )
+    .await
+    {
+        Ok(refreshed) => refreshed,
+        Err(e) => {
+            tracing::warn!(
+                datasource_type = %request.datasource_type,
+                error = %e,
+                "OAuth token refresh failed during resource discovery"
+            );
+            return Ok(Json(DiscoverResourcesResponse {
+                success: false,
+                resources: json!({}),
+                message: Some("OAuth token refresh failed. Please reconnect your account.".into()),
+            }));
+        }
+    };
+
+    let user_context = build_user_context(&state, &user).await?;
+    let user_context_ref = user_context.as_ref();
+
+    let provider = match kyomi_datasource_server::create_provider(
+        &ds_type,
+        &connection_config,
+        &credentials,
+        user_context_ref,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                datasource_type = %request.datasource_type,
+                error = %e,
+                "Failed to create provider for resource discovery"
+            );
+            return Ok(Json(DiscoverResourcesResponse {
+                success: false,
+                resources: json!({}),
+                message: Some("Failed to connect to datasource".into()),
+            }));
+        }
+    };
+
+    let mut resources = serde_json::Map::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Discover resources using provider discovery methods.
+    //
+    // Each provider implements the appropriate methods (list_databases,
+    // list_schemas, list_warehouses, list_catalogs) matching Python exactly.
+    if ds_type == datasource_registry::DatasourceType::BigQuery {
+        // BigQuery uses REST API for project discovery
+        match provider.list_projects().await {
+            Ok(projects) if !projects.is_empty() => {
+                resources.insert("projects".to_string(), json!(projects));
+            }
+            Ok(_) => {} // empty list — not an error
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list BigQuery projects during discovery");
+                errors.push("projects: failed to list".into());
+            }
+        }
+    } else {
+        let discovery_results =
+            discover_all_resources(provider.as_ref(), &ds_type).await;
+
+        for (resource_type, result) in discovery_results {
+            if let Some(err) = result.error {
+                tracing::warn!(
+                    resource_type,
+                    error = %err,
+                    "Discovery failed for resource type"
+                );
+                errors.push(format!("{resource_type}: discovery failed"));
+            } else if !result.items.is_empty() {
+                resources.insert(resource_type.to_string(), json!(result.items));
+            }
+        }
+    }
+
+    provider.close().await;
+
+    // Build response
+    if resources.is_empty() {
+        if !errors.is_empty() {
+            return Ok(Json(DiscoverResourcesResponse {
+                success: false,
+                resources: json!({}),
+                message: Some(format!("Discovery failed: {}", errors.join("; "))),
+            }));
+        }
+        return Ok(Json(DiscoverResourcesResponse {
+            success: false,
+            resources: json!({}),
+            message: Some("No discoverable resources found for this datasource type".into()),
+        }));
+    }
+
+    // Build success message
+    let mut summaries: Vec<String> = Vec::new();
+    for (resource_type, items) in &resources {
+        let count = items.as_array().map(|a| a.len()).unwrap_or(0);
+        summaries.push(format!("{count} {resource_type}"));
+    }
+    let mut message = format!("Discovered: {}", summaries.join(", "));
+    if !errors.is_empty() {
+        message += &format!(" (partial failures: {})", errors.join("; "));
+    }
+
+    Ok(Json(DiscoverResourcesResponse {
+        success: true,
+        resources: Value::Object(resources),
+        message: Some(message),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /{identifier}/catalog/tree — Hierarchical catalog tree from cache
+// ---------------------------------------------------------------------------
+
+async fn get_catalog_tree(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(identifier): Path<String>,
+    Query(params): Query<CatalogTreeParams>,
+) -> Result<Json<CatalogTreeResponse>, kyomi_core::Error> {
+    let workspace_id = get_workspace_id(&user)?;
+    let datasource = resolve_or_404(&state.db, &identifier, workspace_id, false).await?;
+
+    // Sample datasources use a shared sentinel workspace index.
+    let is_sample = datasource
+        .connection_config
+        .get("is_sample")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Get all cached tables (exclude archived)
+    let is_pg = state.db.is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let cached_tables: Vec<DatasourceTableCache> = if is_sample {
+        kyomi_core::db_fetch_all!(
+            &state.db, DatasourceTableCache,
+            &format!(
+                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                 table_metadata, column_descriptions, created_at, updated_at, \
+                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+                 FROM datasource_table_cache \
+                 WHERE workspace_id = $1 AND is_archived = {bf}"
+            ),
+            kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID
+        )?
+    } else {
+        kyomi_core::db_fetch_all!(
+            &state.db, DatasourceTableCache,
+            &format!(
+                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                 table_metadata, column_descriptions, created_at, updated_at, \
+                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+                 FROM datasource_table_cache \
+                 WHERE datasource_config_id = $1 AND is_archived = {bf}"
+            ),
+            &datasource.id
+        )?
+    };
+
+    // SPECIAL CASE: BigQuery public datasets.
+    // Public datasets are stored in a sentinel workspace and shared across all workspaces.
+    // Include them when the datasource has include_public_datasets enabled (defaults to true).
+    let mut cached_tables = cached_tables;
+    if !is_sample && datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
+        let include_public = datasource
+            .connection_config
+            .get("include_public_datasets")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        if include_public {
+            let public_tables: Vec<DatasourceTableCache> = kyomi_core::db_fetch_all!(
+                &state.db, DatasourceTableCache,
+                &format!(
+                    "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                     table_metadata, column_descriptions, created_at, updated_at, \
+                     structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+                     FROM datasource_table_cache \
+                     WHERE workspace_id = $1 AND is_archived = {bf}"
+                ),
+                kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID
+            )?;
+            cached_tables.extend(public_tables);
+        }
+    }
+
+    let table_count = cached_tables.len();
+
+    // Build tree: {project_id: {dataset_id: [table_nodes]}}
+    // Use BTreeMap for sorted output
+    let mut tree_dict: BTreeMap<String, BTreeMap<String, Vec<CatalogTreeNode>>> = BTreeMap::new();
+    let mut last_indexed: Option<String> = None;
+
+    for table in &cached_tables {
+        let project = &table.project_id;
+        let dataset = &table.dataset_id;
+        let table_name = &table.table_id;
+
+        let project_map = tree_dict.entry(project.clone()).or_default();
+        let table_list = project_map.entry(dataset.clone()).or_default();
+
+        // Build table node ID: skip project prefix if empty
+        let table_id = if project.is_empty() {
+            format!("{dataset}.{table_name}")
+        } else {
+            format!("{project}.{dataset}.{table_name}")
+        };
+
+        let metadata = {
+            let description = table
+                .table_metadata
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| json!(s))
+                .unwrap_or(Value::Null);
+            let row_count = table
+                .table_metadata
+                .get("row_count")
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({
+                "description": description,
+                "row_count": row_count,
+            })
+        };
+
+        let children = if params.include_columns {
+            let columns = table
+                .table_metadata
+                .get("columns")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let col_nodes: Vec<CatalogTreeNode> = columns
+                .iter()
+                .map(|col| {
+                    let col_name = col
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let col_id = if project.is_empty() {
+                        format!("{dataset}.{table_name}.{col_name}")
+                    } else {
+                        format!("{project}.{dataset}.{table_name}.{col_name}")
+                    };
+                    let col_meta = json!({
+                        "data_type": col.get("type"),
+                        "description": col.get("description"),
+                    });
+                    CatalogTreeNode {
+                        id: col_id,
+                        name: col_name.to_string(),
+                        node_type: "column".into(),
+                        children: None,
+                        metadata: Some(col_meta),
+                    }
+                })
+                .collect();
+
+            if col_nodes.is_empty() {
+                None
+            } else {
+                Some(col_nodes)
+            }
+        } else {
+            None
+        };
+
+        table_list.push(CatalogTreeNode {
+            id: table_id,
+            name: table_name.clone(),
+            node_type: "table".into(),
+            children,
+            metadata: Some(metadata),
+        });
+
+        // Track last indexed time — use last_verified (set on every refresh check)
+        // with fallback to updated_at (only set on schema changes).
+        let checked_at = table.last_verified.unwrap_or(table.updated_at);
+        let checked_str = checked_at.to_rfc3339();
+        if last_indexed.as_ref().map_or(true, |li| &checked_str > li) {
+            last_indexed = Some(checked_str);
+        }
+    }
+
+    // Convert tree_dict to CatalogTreeNode structure using registry metadata
+    let meta = datasource_registry::get_metadata_by_str(datasource.datasource_type.as_ref())
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal(format!(
+                "Unknown datasource type: '{}'",
+                datasource.datasource_type
+            ))
+        })?;
+
+    let level1_type = meta.tree_level1_type;
+    let level2_type = meta.tree_level2_type;
+
+    let mut tree: Vec<CatalogTreeNode> = Vec::new();
+
+    for (project_id, datasets) in &tree_dict {
+        let mut dataset_nodes: Vec<CatalogTreeNode> = Vec::new();
+
+        for (dataset_id, tables) in datasets {
+            let ds_id = if project_id.is_empty() {
+                dataset_id.clone()
+            } else {
+                format!("{project_id}.{dataset_id}")
+            };
+
+            let mut sorted_tables = tables.clone();
+            sorted_tables.sort_by(|a, b| a.name.cmp(&b.name));
+
+            dataset_nodes.push(CatalogTreeNode {
+                id: ds_id,
+                name: dataset_id.clone(),
+                node_type: level2_type.to_string(),
+                children: Some(sorted_tables),
+                metadata: None,
+            });
+        }
+
+        // Sort dataset nodes by name
+        dataset_nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Determine if we should skip the level1 wrapper
+        let skip_wrapper = (meta.skip_empty_project_wrapper && project_id.is_empty())
+            || (meta.skip_single_project_wrapper && tree_dict.len() == 1);
+
+        if skip_wrapper {
+            tree = dataset_nodes;
+        } else {
+            tree.push(CatalogTreeNode {
+                id: project_id.clone(),
+                name: project_id.clone(),
+                node_type: level1_type.to_string(),
+                children: Some(dataset_nodes),
+                metadata: None,
+            });
+        }
+    }
+
+    Ok(Json(CatalogTreeResponse {
+        datasource_id: datasource.id,
+        datasource_type: datasource.datasource_type.to_string(),
+        datasource_name: datasource.name,
+        tree,
+        table_count,
+        last_indexed,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /{identifier}/catalog/status — Indexing status and statistics
+// ---------------------------------------------------------------------------
+
+async fn get_catalog_status(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(identifier): Path<String>,
+) -> Result<Json<CatalogStatusResponse>, kyomi_core::Error> {
+    let workspace_id = get_workspace_id(&user)?;
+
+    // Admins can view catalog status for disabled datasources
+    let datasource =
+        resolve_or_404(&state.db, &identifier, workspace_id, is_admin(&user)).await?;
+
+    // Sample datasources use a shared sentinel workspace index.
+    let is_sample = datasource
+        .connection_config
+        .get("is_sample")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Get cached table stats (exclude archived)
+    let is_pg = state.db.is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let cached_tables: Vec<DatasourceTableCache> = if is_sample {
+        kyomi_core::db_fetch_all!(
+            &state.db, DatasourceTableCache,
+            &format!(
+                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                 table_metadata, column_descriptions, created_at, updated_at, \
+                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+                 FROM datasource_table_cache \
+                 WHERE workspace_id = $1 AND is_archived = {bf}"
+            ),
+            kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID
+        )?
+    } else {
+        kyomi_core::db_fetch_all!(
+            &state.db, DatasourceTableCache,
+            &format!(
+                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+                 table_metadata, column_descriptions, created_at, updated_at, \
+                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+                 FROM datasource_table_cache \
+                 WHERE datasource_config_id = $1 AND is_archived = {bf}"
+            ),
+            &datasource.id
+        )?
+    };
+
+    let table_count = cached_tables.len();
+
+    // Count unique schemas/datasets and track last indexed
+    let mut schemas: HashSet<String> = HashSet::new();
+    let mut last_indexed: Option<String> = None;
+
+    for table in &cached_tables {
+        if !table.dataset_id.is_empty() {
+            schemas.insert(table.dataset_id.clone());
+        }
+        // Use last_verified (set on every refresh check) with fallback to updated_at
+        let checked_at = table.last_verified.unwrap_or(table.updated_at);
+        let checked_str = checked_at.to_rfc3339();
+        if last_indexed.as_ref().map_or(true, |li| &checked_str > li) {
+            last_indexed = Some(checked_str);
+        }
+    }
+
+    let schema_count = schemas.len();
+
+    // Get indexing status from workspace.
+    // The catalog_refresh_status column is VARCHAR(50) — may contain:
+    //   - A simple string: "idle", "running", "failed"
+    //   - A JSON-encoded dict: {"datasource_id": "...", "status": "...", "progress": N}
+    let indexing_status: String;
+    let mut indexing_progress: Option<i32> = None;
+
+    #[derive(sqlx::FromRow)]
+    struct RefreshStatusRow { catalog_refresh_status: Option<String> }
+    let refresh_status_str = kyomi_core::db_fetch_optional!(
+        &state.db, RefreshStatusRow,
+        "SELECT catalog_refresh_status FROM workspaces WHERE workspace_id = $1",
+        workspace_id
+    )?
+    .and_then(|r| r.catalog_refresh_status);
+
+    if let Some(status_str) = refresh_status_str {
+        // Try to parse as JSON object (advanced status with per-datasource tracking)
+        if let Ok(parsed) = serde_json::from_str::<Value>(&status_str) {
+            if parsed.is_object()
+                && parsed.get("datasource_id").and_then(|v| v.as_str()) == Some(&datasource.id)
+            {
+                indexing_status = parsed
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("idle")
+                    .to_string();
+                indexing_progress =
+                    parsed.get("progress").and_then(|v| v.as_i64()).map(|v| v as i32);
+            } else {
+                indexing_status = "idle".into();
+            }
+        } else {
+            // Simple string value — use directly if it looks like a known status,
+            // otherwise default to "idle"
+            indexing_status = match status_str.as_str() {
+                "idle" | "running" | "failed" => status_str,
+                _ => "idle".into(),
+            };
+        }
+    } else {
+        indexing_status = "idle".into();
+    }
+
+    // Extract catalog config using registry metadata
+    let meta = datasource_registry::get_metadata_by_str(datasource.datasource_type.as_ref())
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal(format!(
+                "Unknown datasource type: '{}'",
+                datasource.datasource_type
+            ))
+        })?;
+
+    let conn_config = &datasource.connection_config;
+    let mut catalog_config = serde_json::Map::new();
+
+    for key in meta.catalog_config_keys {
+        if *key == "include_public_datasets" {
+            // Boolean flag (BigQuery-specific)
+            let val = conn_config
+                .get(*key)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            catalog_config.insert(key.to_string(), json!(val));
+        } else {
+            // List value (catalog_schemas, catalog_databases, etc.)
+            let val = conn_config
+                .get(*key)
+                .cloned()
+                .unwrap_or(json!([]));
+            catalog_config.insert(key.to_string(), val);
+        }
+    }
+
+    Ok(Json(CatalogStatusResponse {
+        datasource_id: datasource.id,
+        datasource_name: datasource.name,
+        datasource_type: datasource.datasource_type.to_string(),
+        table_count,
+        schema_count,
+        last_indexed,
+        indexing_status: Some(indexing_status),
+        indexing_progress,
+        catalog_config: Some(Value::Object(catalog_config)),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /{identifier}/schemas — Live schema list from datasource
+// ---------------------------------------------------------------------------
+
+async fn list_schemas(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(identifier): Path<String>,
+) -> Result<Json<SchemaListResponse>, kyomi_core::Error> {
+    let workspace_id = get_workspace_id(&user)?;
+    let datasource = resolve_or_404(&state.db, &identifier, workspace_id, false).await?;
+
+    // Get registry metadata
+    let meta = datasource_registry::get_metadata_by_str(datasource.datasource_type.as_ref())
+        .ok_or_else(|| {
+            kyomi_core::Error::Internal(format!(
+                "Unknown datasource type: '{}'",
+                datasource.datasource_type
+            ))
+        })?;
+
+    // Check if discovery is supported
+    if !meta.supports_catalog_discovery {
+        let msg = format!(
+            "Schema discovery not supported for {}",
+            datasource.datasource_type
+        );
+        return Ok(Json(SchemaListResponse {
+            datasource_id: datasource.id,
+            datasource_type: datasource.datasource_type.to_string(),
+            schemas: vec![],
+            message: Some(msg),
+        }));
+    }
+
+    let ds_type: datasource_registry::DatasourceType = datasource.datasource_type.into();
+
+    // --- Connect datasources: route through the Connect agent ---
+    if datasource.connection_type == "connect" {
+        use crate::connect::provider::ConnectProvider;
+
+        let provider = ConnectProvider::with_timeout(
+            state.connect_registry.clone(),
+            datasource.id.clone(),
+            std::time::Duration::from_secs(30),
+        );
+
+        let discovery = match provider.discover_catalog().await {
+            Ok(catalog) => {
+                let items: Vec<String> = catalog
+                    .containers
+                    .into_iter()
+                    .map(|c| c.name)
+                    .collect();
+                kyomi_datasource_server::DiscoveryResult {
+                    items,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    datasource_id = %datasource.id,
+                    error = %e,
+                    "Connect catalog discovery failed for schema listing"
+                );
+                kyomi_datasource_server::DiscoveryResult {
+                    items: vec![],
+                    error: Some(format!(
+                        "Failed to list schemas via Connect — is the agent running? ({e})"
+                    )),
+                }
+            }
+        };
+
+        return Ok(Json(SchemaListResponse {
+            datasource_id: datasource.id,
+            datasource_type: datasource.datasource_type.to_string(),
+            schemas: discovery.items,
+            message: discovery.error,
+        }));
+    }
+
+    // --- Direct datasources: connect using server-side credentials ---
+
+    // Get user credentials
+    let user_cred =
+        datasource_service::get_user_credential(&state.db, &user.user_id, &datasource.id)
+            .await?;
+
+    let credentials = if let Some(ref cred) = user_cred {
+        credential_service::decrypt_credentials(&cred.credentials, &state.encryption_key)?
+    } else {
+        json!({})
+    };
+
+    // Refresh OAuth if needed
+    let credentials = match kyomi_datasource_server::ensure_valid_oauth_credentials(
+        &credentials,
+        &datasource.connection_config,
+        &ds_type,
+    )
+    .await
+    {
+        Ok(refreshed) if refreshed != credentials => {
+            if let Some(ref cred) = user_cred {
+                if let Err(e) = datasource_service::save_user_credential(
+                    &state.db,
+                    &state.encryption_key,
+                    &user.user_id,
+                    &datasource.id,
+                    &cred.workspace_id,
+                    &refreshed,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        datasource_id = %datasource.id,
+                        "Failed to persist refreshed OAuth token: {e}"
+                    );
+                }
+            }
+            refreshed
+        }
+        Ok(unchanged) => unchanged,
+        Err(_) => credentials,
+    };
+
+    let user_context = build_user_context(&state, &user).await?;
+    let user_context_ref = user_context.as_ref();
+
+    let provider = match kyomi_datasource_server::create_provider(
+        &ds_type,
+        &datasource.connection_config,
+        &credentials,
+        user_context_ref,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                datasource_id = %datasource.id,
+                error = %e,
+                "Failed to create provider for schema listing"
+            );
+            return Ok(Json(SchemaListResponse {
+                datasource_id: datasource.id,
+                datasource_type: datasource.datasource_type.to_string(),
+                schemas: vec![],
+                message: Some("Failed to connect to datasource".into()),
+            }));
+        }
+    };
+
+    // Use provider discovery methods matching Python's approach.
+    let discovery = if ds_type == datasource_registry::DatasourceType::BigQuery {
+        match provider.list_projects().await {
+            Ok(projects) => kyomi_datasource_server::DiscoveryResult {
+                items: projects,
+                error: None,
+            },
+            Err(e) => kyomi_datasource_server::DiscoveryResult {
+                items: vec![],
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        discover_primary(provider.as_ref(), &ds_type).await
+    };
+    provider.close().await;
+
+    Ok(Json(SchemaListResponse {
+        datasource_id: datasource.id,
+        datasource_type: datasource.datasource_type.to_string(),
+        schemas: discovery.items,
+        message: discovery.error,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /{identifier}/catalog/refresh — Trigger manual catalog refresh
+// ---------------------------------------------------------------------------
+
+async fn refresh_catalog(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(identifier): Path<String>,
+    body: Option<Json<CatalogRefreshRequest>>,
+) -> Result<Json<CatalogRefreshResponse>, kyomi_core::Error> {
+    let workspace_id = get_workspace_id(&user)?;
+
+    // Check admin permission
+    if !is_admin(&user) {
+        return Err(kyomi_core::Error::Forbidden(
+            "Only workspace admins can trigger catalog refresh".into(),
+        ));
+    }
+
+    let datasource = resolve_or_404(&state.db, &identifier, workspace_id, false).await?;
+
+    // Sample datasources cannot be refreshed manually
+    let is_sample = datasource
+        .connection_config
+        .get("is_sample")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if is_sample {
+        return Err(kyomi_core::Error::BadRequest(
+            "Sample datasource catalog is managed automatically and cannot be refreshed manually"
+                .into(),
+        ));
+    }
+
+    let force = body.map(|b| b.force).unwrap_or(false);
+
+    execute_catalog_refresh(&state, &user, datasource, workspace_id, force).await
+        .map(Json)
+}
+
+/// Core catalog refresh logic, shared by the generic endpoint and bigquery-specific endpoint.
+pub(crate) async fn execute_catalog_refresh(
+    state: &AppState,
+    user: &AuthUser,
+    datasource: kyomi_core::models::datasource::DatasourceConfig,
+    workspace_id: &str,
+    force: bool,
+) -> Result<CatalogRefreshResponse, kyomi_core::Error> {
+    // Check rate limit (unless force=true). Manual refresh uses 0 threshold
+    // so any non-running datasource is eligible.
+    if !force {
+        let can_refresh =
+            kyomi_auth::catalog::helpers::can_refresh_now(&state.db, &datasource.id, 0).await;
+
+        if !can_refresh {
+            return Ok(CatalogRefreshResponse {
+                status: "already_running".into(),
+                message: "Catalog indexing is already in progress for this datasource".into(),
+                datasource_id: datasource.id,
+            });
+        }
+    }
+
+    // --- Connect datasources: single discover_catalog command ---
+    // Connect datasources don't have user credentials to decrypt — the Connect
+    // binary handles credentials locally. We send a discover_catalog command
+    // through the WebSocket and process the returned CatalogResult.
+    if datasource.connection_type == "connect" {
+        use crate::connect::provider::ConnectProvider;
+        use kyomi_datasource_server::provider::DatasourceProvider as _;
+
+        // Use a longer timeout — catalog discovery can be slow for large databases
+        let provider = ConnectProvider::with_timeout(
+            state.connect_registry.clone(),
+            datasource.id.clone(),
+            std::time::Duration::from_secs(120),
+        );
+
+        // Test connection first
+        if let Err(e) = provider.test_connection().await {
+            tracing::warn!(
+                datasource_id = %datasource.id,
+                error = %e,
+                "Connection test failed during Connect catalog refresh"
+            );
+            return Ok(CatalogRefreshResponse {
+                status: "error".into(),
+                message: "Connection test failed — is the Connect binary running?".into(),
+                datasource_id: datasource.id,
+            });
+        }
+
+        // Update workspace status to running
+        let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+            &state.db,
+            workspace_id,
+            &datasource.id,
+            "running",
+            None,
+        )
+        .await;
+
+        // Send discover_catalog command
+        let catalog_result = match provider.discover_catalog().await {
+            Ok(cr) => cr,
+            Err(e) => {
+                tracing::warn!(
+                    datasource_id = %datasource.id,
+                    error = %e,
+                    "discover_catalog command failed"
+                );
+                let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+                    &state.db,
+                    workspace_id,
+                    &datasource.id,
+                    "failed",
+                    None,
+                )
+                .await;
+                return Ok(CatalogRefreshResponse {
+                    status: "error".into(),
+                    message: format!("Catalog discovery failed: {e}"),
+                    datasource_id: datasource.id,
+                });
+            }
+        };
+
+        // Process CatalogResult into cache_table calls
+        let mut tables_indexed = 0usize;
+        let mut seen_table_ids = HashSet::new();
+
+        let ctx = kyomi_auth::catalog::helpers::IndexerContext {
+            workspace_id: workspace_id.to_string(),
+            datasource_config_id: datasource.id.clone(),
+            connection_config: datasource.connection_config.clone(),
+            encryption_key: state.encryption_key.clone(),
+        };
+
+        for container in &catalog_result.containers {
+            for table in &container.tables {
+                let columns: Vec<kyomi_auth::catalog::types::ColumnEntry> = table
+                    .columns
+                    .iter()
+                    .map(|col| kyomi_auth::catalog::types::ColumnEntry {
+                        name: col.name.clone(),
+                        col_type: Some(col.native_type.clone()),
+                        native_type: Some(col.native_type.clone()),
+                        description: col.description.clone(),
+                    })
+                    .collect();
+
+                let project_id = "";
+                let dataset_id = container.name.as_str();
+                let table_name = table.name.as_str();
+                let table_type = table.native_type.as_deref().unwrap_or("TABLE");
+                let full_table_id = format!("{}.{}", container.name, table.name);
+                let archive_id =
+                    kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
+                seen_table_ids.insert(archive_id);
+
+                let cached = kyomi_auth::catalog::helpers::cache_table(
+                    &state.db,
+                    state.embedding.wait_ready().await?,
+                    &ctx,
+                    project_id,
+                    dataset_id,
+                    table_name,
+                    table_type,
+                    &columns,
+                    &full_table_id,
+                )
+                .await;
+
+                if cached {
+                    tables_indexed += 1;
+                }
+            }
+        }
+
+        // Archive missing tables
+        let archived_names = kyomi_auth::catalog::helpers::archive_missing_tables(
+            &state.db,
+            workspace_id,
+            &datasource.id,
+            &seen_table_ids,
+        )
+        .await
+        .unwrap_or_default();
+        let tables_archived = archived_names.len();
+
+
+        // Update last refresh timestamp
+        let _ = kyomi_auth::catalog::helpers::update_datasource_last_refresh(
+            &state.db,
+            &datasource.id,
+        )
+        .await;
+
+        // Update workspace status to idle
+        let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+            &state.db,
+            workspace_id,
+            &datasource.id,
+            "idle",
+            None,
+        )
+        .await;
+
+        // Populate graph with the freshly indexed catalog data
+        if tables_indexed > 0 {
+            populate_graph_after_indexing(state, workspace_id, &datasource.id).await;
+        }
+
+        return Ok(CatalogRefreshResponse {
+            status: "completed".into(),
+            message: format!(
+                "Catalog refreshed successfully. {} tables indexed, {} archived.",
+                tables_indexed, tables_archived
+            ),
+            datasource_id: datasource.id,
+        });
+    }
+
+    // --- Direct datasources below (existing code) ---
+
+    // Resolve credentials for the user
+    let user_cred =
+        datasource_service::get_user_credential(&state.db, &user.user_id, &datasource.id)
+            .await?;
+
+    let credentials = if let Some(ref cred) = user_cred {
+        credential_service::decrypt_credentials(&cred.credentials, &state.encryption_key)
+            .unwrap_or(json!({}))
+    } else {
+        json!({})
+    };
+
+    let ds_type: datasource_registry::DatasourceType = datasource.datasource_type.into();
+
+    // Refresh OAuth credentials if needed
+    let credentials = match kyomi_datasource_server::ensure_valid_oauth_credentials(
+        &credentials,
+        &datasource.connection_config,
+        &ds_type,
+    )
+    .await
+    {
+        Ok(refreshed) if refreshed != credentials => {
+            // Persist refreshed token
+            if let Some(ref cred) = user_cred {
+                let _ = datasource_service::save_user_credential(
+                    &state.db,
+                    &state.encryption_key,
+                    &user.user_id,
+                    &datasource.id,
+                    &cred.workspace_id,
+                    &refreshed,
+                )
+                .await;
+            }
+            refreshed
+        }
+        Ok(unchanged) => unchanged,
+        Err(_) => credentials,
+    };
+
+    let user_context = build_user_context(&state, &user).await?;
+    let user_context_ref = user_context.as_ref();
+
+    // Create provider and run indexing
+    let provider = match kyomi_datasource_server::create_provider(
+        &ds_type,
+        &datasource.connection_config,
+        &credentials,
+        user_context_ref,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                datasource_id = %datasource.id,
+                error = %e,
+                "Failed to create provider for catalog refresh"
+            );
+            return Ok(CatalogRefreshResponse {
+                status: "error".into(),
+                message: "Failed to connect to datasource".into(),
+                datasource_id: datasource.id,
+            });
+        }
+    };
+
+    // Test connection
+    if let Err(e) = provider.test_connection().await {
+        tracing::warn!(
+            datasource_id = %datasource.id,
+            error = %e,
+            "Connection test failed during catalog refresh"
+        );
+        provider.close().await;
+        return Ok(CatalogRefreshResponse {
+            status: "error".into(),
+            message: "Connection test failed — check datasource credentials and network access".into(),
+            datasource_id: datasource.id,
+        });
+    }
+
+    // Update workspace status to running
+    let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+        &state.db,
+        workspace_id,
+        &datasource.id,
+        "running",
+        None,
+    )
+    .await;
+
+    // Resolve containers to index.
+    //
+    // Matches Python's BaseSQLCatalogIndexer._get_catalog_containers() logic:
+    // 1. If connection_config has a configured container list (catalog_databases,
+    //    catalog_schemas, catalog_catalogs) — use those directly.
+    // 2. If configured as empty [] — user explicitly chose nothing, index nothing.
+    // 3. If not configured (key missing) — discover all via provider methods.
+    //
+    // BigQuery uses REST API (handled separately below).
+    let containers: Vec<String> = if ds_type != datasource_registry::DatasourceType::BigQuery {
+        let meta = datasource_registry::get_metadata(&ds_type);
+        let container_key = meta.catalog_config_keys.first().copied().unwrap_or("");
+
+        // Check if user configured specific containers to index
+        let configured = if !container_key.is_empty() {
+            datasource.connection_config.get(container_key)
+        } else {
+            None
+        };
+
+        if let Some(Value::Array(arr)) = configured {
+            if arr.is_empty() {
+                // Empty array — user explicitly chose none — index nothing
+                tracing::info!(
+                    container_key,
+                    datasource = %datasource.name,
+                    "Empty container config — nothing to index"
+                );
+                vec![]
+            } else {
+                // User configured specific containers — use those
+                let items: Vec<String> = arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+                tracing::info!(
+                    container_key,
+                    count = items.len(),
+                    datasource = %datasource.name,
+                    "Using configured containers for catalog refresh"
+                );
+                items
+            }
+        } else {
+            // Not configured — discover all
+            tracing::info!(
+                container_key,
+                datasource = %datasource.name,
+                "No container config — discovering all"
+            );
+            let discovery = discover_primary(provider.as_ref(), &ds_type).await;
+            if let Some(err) = discovery.error {
+                tracing::warn!(
+                    datasource_id = %datasource.id,
+                    error = %err,
+                    "Failed to discover containers during catalog refresh"
+                );
+                provider.close().await;
+                let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+                    &state.db,
+                    workspace_id,
+                    &datasource.id,
+                    "failed",
+                    None,
+                )
+                .await;
+                return Ok(CatalogRefreshResponse {
+                    status: "error".into(),
+                    message: "Failed to discover catalog containers — check datasource connectivity".into(),
+                    datasource_id: datasource.id,
+                });
+            }
+            discovery.items
+        }
+    } else if ds_type == datasource_registry::DatasourceType::BigQuery {
+        // BigQuery: use REST API directly (datasets.list, tables.list, tables.get)
+        // matching Python's bq_client.list_datasets() / list_tables() / get_table() approach.
+        // Do NOT use INFORMATION_SCHEMA SQL queries.
+        provider.close().await;
+
+        let catalog_projects: Vec<String> = datasource
+            .connection_config
+            .get("catalog_projects")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if catalog_projects.is_empty() {
+            let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+                &state.db,
+                workspace_id,
+                &datasource.id,
+                "idle",
+                None,
+            )
+            .await;
+            return Ok(CatalogRefreshResponse {
+                status: "completed".into(),
+                message: "No projects configured for catalog indexing. Add projects in datasource settings.".into(),
+                datasource_id: datasource.id,
+            });
+        }
+
+        // Resolve access token using the datasource's configured auth mode
+        let access_token = kyomi_datasource_server::providers::bigquery::resolve_access_token(
+            &datasource.connection_config,
+            &credentials,
+            user_context_ref,
+        )
+        .await?;
+
+        let http_client = kyomi_datasource_server::http_client()?;
+        let mut tables_indexed = 0usize;
+        let mut seen_table_ids = HashSet::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        let ctx = kyomi_auth::catalog::helpers::IndexerContext {
+            workspace_id: workspace_id.to_string(),
+            datasource_config_id: datasource.id.clone(),
+            connection_config: datasource.connection_config.clone(),
+            encryption_key: state.encryption_key.clone(),
+        };
+
+        use kyomi_auth::catalog::indexers::user_dataset::{
+            list_bigquery_datasets, list_bigquery_tables, get_bigquery_table_schema,
+        };
+
+        for project in &catalog_projects {
+            // List datasets via REST API (like Python's bq_client.list_datasets)
+            let datasets = match list_bigquery_datasets(&http_client, &access_token, project).await {
+                Ok(ds) => ds,
+                Err(e) => {
+                    tracing::warn!(
+                        project = %project,
+                        "Failed to list datasets for BigQuery project: {e}"
+                    );
+                    errors.push(format!("{project}: failed to list datasets"));
+                    continue;
+                }
+            };
+
+            for dataset_id in &datasets {
+                // List tables via REST API (like Python's bq_client.list_tables)
+                let tables = match list_bigquery_tables(&http_client, &access_token, project, dataset_id).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(
+                            project = %project,
+                            dataset = %dataset_id,
+                            "Failed to list tables: {e}"
+                        );
+                        errors.push(format!("{project}.{dataset_id}: failed to list tables"));
+                        continue;
+                    }
+                };
+
+                for table_id in &tables {
+                    let full_table_id = kyomi_core::build_full_table_name(project, dataset_id, table_id);
+                    seen_table_ids.insert(full_table_id.clone());
+
+                    // Get schema via REST API (like Python's bq_client.get_table)
+                    let columns = match get_bigquery_table_schema(
+                        &http_client, &access_token, project, dataset_id, table_id,
+                    ).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                table = %full_table_id,
+                                "Could not fetch schema, skipping: {e}"
+                            );
+                            continue;
+                        }
+                    };
+
+                    let cached = kyomi_auth::catalog::helpers::cache_table(
+                        &state.db,
+                        state.embedding.wait_ready().await?,
+                        &ctx,
+                        project,
+                        dataset_id,
+                        table_id,
+                        "TABLE",
+                        &columns,
+                        &full_table_id,
+                    )
+                    .await;
+
+                    if cached {
+                        tables_indexed += 1;
+                    }
+                }
+            }
+        }
+
+        // Archive, update timestamps, return — skip the generic SQL loop below
+        let archived_names = kyomi_auth::catalog::helpers::archive_missing_tables(
+            &state.db,
+            workspace_id,
+            &datasource.id,
+            &seen_table_ids,
+        )
+        .await
+        .unwrap_or_default();
+        let tables_archived = archived_names.len();
+
+
+        let _ = kyomi_auth::catalog::helpers::update_datasource_last_refresh(
+            &state.db, &datasource.id,
+        ).await;
+
+        let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+            &state.db,
+            workspace_id,
+            &datasource.id,
+            "idle",
+            None,
+        )
+        .await;
+
+        if !errors.is_empty() && tables_indexed == 0 {
+            return Ok(CatalogRefreshResponse {
+                status: "error".into(),
+                message: format!("Catalog refresh failed: {}", errors.join("; ")),
+                datasource_id: datasource.id,
+            });
+        }
+
+        // Populate graph with the freshly indexed catalog data (fire-and-forget)
+        populate_graph_after_indexing(state, workspace_id, &datasource.id).await;
+
+        return Ok(CatalogRefreshResponse {
+            status: "completed".into(),
+            message: format!(
+                "Catalog refreshed successfully. {} tables indexed, {} archived.",
+                tables_indexed, tables_archived
+            ),
+            datasource_id: datasource.id,
+        });
+    } else {
+        vec![]
+    };
+
+    // Index tables in each container (SQL-based datasources only — BigQuery returns above)
+    let mut tables_indexed = 0usize;
+    let mut seen_table_ids = HashSet::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Analytics datasources use _-prefixed hidden tables for transforms;
+    // only the public views (without _) should be indexed.
+    let is_analytics = datasource
+        .connection_config
+        .get("analytics_site_id")
+        .and_then(|v| v.as_str())
+        .is_some();
+
+    tracing::info!(
+        containers = ?containers,
+        datasource = %datasource.name,
+        "Starting catalog indexing for {} containers",
+        containers.len()
+    );
+
+    for container in &containers {
+        let tables_sql = get_tables_in_container_sql(ds_type.as_str(), container);
+        let Some(sql) = tables_sql else {
+            tracing::warn!(
+                container,
+                ds_type = ds_type.as_str(),
+                "No table listing SQL for datasource type — skipping container"
+            );
+            continue;
+        };
+
+        let table_rows = match provider.execute_query(&sql, None, None, false).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    container,
+                    error = %e,
+                    "Failed to list tables in container"
+                );
+                errors.push(format!("Failed to list tables in '{}': {}", container, e));
+                continue;
+            }
+        };
+
+        let rows = table_rows.rows.as_deref().unwrap_or(&[]);
+        tracing::info!(
+            container,
+            tables_found = rows.len(),
+            "Listed tables in container"
+        );
+        let ds_type_str = ds_type.as_str();
+        let has_schema_column = ds_type_str == "snowflake" || ds_type_str == "databricks";
+
+        for table_row in rows {
+            // Snowflake and Databricks return (TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE)
+            // because tables span multiple schemas within each database/catalog.
+            // Other SQL datasources return just (TABLE_NAME).
+            let (table_name, effective_container): (&str, String) = if has_schema_column {
+                let schema_name = match table_row.first().and_then(|v| v.as_str()) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => continue,
+                };
+                let tbl = match table_row.get(1).and_then(|v| v.as_str()) {
+                    Some(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                // effective_container = "database.schema" or "catalog.schema"
+                (tbl, format!("{container}.{schema_name}"))
+            } else {
+                let tbl = match table_row.first().and_then(|v| v.as_str()) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                (tbl, container.clone())
+            };
+
+            // Skip hidden transform tables (e.g. _sessions, _visitors) for analytics datasources
+            if is_analytics && table_name.starts_with('_') {
+                continue;
+            }
+
+            // Get columns — pass effective_container so Snowflake/Databricks
+            // can split "database.schema" for the INFORMATION_SCHEMA query.
+            let columns_sql = get_columns_sql(ds_type_str, &effective_container, table_name);
+            let columns = if let Some(sql) = columns_sql {
+                match provider.execute_query(&sql, None, None, false).await {
+                    Ok(result) => result
+                        .rows
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|row| kyomi_auth::catalog::types::ColumnEntry {
+                            name: row
+                                .first()
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            col_type: row.get(1).and_then(|v| v.as_str()).map(String::from),
+                            native_type: row.get(1).and_then(|v| v.as_str()).map(String::from),
+                            description: row.get(2).and_then(|v| v.as_str()).map(String::from),
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(_) => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
+            let project_id = "";
+            let dataset_id = effective_container.as_str();
+            let archive_id = kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
+            seen_table_ids.insert(archive_id);
+
+            let ctx = kyomi_auth::catalog::helpers::IndexerContext {
+                workspace_id: workspace_id.to_string(),
+                datasource_config_id: datasource.id.clone(),
+                connection_config: datasource.connection_config.clone(),
+                encryption_key: state.encryption_key.clone(),
+            };
+
+            let full_table_id = format!("{effective_container}.{table_name}");
+            let cached = kyomi_auth::catalog::helpers::cache_table(
+                &state.db,
+                state.embedding.wait_ready().await?,
+                &ctx,
+                project_id,
+                dataset_id,
+                table_name,
+                "TABLE",
+                &columns,
+                &full_table_id,
+            )
+            .await;
+
+            if cached {
+                tables_indexed += 1;
+            }
+        }
+    }
+
+    // Archive missing tables
+    let archived_names = kyomi_auth::catalog::helpers::archive_missing_tables(
+        &state.db,
+        workspace_id,
+        &datasource.id,
+        &seen_table_ids,
+    )
+    .await
+    .unwrap_or_default();
+    let tables_archived = archived_names.len();
+
+    // Update last refresh timestamp
+    let _ =
+        kyomi_auth::catalog::helpers::update_datasource_last_refresh(&state.db, &datasource.id)
+            .await;
+
+    // Update workspace status to idle
+    let _ = kyomi_auth::catalog::helpers::update_workspace_status(
+        &state.db,
+        workspace_id,
+        &datasource.id,
+        "idle",
+        None,
+    )
+    .await;
+
+    provider.close().await;
+
+    // Populate graph with the freshly indexed catalog data (fire-and-forget)
+    if tables_indexed > 0 {
+        populate_graph_after_indexing(state, workspace_id, &datasource.id).await;
+    }
+
+    if tables_indexed > 0 || containers.is_empty() {
+        Ok(CatalogRefreshResponse {
+            status: "completed".into(),
+            message: format!(
+                "Catalog refreshed successfully. {} tables indexed, {} archived.",
+                tables_indexed, tables_archived
+            ),
+            datasource_id: datasource.id,
+        })
+    } else if !errors.is_empty() {
+        Ok(CatalogRefreshResponse {
+            status: "error".into(),
+            message: format!("Catalog refresh failed: {}", errors.join("; ")),
+            datasource_id: datasource.id,
+        })
+    } else {
+        Ok(CatalogRefreshResponse {
+            status: "completed".into(),
+            message: format!("Catalog refreshed. {} tables indexed.", tables_indexed),
+            datasource_id: datasource.id,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Graph population trigger
+// ---------------------------------------------------------------------------
+
+/// Fire-and-forget embedding population after successful catalog indexing.
+///
+/// Generates pgvector embeddings for table/column entries from the freshly
+/// cached catalog data in PostgreSQL. Failures are logged as warnings --
+/// they never fail the indexing response.
+async fn populate_graph_after_indexing(
+    state: &AppState,
+    workspace_id: &str,
+    datasource_config_id: &str,
+) {
+    let embed = match state.embedding.wait_ready().await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(
+                workspace_id,
+                datasource_config_id,
+                error = %e,
+                "Embedding service not available, skipping embedding population after indexing"
+            );
+            return;
+        }
+    };
+
+    match kyomi_knowledge::populate::populate_table_embeddings(
+        &state.db,
+        embed,
+        workspace_id,
+        datasource_config_id,
+    )
+    .await
+    {
+        Ok(table_count) => {
+            match kyomi_knowledge::populate::populate_column_embeddings(
+                &state.db,
+                embed,
+                workspace_id,
+                datasource_config_id,
+            )
+            .await
+            {
+                Ok(col_count) => {
+                    tracing::info!(
+                        workspace_id,
+                        datasource_config_id,
+                        tables = table_count,
+                        columns = col_count,
+                        "Embeddings populated after catalog refresh"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Column embedding population failed, continuing"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Table embedding population failed, continuing"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_sql_literal_handles_single_quotes() {
+        assert_eq!(escape_sql_literal("test's_db"), "test''s_db");
+    }
+
+    #[test]
+    fn escape_sql_literal_preserves_hyphens() {
+        assert_eq!(escape_sql_literal("my-database"), "my-database");
+    }
+
+    #[test]
+    fn escape_sql_literal_preserves_spaces() {
+        assert_eq!(escape_sql_literal("my database"), "my database");
+    }
+
+    #[test]
+    fn escape_sql_literal_no_change_for_simple_identifiers() {
+        assert_eq!(escape_sql_literal("public"), "public");
+        assert_eq!(escape_sql_literal("my_schema"), "my_schema");
+    }
+
+    #[test]
+    fn escape_sql_literal_doubles_multiple_quotes() {
+        assert_eq!(escape_sql_literal("it''s"), "it''''s");
+    }
+
+    #[test]
+    fn get_tables_sql_uses_escaped_container() {
+        let sql = get_tables_in_container_sql("postgres", "test's schema").unwrap();
+        assert!(sql.contains("test''s schema"), "should escape quotes in SQL: {sql}");
+    }
+
+    #[test]
+    fn get_columns_sql_uses_escaped_values() {
+        let sql = get_columns_sql("clickhouse", "my-db", "my-table").unwrap();
+        assert!(sql.contains("my-db"), "should preserve hyphens: {sql}");
+        assert!(sql.contains("my-table"), "should preserve hyphens in table name: {sql}");
+    }
+
+    #[test]
+    fn snowflake_tables_sql_uses_quoted_identifier() {
+        let sql = get_tables_in_container_sql("snowflake", "MY_DATABASE").unwrap();
+        assert!(sql.contains("\"MY_DATABASE\".INFORMATION_SCHEMA.TABLES"), "should use double-quoted database prefix: {sql}");
+        assert!(sql.contains("TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE"), "should select schema + name: {sql}");
+        assert!(sql.contains("INFORMATION_SCHEMA"), "should exclude INFORMATION_SCHEMA: {sql}");
+    }
+
+    #[test]
+    fn snowflake_columns_sql_uses_quoted_identifier() {
+        let sql = get_columns_sql("snowflake", "MY_DB.PUBLIC", "users").unwrap();
+        assert!(sql.contains("\"MY_DB\".INFORMATION_SCHEMA.COLUMNS"), "should use double-quoted database prefix: {sql}");
+        assert!(sql.contains("TABLE_SCHEMA = 'PUBLIC'"), "should filter by schema: {sql}");
+        assert!(sql.contains("TABLE_NAME = 'users'"), "should filter by table: {sql}");
+    }
+
+    #[test]
+    fn databricks_tables_sql_uses_quoted_identifier() {
+        let sql = get_tables_in_container_sql("databricks", "my_catalog").unwrap();
+        assert!(sql.contains("`my_catalog`.INFORMATION_SCHEMA.TABLES"), "should use backtick-quoted catalog prefix: {sql}");
+        assert!(sql.contains("TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE"), "should select schema + name: {sql}");
+    }
+
+    #[test]
+    fn databricks_columns_sql_uses_quoted_identifier() {
+        let sql = get_columns_sql("databricks", "my_catalog.my_schema", "orders").unwrap();
+        assert!(sql.contains("`my_catalog`.INFORMATION_SCHEMA.COLUMNS"), "should use backtick-quoted catalog prefix: {sql}");
+        assert!(sql.contains("TABLE_SCHEMA = 'my_schema'"), "should filter by schema: {sql}");
+        assert!(sql.contains("TABLE_NAME = 'orders'"), "should filter by table: {sql}");
+    }
+
+    // -- escape_sql_identifier tests --
+
+    #[test]
+    fn escape_sql_identifier_snowflake_simple() {
+        assert_eq!(escape_sql_identifier("MY_DATABASE", "snowflake"), "\"MY_DATABASE\"");
+    }
+
+    #[test]
+    fn escape_sql_identifier_snowflake_escapes_double_quotes() {
+        assert_eq!(
+            escape_sql_identifier("my\"db", "snowflake"),
+            "\"my\"\"db\""
+        );
+    }
+
+    #[test]
+    fn escape_sql_identifier_snowflake_injection_attempt() {
+        // An attacker tries: MY_DB".INFORMATION_SCHEMA.TABLES; DROP TABLE users; --
+        let malicious = "MY_DB\".INFORMATION_SCHEMA.TABLES; DROP TABLE users; --";
+        let escaped = escape_sql_identifier(malicious, "snowflake");
+        assert_eq!(
+            escaped,
+            "\"MY_DB\"\".INFORMATION_SCHEMA.TABLES; DROP TABLE users; --\""
+        );
+        // The entire string is inside one quoted identifier, so the injection is neutralized.
+        assert!(!escaped.starts_with("\"MY_DB\"."), "injection must not break out of identifier: {escaped}");
+    }
+
+    #[test]
+    fn escape_sql_identifier_databricks_simple() {
+        assert_eq!(escape_sql_identifier("my_catalog", "databricks"), "`my_catalog`");
+    }
+
+    #[test]
+    fn escape_sql_identifier_databricks_escapes_backticks() {
+        assert_eq!(
+            escape_sql_identifier("my`catalog", "databricks"),
+            "`my``catalog`"
+        );
+    }
+
+    #[test]
+    fn escape_sql_identifier_databricks_injection_attempt() {
+        // An attacker tries: my_catalog`.INFORMATION_SCHEMA.TABLES; DROP TABLE users; --
+        let malicious = "my_catalog`.INFORMATION_SCHEMA.TABLES; DROP TABLE users; --";
+        let escaped = escape_sql_identifier(malicious, "databricks");
+        assert_eq!(
+            escaped,
+            "`my_catalog``.INFORMATION_SCHEMA.TABLES; DROP TABLE users; --`"
+        );
+        // The entire string is inside one backtick-quoted identifier.
+        assert!(!escaped.starts_with("`my_catalog`."), "injection must not break out of identifier: {escaped}");
+    }
+
+    #[test]
+    fn escape_sql_identifier_unknown_dialect_passthrough() {
+        // Unknown dialects pass through unchanged (those types don't use identifier interpolation)
+        assert_eq!(escape_sql_identifier("test", "postgres"), "test");
+    }
+
+    #[test]
+    fn snowflake_tables_sql_injection_prevented() {
+        // Verify the full SQL query is safe when container name contains injection attempts
+        let malicious = "MY_DB\".INFORMATION_SCHEMA.TABLES; DROP TABLE users; --";
+        let sql = get_tables_in_container_sql("snowflake", malicious).unwrap();
+        // The malicious identifier should be fully contained within double quotes
+        assert!(sql.contains("\"MY_DB\"\".INFORMATION_SCHEMA.TABLES; DROP TABLE users; --\".INFORMATION_SCHEMA.TABLES"),
+            "malicious input should be safely quoted: {sql}");
+    }
+
+    #[test]
+    fn databricks_tables_sql_injection_prevented() {
+        let malicious = "my_catalog`.INFORMATION_SCHEMA.TABLES; DROP TABLE users; --";
+        let sql = get_tables_in_container_sql("databricks", malicious).unwrap();
+        assert!(sql.contains("`my_catalog``.INFORMATION_SCHEMA.TABLES; DROP TABLE users; --`.INFORMATION_SCHEMA.TABLES"),
+            "malicious input should be safely quoted: {sql}");
+    }
+
+}

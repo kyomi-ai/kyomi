@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+.venv/
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+*.pyc
+
+# Environment files
+.env
+
+# Private keys
+*.pem
+.env.local
+.env.deploy
+.env.*-test
+
+# IDEs
+.idea/
+.vscode/settings.json
+.cursor/
+
+# Claude Code
+.claude/
+
+# Local development data (NOT in version control)
+.data/
+data/config.toml
+apps/backend-rust/data/
+postgres_data/
+*.db
+*.db-*
+
+# Logs
+*.log
+logs/
+src/logs/
+
+# Temp files
+temp/
+
+# Test artifacts
+test-results/
+playwright-report/
+htmlcov/
+coverage/
+.coverage
+coverage.xml
+tests/auth-state.json
+
+# Logs
+*.log
+logs/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Dependencies
+node_modules/
+
+# Database backups
+*.dump
+backups/
+
+# Debug screenshots
+*-debug.png
+.env.production
+
+# Secrets
+kyomi-secrets-backup-*.yaml
+
+# MCP chart app build output (built at deploy time)
+apps/mcp-chart-app/chart_app.html
+
+# FastEmbed model cache (downloaded at runtime)
+.fastembed_cache/
+
+# Rust build artifacts
+apps/backend-rust/target/
+.worktrees/

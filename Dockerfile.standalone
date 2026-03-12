@@ -1,0 +1,80 @@
+# ---------------------------------------------------------------------------
+# Kyomi standalone — single Docker image (Community Edition)
+# ---------------------------------------------------------------------------
+# Build context must be the repo root:
+#   docker build -f Dockerfile.standalone -t kyomi .
+#
+# Run:
+#   docker run -v kyomi-data:/data -p 3000:3000 kyomi
+#
+# Everything is embedded in the binary: frontend assets, ONNX model, constants.
+# No external dependencies needed — just set your LLM API key:
+#   docker run -v kyomi-data:/data -p 3000:3000 -e ANTHROPIC_API_KEY=sk-... kyomi
+#
+# Uses debian:bookworm-slim as runtime (ONNX Runtime needs libstdc++).
+# ---------------------------------------------------------------------------
+
+# ===== Stage 0: Build frontend =====
+FROM node:20-slim AS frontend-builder
+WORKDIR /build
+# Copy manifests only — cache npm ci unless deps change
+COPY apps/frontend/package.json apps/frontend/package-lock.json ./apps/frontend/
+COPY packages/chart-header/package.json ./packages/chart-header/package.json
+COPY packages/chartml-transform/package.json ./packages/chartml-transform/package.json
+RUN cd apps/frontend && npm ci
+# Copy full source for the build
+COPY apps/frontend/ ./apps/frontend/
+COPY packages/chart-header/ ./packages/chart-header/
+COPY packages/chartml-transform/ ./packages/chartml-transform/
+RUN cd apps/frontend && npm run build
+
+# ===== Stage 1: Build Rust binary =====
+FROM rust:1-bookworm AS builder
+
+WORKDIR /build
+
+# Copy files needed for compilation (include_str! paths require repo layout)
+COPY apps/backend-rust/ ./apps/backend-rust/
+COPY data/chartml-spec/ ./data/chartml-spec/
+COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
+COPY apps/marketing/public/kyomi_email_logo.png ./apps/marketing/public/kyomi_email_logo.png
+COPY shared/constants.toml ./shared/constants.toml
+
+# Frontend dist — rust-embed reads this at compile time to embed into the binary
+COPY --from=frontend-builder /build/apps/frontend/dist ./apps/frontend/dist
+
+# Build the binary. The ONNX model is downloaded by build.rs and embedded
+# via include_bytes!() — no runtime model files needed.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/apps/backend-rust/target \
+    cd apps/backend-rust && cargo build --release && \
+    cp target/release/kyomi /tmp/kyomi
+
+# ===== Stage 2: Minimal Debian runtime =====
+FROM debian:bookworm-slim
+
+# Install only what ONNX Runtime and TLS need
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libstdc++6 \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Binary
+COPY --from=builder /tmp/kyomi /usr/local/bin/kyomi
+
+# Data directory — SQLite database and auto-generated secrets live here
+ENV DATA_DIR=/data
+VOLUME /data
+
+EXPOSE 3000
+
+# Health check using the built-in /api/health endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:3000/api/health || exit 1
+
+USER 1000
+
+ENTRYPOINT ["kyomi"]

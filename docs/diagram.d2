@@ -1,0 +1,78 @@
+vars: {
+  d2-config: {
+    layout-engine: elk
+  }
+}
+
+direction: right
+*.style.border-radius: 8
+
+classes: {
+  container: {
+    grid-columns: 2
+    grid-rows: 2
+    grid-gap: 10
+    width: 600
+    *.style.border-radius: 8
+  }
+}
+
+mcp: Nexata MCP server
+
+tools: Tools {
+  cli: dbt CLI\nlocal executable {
+    label.near: outside-right-center
+    class: container
+    build
+    compile
+    docs
+    ls
+    parse
+    run
+    test
+    show
+  }
+
+  discovery: Discovery\nMetadata API {
+    label.near: outside-right-center
+    class: container
+    get_mart_models
+    get_all_models
+    get_model_details
+    get_model_parents
+    get_model_children
+  }
+
+  sl: dbt Semantic Layer {
+    label.near: outside-right-center
+    class: container
+    list_metrics
+    get_dimensions
+    get_entities
+    query_metrics
+  }
+
+  sql: SQL tools {
+    label.near: outside-right-center
+    class: container
+    text_to_sql
+    execute_sql
+  }
+}
+
+mcp -- tools.*
+
+clients: MCP Clients {
+  grid-columns: 1
+  *.style.border-radius: 8
+  Claude
+  cursor
+  mcp_clients: Any MCP client
+}
+
+other_mcp: Other MCP servers
+other_tools: Other tools
+
+clients -- mcp
+clients -- other_mcp
+other_mcp -- other_tools

@@ -1,0 +1,3 @@
+- DRY (Don't repeat yourself), common fucntions for all the things regardless of authentication method. e.g. create_session, token_create etc
+- HTTPOnly cookies is the only method we are using to keep it simple. no javascript access or localstorage etc. Lets follow best practise here
+- The only workaround in DEMO/TEST/DEV mode is to not require email verification, everything else should be production ready

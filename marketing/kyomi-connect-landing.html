@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kyomi Connect - Private Database Queries</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 600px;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 60px 40px;
+            text-align: center;
+        }
+
+        .header {
+            margin-bottom: 30px;
+        }
+
+        .rocket {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 32px;
+            color: #1a1a1a;
+            margin-bottom: 10px;
+        }
+
+        .tagline {
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 30px;
+        }
+
+        .benefits {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 30px 0;
+            text-align: left;
+        }
+
+        .benefit {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+
+        .benefit:last-child {
+            margin-bottom: 0;
+        }
+
+        .benefit-icon {
+            color: #667eea;
+            font-weight: bold;
+            margin-right: 12px;
+            font-size: 18px;
+        }
+
+        .benefit-text {
+            color: #333;
+        }
+
+        .install-section {
+            margin: 40px 0;
+        }
+
+        .install-label {
+            font-size: 12px;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 12px;
+        }
+
+        .install-command {
+            background: #1a1a1a;
+            color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: "Courier New", monospace;
+            font-size: 14px;
+            word-break: break-all;
+            cursor: copy;
+            user-select: all;
+            position: relative;
+        }
+
+        .install-command:hover::after {
+            content: "Click to copy";
+            position: absolute;
+            top: -25px;
+            right: 0;
+            background: #333;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .steps {
+            margin: 40px 0;
+            text-align: left;
+        }
+
+        .steps-title {
+            font-size: 14px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 20px;
+        }
+
+        .step {
+            display: flex;
+            margin-bottom: 16px;
+        }
+
+        .step-number {
+            flex-shrink: 0;
+            width: 24px;
+            height: 24px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: bold;
+            margin-right: 12px;
+        }
+
+        .step-text {
+            color: #333;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .docs-link {
+            display: inline-block;
+            margin-top: 30px;
+            padding: 10px 20px;
+            background: #f5f5f5;
+            color: #667eea;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 14px;
+            border: 1px solid #ddd;
+            transition: all 0.2s;
+        }
+
+        .docs-link:hover {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            color: #999;
+            font-size: 12px;
+        }
+
+        @media (max-width: 500px) {
+            .container {
+                padding: 40px 20px;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+
+            .install-command {
+                font-size: 12px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="rocket">🚀</div>
+            <h1>Kyomi Connect</h1>
+            <p class="tagline">Query your database privately. Credentials never leave your network.</p>
+        </div>
+
+        <div class="benefits">
+            <div class="benefit">
+                <div class="benefit-icon">✓</div>
+                <div class="benefit-text"><strong>Zero credentials in the cloud</strong> — Your passwords stay local</div>
+            </div>
+            <div class="benefit">
+                <div class="benefit-icon">✓</div>
+                <div class="benefit-text"><strong>Works with any database</strong> — PostgreSQL, MySQL, ClickHouse, SQL Server, Redshift</div>
+            </div>
+            <div class="benefit">
+                <div class="benefit-icon">✓</div>
+                <div class="benefit-text"><strong>2-minute setup</strong> — Interactive wizard guides you through configuration</div>
+            </div>
+            <div class="benefit">
+                <div class="benefit-icon">✓</div>
+                <div class="benefit-text"><strong>Runs anywhere</strong> — Desktop, server, Docker, Kubernetes</div>
+            </div>
+        </div>
+
+        <div class="install-section">
+            <div class="install-label">Get Started</div>
+            <div class="install-command" onclick="this.select();">curl -fsSL https://kyomi.ai/connect/install.sh | bash</div>
+        </div>
+
+        <div class="steps">
+            <div class="steps-title">How It Works</div>
+            <div class="step">
+                <div class="step-number">1</div>
+                <div class="step-text">Create a Connect datasource in Kyomi</div>
+            </div>
+            <div class="step">
+                <div class="step-number">2</div>
+                <div class="step-text">Copy the token from the UI</div>
+            </div>
+            <div class="step">
+                <div class="step-number">3</div>
+                <div class="step-text">Run the install command above</div>
+            </div>
+            <div class="step">
+                <div class="step-number">4</div>
+                <div class="step-text">Answer the setup wizard questions</div>
+            </div>
+            <div class="step">
+                <div class="step-number">5</div>
+                <div class="step-text">Done! Queries execute locally, results sent to Kyomi</div>
+            </div>
+        </div>
+
+        <a href="https://docs.kyomi.ai/connect" class="docs-link">Read the Documentation →</a>
+
+        <div class="footer">
+            Kyomi Connect is part of the Kyomi Data Intelligence Platform.
+            <br>
+            <a href="https://kyomi.ai" style="color: #999; text-decoration: none;">Learn more about Kyomi →</a>
+        </div>
+    </div>
+
+    <script>
+        // Copy to clipboard
+        document.querySelector('.install-command').addEventListener('click', function() {
+            const text = this.textContent.trim();
+            navigator.clipboard.writeText(text).then(() => {
+                const original = this.textContent;
+                this.textContent = '✓ Copied to clipboard!';
+                setTimeout(() => {
+                    this.textContent = original;
+                }, 2000);
+            });
+        });
+    </script>
+</body>
+</html>

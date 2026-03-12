@@ -1,0 +1,27 @@
+{
+  "name": "kyomi-marketing",
+  "version": "1.0.0",
+  "description": "Kyomi - AI-powered data analytics that speaks your language",
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev --port 5175",
+    "build": "vitepress build",
+    "preview": "vitepress preview --port 5175"
+  },
+  "keywords": [
+    "kyomi",
+    "analytics",
+    "ai",
+    "bigquery",
+    "data",
+    "dashboards"
+  ],
+  "author": "Kyomi",
+  "license": "AGPL-3.0-or-later",
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  },
+  "dependencies": {
+    "@heroicons/vue": "^2.2.0"
+  }
+}
