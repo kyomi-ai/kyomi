@@ -79,6 +79,7 @@ jobs:
         run: |
           kubectl set image deployment/kyomi-api \
             kyomi-api=$REGISTRY/$IMAGE:${{ steps.sha.outputs.short }} \
+            load-docs=$REGISTRY/kyomi-docs:latest \
             -n $K8S_NAMESPACE
           kubectl rollout status deployment/kyomi-api -n $K8S_NAMESPACE --timeout=300s
 
