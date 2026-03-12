@@ -1,0 +1,89 @@
+name: Deploy API
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/backend-rust/**'
+      - 'apps/mcp-chart-app/**'
+      - 'data/chartml-spec/**'
+      - 'apps/marketing/public/kyomi_email_logo.png'
+      - 'apps/frontend/**'              # Frontend changes need binary rebuild (rust-embed)
+      - 'packages/chart-header/**'      # Local package used by frontend build
+      - 'packages/chartml-transform/**' # Local package used by frontend build
+      - 'shared/**'
+      - '.github/workflows/deploy-api.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ vars.REGISTRY }}
+  IMAGE: kyomi-api
+  K8S_NAMESPACE: kyomi
+
+jobs:
+  build-and-deploy:
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get git SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      # ===== Build MCP Chart App =====
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build MCP chart app
+        working-directory: apps/mcp-chart-app
+        run: |
+          npm install
+          npm run build
+          cp dist/mcp-app.html chart_app.html
+          echo "MCP chart app built and copied to chart_app.html"
+
+      # ===== Build Image =====
+      # All SQL queries use runtime string-based sqlx::query() — no compile-time
+      # checking needed, so no temporary Postgres or DATABASE_URL required.
+      - name: Build kyomi-api image
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            -t $IMAGE:${{ steps.sha.outputs.short }} \
+            -t $IMAGE:latest \
+            -f apps/backend-rust/Dockerfile .
+
+      - name: Push to registry
+        run: |
+          docker tag $IMAGE:${{ steps.sha.outputs.short }} $REGISTRY/$IMAGE:${{ steps.sha.outputs.short }}
+          docker tag $IMAGE:latest $REGISTRY/$IMAGE:latest
+          docker push $REGISTRY/$IMAGE:${{ steps.sha.outputs.short }}
+          docker push $REGISTRY/$IMAGE:latest
+
+      # ===== Deploy =====
+      - name: Install kubectl
+        run: |
+          if ! command -v kubectl &>/dev/null; then
+            curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/kubectl
+          fi
+          kubectl version --client
+
+      - name: Deploy to Kubernetes
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: |
+          kubectl apply -f k8s/kyomi-api.yaml -n $K8S_NAMESPACE
+          kubectl rollout restart deployment/kyomi-api -n $K8S_NAMESPACE
+          kubectl rollout status deployment/kyomi-api -n $K8S_NAMESPACE --timeout=300s
+
+      - name: Show deployment status
+        if: always()
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: |
+          kubectl get pods -n $K8S_NAMESPACE -l app=kyomi-api || true

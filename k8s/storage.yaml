@@ -1,0 +1,58 @@
+# Kyomi PVCs using Longhorn distributed storage
+# Migrated from local-path on 2026-01-29
+---
+# PostgreSQL data volume
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data-longhorn
+  namespace: kyomi
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Redis data volume
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data-longhorn
+  namespace: kyomi
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Plausible ClickHouse data volume
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: plausible-clickhouse-data-longhorn
+  namespace: kyomi
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 50Gi
+---
+# Trial ClickHouse data volume
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trial-clickhouse-data-longhorn
+  namespace: kyomi
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,45 @@
+# Ingress for Kyomi services
+# Note: Frontend static files are served from nginx on your reverse proxy
+# This ingress handles:
+# - Backend API at app.kyomi.ai (proxied from nginx)
+# - Kyomi Connect at connect.kyomi.ai (WebSocket, JWKS, info API)
+# - Analytics collector at analytics.kyomi.ai (k.js snippet + event collection)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kyomi-ingress
+  namespace: kyomi
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: app.kyomi.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kyomi-api
+                port:
+                  number: 8001
+    - host: connect.kyomi.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kyomi-api
+                port:
+                  number: 8001
+    - host: analytics.kyomi.ai
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: analytics-collector
+                port:
+                  number: 8003

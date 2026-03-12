@@ -319,6 +319,13 @@ const toggleBilling = () => {
   <p><strong>Kyomi charges only for AI features.</strong> Your data platform costs are separate and billed directly by your provider.</p>
 </div>
 
+<!-- Self-Hosting Callout -->
+<div style="margin: 3rem auto; max-width: 48rem; padding: 2rem; border: 2px solid var(--color-primary); border-radius: 0.75rem; text-align: center;">
+  <h3 style="margin: 0 0 0.5rem; font-size: 1.25rem;">Prefer to self-host?</h3>
+  <p style="color: var(--color-muted-foreground); margin-bottom: 1rem;">Run Kyomi on your own infrastructure for free. Bring your own LLM API key, keep everything on your network. Available as a standalone binary or Docker image.</p>
+  <a href="/self-hosting" style="display: inline-flex; align-items: center; justify-content: center; background: var(--color-primary); color: white; font-weight: 600; padding: 0.6rem 1.5rem; border-radius: 0.375rem; text-decoration: none;">Learn about self-hosting →</a>
+</div>
+
 <div class="section" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%); color: white; border-radius: 1rem; text-align: center; padding: 4rem 1.5rem; margin: 4rem auto;">
   <h2 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; color: white;">Ready to get started?</h2>
   <p style="font-size: 1.25rem; margin-bottom: 2rem; opacity: 0.95;">Start free with AI included. No credit card required.</p>

@@ -1,0 +1,96 @@
+# Kyomi API server — handles all traffic via ingress.
+# Runs database migrations at startup via sqlx::migrate!().
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kyomi-api
+  namespace: kyomi
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kyomi-api
+  template:
+    metadata:
+      labels:
+        app: kyomi-api
+    spec:
+      initContainers:
+        - name: load-docs
+          image: YOUR_REGISTRY:PORT/kyomi-docs:latest
+          command: ['cp', '-r', '/docs/.', '/shared/']
+          volumeMounts:
+            - name: docs
+              mountPath: /shared
+      containers:
+        - name: kyomi-api
+          image: YOUR_REGISTRY:PORT/kyomi-api:latest
+          ports:
+            - containerPort: 8001
+          env:
+            - name: ENABLE_SCHEDULERS
+              value: "true"
+            - name: PORT
+              value: "8001"
+            - name: DOCS_DIR
+              value: "/data/docs"
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/certs/ca-certificates.crt
+          envFrom:
+            - configMapRef:
+                name: kyomi-config
+            - secretRef:
+                name: kyomi-secrets
+          volumeMounts:
+            - name: docs
+              mountPath: /data/docs
+              readOnly: true
+            - name: trust-bundle
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-certificates.crt
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12  # 5 + (12 * 5) = 65s max startup (Rust starts in ~2-3s)
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8001
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "8000m"
+      volumes:
+        - name: docs
+          emptyDir: {}
+        - name: trust-bundle
+          configMap:
+            name: kyomi-trust-bundle
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kyomi-api
+  namespace: kyomi
+spec:
+  selector:
+    app: kyomi-api
+  ports:
+    - port: 8001
+      targetPort: 8001

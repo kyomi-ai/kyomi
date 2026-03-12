@@ -328,8 +328,9 @@ description: Everything you need to analyze data with AI
       </ul>
     </div>
     <div>
-      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Security</h3>
+      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Security & Self-Hosting</h3>
       <ul style="margin: 0; padding-left: 1.25rem; color: var(--color-muted-foreground); font-size: 0.9rem;">
+        <li><a href="/self-hosting">Self-host Kyomi</a> on your own infrastructure — nothing leaves your network</li>
         <li>Kyomi Connect: <a href="https://github.com/kyomi-ai/kyomi-connect">open-source</a>, credentials never leave your network</li>
         <li>OAuth for cloud platforms</li>
         <li>Encrypted credentials at rest</li>

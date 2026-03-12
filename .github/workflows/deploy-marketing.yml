@@ -1,0 +1,61 @@
+name: Deploy Marketing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/marketing/**'
+      - '.github/workflows/deploy-marketing.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ${{ vars.REGISTRY }}
+  K8S_NAMESPACE: kyomi
+
+jobs:
+  build-and-deploy:
+    runs-on: [self-hosted, linux]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build marketing site
+        working-directory: apps/marketing
+        run: |
+          npm install
+          npm run build
+
+      - name: Deploy marketing site
+        run: |
+          rm -rf /www/kyomi.ai/marketing/*
+          cp -r apps/marketing/.vitepress/dist/* /www/kyomi.ai/marketing/
+          echo "Marketing site deployed to /www/kyomi.ai/marketing"
+
+      - name: Build and push docs image
+        run: |
+          docker build \
+            -t kyomi-docs:latest \
+            -f apps/docs/Dockerfile .
+          docker tag kyomi-docs:latest $REGISTRY/kyomi-docs:latest
+          docker push $REGISTRY/kyomi-docs:latest
+
+      - name: Setup kubectl
+        run: |
+          which kubectl || {
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            mv kubectl /usr/local/bin/
+          }
+
+      - name: Restart API to pick up new docs
+        env:
+          KUBECONFIG: /home/runner/.kube/config
+        run: |
+          kubectl rollout restart deployment/kyomi-api -n $K8S_NAMESPACE
+          kubectl rollout status deployment/kyomi-api -n $K8S_NAMESPACE --timeout=120s

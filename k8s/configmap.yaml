@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kyomi-config
+  namespace: kyomi
+data:
+  POSTGRES_DB: "kyomi"
+  POSTGRES_USER: "kyomi"
+  REDIS_URL: "rediss://redis:6379/0"
+  CHART_RENDERER_URL: "http://chart-renderer:3030"
+  CHART_RENDERER_PORT: "3030"
+  NODE_ENV: "production"
+  PORT: "8001"
+  FRONTEND_URL: "https://app.kyomi.ai"
+  LOG_LEVEL: "INFO"
+  DEMO_MODE: "false"
+  CHAT_MOCK_MODE: "false"
+  AUTH_METHOD: "oauth"
+  # Trial ClickHouse config
+  SAMPLE_CLICKHOUSE_HOST: "trial-clickhouse"
+  SAMPLE_CLICKHOUSE_PORT: "8443"
+  SAMPLE_CLICKHOUSE_DATABASE: "acme_analytics"
+  SAMPLE_CLICKHOUSE_USER: "sample_readonly"
+  SAMPLE_CLICKHOUSE_SECURE: "true"
+  # Kyomi Analytics — event collection ClickHouse
+  ANALYTICS_CLICKHOUSE_HOST: "analytics-clickhouse"
+  ANALYTICS_CLICKHOUSE_PORT: "8443"
+  ANALYTICS_CLICKHOUSE_SECURE: "true"

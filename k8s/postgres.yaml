@@ -1,0 +1,116 @@
+# PostgreSQL deployment using Longhorn storage with TLS encryption.
+# Certs are issued by cert-manager (see cert-manager.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: kyomi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      # Postgres requires the TLS key to be owned by UID 999 with mode 0600.
+      # cert-manager Secrets are mounted as root-owned, so we copy + fix perms.
+      initContainers:
+        - name: fix-tls-perms
+          image: docker.io/library/busybox:stable
+          command:
+            - sh
+            - -c
+            - |
+              cp /tls-src/tls.crt /tls/server.crt
+              cp /tls-src/tls.key /tls/server.key
+              chmod 600 /tls/server.key
+              chown 999:999 /tls/server.crt /tls/server.key
+          volumeMounts:
+            - name: postgres-tls-src
+              mountPath: /tls-src
+              readOnly: true
+            - name: postgres-tls
+              mountPath: /tls
+      containers:
+        - name: postgres
+          image: docker.io/pgvector/pgvector:pg15
+          ports:
+            - containerPort: 5432
+          args:
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/tls/server.crt
+            - -c
+            - ssl_key_file=/tls/server.key
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                configMapKeyRef:
+                  name: kyomi-config
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: kyomi-config
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kyomi-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-tls
+              mountPath: /tls
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - kyomi
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - kyomi
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-data-longhorn
+        - name: postgres-tls-src
+          secret:
+            secretName: postgres-tls
+        - name: postgres-tls
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kyomi
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432

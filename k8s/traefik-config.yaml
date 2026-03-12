@@ -1,0 +1,21 @@
+# Traefik HelmChartConfig for k3s
+# Configures Traefik to:
+# 1. Use externalTrafficPolicy: Local to preserve real client source IPs
+#    (without this, kube-proxy SNATs traffic and Traefik sees cluster-internal IPs)
+# 2. Trust X-Forwarded-* headers from your reverse proxy
+#    (without this, Traefik overwrites X-Forwarded-Proto and the backend sees http://)
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      spec:
+        externalTrafficPolicy: Local
+    ports:
+      web:
+        forwardedHeaders:
+          trustedIPs:
+            - "YOUR_REVERSE_PROXY_IP"

@@ -1,0 +1,104 @@
+# Redis deployment using Longhorn storage with TLS encryption.
+# Certs are issued by cert-manager (see cert-manager.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: kyomi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: docker.io/library/redis:7-alpine
+          ports:
+            - containerPort: 6379
+          command:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --tls-port
+            - "6379"
+            - --port
+            - "0"
+            - --tls-cert-file
+            - /tls/tls.crt
+            - --tls-key-file
+            - /tls/tls.key
+            - --tls-ca-cert-file
+            - /tls/ca.crt
+            - --tls-auth-clients
+            - "no"
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+            - name: redis-tls
+              mountPath: /tls
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - --tls
+                - --cacert
+                - /tls/ca.crt
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - --tls
+                - --cacert
+                - /tls/ca.crt
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-data-longhorn
+        - name: redis-tls
+          projected:
+            sources:
+              - secret:
+                  name: redis-tls
+                  items:
+                    - key: tls.crt
+                      path: tls.crt
+                    - key: tls.key
+                      path: tls.key
+              - secret:
+                  name: kyomi-internal-ca
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: kyomi
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
