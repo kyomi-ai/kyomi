@@ -13,6 +13,8 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
+
 use kyomi_core::connect_protocol::{
     CatalogResult, ConnectOp, ConnectRequest, ConnectResponse, ConnectResponseBody, DryRunParams,
     QueryParams,
@@ -160,12 +162,57 @@ impl DatasourceProvider for ConnectProvider {
         offset: Option<u32>,
         include_total: bool,
     ) -> kyomi_connect_protocol::Result<QueryResult> {
-        // Single code path: always use streaming transport and collect.
-        // The Connect agent streams all query responses.
-        let stream = self
-            .execute_query_stream(sql, limit, offset, include_total, None)
-            .await?;
-        crate::stream::collect_stream_to_result(stream).await
+        // The Connect agent may respond with either:
+        //   a) A single buffered Result (small queries)
+        //   b) Streaming responses: Header → Chunk* → Complete (large queries)
+        // Use the streaming transport (mpsc) to handle both transparently.
+        let params = QueryParams {
+            sql: sql.to_string(),
+            limit,
+            offset,
+            include_total,
+        };
+        let params_value = serde_json::to_value(&params)?;
+
+        let mut request = Self::build_request(ConnectOp::ExecuteQuery, Some(params_value));
+        request.streaming = true;
+
+        let mut rx = self
+            .registry
+            .send_command_streaming(&self.datasource_config_id, request, self.timeout)
+            .await
+            .map_err(|e| kyomi_connect_protocol::Error::Internal(e.to_string()))?;
+
+        // Peek at the first message to decide the response format.
+        let first = rx.recv().await.ok_or_else(|| {
+            kyomi_connect_protocol::Error::Internal(
+                "Connect channel closed without a response".into(),
+            )
+        })?;
+
+        match first.body {
+            // (a) Buffered: deserialize the single Result directly.
+            ConnectResponseBody::Result { result } => {
+                serde_json::from_value::<QueryResult>(result).map_err(|e| {
+                    kyomi_connect_protocol::Error::Internal(format!(
+                        "Failed to deserialize QueryResult: {e}"
+                    ))
+                })
+            }
+            ConnectResponseBody::Error { error } => {
+                Err(kyomi_connect_protocol::Error::Provider(error))
+            }
+            // (b) Streaming: re-inject the first event and collect the stream.
+            _ => {
+                let first_event = map_response_to_event(first)?;
+                let rest = async_stream(rx);
+                let combined: QueryStream = Box::pin(
+                    futures_util::stream::once(async move { Ok(first_event) })
+                        .chain(rest),
+                );
+                crate::stream::collect_stream_to_result(combined).await
+            }
+        }
     }
 
     async fn execute_query_stream(
@@ -465,6 +512,56 @@ mod tests {
         assert_eq!(result.rows.as_ref().unwrap().len(), 2);
         assert_eq!(result.total_rows, Some(100));
         assert_eq!(result.execution_time_ms, Some(42));
+
+        handle.await.unwrap();
+        registry.unregister(dsid, conn_id).await;
+    }
+
+    /// Connect agent sends a single buffered Result for small queries.
+    #[tokio::test]
+    async fn execute_query_handles_buffered_result() {
+        let dsid = "ds-provider-eq-buffered";
+        let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
+            assert_eq!(request.op, ConnectOp::ExecuteQuery);
+
+            // Connect agent sends a single buffered Result (small query path)
+            let query_result = QueryResult {
+                status: crate::provider::QueryStatus::Success,
+                columns: Some(vec![crate::provider::ColumnInfo {
+                    name: "id".into(),
+                    col_type: crate::provider::SimpleType::Number,
+                }]),
+                rows: Some(vec![vec![serde_json::json!(1)]]),
+                total_rows: Some(1),
+                has_more: false,
+                bytes_processed: None,
+                execution_time_ms: Some(5),
+                error: None,
+            };
+
+            match response_tx {
+                ResponseChannel::Stream(tx) => {
+                    let _ = tx.try_send(ConnectResponse {
+                        id: request.id,
+                        body: ConnectResponseBody::Result {
+                            result: serde_json::to_value(&query_result).unwrap(),
+                        },
+                    });
+                }
+                _ => panic!("expected Stream channel"),
+            }
+        })
+        .await;
+
+        let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
+        let result = provider
+            .execute_query("SELECT 1", None, None, false)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.status, crate::provider::QueryStatus::Success);
+        assert_eq!(result.rows.as_ref().unwrap().len(), 1);
+        assert_eq!(result.execution_time_ms, Some(5));
 
         handle.await.unwrap();
         registry.unregister(dsid, conn_id).await;
