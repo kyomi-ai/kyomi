@@ -874,7 +874,7 @@ pub async fn execute_watch(
 
             // Mark execution as failed
             let error_msg = sanitize_null_bytes(&e.to_string());
-            let _ = watch_service::complete_execution(
+            if let Err(complete_err) = watch_service::complete_execution(
                 db,
                 execution_id,
                 kyomi_core::WatchExecutionStatus::Error,
@@ -887,10 +887,38 @@ pub async fn execute_watch(
                 None,
                 None,
             )
-            .await;
+            .await
+            {
+                // complete_execution itself failed (e.g. type mismatch) — fall back to
+                // a minimal UPDATE so the record doesn't stay stuck in 'running' forever.
+                error!(
+                    watch_id = %watch_id,
+                    execution_id = execution_id,
+                    error = %complete_err,
+                    "complete_execution failed in error handler, falling back to minimal update"
+                );
+                if let Err(fallback_err) = watch_service::fail_execution_minimal(
+                    db,
+                    execution_id,
+                    &error_msg,
+                )
+                .await
+                {
+                    error!(
+                        watch_id = %watch_id,
+                        execution_id = execution_id,
+                        error = %fallback_err,
+                        "Minimal execution cleanup also failed — record will remain in 'running' until orphan recovery"
+                    );
+                }
+            }
 
             // Update watch run status
-            let _ = watch_service::update_watch_run_status(db, watch_id, "error", None).await;
+            if let Err(status_err) =
+                watch_service::update_watch_run_status(db, watch_id, "error", None).await
+            {
+                error!(watch_id = %watch_id, error = %status_err, "Failed to update watch run status");
+            }
 
             // Send error WS state update
             ws_helpers::send_watch_state_update(
@@ -1335,7 +1363,7 @@ async fn execute_watch_inner(
     let sanitized_response = sanitize_null_bytes(&agent_response);
 
     // 13. Complete execution
-    let _ = watch_service::complete_execution(
+    watch_service::complete_execution(
         db,
         execution_id,
         status,

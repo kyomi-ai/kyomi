@@ -1019,6 +1019,8 @@ pub async fn complete_execution(
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize execution_trace: {e}")))?;
 
+    // Postgres needs explicit TEXT→JSONB cast; SQLite stores JSON as TEXT natively
+    let trace_cast = if is_pg { "::jsonb" } else { "" };
     let sql = format!(
         r#"
         UPDATE watch_executions
@@ -1031,7 +1033,7 @@ pub async fn complete_execution(
             cost_estimate = $7,
             alert_triggered = $8,
             notification_id = $9,
-            execution_trace = $10
+            execution_trace = $10{trace_cast}
         WHERE id = $1
         RETURNING id, watch_id, watch_name, mode, workspace_id, session_id,
                   started_at, completed_at, status, agent_response, error_message,
@@ -1066,6 +1068,29 @@ pub async fn complete_execution(
         "Completed watch execution"
     );
     Ok(execution)
+}
+
+/// Minimal fallback to mark an execution as failed when `complete_execution` itself errors.
+///
+/// Only touches `status`, `error_message`, and `completed_at` — avoids columns with
+/// potential type mismatches (e.g. `execution_trace` jsonb) so this always succeeds.
+pub async fn fail_execution_minimal(
+    db: &DbPool,
+    execution_id: i32,
+    error_message: &str,
+) -> Result<()> {
+    let is_pg = db.is_postgres();
+    let now_fn = sql_compat::now(is_pg);
+    let sql = format!(
+        "UPDATE watch_executions \
+         SET status = 'error', \
+             error_message = $2, \
+             completed_at = {now_fn} \
+         WHERE id = $1"
+    );
+    kyomi_core::db_execute!(db, &sql, execution_id, error_message)
+        .map_err(|e| kyomi_core::Error::Internal(format!("minimal execution update failed: {e}")))?;
+    Ok(())
 }
 
 // ─── Rate limiting ──────────────────────────────────────────────────────────

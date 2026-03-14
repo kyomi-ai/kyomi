@@ -471,6 +471,10 @@ pub async fn search_dashboards(
         "AND ($5 IS NULL OR d.title LIKE '%' || $5 || '%' OR d.content LIKE '%' || $5 || '%')"
     };
 
+    // Postgres SUM returns NUMERIC; cast to FLOAT8 so sqlx can decode as f64.
+    // SQLite doesn't need the cast (SUM already returns REAL).
+    let float_cast = if is_pg { "::FLOAT8" } else { "" };
+
     // Popularity sub-query with CASE expressions
     // Postgres uses FILTER (WHERE ...) but we use CASE for cross-db compat
     let popularity_sql = format!(
@@ -494,7 +498,7 @@ pub async fn search_dashboards(
                         WHEN viewed_at >= $4 THEN 0.25
                         ELSE 0.1
                     END
-                ) AS popularity_score
+                ){float_cast} AS popularity_score
             FROM dashboard_views
             WHERE workspace_id = $1
             GROUP BY dashboard_id
