@@ -16,7 +16,6 @@ use kyomi_core::db::DbPool;
 use kyomi_core::embedding_compat::embedding_to_bytes;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value as JsonValue;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Table embeddings
@@ -328,13 +327,11 @@ pub async fn populate_learning_embedding(
     embed: &EmbeddingService,
     learning_id: &str,
 ) -> anyhow::Result<()> {
-    let parsed_id = Uuid::parse_str(learning_id)?;
-
     let row = kyomi_core::db_fetch_optional!(
         db,
         LearningInsightRow,
         "SELECT insight FROM agent_learnings WHERE learning_id = $1",
-        &parsed_id
+        learning_id
     )?;
 
     let row = match row {
@@ -353,7 +350,7 @@ pub async fn populate_learning_embedding(
             let vec = pgvector::Vector::from(embedding.clone());
             sqlx::query("UPDATE agent_learnings SET embedding = $1 WHERE learning_id = $2")
                 .bind(&vec)
-                .bind(parsed_id)
+                .bind(learning_id)
                 .execute(pg)
                 .await?;
         }
@@ -361,7 +358,7 @@ pub async fn populate_learning_embedding(
             let emb_bytes = embedding_to_bytes(&embedding);
             sqlx::query("UPDATE agent_learnings SET embedding = $1 WHERE learning_id = $2")
                 .bind(&emb_bytes)
-                .bind(parsed_id.to_string())
+                .bind(learning_id)
                 .execute(sq)
                 .await?;
         }

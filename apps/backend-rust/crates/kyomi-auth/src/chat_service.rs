@@ -1234,15 +1234,13 @@ pub async fn get_query(db: &DbPool, query_id: &str) -> kyomi_core::Result<Option
 
 /// Get a chart by ID.
 pub async fn get_chart(db: &DbPool, chart_id: &str) -> kyomi_core::Result<Option<Chart>> {
-    let chart_uuid = uuid::Uuid::parse_str(chart_id)
-        .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid chart_id: {e}")))?;
     let chart = kyomi_core::db_fetch_optional!(
         db,
         Chart,
         "SELECT chart_id, message_id, chart_data, created_at, updated_at \
          FROM charts \
          WHERE chart_id = $1",
-        chart_uuid
+        chart_id
     )?;
 
     Ok(chart)
@@ -1254,8 +1252,6 @@ pub async fn update_chart(
     chart_id: &str,
     chart_data: &serde_json::Value,
 ) -> kyomi_core::Result<bool> {
-    let chart_uuid = uuid::Uuid::parse_str(chart_id)
-        .map_err(|e| kyomi_core::Error::BadRequest(format!("Invalid chart_id: {e}")))?;
     let now = Utc::now();
 
     let result = kyomi_core::db_execute!(
@@ -1264,7 +1260,7 @@ pub async fn update_chart(
          WHERE chart_id = $3",
         chart_data,
         now,
-        chart_uuid
+        chart_id
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update chart: {e}")))?;
 

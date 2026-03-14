@@ -44,7 +44,7 @@ pub fn snippet_tag(signed_key: &str) -> String {
 /// Database row for an analytics site (with optional datasource join).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AnalyticsSite {
-    pub id: uuid::Uuid,
+    pub id: String,
     pub workspace_id: String,
     pub name: String,
     pub site_id: String,
@@ -61,7 +61,7 @@ pub struct AnalyticsSite {
 /// Only used in the Postgres arm of match blocks.
 #[derive(Debug, sqlx::FromRow)]
 struct AnalyticsSitePgRow {
-    id: uuid::Uuid,
+    id: String,
     workspace_id: String,
     name: String,
     site_id: String,
@@ -198,32 +198,22 @@ async fn pg_fetch_all_sites(
 async fn pg_fetch_optional_site(
     db: &DbPool,
     sql: &str,
-    binds: PgBinds<'_>,
+    binds: (&str, &str),
 ) -> Result<Option<AnalyticsSite>> {
     match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut query = sqlx::query_as::<_, AnalyticsSitePgRow>(sql);
-            match binds {
-                PgBinds::UuidStr(uuid, s) => {
-                    query = query.bind(uuid).bind(s);
-                }
-                PgBinds::StrStr(s1, s2) => {
-                    query = query.bind(s1).bind(s2);
-                }
-            }
-            let row = query.fetch_optional(pg).await.map_err(|e| {
-                kyomi_core::Error::Internal(format!("failed to query analytics site: {e}"))
-            })?;
+            let row = sqlx::query_as::<_, AnalyticsSitePgRow>(sql)
+                .bind(binds.0)
+                .bind(binds.1)
+                .fetch_optional(pg)
+                .await
+                .map_err(|e| {
+                    kyomi_core::Error::Internal(format!("failed to query analytics site: {e}"))
+                })?;
             Ok(row.map(AnalyticsSite::from))
         }
         kyomi_core::db::DbPool::Sqlite(_) => Err(sqlite_not_supported()),
     }
-}
-
-/// Bind parameter variants for site queries.
-enum PgBinds<'a> {
-    UuidStr(uuid::Uuid, &'a str),
-    StrStr(&'a str, &'a str),
 }
 
 // ─── CRUD operations ────────────────────────────────────────────────────────
@@ -252,12 +242,14 @@ pub async fn create_site(
     let site_id = generate_site_id();
     let signed_key = generate_signed_key(&site_id, workspace_id, domains, secret);
 
+    let new_id = uuid::Uuid::new_v4().to_string();
+
     let row: AnalyticsSite = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             let pg_row = sqlx::query_as::<_, AnalyticsSitePgRow>(
                 r#"
-                INSERT INTO analytics_sites (workspace_id, name, site_id, allowed_domains, signed_key)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO analytics_sites (id, workspace_id, name, site_id, allowed_domains, signed_key)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id, workspace_id, name, site_id,
                           allowed_domains,
                           signed_key,
@@ -268,6 +260,7 @@ pub async fn create_site(
                           updated_at
                 "#,
             )
+            .bind(&new_id)
             .bind(workspace_id)
             .bind(name)
             .bind(&site_id)
@@ -294,7 +287,7 @@ pub async fn create_site(
                 "UPDATE analytics_sites SET datasource_id = $1, clickhouse_database = $2 WHERE id = $3",
                 &ds_id,
                 &ch_database,
-                row.id
+                &row.id
             )
             .map_err(|e| kyomi_core::Error::Internal(format!("failed to link datasource to site: {e}")))?;
 
@@ -317,7 +310,7 @@ pub async fn create_site(
             if let Err(del_err) = kyomi_core::db_execute!(
                 db,
                 "DELETE FROM analytics_sites WHERE id = $1",
-                row.id
+                &row.id
             ) {
                 tracing::error!(site_id = %row.site_id, error = %del_err, "Failed to clean up orphaned analytics_sites row after provisioning failure");
             }
@@ -392,14 +385,14 @@ pub async fn list_sites(db: &DbPool, workspace_id: &str) -> Result<Vec<Analytics
     pg_fetch_all_sites(db, &sql, &[workspace_id]).await
 }
 
-/// Get a single analytics site by UUID, scoped to workspace.
+/// Get a single analytics site by ID, scoped to workspace.
 pub async fn get_site(
     db: &DbPool,
-    id: uuid::Uuid,
+    id: &str,
     workspace_id: &str,
 ) -> Result<Option<AnalyticsSite>> {
     let sql = format!("{SITE_SELECT_SQL} WHERE a.id = $1 AND a.workspace_id = $2");
-    pg_fetch_optional_site(db, &sql, PgBinds::UuidStr(id, workspace_id)).await
+    pg_fetch_optional_site(db, &sql, (id, workspace_id)).await
 }
 
 /// Get a single analytics site by site_id (16-char hex), scoped to workspace.
@@ -409,13 +402,13 @@ pub async fn get_site_by_site_id(
     workspace_id: &str,
 ) -> Result<Option<AnalyticsSite>> {
     let sql = format!("{SITE_SELECT_SQL} WHERE a.site_id = $1 AND a.workspace_id = $2");
-    pg_fetch_optional_site(db, &sql, PgBinds::StrStr(site_id, workspace_id)).await
+    pg_fetch_optional_site(db, &sql, (site_id, workspace_id)).await
 }
 
 /// Update a site's name, domains, and/or datasource slug. Regenerates signed_key when domains change.
 pub async fn update_site(
     db: &DbPool,
-    id: uuid::Uuid,
+    id: &str,
     workspace_id: &str,
     name: Option<&str>,
     domains: Option<&[String]>,
@@ -488,7 +481,7 @@ pub async fn update_site(
 /// Also tears down the auto-provisioned ClickHouse database, user, and datasource.
 pub async fn delete_site(
     db: &DbPool,
-    id: uuid::Uuid,
+    id: &str,
     workspace_id: &str,
     ch_host: &str,
     ch_port: u16,

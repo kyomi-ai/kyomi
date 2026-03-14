@@ -336,7 +336,7 @@ impl AgentTool for UpdateAnalyticsSiteTool {
 
         let site = analytics_site_service::update_site(
             &ctx.db,
-            existing.id,
+            &existing.id,
             &ctx.workspace_id,
             name.as_deref(),
             allowed_domains.as_deref(),
@@ -424,7 +424,7 @@ impl AgentTool for DeleteAnalyticsSiteTool {
 
         analytics_site_service::delete_site(
             &ctx.db,
-            existing.id,
+            &existing.id,
             &ctx.workspace_id,
             &ctx.config.analytics_clickhouse_host,
             ctx.config.analytics_clickhouse_port,
@@ -560,7 +560,7 @@ mod tests {
     fn site_to_json_includes_snippet() {
         load_constants_for_test();
         let site = analytics_site_service::AnalyticsSite {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::new_v4().to_string(),
             workspace_id: "ws-test".into(),
             name: "Test Site".into(),
             site_id: "abcd1234abcd1234".into(),
@@ -584,7 +584,7 @@ mod tests {
     fn site_to_json_handles_null_datasource() {
         load_constants_for_test();
         let site = analytics_site_service::AnalyticsSite {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::new_v4().to_string(),
             workspace_id: "ws-test".into(),
             name: "No DS".into(),
             site_id: "ef012345ef012345".into(),

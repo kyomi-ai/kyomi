@@ -123,7 +123,7 @@ pub async fn save_learning(
                     (learning_id, workspace_id, insight, context, embedding, enabled, scope,
                      learned_from_session, learned_from_user, created_at, times_used,
                      datasource_config_id, learning_type, reference_queries, structured_metadata)
-                VALUES ($1::uuid, $2, $3, $4, $5::vector, TRUE, $6::learning_scope, $7, $8, NOW(), 0, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5::vector, TRUE, $6::learning_scope, $7, $8, NOW(), 0, $9, $10, $11, $12)
                 "#,
             )
             .bind(&learning_id)
@@ -399,7 +399,7 @@ pub async fn update_learning(
             kyomi_core::db::DbPool::Postgres(pg) => {
                 let vec = Vector::from(bytes_to_embedding(&embedding_bytes));
                 sqlx::query(
-                    "UPDATE agent_learnings SET insight = $1, embedding = $2::vector WHERE learning_id = $3::uuid AND workspace_id = $4",
+                    "UPDATE agent_learnings SET insight = $1, embedding = $2::vector WHERE learning_id = $3 AND workspace_id = $4",
                 )
                 .bind(insight)
                 .bind(&vec)
@@ -489,7 +489,7 @@ pub async fn update_learning(
         match db {
             kyomi_core::db::DbPool::Postgres(pg) => {
                 sqlx::query(
-                    "UPDATE agent_learnings SET reference_queries = $1 WHERE learning_id = $2::uuid AND workspace_id = $3",
+                    "UPDATE agent_learnings SET reference_queries = $1 WHERE learning_id = $2 AND workspace_id = $3",
                 )
                 .bind(&rq_val)
                 .bind(learning_id)

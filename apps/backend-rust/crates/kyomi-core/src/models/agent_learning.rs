@@ -11,15 +11,14 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::enums::{LearningScope, LearningType};
 
 /// An agent learning entry from the `agent_learnings` table.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct AgentLearning {
-    /// Primary key — UUID, generated server-side via `gen_random_uuid()`.
-    pub learning_id: Uuid,
+    /// Primary key — UUID string.
+    pub learning_id: String,
 
     /// FK to workspaces table — workspace isolation.
     pub workspace_id: String,
@@ -67,7 +66,7 @@ pub struct AgentLearning {
     pub last_used_at: Option<DateTime<Utc>>,
 
     /// ID of the learning that supersedes (replaces) this one.
-    pub superseded_by: Option<Uuid>,
+    pub superseded_by: Option<String>,
 
     /// Whether this learning has been superseded by another.
     pub is_superseded: bool,
