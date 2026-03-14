@@ -7,13 +7,12 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// OAuth client record.
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct OAuthClient {
-    /// Primary key (UUID).
-    pub id: Uuid,
+    /// Primary key (UUID stored as TEXT for SQLite compatibility).
+    pub id: String,
 
     /// Unique client identifier (e.g., "mcp-<random>").
     pub client_id: String,
