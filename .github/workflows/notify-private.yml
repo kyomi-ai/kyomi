@@ -3,7 +3,16 @@
 # =============================================================================
 # On push to main, dispatches a repository_dispatch event to kyomi-private.
 # The private repo's sync-submodule.yml workflow picks this up, bumps the
-# submodule pointer, and triggers deploy workflows.
+# submodule pointer, and triggers targeted deploy workflows based on which
+# services have changed files.
+#
+# Path-to-service mapping (mirrors the old per-service workflow triggers):
+#   api:                apps/backend-rust/**, apps/mcp-chart-app/**, data/chartml-spec/**, packages/chart-header/**
+#   chart_renderer:     apps/chart-renderer/**, packages/chartml-transform/**
+#   analytics_collector: apps/analytics-collector/**
+#   frontend:           apps/frontend/**
+#   marketing:          apps/marketing/**, apps/docs/**
+#   infra:              k8s/**
 # =============================================================================
 
 name: Notify Private Repo
@@ -16,10 +25,78 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed services
+        id: changes
+        run: |
+          CHANGED=$(git diff --name-only HEAD~1 HEAD)
+
+          has_match() {
+            local pattern="$1"
+            echo "$CHANGED" | grep -qE "$pattern"
+          }
+
+          # Map changed paths to service flags
+          API=false
+          CHART_RENDERER=false
+          ANALYTICS_COLLECTOR=false
+          FRONTEND=false
+          MARKETING=false
+          INFRA=false
+
+          if has_match '^apps/backend-rust/|^apps/mcp-chart-app/|^data/chartml-spec/|^packages/chart-header/|^packages/chartml-core/'; then
+            API=true
+          fi
+
+          if has_match '^apps/chart-renderer/|^packages/chartml-transform/'; then
+            CHART_RENDERER=true
+          fi
+
+          if has_match '^apps/analytics-collector/'; then
+            ANALYTICS_COLLECTOR=true
+          fi
+
+          if has_match '^apps/frontend/'; then
+            FRONTEND=true
+          fi
+
+          if has_match '^apps/marketing/|^apps/docs/'; then
+            MARKETING=true
+          fi
+
+          if has_match '^k8s/'; then
+            INFRA=true
+          fi
+
+          echo "api=$API" >> "$GITHUB_OUTPUT"
+          echo "chart_renderer=$CHART_RENDERER" >> "$GITHUB_OUTPUT"
+          echo "analytics_collector=$ANALYTICS_COLLECTOR" >> "$GITHUB_OUTPUT"
+          echo "frontend=$FRONTEND" >> "$GITHUB_OUTPUT"
+          echo "marketing=$MARKETING" >> "$GITHUB_OUTPUT"
+          echo "infra=$INFRA" >> "$GITHUB_OUTPUT"
+
+          echo "Changed services: api=$API chart_renderer=$CHART_RENDERER analytics_collector=$ANALYTICS_COLLECTOR frontend=$FRONTEND marketing=$MARKETING infra=$INFRA"
+
       - name: Dispatch to kyomi-private
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           repository: kyomi-ai/kyomi-private
           event-type: public-repo-updated
-          client-payload: '{"sha": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
+          client-payload: >-
+            {
+              "sha": "${{ github.sha }}",
+              "ref": "${{ github.ref }}",
+              "services": {
+                "api": ${{ steps.changes.outputs.api }},
+                "chart_renderer": ${{ steps.changes.outputs.chart_renderer }},
+                "analytics_collector": ${{ steps.changes.outputs.analytics_collector }},
+                "frontend": ${{ steps.changes.outputs.frontend }},
+                "marketing": ${{ steps.changes.outputs.marketing }},
+                "infra": ${{ steps.changes.outputs.infra }}
+              }
+            }
