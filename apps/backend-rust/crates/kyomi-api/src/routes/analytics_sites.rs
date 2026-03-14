@@ -22,7 +22,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use kyomi_agent::catalog::indexing_service::CatalogIndexingService;
 use kyomi_auth::{analytics_quota, analytics_site_service, middleware::AuthUser};
@@ -72,7 +71,7 @@ fn require_workspace_admin(user: &AuthUser) -> Result<(), kyomi_core::Error> {
 
 fn site_to_response(site: &analytics_site_service::AnalyticsSite) -> SiteResponse {
     SiteResponse {
-        id: site.id.to_string(),
+        id: site.id.clone(),
         name: site.name.clone(),
         site_id: site.site_id.clone(),
         allowed_domains: site.allowed_domains.clone(),
@@ -217,12 +216,12 @@ async fn list_sites(
 async fn get_site(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<SiteResponse>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
     require_workspace_admin(&user)?;
 
-    let site = analytics_site_service::get_site(&state.db, id, workspace_id)
+    let site = analytics_site_service::get_site(&state.db, &id, workspace_id)
         .await?
         .ok_or_else(|| kyomi_core::Error::NotFound("Analytics site not found".into()))?;
 
@@ -236,7 +235,7 @@ async fn get_site(
 async fn update_site(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
     Json(request): Json<UpdateSiteRequest>,
 ) -> Result<Json<SiteResponse>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
@@ -274,7 +273,7 @@ async fn update_site(
 
     let site = analytics_site_service::update_site(
         &state.db,
-        id,
+        &id,
         workspace_id,
         trimmed_name.as_deref(),
         request.allowed_domains.as_deref(),
@@ -295,14 +294,14 @@ async fn update_site(
 async fn delete_site(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
     require_workspace_admin(&user)?;
 
     analytics_site_service::delete_site(
         &state.db,
-        id,
+        &id,
         workspace_id,
         &state.config.analytics_clickhouse_host,
         state.config.analytics_clickhouse_port,

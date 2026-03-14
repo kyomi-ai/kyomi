@@ -10,7 +10,6 @@ use crate::sql_references;
 use kyomi_core::db::DbPool;
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Single-learning materialization
@@ -47,8 +46,6 @@ pub async fn materialize_learning_references(
     workspace_id: &str,
     preloaded_table_names: Option<&[String]>,
 ) -> anyhow::Result<()> {
-    let parsed_id = Uuid::parse_str(learning_id)?;
-
     let row = kyomi_core::db_fetch_optional!(
         db,
         LearningRefRow,
@@ -56,7 +53,7 @@ pub async fn materialize_learning_references(
          CAST(structured_metadata AS TEXT) as structured_metadata \
          FROM agent_learnings \
          WHERE learning_id = $1",
-        &parsed_id
+        learning_id
     )?;
 
     let row = match row {
@@ -179,7 +176,7 @@ pub async fn materialize_learning_references(
             let mut tx = pg.begin().await?;
 
             sqlx::query("DELETE FROM learning_references WHERE learning_id = $1")
-                .bind(parsed_id)
+                .bind(learning_id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -189,7 +186,7 @@ pub async fn materialize_learning_references(
                      VALUES ($1, $2, $3, $4) \
                      ON CONFLICT (learning_id, ref_type, ref_name) DO NOTHING",
                 )
-                .bind(parsed_id)
+                .bind(learning_id)
                 .bind(workspace_id)
                 .bind(ref_type)
                 .bind(ref_name)
@@ -203,7 +200,7 @@ pub async fn materialize_learning_references(
             let mut tx = sq.begin().await?;
 
             sqlx::query("DELETE FROM learning_references WHERE learning_id = $1")
-                .bind(parsed_id.to_string())
+                .bind(learning_id)
                 .execute(&mut *tx)
                 .await?;
 
@@ -213,7 +210,7 @@ pub async fn materialize_learning_references(
                      VALUES ($1, $2, $3, $4) \
                      ON CONFLICT (learning_id, ref_type, ref_name) DO NOTHING",
                 )
-                .bind(parsed_id.to_string())
+                .bind(learning_id)
                 .bind(workspace_id)
                 .bind(ref_type)
                 .bind(ref_name)
