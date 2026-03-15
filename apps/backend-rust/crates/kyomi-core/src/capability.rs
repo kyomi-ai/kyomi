@@ -29,9 +29,7 @@ pub struct Capabilities {
     // Subscription info
     pub subscription_tier: SubscriptionTier,
     pub subscription_status: SubscriptionStatus,
-    /// Python has a bug: `workspace.metadata.get("billing_enabled", False)` —
-    /// `workspace.metadata` is SQLAlchemy MetaData, not a dict. Always fails.
-    /// Frontend falls back to `isDemoMode`. We return false for compatibility.
+    /// Whether Stripe billing is available (SaaS mode only, false for self-hosted).
     pub billing_enabled: bool,
     pub credits_remaining: f64,
     pub credits_limit: f64,
@@ -251,7 +249,7 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
     Capabilities {
         subscription_tier: tier,
         subscription_status: workspace.subscription_status,
-        billing_enabled: false, // Python bug — always fails to read this field
+        billing_enabled: true, // SaaS mode — Stripe billing available
         credits_remaining: credits.remaining_usd,
         credits_limit: credits.limit_usd,
         credits_exhausted: credits.exhausted,
@@ -318,7 +316,7 @@ pub fn compute_capabilities_with_credits(
     Capabilities {
         subscription_tier: tier,
         subscription_status: workspace.subscription_status,
-        billing_enabled: false, // Python bug — always fails to read this field
+        billing_enabled: true, // SaaS mode — Stripe billing available
         credits_remaining: credits.remaining_usd,
         credits_limit: credits.limit_usd,
         credits_exhausted: credits.exhausted,
