@@ -58,6 +58,7 @@ pub struct AgentExecutionConfig {
     pub tools_subset: Option<Vec<String>>,
     pub max_iterations: u32,
     pub component: String,
+    pub user_message_id: Option<String>,
     pub assistant_message_id: Option<String>,
     /// Optional conversation history for multi-turn conversations.
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
@@ -84,6 +85,7 @@ impl Default for AgentExecutionConfig {
             tools_subset: None,
             max_iterations: 25,
             component: "custom_agent".into(),
+            user_message_id: None,
             assistant_message_id: None,
             conversation_history: None,
         }
@@ -275,35 +277,16 @@ pub async fn execute_agent_chat(
         adapter_session_id,
         config.component.clone(),
         db.clone(),
-        kv.clone(),
         encryption_key.clone(),
-        embedding.clone(),
     );
 
-    // 9. Create or use assistant message placeholder.
-    //    Trial chat does not persist to PostgreSQL (sessions are Redis-only),
-    //    so we generate a transient UUID instead of inserting into chat_messages.
-    let assistant_message_id = if let Some(ref amid) = config.assistant_message_id {
-        amid.clone()
-    } else if is_trial {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        chat_service::add_message(
-            db,
-            encryption_key,
-            &config.session_id,
-            "assistant",
-            "", // empty placeholder
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?
-    };
+    // 9. Generate assistant message ID (no DB placeholder).
+    //    The adapter's persist_after_chat() saves the actual assistant response
+    //    with the correct content. This avoids empty placeholder rows.
+    let assistant_message_id = config
+        .assistant_message_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // 10. Create thinking tracker.
     let tracker = AgentThinkingTracker::new(
@@ -333,6 +316,8 @@ pub async fn execute_agent_chat(
             config.current_time_user_tz.as_deref(),
             config.message_source.as_deref(),
             Some(&config.user_id),
+            config.user_message_id.as_deref(),
+            Some(&assistant_message_id),
         )
         .await;
 
@@ -412,7 +397,9 @@ pub async fn execute_agent_chat(
         }
     }
 
-    // 15. Update assistant message with response + metadata.
+    // 15. Attach metadata to the assistant message (model, thinking events, token usage).
+    //     The message content was already saved by persist_after_chat();
+    //     we only update the extra_metadata column here.
     //     Trial chat does not persist to PostgreSQL — skip the DB update.
     if !is_trial {
         let metadata = serde_json::json!({
@@ -422,14 +409,18 @@ pub async fn execute_agent_chat(
             "component": config.component,
         });
 
-        chat_service::update_message(
+        // Non-fatal: content is already saved by persist_after_chat, this only attaches metadata.
+        if let Err(e) = chat_service::update_message(
             db,
             encryption_key,
             &assistant_message_id,
-            Some(&response_text),
+            None, // content already saved by persist_after_chat
             Some(&metadata),
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
+        }
     }
 
     // 16. Record conversation in PostgreSQL (fire-and-forget).

@@ -349,6 +349,8 @@ impl CustomAgent {
                     continue;
                 }
 
+                // Push final response to state so persist_after_chat saves it.
+                self.state.messages.push(Message::assistant(&response.content));
                 return Ok(response.content);
             }
 
@@ -421,6 +423,7 @@ impl CustomAgent {
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
+                self.state.messages.push(Message::assistant(&response.content));
                 return Ok(response.content);
             }
 
@@ -447,6 +450,7 @@ impl CustomAgent {
                     if let Some(ref cb) = self.callbacks.on_preparing_response {
                         cb();
                     }
+                    self.state.messages.push(Message::assistant(&content));
                     return Ok(content);
                 }
             }
@@ -457,11 +461,10 @@ impl CustomAgent {
             max_iterations = self.config.max_iterations,
             "agent loop exhausted max iterations"
         );
-        Ok(
-            "I apologize, but I've reached my maximum number of iterations for this request. \
-             Please try rephrasing your question or breaking it into smaller parts."
-                .to_string(),
-        )
+        let fallback = "I apologize, but I've reached my maximum number of iterations for this request. \
+             Please try rephrasing your question or breaking it into smaller parts.".to_string();
+        self.state.messages.push(Message::assistant(&fallback));
+        Ok(fallback)
     }
 
     // -----------------------------------------------------------------------

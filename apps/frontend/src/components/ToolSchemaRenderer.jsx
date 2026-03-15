@@ -1924,6 +1924,24 @@ const ReadResourceRenderer = ({ schema }) => {
   );
 };
 
+const TOOL_LABELS = {
+  list_knowledge_files: 'Browsing knowledge files',
+  read_knowledge_file: 'Reading knowledge file',
+  write_knowledge_file: 'Writing knowledge file',
+  edit_knowledge_file: 'Editing knowledge file',
+  browse_catalog: 'Browsing catalog',
+};
+
+const GenericToolRenderer = ({ schema }) => {
+  const label = TOOL_LABELS[schema.tool] || schema.tool;
+  const path = schema.input?.path || schema.input?.datasource;
+  return (
+    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <span>{label}{path ? `: ${path}` : ''}</span>
+    </div>
+  );
+};
+
 export const ToolSchemaRenderer = ({ schema }) => {
   if (!schema || !schema.tool) {
     return null;
@@ -2023,6 +2041,13 @@ export const ToolSchemaRenderer = ({ schema }) => {
 
     case 'read_resource':
       return <ReadResourceRenderer schema={schema} />;
+
+    case 'list_knowledge_files':
+    case 'read_knowledge_file':
+    case 'write_knowledge_file':
+    case 'edit_knowledge_file':
+    case 'browse_catalog':
+      return <GenericToolRenderer schema={schema} />;
 
     default:
       // Unknown tool - throw error so we know to add it

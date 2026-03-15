@@ -610,6 +610,7 @@ async fn send_copilot_message(
         tools_subset: Some(tools_for_context(context_type)),
         max_iterations: 20,
         component: context_type.to_string(),
+        user_message_id: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
     };

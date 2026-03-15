@@ -544,7 +544,7 @@ export const TiptapDashboardEditor = React.forwardRef(function TiptapDashboardEd
   // Memoize editorProps
   const editorProps = useMemo(() => ({
     attributes: {
-      class: 'tiptap-content focus:outline-none min-h-[200px]',
+      class: 'tiptap-content kyomi-markdown focus:outline-none min-h-[200px]',
     },
   }), []);
 

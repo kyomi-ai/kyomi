@@ -60,6 +60,17 @@ pub async fn build_system_prompt(
         ""
     };
 
+    // Build knowledge file tree for system prompt injection.
+    let knowledge_tree = match kyomi_knowledge::knowledge_files::build_knowledge_tree_text(db, workspace_id).await {
+        Ok(tree) if !tree.is_empty() => format!(
+            "\n\n## Knowledge Files\n\n\
+             Your workspace has a knowledge base of markdown documents. \
+             The file tree is shown below — use `read_knowledge_file` to read any file, \
+             or `search_knowledge` to find relevant content by topic.\n\n{tree}\n\n"
+        ),
+        _ => String::new(),
+    };
+
     // ChartML reference is embedded at compile time.
     let chartml_reference = CHARTML_QUICK_REFERENCE;
 
@@ -99,6 +110,7 @@ pub async fn build_system_prompt(
         .replace("{user_name}", &user_name_section)
         .replace("{workspace_knowledge}", &workspace_knowledge_section)
         .replace("{user_knowledge}", &user_knowledge_section)
+        .replace("{knowledge_tree}", &knowledge_tree)
         .replace("{chartml_reference}", chartml_reference);
 
     Ok(prompt)
@@ -345,9 +357,11 @@ The ID helps distinguish between users who may have the same name.
 
 {shared_context}**Your Superpower: Cross-Session Learning**
 You're not just an assistant - you're an evolving expert on this workspace's data warehouse. \
-Your secret weapon is the `save_learning` tool, which lets you remember insights across ALL future \
-conversations (even with different users). Every correction, every discovery, every better approach \
-you find gets saved and automatically recalled when relevant.
+You have two ways to persist knowledge across ALL future conversations:
+
+1. **`save_learning`** — quick-save a data navigation insight (table names, field meanings, query patterns)
+2. **Knowledge files** (`write_knowledge_file` / `edit_knowledge_file`) — create or update markdown \
+   documents for richer, structured knowledge (metric definitions, onboarding guides, data dictionaries)
 
 Over time, you transform from a general analytics assistant into a domain expert who knows:
 - Which tables are best for which questions
@@ -356,6 +370,7 @@ Over time, you transform from a general analytics assistant into a domain expert
 - User and team preferences
 
 **Think like an analyst building knowledge that grows with each investigation.**
+{knowledge_tree}
 
 **CRITICAL: How to Deliver Your Final Answer**
 When your investigation is complete, provide your answer in your response text with no tool calls. \
@@ -383,26 +398,35 @@ For example, say \"the Sales Dashboard\" not \"dashboard_id: abc123\", or \"#mar
 not \"slack_channel_id: C0A83MRQABE\". IDs are for tools and internal use - users should see names.
 
 {workspace_knowledge}{user_knowledge}\
-## Cross-Session Learning (save_learning tool)
+## Knowledge Management
 
-**Your memories persist across ALL sessions forever:**
-- Save DATA NAVIGATION knowledge: which tables to use, field meanings, query patterns
-- Save user corrections: \"Use table X, not Y\" or \"Field Z means this in our warehouse\"
-- Save data structure facts: field encodings, join keys, date ranges available
+**Two complementary systems for persistent knowledge:**
+
+### 1. Quick Learnings (`save_learning`)
+For bite-sized data navigation insights that persist across ALL sessions:
+- DATA NAVIGATION: which tables to use, field meanings, query patterns
+- User corrections: \"Use table X, not Y\" or \"Field Z means this in our warehouse\"
+- Data structure facts: field encodings, join keys, date ranges available
 - DON'T save analysis results: what the data shows, business insights, metric values
-- Your learnings help you FIND and QUERY data better - not remember past analyses
-
-**Critical: Only save knowledge that helps you navigate the data warehouse, not what you discovered in the data.**
 
 **Structured fields for graph construction:**
-When saving learnings, provide structured fields so the knowledge base can create precise connections:
-- `related_tables`: Table names you referenced or queried (e.g., [\"public.orders\", \"analytics.events\"])
+- `related_tables`: Table names (e.g., [\"public.orders\", \"analytics.events\"])
 - `related_columns`: Important columns in table.column format (e.g., [\"public.orders.total_amount\"])
 - `related_metrics`: Metric names discussed (e.g., [\"MRR\", \"churn_rate\"])
 - For metric learnings (`learning_type=\"metric\"`):
   - `metric_name`: Canonical name (e.g., \"MRR\", \"Churn Rate\")
   - `metric_formula`: How it's calculated (e.g., \"SUM(amount) WHERE status='active'\")
   - `metric_unit`: Unit of measurement (USD, %, count, etc.)
+
+### 2. Knowledge Files (`write_knowledge_file` / `edit_knowledge_file` / `read_knowledge_file` / `list_knowledge_files`)
+For richer, structured documentation:
+- Metric definitions with SQL formulas
+- Data dictionaries and onboarding guides
+- Business logic and domain explanations
+- Use `search_knowledge` to find relevant files by topic
+- Use `read_knowledge_file` to read a specific file
+- Use `write_knowledge_file` to create new files (parent folders auto-created)
+- Use `edit_knowledge_file` for targeted edits (find-and-replace)
 
 ## Your Investigative Mindset
 
@@ -565,6 +589,7 @@ mod tests {
             .replace("{user_name}", user_name)
             .replace("{workspace_knowledge}", workspace_knowledge)
             .replace("{user_knowledge}", user_knowledge)
+            .replace("{knowledge_tree}", "")
             .replace("{chartml_reference}", chartml_reference)
     }
 
@@ -638,11 +663,21 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_template_includes_knowledge_management() {
+        let result = format_template("", "", "", "", "");
+        assert!(result.contains("Knowledge Management"));
+        assert!(result.contains("write_knowledge_file"));
+        assert!(result.contains("edit_knowledge_file"));
+        assert!(result.contains("read_knowledge_file"));
+        assert!(result.contains("list_knowledge_files"));
+    }
+
+    #[test]
     fn system_prompt_template_includes_cross_session_learning() {
         let result = format_template("", "", "", "", "");
         assert!(result.contains("Cross-Session Learning"));
         assert!(result.contains("save_learning"));
-        assert!(result.contains("persist across ALL sessions"));
+        assert!(result.contains("persist"));
     }
 
     #[test]
@@ -738,6 +773,10 @@ mod tests {
         assert!(
             !result.contains("{user_knowledge}"),
             "Leftover {{user_knowledge}} placeholder"
+        );
+        assert!(
+            !result.contains("{knowledge_tree}"),
+            "Leftover {{knowledge_tree}} placeholder"
         );
         assert!(
             !result.contains("{chartml_reference}"),
@@ -839,6 +878,10 @@ mod tests {
         assert!(
             !result.contains("{user_knowledge}"),
             "Unresolved placeholder: user_knowledge"
+        );
+        assert!(
+            !result.contains("{knowledge_tree}"),
+            "Unresolved placeholder: knowledge_tree"
         );
         assert!(
             !result.contains("{chartml_reference}"),

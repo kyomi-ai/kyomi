@@ -673,10 +673,29 @@ pub async fn get_session_messages(
             None
         };
 
+        // Strip the metadata prefix from user messages for UI display.
+        // The DB stores the decorated content (e.g. "[source: web, user_local_time: ...] actual message")
+        // to preserve LLM prompt cache hits. The UI should see only the raw message.
+        let display_content = if row.role == "user" && content.starts_with('[') {
+            if let Some(pos) = content.find("] ") {
+                // Verify it looks like our metadata prefix (starts with "[source:" or "[user_local_time:")
+                let prefix = &content[1..pos];
+                if prefix.contains("source:") || prefix.contains("user_local_time:") {
+                    content[pos + 2..].to_string()
+                } else {
+                    content
+                }
+            } else {
+                content
+            }
+        } else {
+            content
+        };
+
         result.push(MessageItem {
             message_id: row.message_id,
             message_type: row.role,
-            content,
+            content: display_content,
             timestamp: Some(row.created_at.to_rfc3339()),
             model,
             pinned: row.pinned,
@@ -1287,6 +1306,8 @@ pub struct AgentMessage {
     pub tool_calls: Option<serde_json::Value>,
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
+    /// User ID of the sender (for user messages in shared conversations).
+    pub sent_by_user_id: Option<String>,
 }
 
 /// Row type for agent message queries.
@@ -1298,6 +1319,7 @@ struct AgentMessageRow {
     tool_calls: Option<serde_json::Value>,
     tool_call_id: Option<String>,
     tool_name: Option<String>,
+    sent_by_user_id: Option<String>,
 }
 
 /// Get ALL messages for agent context restoration (including tool calls and tool results).
@@ -1333,7 +1355,7 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name \
+            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, sent_by_user_id \
              FROM chat_messages \
              WHERE session_id = $1 AND created_at > $2 \
              ORDER BY created_at ASC",
@@ -1344,7 +1366,7 @@ pub async fn get_agent_messages(
         kyomi_core::db_fetch_all!(
             db,
             AgentMessageRow,
-            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name \
+            "SELECT message_id, role, content, tool_calls, tool_call_id, tool_name, sent_by_user_id \
              FROM chat_messages \
              WHERE session_id = $1 \
              ORDER BY created_at ASC",
@@ -1379,6 +1401,7 @@ pub async fn get_agent_messages(
             tool_calls: row.tool_calls,
             tool_call_id: row.tool_call_id,
             tool_name: row.tool_name,
+            sent_by_user_id: row.sent_by_user_id,
         });
     }
 

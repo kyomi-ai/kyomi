@@ -147,21 +147,19 @@ impl AnthropicClient {
     // Message & Tool Conversion
     // -----------------------------------------------------------------------
 
-    /// Determine the index of the message that should receive a prompt cache marker.
+    /// Determine which messages should receive explicit cache breakpoints.
     ///
-    /// Strategy: cache the last message so that everything up to it is cached
-    /// on the next turn. This enables incremental caching — each turn reads
-    /// previous messages from cache and only pays for new content. Each tool
-    /// iteration extends the cache incrementally.
+    /// With request-level `cache_control`, Anthropic automatically caches
+    /// the last block. We add explicit breakpoints on the system prompt
+    /// (handled separately) and the last tool definition (handled in
+    /// `convert_tools_to_anthropic`). No per-message markers needed —
+    /// automatic caching extends the cache incrementally as the
+    /// conversation grows.
     ///
-    /// Returns `None` if there are 0 or 1 messages (nothing meaningful to cache
-    /// incrementally).
-    pub fn get_cache_marker_index(messages: &[Message]) -> Option<usize> {
-        if messages.len() > 1 {
-            Some(messages.len() - 1)
-        } else {
-            None
-        }
+    /// Kept for backward compatibility with tests; returns `None` since
+    /// automatic caching handles message-level breakpoints.
+    pub fn get_cache_marker_index(_messages: &[Message]) -> Option<usize> {
+        None
     }
 
     /// Convert internal [`Message`] list to Anthropic API format.
@@ -385,6 +383,11 @@ impl AnthropicClient {
         if let Some(temp) = temperature {
             body["temperature"] = json!(temp);
         }
+
+        // Request-level prompt caching — Anthropic automatically places the
+        // breakpoint at the last cacheable block and extends the cache
+        // incrementally as the conversation grows.
+        body["cache_control"] = json!({"type": "ephemeral"});
 
         debug!(
             model = %self.model,

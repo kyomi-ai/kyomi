@@ -1962,6 +1962,7 @@ async fn run_slack_query(
         tools_subset: None,  // all tools available
         max_iterations: 25,
         component: "slack_agent".into(),
+        user_message_id: None,
         assistant_message_id: None,
         conversation_history: None,
     };

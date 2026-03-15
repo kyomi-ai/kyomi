@@ -513,54 +513,12 @@ function MarkdownRendererComponent({
     code,
     pre,
 
-    // Enhanced tables with responsive design
+    // Table overflow wrapper (keeps responsive scroll; inner styling via kyomi-markdown CSS)
     table({ children }) {
       return (
         <div className="overflow-x-auto my-4">
-          <table className="min-w-full divide-y divide-border border border-input rounded-lg">
-            {children}
-          </table>
+          <table>{children}</table>
         </div>
-      );
-    },
-
-    thead({ children }) {
-      return (
-        <thead className="bg-muted">
-          {children}
-        </thead>
-      );
-    },
-
-    th({ children }) {
-      return (
-        <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider border-b border-border">
-          {children}
-        </th>
-      );
-    },
-
-    td({ children }) {
-      return (
-        <td className="px-6 py-4 whitespace-nowrap text-sm text-foreground border-b border-border/50">
-          {children}
-        </td>
-      );
-    },
-
-    tbody({ children }) {
-      return (
-        <tbody className="bg-card divide-y divide-border/50">
-          {children}
-        </tbody>
-      );
-    },
-
-    tr({ children, ...props }) {
-      return (
-        <tr {...props}>
-          {children}
-        </tr>
       );
     },
 
@@ -613,80 +571,7 @@ function MarkdownRendererComponent({
       );
     },
 
-    // Enhanced blockquotes
-    blockquote({ children }) {
-      return (
-        <blockquote className="border-l-4 border-info-border pl-4 py-2 my-4 bg-info text-info-foreground italic">
-          {children}
-        </blockquote>
-      );
-    },
-
-    // Enhanced headings with better spacing
-    h1({ children }) {
-      return (
-        <h1 className="text-2xl font-bold text-foreground mt-6 mb-4 first:mt-0">
-          {children}
-        </h1>
-      );
-    },
-
-    h2({ children }) {
-      return (
-        <h2 className="text-xl font-semibold text-foreground mt-5 mb-3 first:mt-0">
-          {children}
-        </h2>
-      );
-    },
-
-    h3({ children }) {
-      return (
-        <h3 className="text-lg font-medium text-foreground mt-4 mb-2 first:mt-0">
-          {children}
-        </h3>
-      );
-    },
-
-    // Enhanced lists
-    ul({ children, ...props }) {
-      return (
-        <ul className="list-disc list-outside ml-5 space-y-1 my-3 text-foreground" {...props}>
-          {children}
-        </ul>
-      );
-    },
-
-    ol({ children, ...props }) {
-      return (
-        <ol className="list-decimal list-outside ml-5 space-y-1 my-3 text-foreground" {...props}>
-          {children}
-        </ol>
-      );
-    },
-
-    li({ children, ...props }) {
-      return (
-        <li className="leading-relaxed" {...props}>
-          {children}
-        </li>
-      );
-    },
-
-    // Enhanced paragraphs
-    p({ children, ...props }) {
-      return (
-        <p className="text-foreground leading-relaxed my-3 first:mt-0 last:mb-0" {...props}>
-          {children}
-        </p>
-      );
-    },
-
-    // Horizontal rules
-    hr() {
-      return (
-        <hr className="border-border my-6" />
-      );
-    }
+    // Headings, paragraphs, lists, blockquotes, and hr are styled via .kyomi-markdown CSS
   }), [code, pre, navigate]);
 
   // Don't strip comments manually - remarkRemoveComments plugin handles this
@@ -708,7 +593,7 @@ function MarkdownRendererComponent({
   }
 
   return (
-    <div className={`markdown-content ${className}`}>
+    <div className={`kyomi-markdown markdown-content ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkRemoveComments]}
         rehypePlugins={[rehypeRaw]}

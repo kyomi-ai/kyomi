@@ -199,6 +199,202 @@ impl AgentTool for GetTableInfoTool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BrowseCatalogTool
+// ---------------------------------------------------------------------------
+
+#[derive(sqlx::FromRow)]
+struct CatalogBrowseRow {
+    project_id: String,
+    dataset_id: String,
+    table_id: String,
+    table_metadata: serde_json::Value,
+}
+
+/// Browse all tables in a datasource, grouped by schema/dataset.
+pub struct BrowseCatalogTool;
+
+#[async_trait]
+impl AgentTool for BrowseCatalogTool {
+    fn name(&self) -> &str {
+        "browse_catalog"
+    }
+
+    fn description(&self) -> &str {
+        "Browse all tables in a datasource, grouped by schema/dataset. Returns the \
+         same hierarchical view the user sees in the catalog UI. Use this to explore \
+         what tables exist before querying."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "datasource": {
+                    "type": "string",
+                    "description": "Datasource slug (from list_datasources)"
+                },
+                "schema": {
+                    "type": "string",
+                    "description": "Optional: filter to a specific schema/dataset"
+                },
+                "include_columns": {
+                    "type": "boolean",
+                    "description": "Include column names and types (default: false). Use get_table_info for detailed column info on specific tables.",
+                    "default": false
+                }
+            },
+            "required": ["datasource"]
+        })
+    }
+
+    fn annotations(&self) -> Option<ToolAnnotations> {
+        Some(ToolAnnotations {
+            read_only_hint: Some(true),
+            ..Default::default()
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> kyomi_core::Result<String> {
+        let datasource_slug = args
+            .get("datasource")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                kyomi_core::Error::BadRequest("Missing required parameter 'datasource'".into())
+            })?;
+        let schema_filter = args.get("schema").and_then(|v| v.as_str());
+        let include_columns = args
+            .get("include_columns")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let is_pg = ctx.db.is_postgres();
+        let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
+
+        let ds = kyomi_auth::datasource_service::resolve_datasource(
+            &ctx.db,
+            datasource_slug,
+            &ctx.workspace_id,
+            false,
+        )
+        .await?;
+        let is_sample = ds
+            .connection_config
+            .get("is_sample")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let rows: Vec<CatalogBrowseRow> = if is_sample {
+            let sample_ws_id =
+                kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID;
+            let sql = format!(
+                "SELECT project_id, dataset_id, table_id, table_metadata \
+                 FROM datasource_table_cache \
+                 WHERE workspace_id = $1 AND is_archived = {bool_false} \
+                 ORDER BY dataset_id, table_id"
+            );
+            kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &sql, sample_ws_id)
+                .unwrap_or_default()
+        } else {
+            let sql = format!(
+                "SELECT project_id, dataset_id, table_id, table_metadata \
+                 FROM datasource_table_cache \
+                 WHERE datasource_config_id = $1 AND is_archived = {bool_false} \
+                 ORDER BY dataset_id, table_id"
+            );
+            kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &sql, &ds.id)
+                .unwrap_or_default()
+        };
+
+        let mut schemas: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+            std::collections::BTreeMap::new();
+        for row in &rows {
+            if let Some(filter) = schema_filter {
+                if row.dataset_id != filter {
+                    continue;
+                }
+            }
+            let full_name = if row.project_id.is_empty() {
+                if row.dataset_id.is_empty() {
+                    row.table_id.clone()
+                } else {
+                    format!("{}.{}", row.dataset_id, row.table_id)
+                }
+            } else {
+                format!("{}.{}.{}", row.project_id, row.dataset_id, row.table_id)
+            };
+
+            let description = row
+                .table_metadata
+                .get("table_description")
+                .or_else(|| row.table_metadata.get("description"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let row_count = row.table_metadata.get("row_count").and_then(|v| v.as_u64());
+
+            let mut table_obj = serde_json::json!({
+                "name": full_name,
+                "description": description,
+            });
+            if let Some(rows) = row_count {
+                table_obj["row_count"] = serde_json::json!(rows);
+            }
+            if include_columns {
+                let cols: Vec<serde_json::Value> = row
+                    .table_metadata
+                    .get("columns")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|col| {
+                                serde_json::json!({
+                                    "name": col.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "type": col.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                table_obj["columns"] = serde_json::json!(cols);
+            }
+
+            let schema_key = if row.dataset_id.is_empty() {
+                "(default)".to_string()
+            } else {
+                row.dataset_id.clone()
+            };
+            schemas.entry(schema_key).or_default().push(table_obj);
+        }
+
+        let schema_list: Vec<serde_json::Value> = schemas
+            .into_iter()
+            .map(|(name, tables)| {
+                serde_json::json!({
+                    "name": name,
+                    "table_count": tables.len(),
+                    "tables": tables,
+                })
+            })
+            .collect();
+        let total_tables: usize = schema_list
+            .iter()
+            .map(|s| s["table_count"].as_u64().unwrap_or(0) as usize)
+            .sum();
+
+        Ok(serde_json::json!({
+            "datasource": datasource_slug,
+            "type": ds.datasource_type,
+            "total_tables": total_tables,
+            "schemas": schema_list,
+        })
+        .to_string())
+    }
+}
+
 /// Transform cached `table_metadata` into the flat format the frontend expects:
 /// `{ table, desc, rows, cols: [{name, type, desc}] }`
 ///

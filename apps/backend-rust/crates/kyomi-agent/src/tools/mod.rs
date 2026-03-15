@@ -58,16 +58,19 @@ pub const MCP_ONLY_TOOLS: &[&str] = &[
 
 /// Tool names that signal the agent should stop iterating and return the
 /// current response content (e.g., after saving a learning).
-pub const FINAL_TOOL_NAMES: &[&str] = &["save_learning"];
+pub const FINAL_TOOL_NAMES: &[&str] = &["save_learning", "write_knowledge_file"];
 
 /// Tools available to watch execution agents (data query only, no mutations).
 /// Matches Python `watch_scheduler.py` watch_tools list.
 pub const WATCH_TOOLS: &[&str] = &[
     "search_knowledge",
     "get_table_info",
+    "browse_catalog",
     "query_datasource",
     "list_datasources",
     "forecast_data",
+    "list_knowledge_files",
+    "read_knowledge_file",
 ];
 
 /// Tools available to trial chat users (restricted read-only + visualization).
@@ -289,14 +292,19 @@ impl ToolRegistry {
     /// These definitions are passed to the LLM so it knows which tools
     /// are available to call.
     pub fn get_tool_definitions(&self, filter: &ToolFilter) -> Vec<Tool> {
-        self.get_tools(filter)
+        let mut tools: Vec<Tool> = self.get_tools(filter)
             .into_iter()
             .map(|tool| Tool {
                 name: tool.name().to_string(),
                 description: tool.description().to_string(),
                 parameters: tool.parameters_schema(),
             })
-            .collect()
+            .collect();
+        // Stable sort by name ensures the tool list is deterministic across
+        // calls, which is required for Anthropic prompt caching (cache key
+        // is a prefix hash — non-deterministic ordering invalidates the cache).
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        tools
     }
 
     /// Return the names of all registered tools (for error messages).
@@ -340,8 +348,8 @@ pub async fn resolve_credentials(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        if ds_type.as_str() == "bigquery" && auth_mode == "kyomi_oauth" {
-            if let (Some(client_id), Some(client_secret)) = (
+        if ds_type.as_str() == "bigquery" && auth_mode == "kyomi_oauth"
+            && let (Some(client_id), Some(client_secret)) = (
                 ctx.config.google_oauth_client_id.as_deref(),
                 ctx.config.google_oauth_client_secret.as_deref(),
             ) {
@@ -359,7 +367,6 @@ pub async fn resolve_credentials(
                 };
                 return Ok(serde_json::json!({ "oauth_data": oauth_data }));
             }
-        }
 
         Ok(serde_json::json!({}))
     } else {
@@ -400,12 +407,17 @@ pub fn create_default_registry() -> ToolRegistry {
 
     // Catalog tools
     registry.register(Arc::new(catalog::GetTableInfoTool));
+    registry.register(Arc::new(catalog::BrowseCatalogTool));
 
     // Learning tools
     registry.register(Arc::new(learning::SaveLearningTool));
 
-    // Knowledge search (unified graph-backed search)
+    // Knowledge tools (search + file CRUD)
     registry.register(Arc::new(knowledge::SearchKnowledgeTool));
+    registry.register(Arc::new(knowledge::WriteKnowledgeFileTool));
+    registry.register(Arc::new(knowledge::ReadKnowledgeFileTool));
+    registry.register(Arc::new(knowledge::ListKnowledgeFilesTool));
+    registry.register(Arc::new(knowledge::EditKnowledgeFileTool));
 
     // Workspace tools
     registry.register(Arc::new(workspace::GetWorkspaceInfoTool));
@@ -672,7 +684,7 @@ mod tests {
         let registry = create_default_registry();
         let filter = ToolFilter::default();
         let tools = registry.get_tools(&filter);
-        assert_eq!(tools.len(), 28);
+        assert_eq!(tools.len(), 35);
 
         // Verify all expected tools are registered
         let expected = [
@@ -680,8 +692,13 @@ mod tests {
             "query_datasource",
             "validate_sql",
             "get_table_info",
+            "browse_catalog",
             "save_learning",
             "search_knowledge",
+            "write_knowledge_file",
+            "read_knowledge_file",
+            "list_knowledge_files",
+            "edit_knowledge_file",
             "get_workspace_info",
             "get_chartml_spec",
             "search_dashboards",
@@ -704,6 +721,8 @@ mod tests {
             "create_analytics_site",
             "update_analytics_site",
             "delete_analytics_site",
+            "browse_resources",
+            "read_resource",
         ];
         for name in expected {
             assert!(
@@ -732,6 +751,10 @@ mod tests {
         assert!(COPILOT_ONLY_TOOLS.contains(&"preview_watch"));
         assert!(MCP_ONLY_TOOLS.contains(&"render_chart"));
         assert!(FINAL_TOOL_NAMES.contains(&"save_learning"));
+        assert!(FINAL_TOOL_NAMES.contains(&"write_knowledge_file"));
+        assert!(WATCH_TOOLS.contains(&"browse_catalog"));
+        assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
+        assert!(WATCH_TOOLS.contains(&"read_knowledge_file"));
     }
 
     #[test]
@@ -771,8 +794,8 @@ mod contract_tests {
         let tools = registry.get_tools(&ToolFilter::default());
         assert_eq!(
             tools.len(),
-            28,
-            "Expected 28 tools, got {}. Names: {:?}",
+            35,
+            "Expected 35 tools, got {}. Names: {:?}",
             tools.len(),
             tools.iter().map(|t| t.name()).collect::<Vec<_>>()
         );
@@ -785,8 +808,13 @@ mod contract_tests {
             "query_datasource",
             "validate_sql",
             "get_table_info",
+            "browse_catalog",
             "save_learning",
             "search_knowledge",
+            "write_knowledge_file",
+            "read_knowledge_file",
+            "list_knowledge_files",
+            "edit_knowledge_file",
             "get_workspace_info",
             "get_chartml_spec",
             "search_dashboards",
@@ -809,6 +837,8 @@ mod contract_tests {
             "create_analytics_site",
             "update_analytics_site",
             "delete_analytics_site",
+            "browse_resources",
+            "read_resource",
         ]
         .into_iter()
         .collect();
@@ -979,7 +1009,10 @@ mod contract_tests {
         let read_only_names: HashSet<&str> = [
             "list_datasources",
             "get_table_info",
+            "browse_catalog",
             "search_knowledge",
+            "list_knowledge_files",
+            "read_knowledge_file",
             "get_workspace_info",
             "get_chartml_spec",
             "search_dashboards",
@@ -988,6 +1021,8 @@ mod contract_tests {
             "get_watch_info",
             "preview_watch", // preview is read-only (validates but doesn't create)
             "list_analytics_sites",
+            "browse_resources",
+            "read_resource",
         ]
         .into_iter()
         .collect();
@@ -1010,6 +1045,8 @@ mod contract_tests {
     fn mutating_tools_are_not_read_only() {
         let mutating_names: HashSet<&str> = [
             "save_learning",
+            "write_knowledge_file",
+            "edit_knowledge_file",
             "create_dashboard",
             "modify_dashboard",
             "delete_dashboard",
@@ -1150,7 +1187,7 @@ mod contract_tests {
         }
 
         // Chat context should exclude 3 copilot + 5 MCP = 8 tools
-        assert_eq!(tools.len(), 28 - 8);
+        assert_eq!(tools.len(), 35 - 8);
     }
 
     #[test]
@@ -1177,7 +1214,7 @@ mod contract_tests {
                 "Copilot filter should not include MCP tool '{mcp_name}'"
             );
         }
-        assert_eq!(tools.len(), 28 - 5); // Only MCP excluded
+        assert_eq!(tools.len(), 35 - 5); // Only MCP excluded
     }
 
     #[test]
@@ -1203,7 +1240,7 @@ mod contract_tests {
                 "MCP filter should not include copilot tool '{copilot_name}'"
             );
         }
-        assert_eq!(tools.len(), 28 - 3); // Only copilot excluded
+        assert_eq!(tools.len(), 35 - 3); // Only copilot excluded
     }
 
     #[test]
@@ -1302,7 +1339,7 @@ mod contract_tests {
         let filter = ToolFilter::default();
         let definitions = registry.get_tool_definitions(&filter);
 
-        assert_eq!(definitions.len(), 28);
+        assert_eq!(definitions.len(), 35);
         for def in &definitions {
             assert!(!def.name.is_empty(), "Tool definition has empty name");
             assert!(
