@@ -755,8 +755,8 @@ async fn register_client(
         .unwrap_or_else(|| vec!["code".into()]);
     let client_name = registration.client_name.clone().unwrap_or_else(|| "MCP Client".into());
 
-    let redirect_uris_json = json!(registration.redirect_uris).to_string();
-    let scopes_json = json!(["mcp"]).to_string();
+    let redirect_uris_json = json!(registration.redirect_uris);
+    let scopes_json = json!(["mcp"]);
     let new_id = uuid::Uuid::new_v4().to_string();
 
     // Insert into database
