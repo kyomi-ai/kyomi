@@ -1174,6 +1174,7 @@ async fn execute_watch_inner(
         tools_subset: Some(tools_subset),
         max_iterations: MAX_WATCH_ITERATIONS,
         component: "kyomi_watch".into(),
+        user_message_id: None,
         assistant_message_id: None,
         conversation_history: None,
     };
@@ -1249,6 +1250,7 @@ async fn execute_watch_inner(
                         tools_subset: Some(WATCH_TOOLS.iter().map(|s| s.to_string()).collect()),
                         max_iterations: MAX_WATCH_ITERATIONS,
                         component: "kyomi_watch".into(),
+                        user_message_id: None,
                         assistant_message_id: None,
                         conversation_history: None,
                     };

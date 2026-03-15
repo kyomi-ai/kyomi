@@ -219,7 +219,7 @@ export default function KnowledgeFileEditor({ file, filePath, workspaceId, onSav
   );
 
   return (
-    <div className="flex-1 flex flex-col min-h-0">
+    <div className="flex-1 flex flex-col" style={{ height: '100%', overflow: 'hidden' }}>
       {/* File info toolbar */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-card flex-shrink-0">
         <div className="flex items-center gap-2">
@@ -259,7 +259,7 @@ export default function KnowledgeFileEditor({ file, filePath, workspaceId, onSav
       </div>
 
       {/* Content area */}
-      <div className="flex-1 min-h-0 overflow-hidden">
+      <div style={{ flex: 1, overflow: 'auto' }}>
         {editorMode === 'visual' ? (
           <TiptapDashboardEditor
             key={file.id}

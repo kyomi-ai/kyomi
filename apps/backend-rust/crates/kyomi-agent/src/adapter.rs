@@ -1,25 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Chat agent adapter — wraps [`CustomAgent`] with persistence, context loading,
-//! and knowledge graph context retrieval.
+//! and message round-tripping.
 //!
 //! [`ChatAgentAdapter`] is the bridge between the agent loop and the database.
 //! It handles:
 //! - Loading conversation history from the DB into the agent's state
-//! - Injecting knowledge context (tables, columns, metrics, learnings)
-//!   via kyomi-knowledge SQL retrieval
-//! - Persisting intermediate messages and agent metadata after each chat
+//! - Persisting ALL new messages (user, assistant, tool) after each chat
 //! - Wiring the thinking tracker to agent callbacks
+//!
+//! ## Cache-hit principle
+//!
+//! Messages are stored in the DB exactly as the LLM sees them (including
+//! metadata prefixes on user messages). Loading them back for the next turn
+//! produces a byte-identical prefix, maximising prompt cache hits.
 
 use std::sync::Arc;
 
-use anyhow::Context;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use kyomi_auth::chat_service;
-use kyomi_core::{DbPool, KVPool};
-use kyomi_embed::LazyEmbedding;
+use kyomi_core::DbPool;
 
 use crate::agent::CustomAgent;
 use crate::thinking::AgentThinkingTracker;
@@ -33,9 +35,8 @@ use crate::types::{Message, MessageRole, ToolCall};
 ///
 /// One adapter is created per user message exchange. It:
 /// 1. Loads existing conversation history from the DB
-/// 2. Injects knowledge graph context into each user message
-/// 3. Delegates to `CustomAgent::chat()` for the LLM loop
-/// 4. Persists new messages and agent metadata back to the DB
+/// 2. Delegates to `CustomAgent::chat()` for the LLM loop
+/// 3. Persists ALL new messages (user, assistant, tool) back to the DB
 pub struct ChatAgentAdapter {
     agent: CustomAgent,
     pub user_id: String,
@@ -44,9 +45,7 @@ pub struct ChatAgentAdapter {
     pub component: String,
     context_loaded: bool,
     db: DbPool,
-    kv: KVPool,
     encryption_key: Arc<[u8; 32]>,
-    embedding: LazyEmbedding,
     /// Number of messages loaded from the DB during context loading.
     /// Used to determine which new messages need to be persisted.
     messages_loaded_count: usize,
@@ -62,9 +61,7 @@ impl ChatAgentAdapter {
         session_id: Option<String>,
         component: String,
         db: DbPool,
-        kv: KVPool,
         encryption_key: Arc<[u8; 32]>,
-        embedding: LazyEmbedding,
     ) -> Self {
         Self {
             agent,
@@ -74,9 +71,7 @@ impl ChatAgentAdapter {
             component,
             context_loaded: false,
             db,
-            kv,
             encryption_key,
-            embedding,
             messages_loaded_count: 0,
         }
     }
@@ -229,7 +224,9 @@ impl ChatAgentAdapter {
             state.messages.push(agent_msg);
         }
 
-        self.messages_loaded_count = db_messages.len();
+        // Record total message count (including the system message already in state
+        // before DB messages were appended) so persist_after_chat slices correctly.
+        self.messages_loaded_count = state.messages.len();
         self.context_loaded = true;
 
         info!(
@@ -239,39 +236,6 @@ impl ChatAgentAdapter {
         );
 
         Ok(true)
-    }
-
-    /// Retrieve knowledge context (tables, columns, metrics, learnings) using
-    /// pgvector-based semantic search in PostgreSQL.
-    ///
-    /// Loads conversation context from Redis, performs vector search + expansion,
-    /// records new injections, saves context back, and returns a formatted
-    /// `<knowledge_context>` block ready for prepending to the user message.
-    ///
-    /// Returns an empty string if no relevant context is found.
-    async fn inject_knowledge_context(
-        &self,
-        session_id: &str,
-        message: &str,
-    ) -> anyhow::Result<String> {
-        // 1. Get the embedding service
-        let embed = self.embedding.wait_ready().await
-            .context("Embedding service not ready")?;
-
-        // 2. Retrieve and inject (loads context from Redis, searches pgvector,
-        //    records injection, saves back to Redis)
-        let (context_block, _context) = kyomi_knowledge::context::retrieve_and_inject(
-            &self.kv,
-            session_id,
-            &self.db,
-            embed,
-            &self.workspace_id,
-            message,
-            kyomi_knowledge::retrieval::PER_TURN_TOKEN_BUDGET,
-        )
-        .await?;
-
-        Ok(context_block)
     }
 
     /// Persist new messages and agent metadata to the database after a chat.
@@ -299,13 +263,6 @@ impl ChatAgentAdapter {
                     continue;
                 }
 
-                // Skip user messages — they're already stored by the HTTP handler
-                // before the agent runs. Persisting them again would create
-                // duplicates (with the metadata prefix baked into content).
-                if msg.role == MessageRole::User {
-                    continue;
-                }
-
                 let role = match msg.role {
                     MessageRole::User => "user",
                     MessageRole::Assistant => "assistant",
@@ -325,7 +282,7 @@ impl ChatAgentAdapter {
                     role,
                     &msg.content,
                     None, // metadata
-                    None, // auto-generate message_id
+                    msg.message_id.as_deref(), // use tagged ID if set, else auto-generate
                     None, // current_time_user_tz
                     if msg.role == MessageRole::User {
                         msg.user_id.as_deref()
@@ -363,8 +320,13 @@ impl ChatAgentAdapter {
 
     /// Run the agent loop for a user message.
     ///
-    /// Handles context loading (lazy), learning injection, delegation to the
-    /// agent, and post-chat persistence.
+    /// Handles context loading (lazy), delegation to the agent, and
+    /// post-chat persistence. All new messages (user, tool, assistant)
+    /// are saved to the DB by `persist_after_chat()`.
+    ///
+    /// If `assistant_message_id` is provided, it will be set on the final
+    /// assistant response message before persistence, ensuring the DB record
+    /// matches the ID used for WebSocket streaming and UI display.
     pub async fn chat(
         &mut self,
         message: &str,
@@ -372,42 +334,19 @@ impl ChatAgentAdapter {
         current_time_user_tz: Option<&str>,
         message_source: Option<&str>,
         user_id: Option<&str>,
+        user_message_id: Option<&str>,
+        assistant_message_id: Option<&str>,
     ) -> kyomi_core::Result<String> {
         // Lazy context loading on first call.
         if !self.context_loaded {
             self.load_context().await?;
         }
 
-        let mut augmented_message = message.to_string();
-
-        // Inject knowledge context (pgvector-based semantic search).
-        if let Some(ref session_id) = self.session_id {
-            match self
-                .inject_knowledge_context(session_id, &augmented_message)
-                .await
-            {
-                Ok(context_block) => {
-                    if !context_block.is_empty() {
-                        // Prepend knowledge context before the message.
-                        augmented_message =
-                            format!("{context_block}\n\n{augmented_message}");
-                        info!("Injected knowledge context into user message");
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "Knowledge context retrieval failed, continuing without"
-                    );
-                }
-            }
-        }
-
         // Run the agent loop.
         let result = self
             .agent
             .chat(
-                &augmented_message,
+                message,
                 cancel_token,
                 current_time_user_tz,
                 message_source,
@@ -415,7 +354,19 @@ impl ChatAgentAdapter {
             )
             .await;
 
-        // Persist intermediate messages and metadata regardless of success/failure.
+        // Tag the user message with the known ID so the DB record matches
+        // the ID returned to the frontend in the HTTP response.
+        if let Some(umid) = user_message_id {
+            self.tag_first_new_user_message_id(umid);
+        }
+
+        // Tag the final assistant message with the known ID so that the DB
+        // record matches the ID used for WebSocket streaming.
+        if let Some(amid) = assistant_message_id {
+            self.tag_last_assistant_message_id(amid);
+        }
+
+        // Persist all new messages and metadata regardless of success/failure.
         // We log at error level (not warn) because message persistence failures
         // mean data loss — the user's conversation may not be saved.
         if let Err(e) = self.persist_after_chat().await {
@@ -423,6 +374,31 @@ impl ChatAgentAdapter {
         }
 
         result
+    }
+
+    /// Set the `message_id` on the last assistant message in the agent state.
+    ///
+    /// This ensures that when `persist_after_chat()` saves the message, the DB
+    /// record uses the same ID that was used for WebSocket streaming events.
+    fn tag_last_assistant_message_id(&mut self, message_id: &str) {
+        let state = self.agent.state_mut();
+        for msg in state.messages.iter_mut().rev() {
+            if msg.role == MessageRole::Assistant {
+                msg.message_id = Some(message_id.to_string());
+                break;
+            }
+        }
+    }
+
+    /// Set the `message_id` on the first new user message (after loaded messages).
+    fn tag_first_new_user_message_id(&mut self, message_id: &str) {
+        let state = self.agent.state_mut();
+        for msg in state.messages[self.messages_loaded_count..].iter_mut() {
+            if msg.role == MessageRole::User {
+                msg.message_id = Some(message_id.to_string());
+                break;
+            }
+        }
     }
 
     /// Read-only access to the underlying agent state.
@@ -445,7 +421,13 @@ impl ChatAgentAdapter {
 /// Convert a database `AgentMessage` to an agent `Message`.
 fn db_message_to_agent_message(msg: &chat_service::AgentMessage) -> Message {
     match msg.role.as_str() {
-        "user" => Message::user(&msg.content),
+        "user" => {
+            if let Some(ref uid) = msg.sent_by_user_id {
+                Message::user_with_id(&msg.content, uid)
+            } else {
+                Message::user(&msg.content)
+            }
+        }
         "assistant" => {
             if let Some(ref tc_json) = msg.tool_calls {
                 // Parse tool_calls JSON into Vec<ToolCall>.
@@ -490,6 +472,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -505,6 +488,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -526,6 +510,7 @@ mod tests {
             tool_calls: Some(tc),
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -543,6 +528,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: Some("tc_001".into()),
             tool_name: Some("search_catalog".into()),
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -559,6 +545,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::System);
@@ -573,6 +560,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user.
@@ -592,6 +580,7 @@ mod tests {
             tool_calls: Some(tc),
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -613,6 +602,7 @@ mod tests {
             tool_calls: Some(tc),
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -633,6 +623,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Tool);
@@ -649,12 +640,45 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
         // Full content including metadata prefix is preserved.
         assert!(result.content.contains("[source: web"));
         assert!(result.content.contains("monthly revenue"));
+    }
+
+    #[test]
+    fn db_message_to_agent_message_user_preserves_user_id() {
+        let msg = chat_service::AgentMessage {
+            message_id: "m10b".into(),
+            role: "user".into(),
+            content: "Hello".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: Some("user-abc-12345678".into()),
+        };
+        let result = db_message_to_agent_message(&msg);
+        assert_eq!(result.role, MessageRole::User);
+        assert_eq!(result.user_id.as_deref(), Some("user-abc-12345678"));
+    }
+
+    #[test]
+    fn db_message_to_agent_message_user_without_user_id() {
+        let msg = chat_service::AgentMessage {
+            message_id: "m10c".into(),
+            role: "user".into(),
+            content: "Hello".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            sent_by_user_id: None,
+        };
+        let result = db_message_to_agent_message(&msg);
+        assert_eq!(result.role, MessageRole::User);
+        assert!(result.user_id.is_none());
     }
 
     #[test]
@@ -670,6 +694,7 @@ mod tests {
             tool_calls: Some(tc),
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::Assistant);
@@ -775,6 +800,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         // Falls back to user since "Assistant" != "assistant".
@@ -791,6 +817,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             tool_name: None,
+            sent_by_user_id: None,
         };
         let result = db_message_to_agent_message(&msg);
         assert_eq!(result.role, MessageRole::User);
@@ -803,10 +830,6 @@ mod tests {
     //
     // - `ChatAgentAdapter::persist_after_chat` when `session_id` is None:
     //   should skip persistence entirely and log a warning.
-    //
-    // - `ChatAgentAdapter::inject_knowledge_context` deduplication: handled
-    //   inside `kyomi_knowledge::context::retrieve_and_inject`, which tracks
-    //   previously injected items per session via Redis.
     //
     // - `ChatAgentAdapter::load_context` restores full conversation history
     //   including tool_calls and tool_results from the DB.

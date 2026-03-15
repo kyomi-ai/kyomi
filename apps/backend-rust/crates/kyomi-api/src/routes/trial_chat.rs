@@ -741,6 +741,7 @@ async fn trial_chat(
         tools_subset: None, // context_type "trial_chat" already handles tool filtering
         max_iterations: 10,
         component: "trial_chat".into(),
+        user_message_id: None,
         assistant_message_id: None,
         conversation_history,
     };

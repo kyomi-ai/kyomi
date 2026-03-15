@@ -1,0 +1,135 @@
+/* Shared markdown typography — single source of truth.
+ * Applied by MarkdownRenderer (view) and Tiptap (edit).
+ * Chat is the gold standard — all contexts match chat rendering.
+ */
+.kyomi-markdown {
+  @apply text-sm font-sans text-foreground leading-relaxed;
+}
+
+/* Headings */
+.kyomi-markdown h1 {
+  @apply text-2xl font-bold text-foreground mt-6 mb-4 first:mt-0;
+}
+
+.kyomi-markdown h2 {
+  @apply text-xl font-semibold text-foreground mt-5 mb-3 first:mt-0;
+}
+
+.kyomi-markdown h3 {
+  @apply text-lg font-medium text-foreground mt-4 mb-2 first:mt-0;
+}
+
+.kyomi-markdown h4,
+.kyomi-markdown h5,
+.kyomi-markdown h6 {
+  @apply text-base font-semibold text-foreground mt-4 mb-2;
+}
+
+/* Paragraphs */
+.kyomi-markdown p {
+  @apply text-foreground leading-relaxed my-3 first:mt-0 last:mb-0;
+}
+
+/* Bold and Italic */
+.kyomi-markdown strong {
+  @apply font-bold;
+}
+
+.kyomi-markdown em {
+  @apply italic;
+}
+
+/* Inline code */
+.kyomi-markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background-color: var(--color-muted);
+  color: #e11d48;
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  border: 1px solid var(--color-border);
+}
+
+.dark .kyomi-markdown code {
+  color: #fb7185;
+}
+
+/* Code blocks */
+.kyomi-markdown pre {
+  @apply bg-muted rounded-md my-4 overflow-x-auto;
+  padding: 16px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.kyomi-markdown pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  border: none;
+  font-size: 0.867rem; /* ~13px */
+}
+
+/* Links */
+.kyomi-markdown a {
+  @apply text-primary underline;
+  text-underline-offset: 2px;
+}
+
+.kyomi-markdown a:hover {
+  opacity: 0.8;
+}
+
+/* Lists */
+.kyomi-markdown ul {
+  @apply list-disc list-outside ml-5 space-y-1 my-3 text-foreground;
+}
+
+.kyomi-markdown ol {
+  @apply list-decimal list-outside ml-5 space-y-1 my-3 text-foreground;
+}
+
+.kyomi-markdown li {
+  @apply leading-relaxed;
+}
+
+.kyomi-markdown li p {
+  @apply mb-0;
+}
+
+/* Blockquotes — blue info style (matches chat) */
+.kyomi-markdown blockquote {
+  @apply border-l-4 border-info-border pl-4 py-2 my-4 bg-info text-info-foreground italic;
+}
+
+.kyomi-markdown blockquote p {
+  @apply mb-0;
+}
+
+/* Horizontal rules */
+.kyomi-markdown hr {
+  @apply border-border my-6;
+}
+
+/* Tables */
+.kyomi-markdown table {
+  @apply min-w-full divide-y divide-border border border-input rounded-lg my-4;
+}
+
+.kyomi-markdown thead {
+  @apply bg-muted;
+}
+
+.kyomi-markdown th {
+  @apply px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider;
+}
+
+.kyomi-markdown td {
+  @apply px-6 py-4 whitespace-nowrap text-sm text-foreground border-b border-border/50;
+}
+
+.kyomi-markdown tbody tr:hover {
+  @apply bg-muted/50;
+}

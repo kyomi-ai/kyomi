@@ -70,7 +70,7 @@ const ChatMessage = memo(({
             )}
             {message.text && (
               <MarkdownRenderer
-                className="text-sm"
+                className=""
                 messageId={message.id}
                 sessionId={sessionId}
                 isStreaming={message.isStreaming}

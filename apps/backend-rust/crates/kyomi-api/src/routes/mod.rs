@@ -23,6 +23,7 @@ pub mod dashboards;
 pub mod datasources;
 pub mod feedback;
 pub mod integrations;
+pub mod knowledge_files;
 pub mod learnings;
 pub mod sql_history;
 pub mod subscribe;

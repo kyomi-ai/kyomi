@@ -49,6 +49,11 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
     ("validate_sql", "Validating SQL"),
     ("browse_resources", "Browsing documentation"),
     ("read_resource", "Reading documentation"),
+    ("browse_catalog", "Browsing catalog"),
+    ("write_knowledge_file", "Writing knowledge file"),
+    ("read_knowledge_file", "Reading knowledge file"),
+    ("list_knowledge_files", "Browsing knowledge files"),
+    ("edit_knowledge_file", "Editing knowledge file"),
 ];
 
 /// Look up the friendly display name for a tool.

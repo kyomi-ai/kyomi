@@ -406,7 +406,8 @@ async fn migrate_learnings(
         &workspace_id,
         &user.user_id,
     )
-    .await?;
+    .await
+    .map_err(|e| kyomi_core::Error::Internal(format!("Migration failed: {e}")))?;
 
     Ok(Json(serde_json::to_value(result).map_err(|e| {
         kyomi_core::Error::Internal(format!("Failed to serialize migration result: {e}"))

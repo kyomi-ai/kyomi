@@ -612,54 +612,50 @@ async fn send_message(
         new_sid
     };
 
-    // Store the user message.
-    let user_message_id = chat_service::add_message(
-        &state.db,
-        &state.encryption_key,
-        &session_id,
-        "user",
-        &request.message,
-        None,  // metadata
-        None,  // message_id (auto-generate)
-        request.current_time_user_tz.as_deref(),
-        Some(&user.user_id),
-        None,  // tool_call_id
-        None,  // tool_name
-        None,  // tool_calls
-    )
-    .await?;
+    // Generate user message ID without saving to DB.
+    // The adapter's persist_after_chat() will save the decorated user message
+    // (with metadata prefix) so that reloading from DB produces a byte-identical
+    // prefix for LLM prompt cache hits.
+    let user_message_id = uuid::Uuid::new_v4().to_string();
 
     let skip_ai = request.skip_ai.unwrap_or(false);
 
     if skip_ai {
+        // skip_ai bypasses the agent loop, so we must save the user message
+        // directly (the adapter's persist_after_chat won't run).
+        let saved_id = chat_service::add_message(
+            &state.db,
+            &state.encryption_key,
+            &session_id,
+            "user",
+            &request.message,
+            None,
+            Some(&user_message_id),
+            request.current_time_user_tz.as_deref(),
+            Some(&user.user_id),
+            None,
+            None,
+            None,
+        )
+        .await?;
+
         tracing::info!(
             "Stored user message {} in session {} (skip_ai=true)",
-            user_message_id,
+            saved_id,
             session_id
         );
         return Ok(Json(json!({
             "session_id": session_id,
-            "user_message_id": user_message_id,
+            "user_message_id": saved_id,
             "status": "skipped",
         })));
     }
 
-    // Create assistant message placeholder.
-    let assistant_message_id = chat_service::add_message(
-        &state.db,
-        &state.encryption_key,
-        &session_id,
-        "assistant",
-        "", // empty placeholder
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await?;
+    // Generate assistant message ID without saving a placeholder to DB.
+    // The adapter's persist_after_chat() will save the actual assistant response
+    // with the correct content. This avoids empty placeholder rows and ensures
+    // all messages are saved in a single pass with correct ordering.
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
 
     // Check if this is a shared conversation.
     let session_detail = chat_service::get_session(&state.db, &session_id).await?;
@@ -690,6 +686,7 @@ async fn send_message(
         tools_subset: None,
         max_iterations: 25,
         component: "custom_agent".to_string(),
+        user_message_id: Some(user_message_id.clone()),
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
     };
@@ -754,8 +751,12 @@ async fn send_message(
                     "Agent execution failed"
                 );
 
-                // Update assistant message placeholder with error text so it
-                // doesn't remain as an empty message in the chat history.
+                // Save error as an assistant message so the user sees it
+                // in the chat history. persist_after_chat() may or may not
+                // have saved the assistant message depending on where the
+                // error occurred, so we use add_message with the known ID.
+                // If persist already saved it, update_message sets the error
+                // metadata; if not, add_message creates it.
                 let error_text = format!(
                     "I encountered an error while processing your request: {e}"
                 );
@@ -763,14 +764,35 @@ async fn send_message(
                     "status": "error",
                     "error": e.to_string(),
                 });
-                let _ = chat_service::update_message(
+                // Try update first (persist may have saved the message).
+                let updated = chat_service::update_message(
                     &db,
                     &encryption_key,
                     &spawn_assistant_message_id,
                     Some(&error_text),
                     Some(&error_metadata),
                 )
-                .await;
+                .await
+                .unwrap_or(false);
+
+                // If no message existed to update, create one.
+                if !updated {
+                    let _ = chat_service::add_message(
+                        &db,
+                        &encryption_key,
+                        &spawn_session_id,
+                        "assistant",
+                        &error_text,
+                        Some(&error_metadata),
+                        Some(&spawn_assistant_message_id),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
 
                 kyomi_auth::websocket::helpers::send_error(
                     &ws_manager,
@@ -804,9 +826,9 @@ async fn send_message(
     }
 
     tracing::info!(
-        "Stored user message {} in session {} (AI processing spawned)",
+        "Dispatched AI processing for session {} (message_id={})",
+        session_id,
         user_message_id,
-        session_id
     );
 
     Ok(Json(json!({

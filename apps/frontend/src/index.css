@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./styles/markdown.css";
 
 /* Enable class-based dark mode (Tailwind v4 syntax) */
 @custom-variant dark (&:where(.dark, .dark *));
@@ -420,27 +421,7 @@ input, textarea, select {
   text-overflow: ellipsis;
 }
 
-/* Override user-agent white-space: pre to allow wrapping in sidebars */
-.markdown-content pre {
-  white-space: pre-wrap;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-}
-
-/* Inline code styling */
-.markdown-content .inline-code {
-  font-family: var(--font-mono);
-  font-size: 0.875em;
-  background-color: var(--color-muted);
-  color: #e11d48;
-  padding: 0.2em 0.4em;
-  border-radius: 3px;
-  border: 1px solid var(--color-border);
-}
-
-.dark .markdown-content .inline-code {
-  color: #fb7185;
-}
+/* Markdown typography is now in styles/markdown.css (shared by MarkdownRenderer + Tiptap) */
 
 /* Subtle breathing animation for thinking status text */
 @keyframes subtle-breathe {

@@ -48,6 +48,7 @@ pub fn build_router(state: state::AppState) -> Router {
         .nest("/api/v1/users", routes::users::routes())
         .nest("/api/v1/workspaces", routes::workspaces::routes())
         .nest("/api/v1/workspaces", routes::learnings::routes())
+        .nest("/api/v1/workspaces", routes::knowledge_files::routes())
         .nest(
             "/api/v1/datasources",
             routes::datasources::routes().merge(routes::catalog::routes()),
