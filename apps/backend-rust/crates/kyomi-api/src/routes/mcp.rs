@@ -30,8 +30,9 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -156,10 +157,46 @@ pub fn routes() -> Router<AppState> {
         .route("/", post(handle_mcp_request))
         .route("/", get(handle_mcp_sse))
         .route("/", delete(handle_mcp_delete))
+        .layer(middleware::from_fn(mcp_www_authenticate_layer))
         .route(
             "/.well-known/openid-configuration",
             get(super::oauth::mcp_openid_configuration),
         )
+}
+
+/// Response layer that adds `WWW-Authenticate` to 401 responses per RFC 6750.
+///
+/// MCP clients (and directories like Glama) use this header to discover OAuth
+/// endpoints and distinguish "online, requires auth" from "broken/offline".
+/// The `resource_metadata` parameter points to the RFC 9728 protected resource
+/// metadata endpoint, which in turn references the authorization server.
+async fn mcp_www_authenticate_layer(request: Request, next: Next) -> Response {
+    // Capture the request's host/scheme before passing ownership to `next`.
+    let base_url = {
+        let headers = request.headers();
+        let scheme = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("https");
+        let host = headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("app.kyomi.ai");
+        format!("{scheme}://{host}")
+    };
+
+    let mut response = next.run(request).await;
+
+    if response.status() == StatusCode::UNAUTHORIZED {
+        let www_auth = format!(
+            r#"Bearer realm="OAuth", resource_metadata="{base_url}/.well-known/oauth-protected-resource", error="invalid_token", error_description="Missing or invalid access token""#
+        );
+        if let Ok(val) = www_auth.parse() {
+            response.headers_mut().insert("www-authenticate", val);
+        }
+    }
+
+    response
 }
 
 // ===========================================================================

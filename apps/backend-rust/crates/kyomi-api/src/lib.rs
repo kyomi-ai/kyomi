@@ -80,6 +80,8 @@ pub fn build_router(state: state::AppState) -> Router {
         .nest("/api/v1/feedback", routes::feedback::routes())
         // JWKS endpoint for Kyomi Connect token verification (public, no auth)
         .route("/.well-known/jwks.json", axum::routing::get(jwks_handler))
+        // Glama MCP directory — server ownership claim
+        .route("/.well-known/glama.json", axum::routing::get(glama_json_handler))
         // Kyomi Connect WebSocket (JWT-authenticated, separate from user WebSockets)
         // /connect/v1 — via app.kyomi.ai (internal/dev)
         // /v1         — via connect.kyomi.ai (production)
@@ -112,6 +114,18 @@ async fn jwks_handler(State(state): State<state::AppState>) -> impl IntoResponse
             .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// Glama MCP directory — static JSON for server ownership claim.
+///
+/// <https://glama.ai/mcp/servers> uses `/.well-known/glama.json` to verify
+/// domain ownership of MCP servers listed in their directory.
+async fn glama_json_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        r#"{"$schema":"https://glama.ai/mcp/schemas/connector.json","maintainers":[{"email":"jason@yellowgorilla.net"}]}"#,
+    )
 }
 
 /// Wrap a completed `Router` with path normalization and connect-info extraction.
