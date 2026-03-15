@@ -114,7 +114,7 @@ async fn load_workspace(
     kyomi_core::db_fetch_optional!(
         db, WorkspaceRow,
         "SELECT workspace_id, name, subscription_tier, subscription_status, \
-         billing_cycle, subscription_period_start, subscription_period_end, user_limit, \
+         billing_cycle, subscription_period_start::text, subscription_period_end::text, user_limit, \
          stripe_customer_id, stripe_subscription_id, stripe_additional_users_item_id \
          FROM workspaces WHERE workspace_id = $1",
         workspace_id
@@ -130,7 +130,7 @@ async fn load_workspace_by_subscription(
     kyomi_core::db_fetch_optional!(
         db, WorkspaceRow,
         "SELECT workspace_id, name, subscription_tier, subscription_status, \
-         billing_cycle, subscription_period_start, subscription_period_end, user_limit, \
+         billing_cycle, subscription_period_start::text, subscription_period_end::text, user_limit, \
          stripe_customer_id, stripe_subscription_id, stripe_additional_users_item_id \
          FROM workspaces WHERE stripe_subscription_id = $1",
         subscription_id
