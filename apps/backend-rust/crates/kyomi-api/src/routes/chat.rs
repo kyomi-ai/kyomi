@@ -1081,10 +1081,10 @@ async fn transfer_ownership(
 
     // Verify new owner is a workspace member.
     #[derive(sqlx::FromRow)]
-    struct ExistsRow { n: i32 }
+    struct ExistsRow { _n: i32 }
     let membership = kyomi_core::db_fetch_optional!(
         &state.db, ExistsRow,
-        "SELECT 1 as n FROM workspace_users \
+        "SELECT 1 as _n FROM workspace_users \
          WHERE workspace_id = $1 AND user_id = $2",
         &session_workspace_id,
         new_owner_id
@@ -1178,10 +1178,10 @@ async fn update_message_content(
 
     // Verify the message belongs to this session.
     #[derive(sqlx::FromRow)]
-    struct ExistsRow2 { n: i32 }
+    struct ExistsRow2 { _n: i32 }
     let msg_exists = kyomi_core::db_fetch_optional!(
         &state.db, ExistsRow2,
-        "SELECT 1 as n FROM chat_messages \
+        "SELECT 1 as _n FROM chat_messages \
          WHERE message_id = $1 AND session_id = $2",
         &message_id,
         &session_id

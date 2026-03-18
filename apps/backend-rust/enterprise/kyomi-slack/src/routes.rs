@@ -655,10 +655,10 @@ async fn handle_user_callback(
 
     // Find active workspace_user
     #[derive(sqlx::FromRow)]
-    struct ExistsRow { n: i32 }
+    struct ExistsRow { _n: i32 }
     let has_membership = kyomi_core::db_fetch_optional!(
         &state.db, ExistsRow,
-        "SELECT 1 as n FROM workspace_users \
+        "SELECT 1 as _n FROM workspace_users \
          WHERE user_id = $1 AND workspace_id = $2 AND active = true",
         user_id,
         &workspace_id
