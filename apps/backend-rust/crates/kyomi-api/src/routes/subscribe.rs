@@ -135,10 +135,10 @@ async fn subscribe_email(
 
     // Check if subscriber already exists
     #[derive(sqlx::FromRow)]
-    struct ExistsRow { n: i32 }
+    struct ExistsRow { _n: i32 }
     let existing = kyomi_core::db_fetch_optional!(
         &state.db, ExistsRow,
-        "SELECT 1 as n FROM email_subscribers WHERE email = $1",
+        "SELECT 1 as _n FROM email_subscribers WHERE email = $1",
         &email
     )?;
 

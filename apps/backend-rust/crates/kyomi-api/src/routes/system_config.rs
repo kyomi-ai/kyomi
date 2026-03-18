@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::state::AppState;
 
 #[derive(Serialize)]
-struct SystemConfig {
+pub struct SystemConfig {
     self_hosted: bool,
     /// "community", "enterprise", or "saas"
     edition: &'static str,
