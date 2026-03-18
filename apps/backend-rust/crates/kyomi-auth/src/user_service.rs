@@ -735,12 +735,10 @@ pub async fn update_chartml_config(
 ) -> kyomi_core::Result<bool> {
     let is_pg = pool.is_postgres();
     let now = sql_compat::now(is_pg);
-    let config_str = serde_json::to_string(config)
-        .map_err(|e| kyomi_core::Error::Internal(format!("JSON serialization failed: {e}")))?;
     let sql = format!(
         "UPDATE users SET chartml_config = $1, updated_at = {now} WHERE user_id = $2"
     );
-    let result = kyomi_core::db_execute!(pool, &sql, &config_str, user_id)?;
+    let result = kyomi_core::db_execute!(pool, &sql, config, user_id)?;
     Ok(result.rows_affected() > 0)
 }
 

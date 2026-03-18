@@ -381,9 +381,6 @@ pub async fn create_datasource(
     let id = generate_datasource_id();
     let conn_type = connection_type.unwrap_or("direct");
     let is_pg = pool.is_postgres();
-    let config_str = serde_json::to_string(&connection_config)
-        .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize config: {e}")))?;
-
     let sql = format!(
         "INSERT INTO datasource_configs \
          (id, workspace_id, name, slug, datasource_type, connection_config, active, connection_type, created_at, updated_at) \
@@ -399,7 +396,7 @@ pub async fn create_datasource(
         name,
         &slug_value,
         ds_type,
-        &config_str,
+        &connection_config,
         conn_type
     )?;
 
@@ -482,8 +479,6 @@ pub async fn update_datasource(
     let final_auto_refresh = auto_refresh_allowed.unwrap_or(existing.auto_refresh_allowed);
 
     let is_pg = pool.is_postgres();
-    let config_str = serde_json::to_string(final_config)
-        .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize config: {e}")))?;
 
     let sql = format!(
         "UPDATE datasource_configs SET \
@@ -497,7 +492,7 @@ pub async fn update_datasource(
         &sql,
         final_name,
         final_slug,
-        &config_str,
+        final_config,
         final_active,
         final_auto_refresh,
         id,

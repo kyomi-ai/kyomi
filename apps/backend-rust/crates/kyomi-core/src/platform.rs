@@ -301,8 +301,6 @@ pub async fn upsert_workspace_integration(
     installed_by: &str,
 ) -> crate::Result<()> {
     let id = uuid::Uuid::new_v4().to_string();
-    let config_str = serde_json::to_string(config)
-        .map_err(|e| crate::Error::Internal(format!("JSON serialization failed: {e}")))?;
     let now = chrono::Utc::now().to_rfc3339();
 
     crate::db_execute!(
@@ -314,7 +312,7 @@ pub async fn upsert_workspace_integration(
         &id,
         workspace_id,
         platform_type,
-        &config_str,
+        config,
         installed_by,
         &now
     )?;
@@ -381,9 +379,6 @@ pub async fn upsert_user_integration(
     config: &serde_json::Value,
 ) -> crate::Result<()> {
     let id = uuid::Uuid::new_v4().to_string();
-    let config_str = serde_json::to_string(config)
-        .map_err(|e| crate::Error::Internal(format!("JSON serialization failed: {e}")))?;
-
     crate::db_execute!(
         db,
         "INSERT INTO workspace_user_integrations (id, workspace_id, user_id, platform_type, config) \
@@ -394,7 +389,7 @@ pub async fn upsert_user_integration(
         workspace_id,
         user_id,
         platform_type,
-        &config_str
+        config
     )?;
     Ok(())
 }
