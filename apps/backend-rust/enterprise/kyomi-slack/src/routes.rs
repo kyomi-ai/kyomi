@@ -267,19 +267,21 @@ async fn upsert_slack_user_link(
     slack_username: Option<&str>,
 ) -> kyomi_core::Result<()> {
     let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now_expr = kyomi_core::sql_compat::now(db.is_postgres());
+    let sql = format!(
+        "INSERT INTO platform_user_links (id, workspace_id, user_id, platform_type, platform_user_id, platform_username, connected_at) \
+         VALUES ($1, $2, $3, 'slack', $4, $5, {now_expr}) \
+         ON CONFLICT (workspace_id, platform_type, platform_user_id) \
+         DO UPDATE SET platform_username = $5"
+    );
     kyomi_core::db_execute!(
         db,
-        "INSERT INTO platform_user_links (id, workspace_id, user_id, platform_type, platform_user_id, platform_username, connected_at) \
-         VALUES ($1, $2, $3, 'slack', $4, $5, $6) \
-         ON CONFLICT (workspace_id, platform_type, platform_user_id) \
-         DO UPDATE SET platform_username = $5",
+        &sql,
         &id,
         workspace_id,
         user_id,
         slack_user_id,
-        slack_username,
-        &now
+        slack_username
     )?;
     Ok(())
 }
