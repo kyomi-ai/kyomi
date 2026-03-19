@@ -50,9 +50,9 @@ export default function ConnectSetup({ token, datasourceName, datasourceType, on
       {/* Security warning */}
       <Alert variant="warning">
         <AlertTriangle className="h-4 w-4" />
-        <AlertTitle>Keep this token secret</AlertTitle>
+        <AlertTitle>Store this token securely</AlertTitle>
         <AlertDescription>
-          This token grants access to your datasource configuration. Do not share it publicly or commit it to version control.
+          This token authenticates your Kyomi Connect agent. Do not share it publicly or commit it to version control.
         </AlertDescription>
       </Alert>
 
