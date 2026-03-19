@@ -227,25 +227,25 @@ pub async fn find_or_create_platform_session(
 
     // Create new session — match column list from existing session creation code.
     let session_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now();
-    let now_str = now.to_rfc3339();
     let title: Option<&str> = None;
+    let now_expr = crate::sql_compat::now(db.is_postgres());
 
-    crate::db_execute!(
-        db,
+    let sql = format!(
         "INSERT INTO chat_sessions \
          (session_id, user_id, workspace_id, title, session_type, shared, \
           platform_type, platform_thread_key, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, 'chat', $5, $6, $7, $8, $9)",
+         VALUES ($1, $2, $3, $4, 'chat', $5, $6, $7, {now_expr}, {now_expr})"
+    );
+    crate::db_execute!(
+        db,
+        &sql,
         &session_id,
         user_id,
         workspace_id,
         title,
         is_shared,
         &thread.platform,
-        &thread.thread_key,
-        &now_str,
-        &now_str
+        &thread.thread_key
     )?;
 
     tracing::info!(
@@ -301,20 +301,22 @@ pub async fn upsert_workspace_integration(
     installed_by: &str,
 ) -> crate::Result<()> {
     let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now_expr = crate::sql_compat::now(db.is_postgres());
 
+    let sql = format!(
+        "INSERT INTO workspace_integrations (id, workspace_id, platform_type, config, installed_by, installed_at) \
+         VALUES ($1, $2, $3, $4, $5, {now_expr}) \
+         ON CONFLICT (workspace_id, platform_type) \
+         DO UPDATE SET config = $4, installed_by = $5"
+    );
     crate::db_execute!(
         db,
-        "INSERT INTO workspace_integrations (id, workspace_id, platform_type, config, installed_by, installed_at) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         ON CONFLICT (workspace_id, platform_type) \
-         DO UPDATE SET config = $4, installed_by = $5",
+        &sql,
         &id,
         workspace_id,
         platform_type,
         config,
-        installed_by,
-        &now
+        installed_by
     )?;
     Ok(())
 }
