@@ -9,6 +9,7 @@
 //! Design system: `docs/DESIGN_SYSTEM.md`
 
 pub mod action_status;
+pub mod badge;
 pub mod button;
 pub mod card;
 pub mod confirm_dialog;
@@ -21,6 +22,7 @@ pub mod toast;
 
 // Re-export commonly used components
 pub use action_status::ActionStatus;
+pub use badge::{Badge, BadgeVariant};
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle};
 pub use confirm_dialog::ConfirmDialog;
