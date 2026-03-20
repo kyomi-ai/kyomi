@@ -52,9 +52,20 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
     let user_ctx = Resource::new(|| (), |_| get_user_context());
     provide_context(user_ctx);
 
-    // For the POC, we show all common tabs but only Profile is active in Leptos.
-    // Other tabs navigate to the React app.
-    let active_tab = "profile";
+    // Derive active tab from the current URL path.
+    let active_tab = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::window()
+                .and_then(|w| w.location().pathname().ok())
+                .and_then(|p| p.strip_prefix("/settings/").map(|s| s.to_string()))
+                .unwrap_or_else(|| "profile".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            "profile".to_string()
+        }
+    };
 
     view! {
         <div class="w-full space-y-8" style:display="block">
