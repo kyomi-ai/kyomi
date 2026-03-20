@@ -20,6 +20,8 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::server_fns::context::get_user_context;
+
 /// Settings tab definition.
 struct SettingsTab {
     id: &'static str,
@@ -41,10 +43,15 @@ const TABS: &[SettingsTab] = &[
 
 /// Settings shell component — wraps settings tab content.
 ///
-/// For the POC, only the Profile tab is implemented in Leptos.
-/// Other tabs link to the React settings page (full page nav).
+/// Fetches `UserContext` once via server function and provides it to all child
+/// components via Leptos context. Settings tabs read it with
+/// `expect_context::<Resource<Result<UserContext, ServerFnError>>>()`.
 #[component]
 pub fn SettingsShell(children: Children) -> impl IntoView {
+    // Fetch user context once — all settings tabs share this resource.
+    let user_ctx = Resource::new(|| (), |_| get_user_context());
+    provide_context(user_ctx);
+
     // For the POC, we show all common tabs but only Profile is active in Leptos.
     // Other tabs navigate to the React app.
     let active_tab = "profile";

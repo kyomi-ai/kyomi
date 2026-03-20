@@ -21,8 +21,10 @@ pub use app::App;
 #[cfg(feature = "ssr")]
 pub fn register_server_functions() {
     use leptos::server_fn::axum::register_explicit;
-    use server_fns::profile::*;
+    use server_fns::context::*;
+    register_explicit::<GetUserContext>();
 
+    use server_fns::profile::*;
     register_explicit::<GetProfile>();
     register_explicit::<GetDashboards>();
     register_explicit::<GetPendingInvitations>();
