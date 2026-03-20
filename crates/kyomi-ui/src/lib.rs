@@ -78,6 +78,12 @@ pub fn register_server_functions() {
     register_explicit::<ListOwnershipTransfers>();
     register_explicit::<CancelOwnershipTransfer>();
 
+    use server_fns::datasources::*;
+    register_explicit::<ListDatasources>();
+    register_explicit::<GetDatasourceTypes>();
+    register_explicit::<ToggleDatasource>();
+    register_explicit::<DeleteDatasource>();
+
     use server_fns::workspace::*;
     register_explicit::<GetWorkspaceSettings>();
     register_explicit::<UpdateWorkspaceName>();

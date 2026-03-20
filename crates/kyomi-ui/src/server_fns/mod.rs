@@ -14,6 +14,7 @@
 
 pub mod analytics;
 pub mod context;
+pub mod datasources;
 pub mod profile;
 pub mod security;
 pub mod sidebar;
