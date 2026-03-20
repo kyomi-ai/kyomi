@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [features]
 default = ["slack"]
-slack = ["dep:kyomi-slack"]
+slack = ["dep:kyomi-slack", "kyomi-ui/slack"]
 
 [dependencies]
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }

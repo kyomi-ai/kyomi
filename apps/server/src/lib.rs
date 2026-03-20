@@ -88,12 +88,28 @@ pub async fn auto_provision_personal_mode(db: &DbPool) -> Result<(), kyomi_core:
     Ok(())
 }
 
+/// Optional components that platform-specific features inject into the
+/// Leptos server-function context. Passed to [`build_router`] so the
+/// server-context struct can include them without adding enterprise
+/// dependencies to `AppState`.
+#[derive(Default)]
+pub struct ServerExtras {
+    /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
+    /// Present only when the `slack` feature is enabled and Slack is configured.
+    #[cfg(feature = "slack")]
+    pub slack_client: Option<kyomi_slack::client::SlackClient>,
+}
+
 /// Build the axum Router with all core routes and middleware.
 ///
 /// Returns a `Router<()>` (state already applied). Platform-specific routes
 /// (e.g. Slack) can be merged into this router before wrapping with
 /// `NormalizePathLayer`.
-pub fn build_router(state: state::AppState) -> Router {
+///
+/// `extras` carries optional platform-specific components (e.g. Slack client)
+/// that need to reach the Leptos server-function context without polluting
+/// `AppState`.
+pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
     let demo_mode = state.config.demo_mode;
 
     Router::new()
@@ -166,6 +182,10 @@ pub fn build_router(state: state::AppState) -> Router {
                 db: state.db.clone(),
                 config: state.config.clone(),
                 auth_state: kyomi_auth::middleware::AuthState::from_ref(&state),
+                encryption_key: Some(state.encryption_key.clone()),
+                kv: Some(state.kv.clone()),
+                #[cfg(feature = "slack")]
+                slack_client: extras.slack_client,
             };
             move |req: axum::http::Request<axum::body::Body>| {
                 let ctx = server_ctx.clone();
@@ -242,5 +262,5 @@ pub fn build_service(
     tower_http::normalize_path::NormalizePath<Router>,
     SocketAddr,
 > {
-    wrap_service(build_router(state))
+    wrap_service(build_router(state, ServerExtras::default()))
 }

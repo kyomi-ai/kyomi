@@ -222,7 +222,7 @@ async fn lookup_workspace_by_team_id(
 /// Get the decrypted Slack bot token from the workspace integration config.
 ///
 /// Returns `None` if no Slack integration exists or the config has no bot_token.
-pub(crate) async fn get_slack_bot_token(
+pub async fn get_slack_bot_token(
     db: &DbPool,
     encryption_key: &[u8; 32],
     workspace_id: &str,

@@ -40,4 +40,15 @@ pub fn register_server_functions() {
     use server_fns::sidebar::*;
     register_explicit::<GetRecentSessions>();
     register_explicit::<GetSidebarUser>();
+
+    #[cfg(feature = "slack")]
+    {
+        use server_fns::slack::*;
+        register_explicit::<GetSlackStatus>();
+        register_explicit::<SlackConnect>();
+        register_explicit::<SlackDisconnect>();
+        register_explicit::<GetSlackChannels>();
+        register_explicit::<GetDefaultWatchChannel>();
+        register_explicit::<SetDefaultWatchChannel>();
+    }
 }

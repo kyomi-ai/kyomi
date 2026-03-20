@@ -23,6 +23,8 @@ hydrate = [
     "leptos/hydrate",
     "leptos/csr",
 ]
+# Slack integration — adds server functions for Slack connection management
+slack = ["dep:kyomi-slack", "dep:chrono"]
 
 [dependencies]
 # Leptos framework
@@ -64,6 +66,10 @@ tracing = { workspace = true }
 kyomi-core = { workspace = true, optional = true }
 kyomi-auth = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
+
+# Enterprise crates (optional, behind feature flags)
+kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
+chrono = { workspace = true, optional = true }
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }

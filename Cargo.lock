@@ -4165,6 +4165,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "chrono",
  "console_error_panic_hook",
  "gloo-timers",
  "icondata_core",
@@ -4172,6 +4173,7 @@ dependencies = [
  "js-sys",
  "kyomi-auth",
  "kyomi-core",
+ "kyomi-slack",
  "leptos",
  "leptos_axum",
  "leptos_icons",

@@ -408,7 +408,16 @@ async fn main() {
     );
 
     // Build the core router, then conditionally mount platform-specific routes.
-    let router = kyomi_server::build_router(state);
+    let extras = {
+        #[allow(unused_mut)]
+        let mut e = kyomi_server::ServerExtras::default();
+        #[cfg(feature = "slack")]
+        {
+            e.slack_client = Some(slack_state.slack_client.clone());
+        }
+        e
+    };
+    let router = kyomi_server::build_router(state, extras);
 
     #[cfg(feature = "slack")]
     let router = router.nest(
