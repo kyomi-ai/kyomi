@@ -151,16 +151,7 @@ pub fn ProfilePage() -> impl IntoView {
                                     <PreferencesCard data=data_prefs dashboards=dash_list/>
 
                                     // Slack Connection — hidden in personal mode (feature-gated)
-                                    #[cfg(feature = "slack")]
-                                    {
-                                        if !is_personal {
-                                            view! {
-                                                <crate::pages::settings::slack_connection::SlackConnectionCard/>
-                                            }.into_any()
-                                        } else {
-                                            view! { <span class="hidden"></span> }.into_any()
-                                        }
-                                    }
+                                    <SlackSection is_personal=is_personal/>
 
                                     // TODO: PushNotificationsCard — requires full PushManager.subscribe() + server registration flow
 
@@ -862,3 +853,24 @@ fn InvitationsCard(invitations: Vec<crate::types::InvitationData>) -> impl IntoV
     }
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slack section — feature-gated wrapper to avoid cfg inside view! macro
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "slack")]
+#[component]
+fn SlackSection(is_personal: bool) -> impl IntoView {
+    if !is_personal {
+        view! { <crate::pages::settings::slack_connection::SlackConnectionCard/> }.into_any()
+    } else {
+        view! { <span></span> }.into_any()
+    }
+}
+
+#[cfg(not(feature = "slack"))]
+#[component]
+fn SlackSection(is_personal: bool) -> impl IntoView {
+    let _ = is_personal;
+    view! { <span></span> }
+}

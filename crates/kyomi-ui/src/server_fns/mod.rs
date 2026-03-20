@@ -14,6 +14,7 @@
 
 pub mod context;
 pub mod profile;
+pub mod security;
 pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;

@@ -37,6 +37,11 @@ pub fn register_server_functions() {
     register_explicit::<AcceptInvitation>();
     register_explicit::<DeclineInvitation>();
 
+    use server_fns::security::*;
+    register_explicit::<HasPassword>();
+    register_explicit::<SetPassword>();
+    register_explicit::<ChangePassword>();
+
     use server_fns::sidebar::*;
     register_explicit::<GetRecentSessions>();
     register_explicit::<GetSidebarUser>();
