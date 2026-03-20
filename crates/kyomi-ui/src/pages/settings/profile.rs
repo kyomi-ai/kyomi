@@ -149,6 +149,21 @@ pub fn ProfilePage() -> impl IntoView {
                                     </Show>
                                     <AppearanceCard data=data_appearance/>
                                     <PreferencesCard data=data_prefs dashboards=dash_list/>
+
+                                    // Slack Connection — hidden in personal mode (feature-gated)
+                                    #[cfg(feature = "slack")]
+                                    {
+                                        if !is_personal {
+                                            view! {
+                                                <crate::pages::settings::slack_connection::SlackConnectionCard/>
+                                            }.into_any()
+                                        } else {
+                                            view! { <span class="hidden"></span> }.into_any()
+                                        }
+                                    }
+
+                                    // TODO: PushNotificationsCard — requires full PushManager.subscribe() + server registration flow
+
                                     <McpConnectionCard is_personal=is_personal/>
 
                                     // AI Provider — personal mode only
