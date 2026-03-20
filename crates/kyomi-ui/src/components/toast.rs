@@ -108,7 +108,7 @@ pub fn ToastProvider(children: Children) -> impl IntoView {
 #[component]
 fn ToastContainer(state: ToastState) -> impl IntoView {
     view! {
-        <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+        <div class="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
             <For
                 each=move || state.toasts.get()
                 key=|toast| toast.id

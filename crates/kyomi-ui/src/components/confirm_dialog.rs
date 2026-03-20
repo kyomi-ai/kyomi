@@ -54,17 +54,18 @@ pub fn ConfirmDialog(
     /// Called when the user cancels (or clicks backdrop).
     on_cancel: Callback<()>,
 ) -> impl IntoView {
+    // Match Button component variant classes exactly (from button.jsx)
     let confirm_btn_class = if destructive {
-        "px-4 py-2 rounded-md text-sm font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90"
     } else {
-        "px-4 py-2 rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+        "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
     };
 
     view! {
         <Show when=move || open.get()>
             // Backdrop
             <div
-                class="fixed inset-0 z-50 bg-overlay flex items-center justify-center"
+                class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"
                 on:click=move |_| on_cancel.run(())
             >
                 // Dialog
@@ -80,7 +81,7 @@ pub fn ConfirmDialog(
                     </p>
                     <div class="flex justify-end gap-3">
                         <button
-                            class="px-4 py-2 rounded-md text-sm font-medium border border-border text-foreground hover:bg-accent transition-colors"
+                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
                             on:click=move |_| on_cancel.run(())
                         >
                             {cancel_text.clone()}

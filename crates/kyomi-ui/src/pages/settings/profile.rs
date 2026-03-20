@@ -8,7 +8,8 @@
 use leptos::prelude::*;
 
 use crate::components::{
-    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, StyledSelect,
+    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label, StyledSelect,
+    INPUT_CLASS,
 };
 use crate::server_fns::profile::*;
 use crate::types::{DashboardSummary, ProfileData};
@@ -210,10 +211,10 @@ fn ProfileInfoCard(data: ProfileData) -> impl IntoView {
             <CardContent>
                 <div class="space-y-4 max-w-md">
                     <div class="space-y-2">
-                        <label class="text-sm font-medium text-foreground">"Name"</label>
+                        <Label>"Name"</Label>
                         <input
                             type="text"
-                            class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                            class=INPUT_CLASS
                             placeholder="Your name"
                             prop:value=name
                             on:input=move |ev| set_name.set(event_target_value(&ev))
@@ -221,10 +222,10 @@ fn ProfileInfoCard(data: ProfileData) -> impl IntoView {
                         />
                     </div>
                     <div class="space-y-2">
-                        <label class="text-sm font-medium text-foreground">"Email"</label>
+                        <Label>"Email"</Label>
                         <input
                             type="email"
-                            class="flex h-10 w-full rounded-md border border-input bg-muted px-3 py-2 text-sm text-muted-foreground cursor-not-allowed"
+                            class=format!("{INPUT_CLASS} bg-muted text-muted-foreground")
                             disabled=true
                             prop:value=data.email.clone()
                         />
@@ -351,7 +352,7 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
                 <div class="space-y-6 max-w-md">
                     // Landing Page
                     <div class="space-y-2">
-                        <label class="text-sm font-medium text-foreground">"Landing Page"</label>
+                        <Label>"Landing Page"</Label>
                         <StyledSelect
                             value=landing.get_untracked()
                             options=landing_options
@@ -364,10 +365,10 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
 
                     // Default Dashboard
                     <div class="space-y-2">
-                        <label class="text-sm font-medium text-foreground">"My Default Dashboard"</label>
+                        <Label>"My Default Dashboard"</Label>
                         <select
-                            class="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground transition-colors hover:border-ring focus:outline-none focus:border-ring appearance-none cursor-pointer"
-                            style="background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2.5rem;"
+                            class=crate::components::select::SELECT_CLASS
+                            style=crate::components::select::CHEVRON_STYLE
                             on:change=move |ev| {
                                 dashboard_action.dispatch(event_target_value(&ev));
                             }
@@ -507,7 +508,7 @@ fn QueryRetentionCard(data: ProfileData) -> impl IntoView {
             </CardHeader>
             <CardContent>
                 <div class="max-w-md space-y-2">
-                    <label class="text-sm font-medium text-foreground">"Retention Period"</label>
+                    <Label>"Retention Period"</Label>
                     <StyledSelect
                         value=initial_value
                         options=options

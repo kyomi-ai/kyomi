@@ -1,42 +1,51 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Card components — matches shadcn/ui Card pattern.
-//!
-//! Provides Card, CardHeader, CardContent, CardTitle, and CardDescription
-//! as reusable building blocks for settings pages, dashboards, etc.
+//! Card components — matches `apps/frontend/src/components/ui/card.jsx` exactly.
 
 use leptos::prelude::*;
 
-/// Card container with border, shadow, and rounded corners.
+/// Card container.
+/// React: `rounded-xl border border-border bg-card text-card-foreground shadow`
 #[component]
 pub fn Card(children: Children) -> impl IntoView {
     view! {
-        <div class="bg-card rounded-xl shadow-sm border border-border overflow-hidden">
+        <div class="rounded-xl border border-border bg-card text-card-foreground shadow">
             {children()}
         </div>
     }
 }
 
-/// Card header section — typically contains title and description.
+/// Card header section.
+/// React: `flex flex-col space-y-1.5 p-6`
 #[component]
 pub fn CardHeader(children: Children) -> impl IntoView {
-    view! { <div class="p-6 pb-2">{children()}</div> }
+    view! { <div class="flex flex-col space-y-1.5 p-6">{children()}</div> }
 }
 
-/// Card content section — the main body below the header.
+/// Card content section.
+/// React: `p-6 pt-0`
 #[component]
 pub fn CardContent(children: Children) -> impl IntoView {
-    view! { <div class="p-6 pt-4">{children()}</div> }
+    view! { <div class="p-6 pt-0">{children()}</div> }
 }
 
-/// Card title — semibold heading text.
+/// Card title.
+/// React: `font-semibold leading-none tracking-tight`
 #[component]
 pub fn CardTitle(children: Children) -> impl IntoView {
-    view! { <h3 class="text-lg font-semibold text-foreground">{children()}</h3> }
+    view! { <div class="font-semibold leading-none tracking-tight">{children()}</div> }
 }
 
-/// Card description — muted text below the title.
+/// Card description.
+/// React: `text-sm text-muted-foreground`
 #[component]
 pub fn CardDescription(children: Children) -> impl IntoView {
-    view! { <p class="text-sm text-muted-foreground mt-1">{children()}</p> }
+    view! { <div class="text-sm text-muted-foreground">{children()}</div> }
+}
+
+/// Card footer.
+/// React: `flex items-center p-6 pt-0`
+#[component]
+pub fn CardFooter(children: Children) -> impl IntoView {
+    view! { <div class="flex items-center p-6 pt-0">{children()}</div> }
 }

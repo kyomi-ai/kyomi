@@ -3393,6 +3393,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "icondata_core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c97be924215abd5e630d84e95a47c710138a6559b4c55039f4f33aa897fa859"
+
+[[package]]
+name = "icondata_lu"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f25663a6cc5371e9e33c98bab870f4aa2fd68c88853f1467c8fccfaf112782b1"
+dependencies = [
+ "icondata_core",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4140,11 +4155,14 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "console_error_panic_hook",
+ "icondata_core",
+ "icondata_lu",
  "js-sys",
  "kyomi-auth",
  "kyomi-core",
  "leptos",
  "leptos_axum",
+ "leptos_icons",
  "leptos_meta",
  "leptos_router",
  "serde",
@@ -4286,6 +4304,16 @@ dependencies = [
  "serde",
  "syn 2.0.114",
  "walkdir",
+]
+
+[[package]]
+name = "leptos_icons"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "274959df1a852fc431b03f27d9cd3129fb0f8cca9c8d383e4d668f62543cbec9"
+dependencies = [
+ "icondata_core",
+ "leptos",
 ]
 
 [[package]]

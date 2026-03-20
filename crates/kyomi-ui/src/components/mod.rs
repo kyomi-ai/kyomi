@@ -2,20 +2,30 @@
 
 //! Shared UI components for the Leptos frontend.
 //!
-//! These components follow the shadcn/ui design pattern and use
-//! Kyomi's Tailwind design tokens. They are reusable across all pages.
+//! These components match the React shadcn/ui components in
+//! `apps/frontend/src/components/ui/` exactly. Classes are copied
+//! from the React source, not approximated.
+//!
+//! Design system: `docs/DESIGN_SYSTEM.md`
 
 pub mod action_status;
+pub mod button;
 pub mod card;
 pub mod confirm_dialog;
-pub mod icons;
+pub mod input;
+pub mod label;
+pub mod layout;
 pub mod select;
 pub mod theme;
 pub mod toast;
 
-// Re-export commonly used components for convenience
+// Re-export commonly used components
 pub use action_status::ActionStatus;
-pub use card::{Card, CardContent, CardDescription, CardHeader, CardTitle};
+pub use button::{Button, ButtonSize, ButtonVariant};
+pub use card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle};
 pub use confirm_dialog::ConfirmDialog;
+pub use input::INPUT_CLASS;
+pub use label::Label;
+pub use layout::Layout;
 pub use select::StyledSelect;
 pub use theme::ThemeProvider;
