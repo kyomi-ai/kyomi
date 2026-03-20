@@ -9,6 +9,7 @@
 //! Design system: `docs/DESIGN_SYSTEM.md`
 
 pub mod action_status;
+pub mod alert;
 pub mod badge;
 pub mod button;
 pub mod card;
@@ -17,11 +18,13 @@ pub mod input;
 pub mod label;
 pub mod layout;
 pub mod select;
+pub mod status_badge;
 pub mod theme;
 pub mod toast;
 
 // Re-export commonly used components
 pub use action_status::ActionStatus;
+pub use alert::{Alert, AlertDescription, AlertTitle, AlertVariant};
 pub use badge::{Badge, BadgeVariant};
 pub use button::{Button, ButtonSize, ButtonVariant};
 pub use card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle};
@@ -30,4 +33,5 @@ pub use input::INPUT_CLASS;
 pub use label::Label;
 pub use layout::Layout;
 pub use select::StyledSelect;
+pub use status_badge::{StatusBadge, StatusBadgeVariant};
 pub use theme::ThemeProvider;
