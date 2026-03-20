@@ -41,6 +41,10 @@ pub fn register_server_functions() {
     register_explicit::<HasPassword>();
     register_explicit::<SetPassword>();
     register_explicit::<ChangePassword>();
+    register_explicit::<GetTotpStatus>();
+    register_explicit::<SetupTotp>();
+    register_explicit::<EnableTotp>();
+    register_explicit::<DisableTotp>();
 
     use server_fns::sidebar::*;
     register_explicit::<GetRecentSessions>();

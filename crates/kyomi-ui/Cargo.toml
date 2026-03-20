@@ -17,6 +17,7 @@ ssr = [
     "dep:kyomi-core",
     "dep:kyomi-auth",
     "dep:axum",
+    "dep:chrono",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -69,7 +70,7 @@ axum = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
-chrono = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }  # used by: slack, ssr (TOTP enabled_at)
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }

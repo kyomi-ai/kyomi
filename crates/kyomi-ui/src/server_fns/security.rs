@@ -2,16 +2,35 @@
 
 //! Server functions for Security settings.
 //!
-//! These replace the REST API calls for password management:
+//! These replace the REST API calls for password and TOTP management:
 //! - `POST /auth/set-password` -> `set_password()`
 //! - `POST /auth/change-password` -> `change_password()`
+//! - `GET  /auth/2fa/status` -> `get_totp_status()`
+//! - `POST /auth/2fa/setup` -> `setup_totp()`
+//! - `POST /auth/2fa/enable` -> `enable_totp()`
+//! - `POST /auth/2fa/disable` -> `disable_totp()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/auth_password.rs`.
+//! Calls the same service-layer code as `apps/server/src/routes/auth_password.rs`
+//! and `apps/server/src/routes/auth_totp.rs`.
 
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context};
+
+/// TOTP status returned by `get_totp_status()`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TotpStatus {
+    pub enabled: bool,
+}
+
+/// TOTP setup data returned by `setup_totp()`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TotpSetup {
+    pub secret: String,
+    pub qr_uri: String,
+}
 
 /// Check whether the current user has a password set.
 #[server(prefix = "/leptos-api")]
@@ -118,5 +137,134 @@ pub async fn change_password(
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok("Password changed successfully".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// TOTP 2FA server functions
+// ---------------------------------------------------------------------------
+
+/// Check whether the current user has TOTP 2FA enabled.
+///
+/// Mirrors `GET /auth/2fa/status` in `apps/server/src/routes/auth_totp.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let enabled = kyomi_auth::user_service::has_totp_enabled(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(TotpStatus { enabled })
+}
+
+/// Begin 2FA setup: generate a secret and QR code data URI.
+///
+/// The secret is stored in Redis (10 min TTL) until the user confirms with
+/// a verification code via `enable_totp()`.
+///
+/// Mirrors `POST /auth/2fa/setup` in `apps/server/src/routes/auth_totp.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    // Check not already enabled
+    let enabled = kyomi_auth::user_service::has_totp_enabled(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    if enabled {
+        return Err(ServerFnError::new("2FA is already enabled"));
+    }
+
+    let secret = kyomi_auth::totp::generate_secret();
+    let qr_uri = kyomi_auth::totp::generate_qr_code(&secret, &auth.email)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Store pending secret in Redis (10 min TTL)
+    let kv = ctx
+        .kv
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    kyomi_auth::redis_ops::store_pending_totp(kv, &auth.user_id, &secret)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(TotpSetup { secret, qr_uri })
+}
+
+/// Confirm 2FA setup by verifying a TOTP code against the pending secret.
+///
+/// On success the secret is persisted in `user_auth_methods`. On failure the
+/// pending secret is re-stored in Redis so the user can retry.
+///
+/// Mirrors `POST /auth/2fa/enable` in `apps/server/src/routes/auth_totp.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let kv = ctx
+        .kv
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Get pending secret from Redis (atomic get+delete)
+    let secret = kyomi_auth::redis_ops::get_pending_totp(kv, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let Some(secret) = secret else {
+        return Err(ServerFnError::new(
+            "No pending 2FA setup found. Please start the setup process again.",
+        ));
+    };
+
+    // Verify the code
+    if !kyomi_auth::totp::verify_code(&secret, &code) {
+        // Re-store secret so user can retry
+        kyomi_auth::redis_ops::store_pending_totp(kv, &auth.user_id, &secret)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+        return Err(ServerFnError::new(
+            "Invalid verification code. Please try again.",
+        ));
+    }
+
+    // Persist TOTP auth method
+    let now = chrono::Utc::now().to_rfc3339();
+    let auth_data = serde_json::json!({
+        "secret": secret,
+        "enabled_at": now,
+    });
+    kyomi_auth::user_service::upsert_auth_method(&ctx.db, &auth.user_id, "totp", &auth_data)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok("2FA has been successfully enabled".to_string())
+}
+
+/// Disable 2FA for the authenticated user.
+///
+/// Mirrors `POST /auth/2fa/disable` in `apps/server/src/routes/auth_totp.rs`.
+/// The REST handler does not require a TOTP code — it simply removes the auth
+/// method for the already-authenticated user.
+#[server(prefix = "/leptos-api")]
+pub async fn disable_totp() -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let enabled = kyomi_auth::user_service::has_totp_enabled(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    if !enabled {
+        return Err(ServerFnError::new("2FA is not currently enabled"));
+    }
+
+    kyomi_auth::user_service::remove_auth_method(&ctx.db, &auth.user_id, "totp")
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok("2FA has been successfully disabled".to_string())
 }
 
