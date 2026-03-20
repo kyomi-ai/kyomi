@@ -16,6 +16,8 @@ ssr = [
     "leptos_meta/ssr",
     "dep:kyomi-core",
     "dep:kyomi-auth",
+    "dep:kyomi-embed",
+    "dep:kyomi-knowledge",
     "dep:axum",
     "dep:chrono",
     "dep:sqlx",
@@ -73,6 +75,10 @@ axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+
+# Knowledge graph + embedding (server-only — gated behind ssr feature)
+kyomi-embed = { workspace = true, optional = true }
+kyomi-knowledge = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }

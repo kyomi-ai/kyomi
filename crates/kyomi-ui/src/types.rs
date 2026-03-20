@@ -62,3 +62,26 @@ pub struct WatchChannel {
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
 }
+
+/// Workspace settings data returned by the get_workspace_settings server function.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceSettingsData {
+    pub workspace_name: String,
+    pub default_model: String,
+    pub chart_palette: String,
+}
+
+/// Result of a knowledge graph rebuild.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GraphRebuildResult {
+    pub status: String,
+    pub learnings_with_references: i64,
+}
+
+/// Workspace-level Slack integration status.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceSlackStatus {
+    pub installed: bool,
+    pub team_id: Option<String>,
+    pub team_name: Option<String>,
+}

@@ -176,6 +176,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/settings/profile", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/security", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/usage", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/settings/workspace", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/leptos/{*path}", axum::routing::get(leptos_frontend::serve_leptos_asset))
         // Leptos server functions — typed RPC replacing REST calls
         // Uses /leptos-api/ prefix to avoid conflicts with /api/v1/ REST routes
@@ -187,6 +188,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 encryption_key: Some(state.encryption_key.clone()),
                 kv: Some(state.kv.clone()),
                 webauthn: Some(state.webauthn.clone()),
+                embedding: state.embedding.clone(),
                 #[cfg(feature = "slack")]
                 slack_client: extras.slack_client,
             };

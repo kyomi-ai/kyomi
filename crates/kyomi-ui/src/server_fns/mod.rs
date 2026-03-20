@@ -19,6 +19,7 @@ pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;
 pub mod usage;
+pub mod workspace;
 
 /// State provided to server functions via Leptos context.
 ///
@@ -43,6 +44,10 @@ pub struct ServerContext {
     /// WebAuthn instance for passkey registration/authentication.
     /// Built once at server startup from config.
     pub webauthn: Option<std::sync::Arc<webauthn_rs::Webauthn>>,
+
+    /// Lazy-loaded embedding model for knowledge graph operations.
+    /// Required by workspace admin populate-graph server function.
+    pub embedding: kyomi_embed::LazyEmbedding,
 
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.

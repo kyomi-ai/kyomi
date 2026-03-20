@@ -61,6 +61,13 @@ pub fn register_server_functions() {
     use server_fns::usage::*;
     register_explicit::<GetAiUsageStatus>();
 
+    use server_fns::workspace::*;
+    register_explicit::<GetWorkspaceSettings>();
+    register_explicit::<UpdateWorkspaceName>();
+    register_explicit::<UpdateWorkspaceModel>();
+    register_explicit::<UpdateWorkspaceChartmlConfig>();
+    register_explicit::<PopulateKnowledgeGraph>();
+
     #[cfg(feature = "slack")]
     {
         use server_fns::slack::*;
@@ -70,5 +77,13 @@ pub fn register_server_functions() {
         register_explicit::<GetSlackChannels>();
         register_explicit::<GetDefaultWatchChannel>();
         register_explicit::<SetDefaultWatchChannel>();
+
+        // Workspace-level Slack server functions
+        use server_fns::workspace::{
+            GetWorkspaceSlackStatus, GetSlackInstallUrl, UninstallWorkspaceSlack,
+        };
+        register_explicit::<GetWorkspaceSlackStatus>();
+        register_explicit::<GetSlackInstallUrl>();
+        register_explicit::<UninstallWorkspaceSlack>();
     }
 }

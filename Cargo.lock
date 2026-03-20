@@ -4173,6 +4173,8 @@ dependencies = [
  "js-sys",
  "kyomi-auth",
  "kyomi-core",
+ "kyomi-embed",
+ "kyomi-knowledge",
  "kyomi-slack",
  "leptos",
  "leptos_axum",
