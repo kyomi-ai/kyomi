@@ -41,6 +41,9 @@ COPY crates/ ./crates/
 COPY apps/server/ ./apps/server/
 COPY enterprise/ ./enterprise/
 
+# Remove desktop from workspace members (not needed for server Docker build)
+RUN sed -i '/"apps\/desktop",/d' Cargo.toml
+
 # Copy files needed for include_str!/include_bytes! paths
 COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
