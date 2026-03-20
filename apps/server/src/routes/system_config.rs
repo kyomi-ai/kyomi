@@ -8,6 +8,8 @@
 use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
 
+use kyomi_core::config::KyomiMode;
+
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -15,6 +17,10 @@ pub struct SystemConfig {
     self_hosted: bool,
     /// "community", "enterprise", or "saas"
     edition: &'static str,
+    /// "personal", "self_hosted", or "saas"
+    mode: &'static str,
+    /// Whether an LLM provider is configured (ANTHROPIC_API_KEY or LLM_API_KEY)
+    llm_configured: bool,
     features: FeatureFlags,
 }
 
@@ -36,6 +42,15 @@ struct FeatureFlags {
     website_analytics: bool,
 }
 
+/// Map the `KyomiMode` enum to the JSON string returned by the API.
+fn mode_str(mode: &KyomiMode) -> &'static str {
+    match mode {
+        KyomiMode::Personal => "personal",
+        KyomiMode::SelfHosted => "self_hosted",
+        KyomiMode::Saas => "saas",
+    }
+}
+
 pub async fn get_system_config(State(state): State<AppState>) -> Json<SystemConfig> {
     let config = &state.config;
     let self_hosted = config.self_hosted;
@@ -47,6 +62,9 @@ pub async fn get_system_config(State(state): State<AppState>) -> Json<SystemConf
     } else {
         "community"
     };
+
+    let mode = mode_str(&config.mode);
+    let llm_configured = config.llm_configured();
 
     let smtp_configured = config.smtp_configured();
     let chart_renderer_configured = config.chart_renderer_configured();
@@ -85,6 +103,8 @@ pub async fn get_system_config(State(state): State<AppState>) -> Json<SystemConf
     Json(SystemConfig {
         self_hosted,
         edition,
+        mode,
+        llm_configured,
         features,
     })
 }

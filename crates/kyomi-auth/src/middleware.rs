@@ -21,6 +21,8 @@ use crate::jwt;
 pub struct AuthState {
     pub jwt_secret: String,
     pub db: kyomi_core::DbPool,
+    /// When true, skip JWT validation and inject the local user context.
+    pub is_personal: bool,
 }
 
 /// Workspace context enriched from the database.
@@ -84,6 +86,11 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_state = AuthState::from_ref(state);
+
+        // ── Personal mode: skip JWT, inject local user ──────────────
+        if auth_state.is_personal {
+            return load_personal_user(&auth_state.db).await;
+        }
 
         // Try Authorization header first, then cookie
         let token = extract_token(parts)?;
@@ -216,6 +223,63 @@ fn extract_token(parts: &Parts) -> kyomi_core::Result<String> {
     Err(kyomi_core::Error::Unauthorized(
         "Not authenticated".into(),
     ))
+}
+
+/// Load the personal-mode user and workspace context.
+///
+/// In personal mode there is no JWT — a single local user ("user-local") and
+/// workspace ("workspace-local") are provisioned at first boot. This function
+/// loads them from the database and returns a fully-populated `AuthUser`.
+///
+/// Returns 503 if the local user doesn't exist yet (first-boot race condition).
+async fn load_personal_user(db: &kyomi_core::DbPool) -> kyomi_core::Result<AuthUser> {
+    let user = crate::user_service::get_user_by_id(db, "user-local")
+        .await
+        .map_err(|e| {
+            tracing::error!("personal mode: database error loading local user: {e}");
+            kyomi_core::Error::Internal("database error".into())
+        })?
+        .ok_or_else(|| {
+            tracing::warn!("personal mode: user-local not found — still initializing");
+            kyomi_core::Error::ServiceUnavailable(
+                "Personal mode initializing, please retry".into(),
+            )
+        })?;
+
+    let workspace = crate::user_service::get_workspace(db, "workspace-local")
+        .await
+        .map_err(|e| {
+            tracing::error!("personal mode: database error loading local workspace: {e}");
+            kyomi_core::Error::Internal("database error".into())
+        })?
+        .ok_or_else(|| {
+            tracing::warn!("personal mode: workspace-local not found — still initializing");
+            kyomi_core::Error::ServiceUnavailable(
+                "Personal mode initializing, please retry".into(),
+            )
+        })?;
+
+    let workspace_ctx = WorkspaceContext {
+        workspace_id: Some(workspace.workspace_id),
+        workspace_name: workspace.name,
+        workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
+        workspace_status: Some(workspace.status),
+        subscription_tier: workspace.subscription_tier,
+        is_owner: true,
+    };
+
+    let roles = user.roles();
+    Ok(AuthUser {
+        user_id: user.user_id,
+        email: user.email,
+        name: user.name,
+        roles,
+        active: user.active,
+        verified: user.verified,
+        workspace: workspace_ctx,
+        token_exp: None,
+        token_jti: None,
+    })
 }
 
 // Identity impl — when the state IS AuthState directly.

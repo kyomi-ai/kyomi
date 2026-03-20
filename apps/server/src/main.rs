@@ -47,6 +47,13 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
+    // Personal mode: auto-provision local user and workspace on first boot
+    if config.is_personal() {
+        kyomi_server::auto_provision_personal_mode(&db)
+            .await
+            .expect("failed to auto-provision personal mode user and workspace");
+    }
+
     // KVStore: abstracted key-value store for auth, rate limiting, and session ops.
     // Uses Redis when REDIS_URL is set; falls back to in-memory for single-instance mode.
     let redis_url = config.redis_url.clone(); // now Option<String>

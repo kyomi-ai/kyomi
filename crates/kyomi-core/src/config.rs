@@ -17,6 +17,41 @@ pub enum SelfHostedEdition {
     Enterprise,
 }
 
+/// Deployment mode for the Kyomi backend.
+///
+/// Set via `KYOMI_MODE` env var. Falls back to `SELF_HOSTED` for backward compat.
+/// - `saas`: Multi-tenant hosted service (app.kyomi.ai)
+/// - `self_hosted`: Team server with full auth (password, optional OAuth)
+/// - `personal`: Single-user desktop app — zero auth, SQLite, localhost only
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KyomiMode {
+    Saas,
+    SelfHosted,
+    Personal,
+}
+
+impl KyomiMode {
+    /// Derive the legacy `self_hosted` bool from the mode.
+    fn self_hosted(&self) -> bool {
+        matches!(self, KyomiMode::SelfHosted | KyomiMode::Personal)
+    }
+
+    /// Derive the edition from the mode.
+    /// Personal always gets Community. SelfHosted reads from `KYOMI_EDITION` env.
+    /// Saas returns Community (edition is irrelevant for SaaS).
+    fn edition(&self) -> SelfHostedEdition {
+        match self {
+            KyomiMode::SelfHosted => {
+                match env::var("KYOMI_EDITION").unwrap_or_default().to_lowercase().as_str() {
+                    "enterprise" => SelfHostedEdition::Enterprise,
+                    _ => SelfHostedEdition::Community,
+                }
+            }
+            _ => SelfHostedEdition::Community,
+        }
+    }
+}
+
 /// Central application configuration.
 ///
 /// Mirrors the Python `KyomiAPIConfig` — loaded from environment variables.
@@ -55,6 +90,10 @@ pub struct Config {
     /// Self-hosted edition. Only meaningful when `self_hosted = true`.
     /// Controls which commercial-gated features are available.
     pub edition: SelfHostedEdition,
+
+    /// Deployment mode. Determines auth strategy, database backend, and UI surface.
+    /// The `self_hosted` and `edition` fields are computed from this for backward compat.
+    pub mode: KyomiMode,
 
     /// Whether SMTP is configured at startup time.
     /// True when both `SMTP_HOST` and `SMTP_USER` env vars are set.
@@ -209,8 +248,13 @@ impl Config {
                 );
                 env::set_var("JWT_SECRET_KEY", &standalone_config.jwt_secret);
                 env::set_var("ENCRYPTION_KEY", &standalone_config.encryption_key);
-                env::set_var("SELF_HOSTED", "true");
-                env::set_var("KYOMI_EDITION", "community");
+                // Only set SELF_HOSTED if KYOMI_MODE is not already set to personal.
+                // Personal mode is distinct from self-hosted; it inherits self_hosted=true
+                // via KyomiMode::Personal.self_hosted(), but we don't pollute the env.
+                if env::var("KYOMI_MODE").unwrap_or_default().to_lowercase() != "personal" {
+                    env::set_var("SELF_HOSTED", "true");
+                    env::set_var("KYOMI_EDITION", "community");
+                }
             }
 
             // Set defaults only if not already set by user
@@ -226,6 +270,26 @@ impl Config {
                 unsafe { env::set_var("BASE_URL", format!("http://localhost:{port}")) };
             }
         }
+
+        // Determine deployment mode.
+        // KYOMI_MODE takes precedence; fall back to SELF_HOSTED for backward compat.
+        let mode = match env::var("KYOMI_MODE").unwrap_or_default().to_lowercase().as_str() {
+            "personal" => KyomiMode::Personal,
+            "self_hosted" | "selfhosted" => KyomiMode::SelfHosted,
+            "saas" => KyomiMode::Saas,
+            _ => {
+                // Backward compat: check legacy SELF_HOSTED bool
+                if env::var("SELF_HOSTED")
+                    .unwrap_or_else(|_| "false".into())
+                    .parse()
+                    .unwrap_or(false)
+                {
+                    KyomiMode::SelfHosted
+                } else {
+                    KyomiMode::Saas
+                }
+            }
+        };
 
         Self {
             database_url: required_env("DATABASE_URL"),
@@ -246,18 +310,9 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .parse()
                 .unwrap_or(false),
-            self_hosted: env::var("SELF_HOSTED")
-                .unwrap_or_else(|_| "false".into())
-                .parse()
-                .unwrap_or(false),
-            edition: if env::var("SELF_HOSTED").unwrap_or_default() == "true" {
-                match env::var("KYOMI_EDITION").unwrap_or_default().to_lowercase().as_str() {
-                    "enterprise" => SelfHostedEdition::Enterprise,
-                    _ => SelfHostedEdition::Community,
-                }
-            } else {
-                SelfHostedEdition::Community
-            },
+            self_hosted: mode.self_hosted(),
+            edition: mode.edition(),
+            mode,
             smtp_configured: env::var("SMTP_HOST").is_ok() && env::var("SMTP_USER").is_ok(),
             passkeys_enabled: env::var("PASSKEYS_ENABLED")
                 .unwrap_or_else(|_| "true".into())
@@ -344,6 +399,7 @@ impl Config {
             demo_mode: false,
             self_hosted: false,
             edition: SelfHostedEdition::Community,
+            mode: KyomiMode::Saas,
             smtp_configured: false,
             passkeys_enabled: true,
             password_auth_enabled: true,
@@ -386,6 +442,11 @@ impl Config {
     /// Always false for SaaS (self_hosted=false) — SaaS features are controlled by the capability service.
     pub fn is_enterprise(&self) -> bool {
         self.self_hosted && self.edition == SelfHostedEdition::Enterprise
+    }
+
+    /// Returns true if the server is running in personal (desktop) mode.
+    pub fn is_personal(&self) -> bool {
+        self.mode == KyomiMode::Personal
     }
 
     /// Returns true if SMTP is configured (account emails and alerts enabled).

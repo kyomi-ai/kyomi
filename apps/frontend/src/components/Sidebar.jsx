@@ -4,6 +4,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import { useCapabilities } from '../context/CapabilitiesContext';
+import { useSystemConfig } from '../context/SystemConfigContext';
 import { useWebSocket } from '../context/WebSocketContext';
 import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
 import { Badge } from './ui/badge';
@@ -40,6 +41,7 @@ const Sidebar = () => {
   const location = useLocation();
   const { user, logout, apiClient } = useAuth();
   const capabilities = useCapabilities();
+  const { isPersonalMode } = useSystemConfig();
   const { subscribe } = useWebSocket();
   const { isOpen, dialogProps, confirm } = useConfirm();
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
@@ -557,18 +559,20 @@ const Sidebar = () => {
               className={`flex items-center w-full h-10 hover:bg-accent rounded-lg transition-colors ${
                 isSidebarCollapsed ? 'gap-3 px-2' : 'gap-3 pl-2 pr-3 py-2.5'
               }`}
-              aria-label={user?.name || user?.email || 'User'}
+              aria-label={isPersonalMode ? 'Settings' : (user?.name || user?.email || 'User')}
             >
               <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
                 <span className="text-xs font-medium text-primary-foreground">
-                  {user?.name?.charAt(0) || user?.email?.charAt(0) || 'U'}
+                  {isPersonalMode ? '⚙' : (user?.name?.charAt(0) || user?.email?.charAt(0) || 'U')}
                 </span>
               </div>
               <div className={`flex-1 min-w-0 text-left overflow-hidden transition-all duration-300 ${isSidebarCollapsed ? 'opacity-0 w-0' : 'opacity-100'}`}>
-                <div className="text-sm font-medium text-foreground truncate">{user?.name || user?.email || 'User'}</div>
+                <div className="text-sm font-medium text-foreground truncate">{isPersonalMode ? 'Settings' : (user?.name || user?.email || 'User')}</div>
+                {!isPersonalMode && (
                 <div className="text-xs text-muted-foreground truncate">
                   {user?.workspace_name || 'My Workspace'}
                 </div>
+                )}
               </div>
               <svg className={`w-4 h-4 text-muted-foreground flex-shrink-0 transition-all duration-300 ${isUserMenuOpen ? 'rotate-180' : ''} ${isSidebarCollapsed ? 'opacity-0 w-0' : 'opacity-100'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -580,13 +584,15 @@ const Sidebar = () => {
 
         {isUserMenuOpen && (
           <div className="absolute bottom-full left-0 mb-2 bg-popover border border-border rounded-lg shadow-lg py-1 z-50 min-w-48">
-            {/* User Info Header */}
+            {/* User Info Header — hide email in personal mode */}
+            {!isPersonalMode && (
             <div className="px-4 py-3 border-b border-border">
               <div className="text-sm font-medium text-popover-foreground">{user?.name || 'User'}</div>
               <div className="text-xs text-muted-foreground truncate">{user?.email}</div>
             </div>
-            {/* Workspace Switcher - only show if user belongs to 2+ workspaces */}
-            {workspaces.length > 1 && (
+            )}
+            {/* Workspace Switcher - only show if user belongs to 2+ workspaces, hidden in personal mode */}
+            {!isPersonalMode && workspaces.length > 1 && (
               <WorkspaceSwitcher
                 workspaces={workspaces}
                 currentWorkspaceId={user?.workspace_id}
@@ -631,18 +637,20 @@ const Sidebar = () => {
               </svg>
               <span>Send Feedback</span>
             </button>
-            <button
-              onClick={() => {
-                handleLogout();
-                setIsUserMenuOpen(false);
-              }}
-              className="w-full text-left px-4 py-2 text-sm text-error-foreground hover:bg-error/10 flex items-center space-x-3"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
-              <span>Logout</span>
-            </button>
+            {!isPersonalMode && (
+              <button
+                onClick={() => {
+                  handleLogout();
+                  setIsUserMenuOpen(false);
+                }}
+                className="w-full text-left px-4 py-2 text-sm text-error-foreground hover:bg-error/10 flex items-center space-x-3"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                <span>Logout</span>
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -12,6 +12,7 @@
  * - Create and edit mode support
  */
 import { useState, useEffect, useCallback } from 'react';
+import { useSystemConfig } from '../../../context/SystemConfigContext';
 import {
   Database,
   Check,
@@ -89,6 +90,8 @@ export default function DatasourceModal({
   showDeleteButton = true,
   user = null,
 }) {
+  const { isPersonalMode } = useSystemConfig();
+
   // ==========================================================================
   // STATE
   // ==========================================================================
@@ -1757,8 +1760,8 @@ export default function DatasourceModal({
           </div>
         )}
 
-        {/* Connection Method selector (Connect vs Direct) — create mode only */}
-        {isCreateMode && schema?.connectSupported && (
+        {/* Connection Method selector (Connect vs Direct) — create mode only, not in personal mode */}
+        {isCreateMode && schema?.connectSupported && !isPersonalMode && (
           <div className="mb-2">
             <label className="text-sm font-medium text-foreground mb-3 block">Connection Method</label>
             <div className="grid grid-cols-2 gap-3">

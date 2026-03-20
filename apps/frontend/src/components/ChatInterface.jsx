@@ -19,6 +19,10 @@ import { processThinkingEvent } from '../hooks/useAgentThinking';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import AgentThinking from './AgentThinking';
 import { Alert, AlertDescription } from './ui/alert';
+import { useSystemConfig } from '../context/SystemConfigContext';
+import { useNavigate } from 'react-router-dom';
+import { Button } from './ui/button';
+import { MessageSquare, Settings, ExternalLink } from 'lucide-react';
 
 /**
  * Memoized message component
@@ -147,6 +151,8 @@ export function ChatInterface({
   const { apiClient } = useAuth();
   const { subscribe, connectionState, send: sendWebSocketMessage } = useWebSocket();
   const { creditsExhausted, subscriptionTier } = useCapabilities();
+  const { isPersonalMode, llmConfigured } = useSystemConfig();
+  const navigate = useNavigate();
   const chatState = useChatState();
 
   const [messages, setMessages] = useState([]);
@@ -477,6 +483,47 @@ export function ChatInterface({
   const aiDisabledMessage = 'AI budget exhausted for this month. Upgrade for more capacity.';
 
   const isSidebar = variant === 'sidebar';
+
+  // In personal mode without an LLM configured, show empty state instead of chat
+  if (isPersonalMode && !llmConfigured) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
+        <div className="max-w-md w-full bg-card border border-border rounded-xl p-8 shadow-sm text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+            <MessageSquare className="w-8 h-8 text-primary" />
+          </div>
+
+          <h2 className="text-2xl font-semibold text-foreground mb-3">
+            Chat requires an AI provider
+          </h2>
+
+          <p className="text-muted-foreground mb-6">
+            Use Kyomi from Claude Code via MCP, or add your own API key in Settings.
+          </p>
+
+          <div className="flex flex-col gap-3">
+            <Button
+              onClick={() => navigate('/settings')}
+              size="lg"
+              className="w-full"
+            >
+              <Settings className="w-5 h-5 mr-2" />
+              Open Settings
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => navigate('/setup')}
+              size="lg"
+              className="w-full"
+            >
+              <ExternalLink className="w-5 h-5 mr-2" />
+              Learn about MCP
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`flex flex-col h-full min-h-0 ${isSidebar ? '' : 'bg-muted'}`}>

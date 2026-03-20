@@ -5,6 +5,7 @@ import authService from '../services/authService';
 import { API_CONFIG } from '../config/api.js';
 import { Spinner } from '../components/ui/spinner';
 import { useTheme } from './ThemeContext';
+import { useSystemConfig } from './SystemConfigContext';
 
 // Export context so TrialAuthProvider can use the same context reference
 export const AuthContext = createContext();
@@ -37,13 +38,23 @@ export function AuthProvider({ children }) {
   const [userChartMLConfig, setUserChartMLConfig] = useState(null);
   const [workspaceChartMLConfig, setWorkspaceChartMLConfig] = useState(null);
   const { setThemeFromServer } = useTheme();
+  const { isPersonalMode, loading: systemConfigLoading } = useSystemConfig();
 
   const apiClientInstance = apiClient;
 
   useEffect(() => {
-    initializeAuth();
+    // Wait for system config to finish loading before initializing auth
+    if (systemConfigLoading) return;
 
-    // Listen for authentication failures from API client
+    if (isPersonalMode) {
+      initializePersonalMode();
+    } else {
+      initializeAuth();
+    }
+
+    // Listen for authentication failures from API client (not needed in personal mode)
+    if (isPersonalMode) return;
+
     const handleAuthFailed = (event) => {
       setAuthState(AUTH_STATES.UNAUTHENTICATED);
       setUser(null);
@@ -66,7 +77,7 @@ export function AuthProvider({ children }) {
     return () => {
       window.removeEventListener('auth-failed', handleAuthFailed);
     };
-  }, []);
+  }, [systemConfigLoading, isPersonalMode]);
 
   const fetchChartMLConfigs = async () => {
     try {
@@ -83,6 +94,26 @@ export function AuthProvider({ children }) {
       }
     } catch (error) {
       // Non-critical error - don't fail authentication
+    }
+  };
+
+  const initializePersonalMode = async () => {
+    try {
+      // In personal mode, the backend auto-authenticates all requests.
+      // Just fetch the profile directly — no tokens or cookies needed.
+      const response = await apiClientInstance.get('/api/v1/auth/profile');
+      setUser(response.data);
+      setAuthState(AUTH_STATES.AUTHENTICATED);
+      setThemeFromServer(response.data.extra_metadata?.theme);
+      fetchChartMLConfigs();
+    } catch (error) {
+      // Personal mode should always succeed — if it doesn't, something is
+      // seriously wrong with the backend. Set error state but don't redirect
+      // to login (there is no login in personal mode).
+      setUser(null);
+      setAuthState(AUTH_STATES.AUTHENTICATED); // Still mark as authenticated so the app doesn't redirect to login
+    } finally {
+      setLoading(false);
     }
   };
 

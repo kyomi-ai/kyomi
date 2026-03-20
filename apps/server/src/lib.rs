@@ -25,6 +25,68 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::normalize_path::NormalizePathLayer;
 use tower_http::trace::TraceLayer;
 
+use kyomi_core::db::DbPool;
+use kyomi_core::sql_compat;
+use kyomi_core::{db_execute, db_fetch_scalar};
+
+/// Auto-provision a local user and workspace for personal (desktop) mode.
+///
+/// Called once at startup when `config.is_personal()` is true. If the `users`
+/// table is empty, creates a fixed local user, workspace, and membership so the
+/// app is immediately usable without any signup or authentication flow.
+///
+/// Idempotent: skips silently if any users already exist.
+pub async fn auto_provision_personal_mode(db: &DbPool) -> Result<(), kyomi_core::Error> {
+    let is_pg = db.is_postgres();
+
+    let user_count: i64 = db_fetch_scalar!(db, i64, "SELECT COUNT(*) FROM users")?;
+    if user_count > 0 {
+        return Ok(());
+    }
+
+    let now = sql_compat::now(is_pg);
+    let bool_true = sql_compat::bool_true(is_pg);
+
+    // Create local user
+    let user_sql = format!(
+        "INSERT INTO users (user_id, email, name, verified, active, created_at, updated_at) \
+         VALUES ($1, $2, $3, {bool_true}, {bool_true}, {now}, {now})"
+    );
+    db_execute!(db, &user_sql, "user-local", "local@localhost", "Local User")?;
+
+    // Create workspace
+    let workspace_sql = format!(
+        "INSERT INTO workspaces (workspace_id, name, owner_user_id, subscription_tier, subscription_status, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, {now}, {now})"
+    );
+    db_execute!(
+        db,
+        &workspace_sql,
+        "workspace-local",
+        "My Workspace",
+        "user-local",
+        "enterprise",
+        "active"
+    )?;
+
+    // Create workspace membership
+    let membership_sql = format!(
+        "INSERT INTO workspace_users (workspace_id, user_id, role, active, created_at) \
+         VALUES ($1, $2, $3, {bool_true}, {now})"
+    );
+    db_execute!(
+        db,
+        &membership_sql,
+        "workspace-local",
+        "user-local",
+        "workspace_admin"
+    )?;
+
+    tracing::info!("Personal mode: auto-provisioned local user and workspace");
+
+    Ok(())
+}
+
 /// Build the axum Router with all core routes and middleware.
 ///
 /// Returns a `Router<()>` (state already applied). Platform-specific routes

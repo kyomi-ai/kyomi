@@ -19,6 +19,7 @@ import InlineEditableTitle from '../components/InlineEditableTitle';
 import { useProductTour } from '../components/ProductTour';
 import useDatasources from '../hooks/useDatasources';
 import NoDatasourcesEmptyState from '../components/NoDatasourcesEmptyState';
+import { useSystemConfig } from '../context/SystemConfigContext';
 import { trackEvent } from '../utils/analytics';
 import { toast } from '@/lib/toast';
 import {
@@ -245,6 +246,7 @@ const Chat = () => {
 
   // Datasources check for empty state
   const { hasDatasources, loading: datasourcesLoading } = useDatasources();
+  const { isPersonalMode, llmConfigured } = useSystemConfig();
 
   // Product tour
   const { showTour } = useProductTour();
@@ -1427,6 +1429,33 @@ Just describe what you want to monitor, and I'll set it up for you.`,
 
   // Show empty state if no datasources are configured
   // While loading, assume datasources exist (optimistic approach)
+  // In personal mode without an LLM provider, block chat entirely
+  if (isPersonalMode && !llmConfigured) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
+        <div className="max-w-md w-full bg-card border border-border rounded-xl p-8 shadow-sm text-center">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+            <svg className="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-semibold text-foreground mb-3">Chat requires an AI provider</h2>
+          <p className="text-muted-foreground mb-6">
+            Use Kyomi from Claude Code via MCP, or add your own API key in Settings.
+          </p>
+          <div className="flex flex-col gap-3">
+            <button onClick={() => navigate('/settings/profile')} className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+              Open Settings
+            </button>
+            <button onClick={() => navigate('/setup')} className="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-accent hover:text-accent-foreground">
+              Learn about MCP
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!datasourcesLoading && !hasDatasources) {
     return <NoDatasourcesEmptyState context="chat" />;
   }

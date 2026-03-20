@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useCapabilities } from '../context/CapabilitiesContext';
+import { useSystemConfig } from '../context/SystemConfigContext';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { CreditCard, Users, Settings, User, Shield, BarChart3, Activity, Server } from 'lucide-react';
 import { Spinner } from '../components/ui/spinner';
@@ -26,6 +27,7 @@ import { toast } from '../lib/toast';
 export default function SettingsContent() {
   const { user, apiClient, refreshUser } = useAuth();
   const { capabilities } = useCapabilities();
+  const { isPersonalMode } = useSystemConfig();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -210,13 +212,13 @@ export default function SettingsContent() {
 
   const availableTabs = [
     { id: 'profile', name: 'Profile', icon: User, available: true },
-    { id: 'security', name: 'Security', icon: Shield, available: true },
-    { id: 'workspace', name: 'Workspace', icon: Settings, available: isAdmin },
+    { id: 'security', name: 'Security', icon: Shield, available: !isPersonalMode },
+    { id: 'workspace', name: 'Workspace', icon: Settings, available: isAdmin && !isPersonalMode },
     { id: 'datasources', name: 'Data Sources', icon: Server, available: true },
     { id: 'analytics', name: 'Analytics', icon: Activity, available: isAdmin && !selfHosted },
     { id: 'usage', name: 'Usage', icon: BarChart3, available: !selfHosted },
     { id: 'billing', name: 'Billing', icon: CreditCard, available: isOwner && !selfHosted },
-    { id: 'team', name: 'Team', icon: Users, available: isTeamTier && isAdmin }
+    { id: 'team', name: 'Team', icon: Users, available: isTeamTier && isAdmin && !isPersonalMode }
   ];
 
   const visibleTabs = availableTabs.filter(tab => tab.available);

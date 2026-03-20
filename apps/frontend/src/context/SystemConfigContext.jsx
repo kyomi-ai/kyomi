@@ -27,6 +27,8 @@ export function useSystemConfig() {
 export function SystemConfigProvider({ children }) {
   const [selfHosted, setSelfHosted] = useState(false);
   const [edition, setEdition] = useState('saas');
+  const [mode, setMode] = useState(null);
+  const [llmConfigured, setLlmConfigured] = useState(false);
   const [features, setFeatures] = useState(DEFAULT_FEATURES);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -43,6 +45,8 @@ export function SystemConfigProvider({ children }) {
       .then((data) => {
         setSelfHosted(data.self_hosted ?? false);
         setEdition(data.edition ?? 'saas');
+        setMode(data.mode ?? null);
+        setLlmConfigured(data.llm_configured ?? false);
         setFeatures({ ...DEFAULT_FEATURES, ...data.features });
       })
       .catch((err) => {
@@ -54,9 +58,14 @@ export function SystemConfigProvider({ children }) {
       });
   }, []);
 
+  const isPersonalMode = mode === 'personal';
+
   const value = {
     selfHosted,
     edition,
+    mode,
+    isPersonalMode,
+    llmConfigured,
     features,
     loading,
     error,

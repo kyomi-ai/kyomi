@@ -56,6 +56,7 @@ impl FromRef<SlackState> for AuthState {
         AuthState {
             jwt_secret: state.config.jwt_secret.clone(),
             db: state.db.clone(),
+            is_personal: false, // Slack is SaaS-only; personal mode never uses Slack routes
         }
     }
 }

@@ -105,52 +105,73 @@ fn oauth_metadata(base: &str) -> serde_json::Value {
 // ===========================================================================
 
 /// `GET /.well-known/oauth-authorization-server` — RFC 8414.
+///
+/// Returns 404 in personal mode — no OAuth needed for single-user desktop app.
+/// MCP clients interpret missing discovery as "no auth required" and connect directly.
 async fn oauth_authorization_server_metadata(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
-    Json(oauth_metadata(&base_url_from_request(&headers, &state)))
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if state.config.is_personal() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    Ok(Json(oauth_metadata(&base_url_from_request(&headers, &state))))
 }
 
 /// `GET /.well-known/oauth-protected-resource` — RFC 9728.
+///
+/// Returns 404 in personal mode — no OAuth needed for single-user desktop app.
 async fn oauth_protected_resource_metadata(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if state.config.is_personal() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let base = base_url_from_request(&headers, &state);
-    Json(json!({
+    Ok(Json(json!({
         "resource": base,
         "authorization_servers": [base],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"],
-    }))
+    })))
 }
 
 /// `GET /.well-known/oauth-protected-resource/{*path}` — RFC 9728 with resource path.
+///
+/// Returns 404 in personal mode — no OAuth needed for single-user desktop app.
 async fn oauth_protected_resource_metadata_with_path(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(path): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if state.config.is_personal() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let base = base_url_from_request(&headers, &state);
-    Json(json!({
+    Ok(Json(json!({
         "resource": format!("{base}/{path}"),
         "authorization_servers": [base],
         "scopes_supported": ["mcp"],
         "bearer_methods_supported": ["header"],
-    }))
+    })))
 }
 
 /// `GET /.well-known/openid-configuration` — OpenID Connect Discovery.
+///
+/// Returns 404 in personal mode — no OAuth needed for single-user desktop app.
 async fn openid_configuration(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if state.config.is_personal() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let mut meta = oauth_metadata(&base_url_from_request(&headers, &state));
     meta.as_object_mut()
         .unwrap()
         .insert("subject_types_supported".into(), json!(["public"]));
-    Json(meta)
+    Ok(Json(meta))
 }
 
 // ===========================================================================
@@ -160,15 +181,19 @@ async fn openid_configuration(
 /// `GET /mcp/.well-known/openid-configuration` — OAuth discovery relative to MCP URL.
 ///
 /// Some MCP clients look for discovery relative to the server URL.
+/// Returns 404 in personal mode — no OAuth needed for single-user desktop app.
 pub async fn mcp_openid_configuration(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if state.config.is_personal() {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let mut meta = oauth_metadata(&base_url_from_request(&headers, &state));
     meta.as_object_mut()
         .unwrap()
         .insert("subject_types_supported".into(), json!(["public"]));
-    Json(meta)
+    Ok(Json(meta))
 }
 
 // ===========================================================================

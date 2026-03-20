@@ -2,6 +2,7 @@
 import { Navigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
+import { useSystemConfig } from '../context/SystemConfigContext';
 import apiClient from '../api/apiClient';
 import Chat from '../pages/Chat';
 
@@ -11,7 +12,11 @@ import Chat from '../pages/Chat';
  */
 export default function LandingRedirect() {
   const { user } = useAuth();
-  const landingPage = user?.extra_metadata?.landing_page || 'chat';
+  const { isPersonalMode, llmConfigured } = useSystemConfig();
+
+  // In personal mode without LLM, default to dashboards instead of chat
+  const defaultPage = (isPersonalMode && !llmConfigured) ? 'dashboards' : 'chat';
+  const landingPage = user?.extra_metadata?.landing_page || defaultPage;
 
   // Fetch workspace default dashboard (shared cache with Sidebar)
   const { data: workspaceDefault, isLoading: isLoadingDefault } = useQuery({

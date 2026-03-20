@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { useState, useEffect, useCallback } from 'react';
-import { CheckCircle, Check, ExternalLink, Unplug, AlertTriangle, MessageSquare, Plug, Copy, Sun, Moon, Monitor, Bell, BellOff, Trash2, Smartphone } from 'lucide-react';
+import { CheckCircle, Check, ExternalLink, Unplug, AlertTriangle, MessageSquare, Plug, Copy, Sun, Moon, Monitor, Bell, BellOff, Trash2, Smartphone, Bot } from 'lucide-react';
 import usePushNotifications from '../../hooks/usePushNotifications';
 import { useSystemConfig } from '../../context/SystemConfigContext';
 import { useTheme } from '../../context/ThemeContext';
@@ -16,10 +16,11 @@ import { Label } from '../ui/label';
 import ConfirmDialog from '../ConfirmDialog';
 import useConfirm from '../../hooks/useConfirm';
 import { toast } from '../../lib/toast';
+import AIProviderSettings from './AIProviderSettings';
 
 export default function ProfileSettings({ user, apiClient, refreshUser, capabilities }) {
   const { theme, setTheme } = useTheme();
-  const { features, selfHosted } = useSystemConfig();
+  const { features, selfHosted, isPersonalMode } = useSystemConfig();
   const { isOpen, dialogProps, confirm } = useConfirm();
   // Save status tracking (for auto-save feedback)
   const [saveStatus, setSaveStatus] = useState({
@@ -462,7 +463,8 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
       <h2 className="text-xl font-semibold text-foreground mb-6">Profile Settings</h2>
 
       <div className="space-y-6">
-        {/* Profile Information Section */}
+        {/* Profile Information Section — hidden in personal mode */}
+        {!isPersonalMode && (
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
@@ -498,6 +500,7 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
             </div>
           </CardContent>
         </Card>
+        )}
 
         {/* Appearance Section */}
         <Card>
@@ -601,8 +604,8 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
           </CardContent>
         </Card>
 
-        {/* Slack Connection Section - hidden if not available */}
-        {!slackNotAvailable && features.slack_integration && <Card>
+        {/* Slack Connection Section - hidden if not available or in personal mode */}
+        {!isPersonalMode && !slackNotAvailable && features.slack_integration && <Card>
           <CardHeader>
             <CardTitle>Slack Connection</CardTitle>
             <CardDescription>
@@ -741,8 +744,8 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
           </CardContent>
         </Card>}
 
-        {/* Push Notifications Section */}
-        <Card>
+        {/* Push Notifications Section - hidden in personal mode */}
+        {!isPersonalMode && <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Bell className="h-5 w-5" />
@@ -857,7 +860,7 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
               </div>
             )}
           </CardContent>
-        </Card>
+        </Card>}
 
         {/* MCP Connection Section */}
         <Card>
@@ -872,17 +875,35 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
           </CardHeader>
           <CardContent>
             {(() => {
-                const mcpUrl = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-                  ? `http://${window.location.hostname}:8002/mcp`
-                  : `${window.location.origin}/mcp`;
+                const mcpPort = window.location.port || '3000';
+                const mcpUrl = isPersonalMode
+                  ? `http://localhost:${mcpPort}/mcp`
+                  : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+                    ? `http://${window.location.hostname}:8002/mcp`
+                    : `${window.location.origin}/mcp`;
+                const claudeDesktopConfig = JSON.stringify({
+                  mcpServers: {
+                    kyomi: {
+                      url: mcpUrl
+                    }
+                  }
+                }, null, 2);
+                const claudeCodeCommand = `claude mcp add --transport http kyomi http://localhost:${mcpPort}/mcp`;
                 return (
                   <div className="space-y-6">
                     {/* MCP Server URL */}
                     <div className="space-y-3">
                       <h4 className="font-medium text-foreground">Server URL</h4>
-                      <p className="text-sm text-muted-foreground">
-                        Use this URL to connect from any MCP client. You'll be prompted to authorize via your browser.
-                      </p>
+                      {!isPersonalMode && (
+                        <p className="text-sm text-muted-foreground">
+                          Use this URL to connect from any MCP client. You'll be prompted to authorize via your browser.
+                        </p>
+                      )}
+                      {isPersonalMode && (
+                        <p className="text-sm text-muted-foreground">
+                          Use this URL to connect from any MCP client.
+                        </p>
+                      )}
                       <div className="relative">
                         <pre className="p-4 bg-muted rounded-md text-sm overflow-x-auto pr-12">
                           {mcpUrl}
@@ -900,6 +921,58 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
                         </Button>
                       </div>
                     </div>
+
+                    {/* Claude Code - only in personal mode */}
+                    {isPersonalMode && (
+                      <div className="space-y-3 pt-4 border-t border-border">
+                        <h4 className="font-medium text-foreground">Claude Code</h4>
+                        <p className="text-sm text-muted-foreground">
+                          Run this command in your terminal to connect Claude Code.
+                        </p>
+                        <div className="relative">
+                          <pre className="p-4 bg-muted rounded-md text-sm overflow-x-auto pr-12">
+                            {claudeCodeCommand}
+                          </pre>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="absolute top-2 right-2"
+                            onClick={() => {
+                              navigator.clipboard.writeText(claudeCodeCommand);
+                              toast.success('Copied to clipboard!');
+                            }}
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Claude Desktop - only in personal mode */}
+                    {isPersonalMode && (
+                      <div className="space-y-3 pt-4 border-t border-border">
+                        <h4 className="font-medium text-foreground">Claude Desktop</h4>
+                        <p className="text-sm text-muted-foreground">
+                          Add this to your Claude Desktop configuration file.
+                        </p>
+                        <div className="relative">
+                          <pre className="p-4 bg-muted rounded-md text-sm overflow-x-auto pr-12">
+                            {claudeDesktopConfig}
+                          </pre>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="absolute top-2 right-2"
+                            onClick={() => {
+                              navigator.clipboard.writeText(claudeDesktopConfig);
+                              toast.success('Copied to clipboard!');
+                            }}
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Cursor One-Click */}
                     <div className="space-y-3 pt-4 border-t border-border">
@@ -926,8 +999,26 @@ export default function ProfileSettings({ user, apiClient, refreshUser, capabili
           </CardContent>
         </Card>
 
-        {/* Pending Invitations Section - Only show when there are actual invitations */}
-        {invitations.length > 0 && (
+        {/* AI Provider Section - Only in personal mode */}
+        {isPersonalMode && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Bot className="h-5 w-5" />
+                AI Provider
+              </CardTitle>
+              <CardDescription>
+                Configure an LLM provider for built-in chat and automated watches.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <AIProviderSettings />
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Pending Invitations Section - Only show when there are actual invitations, hidden in personal mode */}
+        {!isPersonalMode && invitations.length > 0 && (
           <Card>
             <CardHeader>
               <CardTitle>Pending Workspace Invitations</CardTitle>

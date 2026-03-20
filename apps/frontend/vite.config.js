@@ -12,14 +12,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const backendUrl = 'http://localhost:8002'
 
 // https://vite.dev/config/
-export default defineConfig(({ mode }) => ({
+export default defineConfig(({ mode }) => {
+  const isDesktop = process.env.KYOMI_DESKTOP === 'true';
+
+  return ({
   plugins: [
     tailwindcss(),
     react(),
     // Remove console.* in production builds
     mode === 'production' && removeConsole(),
-    // PWA support — uses injectManifest for custom service worker (push notifications)
-    VitePWA({
+    // PWA support — disabled for desktop builds (Tauri embeds the frontend)
+    !isDesktop && VitePWA({
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.js',
@@ -140,4 +143,4 @@ export default defineConfig(({ mode }) => ({
       '@duckdb/duckdb-wasm'
     ]
   },
-}))
+})})

@@ -33,11 +33,12 @@ import AcceptOwnershipPage from './pages/AcceptOwnershipPage';
 import Try from './pages/Try';
 import ConnectSetupPage from './pages/ConnectSetupPage';
 import DatasourceOnboarding from './pages/DatasourceOnboarding';
+import PersonalSetupWizard from './pages/PersonalSetupWizard';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { WebSocketProvider } from './context/WebSocketContext';
 import { CapabilitiesProvider } from './context/CapabilitiesContext';
-import { SystemConfigProvider } from './context/SystemConfigContext';
+import { SystemConfigProvider, useSystemConfig } from './context/SystemConfigContext';
 import { SidebarProvider } from './components/Sidebar';
 import AppWithOAuthBar from './components/AppWithOAuthBar';
 import PWAUpdatePrompt from './components/PWAUpdatePrompt';
@@ -60,7 +61,13 @@ const queryClient = new QueryClient({
 
 function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useAuth();
+  const { isPersonalMode } = useSystemConfig();
   const location = useLocation();
+
+  // In personal mode, skip auth checks — backend auto-authenticates
+  if (isPersonalMode) {
+    return children;
+  }
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
@@ -69,6 +76,17 @@ function ProtectedRoute({ children }) {
   if (!isAuthenticated) {
     // Save the location they were trying to access so we can redirect back after login
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  return children;
+}
+
+// Wrapper that redirects auth-related routes to / in personal mode
+function RedirectInPersonalMode({ children }) {
+  const { isPersonalMode } = useSystemConfig();
+
+  if (isPersonalMode) {
+    return <Navigate to="/" replace />;
   }
 
   return children;
@@ -89,58 +107,78 @@ function App() {
 
             {/* Public routes - auth context but no sidebar */}
             <Route path="/login" element={
-              <AuthProvider>
-                <Login />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <Login />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/verify-email" element={
-              <AuthProvider>
-                <VerifyEmail />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <VerifyEmail />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/verify" element={
-              <AuthProvider>
-                <VerifyEmail />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <VerifyEmail />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/oauth-complete" element={<OAuthComplete />} />
             {/* Signup routes */}
             <Route path="/signup/complete" element={
-              <AuthProvider>
-                <SignupComplete />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <SignupComplete />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/auth/passkey-signup" element={
-              <AuthProvider>
-                <PasskeySignupComplete />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <PasskeySignupComplete />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/auth/recover-passkey" element={
-              <AuthProvider>
-                <PasskeyRecovery />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <PasskeyRecovery />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/auth/recover-passkey/complete" element={
-              <AuthProvider>
-                <PasskeyRecoveryComplete />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <PasskeyRecoveryComplete />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             {/* Account recovery routes (password reset) */}
             <Route path="/account/recover" element={
-              <AuthProvider>
-                <AccountRecovery />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <AccountRecovery />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/account/recover/complete" element={
-              <AuthProvider>
-                <AccountRecoveryComplete />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <AccountRecoveryComplete />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
             <Route path="/unsubscribe" element={<Unsubscribe />} />
             <Route path="/welcome" element={
-              <AuthProvider>
-                <Welcome />
-              </AuthProvider>
+              <RedirectInPersonalMode>
+                <AuthProvider>
+                  <Welcome />
+                </AuthProvider>
+              </RedirectInPersonalMode>
             } />
 
             {/* Test pages - no auth required */}
@@ -189,6 +227,15 @@ function App() {
               <AuthProvider>
                 <ProtectedRoute>
                   <ConnectSetupPage />
+                </ProtectedRoute>
+              </AuthProvider>
+            } />
+
+            {/* Personal mode setup wizard - full screen, no sidebar */}
+            <Route path="/setup" element={
+              <AuthProvider>
+                <ProtectedRoute>
+                  <PersonalSetupWizard />
                 </ProtectedRoute>
               </AuthProvider>
             } />

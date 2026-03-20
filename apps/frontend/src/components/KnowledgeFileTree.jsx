@@ -420,7 +420,7 @@ export default function KnowledgeFileTree({
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={onCreateFile}
+            onClick={() => onCreateFile()}
             title="New File"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -429,7 +429,7 @@ export default function KnowledgeFileTree({
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={onCreateFolder}
+            onClick={() => onCreateFolder()}
             title="New Folder"
           >
             <Folder className="w-3.5 h-3.5" />
