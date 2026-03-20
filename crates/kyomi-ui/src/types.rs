@@ -85,3 +85,50 @@ pub struct WorkspaceSlackStatus {
     pub team_id: Option<String>,
     pub team_name: Option<String>,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Team management types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A workspace member with user details.
+///
+/// Mirrors the JSON shape returned by `GET /api/v1/workspaces/members`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub user_id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
+    pub is_owner: bool,
+    pub joined_at: String,
+}
+
+/// A pending workspace invitation (admin view).
+///
+/// Mirrors the JSON shape returned by `GET /api/v1/workspaces/invitations`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TeamInvitation {
+    pub invitation_id: String,
+    pub email: String,
+    pub role: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+/// A pending ownership transfer.
+///
+/// Mirrors the JSON shape returned by `GET /api/v1/workspaces/ownership/transfers`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnershipTransferData {
+    pub transfer_id: String,
+    pub from_user_id: String,
+    pub from_user_email: String,
+    pub to_user_id: String,
+    pub to_user_email: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub is_initiator: bool,
+    pub is_recipient: bool,
+}

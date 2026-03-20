@@ -68,6 +68,16 @@ pub fn register_server_functions() {
     register_explicit::<UpdateAnalyticsSite>();
     register_explicit::<DeleteAnalyticsSite>();
 
+    use server_fns::team::*;
+    register_explicit::<ListWorkspaceMembers>();
+    register_explicit::<UpdateMemberRole>();
+    register_explicit::<RemoveMember>();
+    register_explicit::<ListWorkspaceInvitations>();
+    register_explicit::<InviteMember>();
+    register_explicit::<CancelInvitation>();
+    register_explicit::<ListOwnershipTransfers>();
+    register_explicit::<CancelOwnershipTransfer>();
+
     use server_fns::workspace::*;
     register_explicit::<GetWorkspaceSettings>();
     register_explicit::<UpdateWorkspaceName>();

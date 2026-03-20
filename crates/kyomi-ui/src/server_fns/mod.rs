@@ -19,6 +19,7 @@ pub mod security;
 pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;
+pub mod team;
 pub mod usage;
 pub mod workspace;
 

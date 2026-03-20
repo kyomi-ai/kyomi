@@ -8,6 +8,7 @@ pub mod profile;
 pub mod push_notifications;
 pub mod security;
 pub mod settings_shell;
+pub mod team;
 #[cfg(feature = "slack")]
 pub mod slack_connection;
 pub mod usage;
