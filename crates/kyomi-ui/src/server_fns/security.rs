@@ -2,7 +2,7 @@
 
 //! Server functions for Security settings.
 //!
-//! These replace the REST API calls for password, TOTP, and session management:
+//! These replace the REST API calls for password, TOTP, session, and passkey management:
 //! - `POST /auth/set-password` -> `set_password()`
 //! - `POST /auth/change-password` -> `change_password()`
 //! - `GET  /auth/2fa/status` -> `get_totp_status()`
@@ -12,9 +12,15 @@
 //! - `GET  /auth/sessions` -> `get_sessions()`
 //! - `DELETE /auth/sessions/{id}` -> `revoke_session()`
 //! - `POST /auth/logout-all` -> `logout_all_sessions()`
+//! - `GET  /auth/passkeys/list` -> `list_passkeys()`
+//! - `POST /auth/passkeys/add/start` -> `start_passkey_registration()`
+//! - `POST /auth/passkeys/add/complete` -> `complete_passkey_registration()`
+//! - `DELETE /auth/passkeys/{id}` -> `delete_passkey()`
+//! - `PATCH /auth/passkeys/{id}` -> `rename_passkey()`
 //!
 //! Calls the same service-layer code as `apps/server/src/routes/auth_password.rs`,
-//! `apps/server/src/routes/auth_totp.rs`, and `apps/server/src/routes/auth.rs`.
+//! `apps/server/src/routes/auth_totp.rs`, `apps/server/src/routes/auth_passkeys.rs`,
+//! and `apps/server/src/routes/auth.rs`.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -396,5 +402,316 @@ pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
     Ok(format!(
         "Logged out from all devices successfully ({revoked_count} sessions revoked)"
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Passkey management server functions
+// ---------------------------------------------------------------------------
+
+/// A single passkey entry returned by `list_passkeys()`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasskeyInfo {
+    pub credential_id: String,
+    pub name: String,
+    pub created_at: Option<String>,
+    pub last_used: Option<String>,
+}
+
+/// List all passkeys for the authenticated user.
+///
+/// Mirrors `GET /auth/passkeys/list` in `apps/server/src/routes/auth_passkeys.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let passkeys: Vec<PasskeyInfo> = creds
+        .iter()
+        .map(|(cred_id, data)| PasskeyInfo {
+            credential_id: cred_id.clone(),
+            name: data
+                .get("device_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unnamed Device")
+                .to_string(),
+            created_at: data
+                .get("created_at")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            last_used: data
+                .get("last_used")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        })
+        .collect();
+
+    Ok(passkeys)
+}
+
+/// Start passkey registration for the authenticated user.
+///
+/// Returns a JSON string containing the challenge_id and WebAuthn options
+/// that the browser needs for `navigator.credentials.create()`.
+///
+/// Mirrors `POST /auth/passkeys/add/start` in `apps/server/src/routes/auth_passkeys.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn start_passkey_registration(
+    device_name: String,
+) -> Result<String, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use sha2::{Digest, Sha256};
+    use webauthn_rs::prelude::*;
+
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let device_name = if device_name.trim().is_empty() {
+        "Unknown Device".to_string()
+    } else {
+        device_name.trim().to_string()
+    };
+
+    let db_user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("User not found"))?;
+
+    let email = &db_user.email;
+    let display_name = db_user.name.as_deref().unwrap_or(email);
+
+    // Generate deterministic user handle from email (same as auth_passkeys.rs)
+    let user_unique_id = {
+        let mut hasher = Sha256::new();
+        hasher.update(email.as_bytes());
+        let hash = hasher.finalize();
+        let bytes: [u8; 16] = hash[..16].try_into().expect("16 bytes");
+        Uuid::from_bytes(bytes)
+    };
+
+    // Get existing credential IDs to exclude
+    let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut exclude_ids = Vec::new();
+    for (cred_id_b64, _) in &creds {
+        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(cred_id_b64) {
+            exclude_ids.push(CredentialID::from(bytes));
+        }
+    }
+    let exclude_opt = if exclude_ids.is_empty() {
+        None
+    } else {
+        Some(exclude_ids)
+    };
+
+    let (ccr, reg_state) = kyomi_auth::webauthn::start_registration(
+        webauthn,
+        user_unique_id,
+        email,
+        display_name,
+        exclude_opt,
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let challenge_id = kyomi_auth::redis_ops::generate_token();
+    let reg_state_json = serde_json::to_value(&reg_state)
+        .map_err(|e| ServerFnError::new(format!("Serialize reg state: {e}")))?;
+
+    let challenge_data = serde_json::json!({
+        "registration_state": reg_state_json,
+        "email": email,
+        "user_name": display_name,
+        "user_id": auth.user_id,
+        "device_name": device_name,
+    });
+    kyomi_auth::redis_ops::store_webauthn_challenge(kv, &challenge_id, &challenge_data)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Return JSON with challenge_id and options for the browser
+    let result = serde_json::json!({
+        "challenge_id": challenge_id,
+        "options": ccr,
+    });
+
+    serde_json::to_string(&result)
+        .map_err(|e| ServerFnError::new(format!("Serialize response: {e}")))
+}
+
+/// Complete passkey registration by verifying the browser credential.
+///
+/// Receives the challenge_id and the PublicKeyCredential JSON from the browser.
+///
+/// Mirrors `POST /auth/passkeys/add/complete` in `apps/server/src/routes/auth_passkeys.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn complete_passkey_registration(
+    credential_json: String,
+) -> Result<String, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_rs::prelude::*;
+
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Parse the incoming JSON which contains challenge_id and credential
+    let data: serde_json::Value = serde_json::from_str(&credential_json)
+        .map_err(|e| ServerFnError::new(format!("Invalid credential JSON: {e}")))?;
+
+    let challenge_id = data["challenge_id"]
+        .as_str()
+        .ok_or_else(|| ServerFnError::new("Missing challenge_id"))?;
+
+    let credential: RegisterPublicKeyCredential =
+        serde_json::from_value(data["credential"].clone())
+            .map_err(|e| ServerFnError::new(format!("Invalid credential: {e}")))?;
+
+    // Get challenge from KV
+    let challenge_data =
+        kyomi_auth::redis_ops::get_webauthn_challenge(kv, challenge_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .ok_or_else(|| ServerFnError::new("Invalid or expired challenge"))?;
+
+    // Delete challenge (prevent replay)
+    kyomi_auth::redis_ops::delete_webauthn_challenge(kv, challenge_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Verify the registration state matches this user
+    let challenge_user_id = challenge_data["user_id"].as_str().unwrap_or("");
+    if challenge_user_id != auth.user_id {
+        return Err(ServerFnError::new(
+            "Challenge does not match authenticated user",
+        ));
+    }
+
+    let reg_state: PasskeyRegistration =
+        serde_json::from_value(challenge_data["registration_state"].clone())
+            .map_err(|e| ServerFnError::new(format!("Deserialize reg state: {e}")))?;
+
+    let device_name = challenge_data["device_name"]
+        .as_str()
+        .unwrap_or("Unknown Device");
+
+    // Verify credential
+    let passkey = kyomi_auth::webauthn::finish_registration(webauthn, &credential, &reg_state)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let cred_id_bytes: &[u8] = passkey.cred_id().as_ref();
+    let credential_id_b64 = URL_SAFE_NO_PAD.encode(cred_id_bytes);
+
+    let passkey_json = serde_json::to_value(&passkey)
+        .map_err(|e| ServerFnError::new(format!("Serialize passkey: {e}")))?;
+
+    let public_key_b64 = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&passkey)
+            .map_err(|e| ServerFnError::new(format!("Serialize passkey bytes: {e}")))?,
+    );
+
+    let initial_counter = passkey_json
+        .get("cred")
+        .and_then(|c| c.get("counter"))
+        .and_then(|c| c.as_u64())
+        .unwrap_or(0) as u32;
+
+    // Store credential
+    kyomi_auth::user_service::add_passkey_to_user(
+        &ctx.db,
+        &auth.user_id,
+        &credential_id_b64,
+        &public_key_b64,
+        initial_counter,
+        device_name,
+        &passkey_json,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(format!("Passkey '{}' added successfully", device_name))
+}
+
+/// Delete a passkey for the authenticated user.
+///
+/// Mirrors `DELETE /auth/passkeys/{credential_id}` in `apps/server/src/routes/auth_passkeys.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn delete_passkey(credential_id: String) -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    match kyomi_auth::user_service::delete_passkey_from_user(
+        &ctx.db,
+        &auth.user_id,
+        &credential_id,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?
+    {
+        None => Ok("Passkey deleted successfully".to_string()),
+        Some(error_msg) => Err(ServerFnError::new(error_msg)),
+    }
+}
+
+/// Rename a passkey for the authenticated user.
+///
+/// Mirrors `PATCH /auth/passkeys/{credential_id}` in `apps/server/src/routes/auth_passkeys.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn rename_passkey(
+    credential_id: String,
+    name: String,
+) -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let trimmed = name.trim().to_string();
+
+    if trimmed.is_empty() {
+        return Err(ServerFnError::new("Device name cannot be empty"));
+    }
+
+    if trimmed.len() > 100 {
+        return Err(ServerFnError::new(
+            "Device name cannot exceed 100 characters",
+        ));
+    }
+
+    let updated = kyomi_auth::user_service::update_passkey_device_name(
+        &ctx.db,
+        &auth.user_id,
+        &credential_id,
+        &trimmed,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    if !updated {
+        return Err(ServerFnError::new("Passkey not found"));
+    }
+
+    Ok("Passkey renamed successfully".to_string())
 }
 

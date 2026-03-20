@@ -184,6 +184,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 auth_state: kyomi_auth::middleware::AuthState::from_ref(&state),
                 encryption_key: Some(state.encryption_key.clone()),
                 kv: Some(state.kv.clone()),
+                webauthn: Some(state.webauthn.clone()),
                 #[cfg(feature = "slack")]
                 slack_client: extras.slack_client,
             };

@@ -48,6 +48,11 @@ pub fn register_server_functions() {
     register_explicit::<GetSessions>();
     register_explicit::<RevokeSession>();
     register_explicit::<LogoutAllSessions>();
+    register_explicit::<ListPasskeys>();
+    register_explicit::<StartPasskeyRegistration>();
+    register_explicit::<CompletePasskeyRegistration>();
+    register_explicit::<DeletePasskey>();
+    register_explicit::<RenamePasskey>();
 
     use server_fns::sidebar::*;
     register_explicit::<GetRecentSessions>();

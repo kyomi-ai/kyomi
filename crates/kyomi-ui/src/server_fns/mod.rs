@@ -39,6 +39,10 @@ pub struct ServerContext {
     /// Required by Slack connect flow; `None` disables OAuth URL generation.
     pub kv: Option<kyomi_core::KVPool>,
 
+    /// WebAuthn instance for passkey registration/authentication.
+    /// Built once at server startup from config.
+    pub webauthn: Option<std::sync::Arc<webauthn_rs::Webauthn>>,
+
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.
     #[cfg(feature = "slack")]

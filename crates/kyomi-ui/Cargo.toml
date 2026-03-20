@@ -19,6 +19,8 @@ ssr = [
     "dep:axum",
     "dep:chrono",
     "dep:sqlx",
+    "dep:webauthn-rs",
+    "dep:sha2",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -69,6 +71,8 @@ kyomi-core = { workspace = true, optional = true }
 kyomi-auth = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
+webauthn-rs = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }

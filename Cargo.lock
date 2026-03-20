@@ -4181,12 +4181,14 @@ dependencies = [
  "leptos_router",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webauthn-rs",
 ]
 
 [[package]]
