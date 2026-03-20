@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "kyomi-ui"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[features]
+default = []
+# Server-side rendering — includes leptos_axum, accesses DB/services directly
+ssr = [
+    "leptos/ssr",
+    "dep:leptos_axum",
+    "leptos_router/ssr",
+    "leptos_meta/ssr",
+    "dep:kyomi-core",
+    "dep:kyomi-auth",
+    "dep:axum",
+]
+# Client-side hydration — compiles to WASM, no server deps
+hydrate = [
+    "leptos/hydrate",
+    "leptos/csr",
+]
+
+[dependencies]
+# Leptos framework
+leptos = "0.8"
+leptos_router = "0.8"
+leptos_meta = "0.8"
+leptos_axum = { version = "0.8", optional = true }
+
+# Serialization (shared types cross server/client boundary)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# WASM error handling (client-only, but always compiled — no-op on server)
+console_error_panic_hook = "0.1"
+
+# Browser DOM access (for theme toggling, clipboard, etc.)
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "Element", "DomTokenList", "MediaQueryList", "Location", "RequestCredentials"] }
+
+# WASM interop (session refresh via JS fetch)
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Logging
+tracing = { workspace = true }
+
+# Internal crates (server-only — gated behind ssr feature)
+kyomi-core = { workspace = true, optional = true }
+kyomi-auth = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+kyomi-core = { workspace = true, features = ["test-helpers"] }
+kyomi-auth = { workspace = true }
+tokio = { workspace = true }

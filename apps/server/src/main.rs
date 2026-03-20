@@ -399,6 +399,14 @@ async fn main() {
         tracing::info!("SQLite backend — analytics background jobs disabled");
     }
 
+    // Register Leptos server functions before building the router.
+    kyomi_ui::register_server_functions();
+
+    tracing::info!(
+        count = leptos::server_fn::axum::server_fn_paths().count(),
+        "Leptos server functions registered"
+    );
+
     // Build the core router, then conditionally mount platform-specific routes.
     let router = kyomi_server::build_router(state);
 

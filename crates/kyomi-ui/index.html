@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>Kyomi — Settings</title>
+    <link data-trunk rel="css" href="style/output.css"/>
+    <script type="module">
+        // Ensure auth session is fresh before WASM boots.
+        // Access tokens expire after 15 min — refresh to get a new one.
+        await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    </script>
+    <link data-trunk rel="rust" data-cargo-features="hydrate"/>
+</head>
+<body class="min-h-screen bg-background text-foreground antialiased">
+</body>
+</html>

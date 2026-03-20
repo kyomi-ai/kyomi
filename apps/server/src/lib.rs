@@ -9,6 +9,7 @@ pub mod connect;
 pub mod frontend;
 pub mod health;
 pub mod helpers;
+pub mod leptos_frontend;
 pub mod mcp_session_manager;
 pub mod middleware;
 pub mod routes;
@@ -16,7 +17,7 @@ pub mod state;
 
 use std::net::SocketAddr;
 
-use axum::extract::State;
+use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Router;
@@ -155,6 +156,30 @@ pub fn build_router(state: state::AppState) -> Router {
         // WebSocket routes at root level (not under /api/v1)
         .route("/ws/{user_id}", axum::routing::get(routes::websocket::ws_handler))
         .route("/ws/trial/{session_id}", axum::routing::get(routes::websocket::ws_trial_handler))
+        // Leptos frontend routes (POC — settings profile page)
+        .route("/settings/profile", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/leptos/{*path}", axum::routing::get(leptos_frontend::serve_leptos_asset))
+        // Leptos server functions — typed RPC replacing REST calls
+        // Uses /leptos-api/ prefix to avoid conflicts with /api/v1/ REST routes
+        .route("/leptos-api/{*fn_name}", axum::routing::post({
+            let server_ctx = kyomi_ui::server_fns::ServerContext {
+                db: state.db.clone(),
+                config: state.config.clone(),
+                auth_state: kyomi_auth::middleware::AuthState::from_ref(&state),
+            };
+            move |req: axum::http::Request<axum::body::Body>| {
+                let ctx = server_ctx.clone();
+                async move {
+                    leptos_axum::handle_server_fns_with_context(
+                        move || {
+                            leptos::prelude::provide_context(ctx.clone());
+                        },
+                        req,
+                    )
+                    .await
+                }
+            }
+        }))
         .fallback(frontend::serve)
         .with_state(state)
         .layer(axum::middleware::from_fn(middleware::security_headers))

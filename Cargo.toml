@@ -9,6 +9,7 @@ members = [
     "apps/server",
     "apps/desktop",
     "enterprise/kyomi-slack",
+    "crates/kyomi-ui",
 ]
 resolver = "3"
 
@@ -114,6 +115,7 @@ kyomi-embed = { path = "crates/kyomi-embed" }
 kyomi-datasource-server = { path = "crates/kyomi-datasource" }
 kyomi-agent = { path = "crates/kyomi-agent" }
 kyomi-knowledge = { path = "crates/kyomi-knowledge" }
+kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 
