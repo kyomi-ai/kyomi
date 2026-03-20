@@ -11,6 +11,7 @@ use crate::components::{
     ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label, StyledSelect,
     INPUT_CLASS,
 };
+use crate::pages::settings::ai_provider::AiProviderCard;
 use crate::server_fns::profile::*;
 use crate::types::{DashboardSummary, ProfileData};
 
@@ -148,6 +149,13 @@ pub fn ProfilePage() -> impl IntoView {
                                     </Show>
                                     <AppearanceCard data=data_appearance/>
                                     <PreferencesCard data=data_prefs dashboards=dash_list/>
+                                    <McpConnectionCard is_personal=is_personal/>
+
+                                    // AI Provider — personal mode only
+                                    <Show when=move || is_personal>
+                                        <AiProviderCard/>
+                                    </Show>
+
                                     <ChartPaletteCard data=data_palette/>
                                     <QueryRetentionCard data=data_retention/>
                                     <Show when=move || !is_personal && has_invitations>
@@ -516,6 +524,242 @@ fn QueryRetentionCard(data: ProfileData) -> impl IntoView {
                 </div>
             </CardContent>
         </Card>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP Connection Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn McpConnectionCard(is_personal: bool) -> impl IntoView {
+    // Derive MCP URL from window.location on the client.
+    // On the server (SSR), use a sensible default that will be replaced on hydration.
+    let mcp_url = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let window = web_sys::window().expect("no global window");
+            let location = window.location();
+            let port = location.port().unwrap_or_default();
+            let hostname = location.hostname().unwrap_or_default();
+            let origin = location.origin().unwrap_or_default();
+
+            if is_personal {
+                let p = if port.is_empty() { "3000".to_string() } else { port };
+                format!("http://localhost:{p}/mcp")
+            } else if hostname == "localhost" || hostname == "127.0.0.1" {
+                format!("http://{hostname}:8002/mcp")
+            } else {
+                format!("{origin}/mcp")
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            "/mcp".to_string()
+        }
+    };
+
+    let mcp_port = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let port = web_sys::window()
+                .and_then(|w| w.location().port().ok())
+                .unwrap_or_default();
+            if port.is_empty() { "3000".to_string() } else { port }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            "3000".to_string()
+        }
+    };
+
+    let claude_code_command = format!(
+        "claude mcp add --transport http kyomi http://localhost:{mcp_port}/mcp"
+    );
+
+    let claude_desktop_config = format!(
+        "{{\n  \"mcpServers\": {{\n    \"kyomi\": {{\n      \"url\": \"{mcp_url}\"\n    }}\n  }}\n}}"
+    );
+
+    // Build the Cursor deep-link URL (base64-encoded config, client-only)
+    #[cfg(target_arch = "wasm32")]
+    let cursor_config_b64 = {
+        use base64::Engine;
+        let cursor_config_json = format!("{{\"type\":\"http\",\"url\":\"{mcp_url}\"}}");
+        base64::engine::general_purpose::STANDARD.encode(cursor_config_json.as_bytes())
+    };
+
+    // Clones for closures
+    let url_for_copy = mcp_url.clone();
+    let cmd_for_copy = claude_code_command.clone();
+    let config_for_copy = claude_desktop_config.clone();
+
+    view! {
+        <Card>
+            <CardHeader>
+                <CardTitle>
+                    <span class="flex items-center gap-2">
+                        <leptos_icons::Icon icon=icondata_lu::LuPlug width="20" height="20"/>
+                        "MCP Connection"
+                    </span>
+                </CardTitle>
+                <CardDescription>
+                    "Connect Kyomi to any MCP-compatible client for AI-powered data analysis."
+                </CardDescription>
+            </CardHeader>
+            <CardContent>
+                <div class="space-y-6">
+                    // -- Server URL --
+                    <div class="space-y-3">
+                        <h4 class="font-medium text-foreground">"Server URL"</h4>
+                        {if !is_personal {
+                            view! {
+                                <p class="text-sm text-muted-foreground">
+                                    "Use this URL to connect from any MCP client. You\u{2019}ll be prompted to authorize via your browser."
+                                </p>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <p class="text-sm text-muted-foreground">
+                                    "Use this URL to connect from any MCP client."
+                                </p>
+                            }.into_any()
+                        }}
+                        <div class="relative">
+                            <pre class="p-4 bg-muted rounded-md text-sm overflow-x-auto pr-12">
+                                {mcp_url.clone()}
+                            </pre>
+                            <CopyButton text=url_for_copy/>
+                        </div>
+                    </div>
+
+                    // -- Claude Code (personal mode only) --
+                    {if is_personal {
+                        view! {
+                            <div class="space-y-3 pt-4 border-t border-border">
+                                <h4 class="font-medium text-foreground">"Claude Code"</h4>
+                                <p class="text-sm text-muted-foreground">
+                                    "Run this command in your terminal to connect Claude Code."
+                                </p>
+                                <div class="relative">
+                                    <pre class="p-4 bg-muted rounded-md text-sm overflow-x-auto pr-12">
+                                        {claude_code_command}
+                                    </pre>
+                                    <CopyButton text=cmd_for_copy/>
+                                </div>
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! { <span class="hidden"></span> }.into_any()
+                    }}
+
+                    // -- Claude Desktop (personal mode only) --
+                    {if is_personal {
+                        view! {
+                            <div class="space-y-3 pt-4 border-t border-border">
+                                <h4 class="font-medium text-foreground">"Claude Desktop"</h4>
+                                <p class="text-sm text-muted-foreground">
+                                    "Add this to your Claude Desktop configuration file."
+                                </p>
+                                <div class="relative">
+                                    <pre class="p-4 bg-muted rounded-md text-sm overflow-x-auto pr-12">
+                                        {claude_desktop_config}
+                                    </pre>
+                                    <CopyButton text=config_for_copy/>
+                                </div>
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! { <span class="hidden"></span> }.into_any()
+                    }}
+
+                    // -- Cursor One-Click --
+                    <div class="space-y-3 pt-4 border-t border-border">
+                        <h4 class="font-medium text-foreground">"Cursor"</h4>
+                        <p class="text-sm text-muted-foreground">
+                            "One-click install for Cursor users."
+                        </p>
+                        {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let cursor_url = format!(
+                                    "cursor://anysphere.cursor-deeplink/mcp/install?name=kyomi&config={cursor_config_b64}"
+                                );
+                                view! {
+                                    <a
+                                        href=cursor_url
+                                        target="_blank"
+                                        class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                                    >
+                                        <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                                        "Connect with Cursor"
+                                    </a>
+                                }.into_any()
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                view! {
+                                    <a
+                                        href="#"
+                                        class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                                    >
+                                        <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                                        "Connect with Cursor"
+                                    </a>
+                                }.into_any()
+                            }
+                        }
+                    </div>
+                </div>
+            </CardContent>
+        </Card>
+    }
+}
+
+/// Small copy-to-clipboard button used inside MCP Connection card.
+#[component]
+fn CopyButton(text: String) -> impl IntoView {
+    let (copied, set_copied) = signal(false);
+    let text = text.clone();
+
+    let on_click = move |_| {
+        let text = text.clone();
+        let set_copied = set_copied;
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            leptos::task::spawn_local(async move {
+                if let Some(window) = web_sys::window() {
+                    let clipboard = window.navigator().clipboard();
+                    let promise = clipboard.write_text(&text);
+                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+                    set_copied.set(true);
+                    gloo_timers::future::TimeoutFuture::new(2000).await;
+                    set_copied.set(false);
+                }
+            });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (text, set_copied);
+        }
+    };
+
+    view! {
+        <button
+            class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            on:click=on_click
+            title="Copy to clipboard"
+        >
+            {move || {
+                if copied.get() {
+                    view! { <leptos_icons::Icon icon=icondata_lu::LuCopyCheck width="16" height="16"/> }.into_any()
+                } else {
+                    view! { <leptos_icons::Icon icon=icondata_lu::LuCopy width="16" height="16"/> }.into_any()
+                }
+            }}
+        </button>
     }
 }
 

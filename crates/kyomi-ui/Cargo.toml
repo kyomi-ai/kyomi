@@ -44,12 +44,18 @@ icondata_lu = "0.1"
 console_error_panic_hook = "0.1"
 
 # Browser DOM access (for theme toggling, clipboard, etc.)
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "Element", "DomTokenList", "MediaQueryList", "Location", "RequestCredentials"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "Element", "DomTokenList", "MediaQueryList", "Location", "RequestCredentials", "Navigator", "Clipboard"] }
 
 # WASM interop (session refresh via JS fetch)
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+
+# Base64 encoding (for Cursor deep-link config)
+base64 = { workspace = true }
+
+# Async timers for WASM (copy feedback reset)
+gloo-timers = "0.3"
 
 # Logging
 tracing = { workspace = true }
