@@ -19,7 +19,6 @@ ssr = [
     "dep:kyomi-embed",
     "dep:kyomi-knowledge",
     "dep:axum",
-    "dep:chrono",
     "dep:sqlx",
     "dep:webauthn-rs",
     "dep:sha2",
@@ -30,7 +29,7 @@ hydrate = [
     "leptos/csr",
 ]
 # Slack integration — adds server functions for Slack connection management
-slack = ["dep:kyomi-slack", "dep:chrono"]
+slack = ["dep:kyomi-slack"]
 
 [dependencies]
 # Leptos framework
@@ -52,7 +51,10 @@ icondata_lu = "0.1"
 console_error_panic_hook = "0.1"
 
 # Browser DOM access (for theme toggling, clipboard, etc.)
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "Element", "DomTokenList", "MediaQueryList", "Location", "RequestCredentials", "Navigator", "Clipboard"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "Element", "DomTokenList", "MediaQueryList", "Location", "RequestCredentials", "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer"] }
+
+# SendWrapper for non-Send JS values in Leptos reactive closures
+send_wrapper = "0.6"
 
 # WASM interop (session refresh via JS fetch)
 js-sys = "0.3"
@@ -63,7 +65,7 @@ wasm-bindgen-futures = "0.4"
 base64 = { workspace = true }
 
 # Async timers for WASM (copy feedback reset)
-gloo-timers = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 # Logging
 tracing = { workspace = true }
@@ -80,9 +82,11 @@ sha2 = { workspace = true, optional = true }
 kyomi-embed = { workspace = true, optional = true }
 kyomi-knowledge = { workspace = true, optional = true }
 
+# Date/time (used in both SSR and WASM for date formatting)
+chrono = { workspace = true }
+
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
-chrono = { workspace = true, optional = true }  # used by: slack, ssr (TOTP enabled_at)
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }

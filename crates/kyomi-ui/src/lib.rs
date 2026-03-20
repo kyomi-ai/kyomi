@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+#![recursion_limit = "512"]
 
 //! kyomi-ui — Leptos frontend for Kyomi.
 //!

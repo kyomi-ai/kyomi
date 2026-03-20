@@ -36,9 +36,11 @@ struct PushSubscription {
 /// Check whether the browser supports the Push API.
 #[cfg(target_arch = "wasm32")]
 fn push_supported() -> bool {
-    web_sys::window()
-        .and_then(|w| w.navigator().service_worker().ok())
-        .is_some()
+    // ServiceWorkerContainer exists if the browser supports service workers
+    web_sys::window().is_some() && js_sys::Reflect::has(
+        &web_sys::window().unwrap().navigator(),
+        &wasm_bindgen::JsValue::from_str("serviceWorker"),
+    ).unwrap_or(false)
 }
 
 /// Check whether we are on a secure context (HTTPS or localhost).

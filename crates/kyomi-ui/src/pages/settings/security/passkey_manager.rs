@@ -47,9 +47,11 @@ fn format_date(date_str: &str) -> String {
 
         let locale = js_sys::Array::of1(&"en-US".into());
         let formatter = Intl::DateTimeFormat::new(&locale, &options);
-        formatter
-            .format(&date)
-            .as_string()
+        let format_fn = formatter.format();
+        format_fn
+            .call1(&wasm_bindgen::JsValue::NULL, &date)
+            .ok()
+            .and_then(|v| v.as_string())
             .unwrap_or_else(|| "Unknown".to_string())
     }
     #[cfg(not(target_arch = "wasm32"))]

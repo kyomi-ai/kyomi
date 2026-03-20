@@ -240,7 +240,8 @@ pub fn BillingPage() -> impl IntoView {
                     }
                 });
 
-                // Keep interval alive for 10 seconds
+                // Keep interval alive — wrap in SendWrapper for WASM compatibility
+                let interval = send_wrapper::SendWrapper::new(interval);
                 leptos::prelude::on_cleanup(move || drop(interval));
             }
         });
