@@ -15,6 +15,7 @@ use crate::pages::settings::datasources::DatasourcesPage;
 use crate::pages::settings::profile::ProfilePage;
 use crate::pages::settings::security::SecurityTab;
 use crate::pages::settings::settings_shell::SettingsShell;
+use crate::pages::settings::billing::BillingPage;
 use crate::pages::settings::team::TeamPage;
 use crate::pages::settings::usage::UsagePage;
 use crate::pages::settings::workspace::WorkspacePage;
@@ -100,6 +101,13 @@ pub fn App() -> impl IntoView {
                             <div class="max-w-7xl mx-auto p-6">
                                 <SettingsShell>
                                     <TeamPage/>
+                                </SettingsShell>
+                            </div>
+                        }/>
+                        <Route path=path!("/settings/billing") view=|| view! {
+                            <div class="max-w-7xl mx-auto p-6">
+                                <SettingsShell>
+                                    <BillingPage/>
                                 </SettingsShell>
                             </div>
                         }/>

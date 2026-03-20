@@ -4,6 +4,7 @@
 
 pub mod ai_provider;
 pub mod analytics;
+pub mod billing;
 pub mod datasources;
 pub mod profile;
 pub mod push_notifications;

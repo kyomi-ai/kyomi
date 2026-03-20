@@ -7,9 +7,17 @@ use leptos::prelude::*;
 /// Card container.
 /// React: `rounded-xl border border-border bg-card text-card-foreground shadow`
 #[component]
-pub fn Card(children: Children) -> impl IntoView {
+pub fn Card(
+    #[prop(optional, into)]
+    class: String,
+    children: Children,
+) -> impl IntoView {
+    let classes = format!(
+        "rounded-xl border border-border bg-card text-card-foreground shadow {}",
+        class
+    );
     view! {
-        <div class="rounded-xl border border-border bg-card text-card-foreground shadow">
+        <div class=classes>
             {children()}
         </div>
     }
@@ -25,22 +33,37 @@ pub fn CardHeader(children: Children) -> impl IntoView {
 /// Card content section.
 /// React: `p-6 pt-0`
 #[component]
-pub fn CardContent(children: Children) -> impl IntoView {
-    view! { <div class="p-6 pt-0">{children()}</div> }
+pub fn CardContent(
+    #[prop(optional, into)]
+    class: String,
+    children: Children,
+) -> impl IntoView {
+    let classes = format!("p-6 pt-0 {}", class);
+    view! { <div class=classes>{children()}</div> }
 }
 
 /// Card title.
 /// React: `font-semibold leading-none tracking-tight`
 #[component]
-pub fn CardTitle(children: Children) -> impl IntoView {
-    view! { <div class="font-semibold leading-none tracking-tight">{children()}</div> }
+pub fn CardTitle(
+    #[prop(optional, into)]
+    class: String,
+    children: Children,
+) -> impl IntoView {
+    let classes = format!("font-semibold leading-none tracking-tight {}", class);
+    view! { <div class=classes>{children()}</div> }
 }
 
 /// Card description.
 /// React: `text-sm text-muted-foreground`
 #[component]
-pub fn CardDescription(children: Children) -> impl IntoView {
-    view! { <div class="text-sm text-muted-foreground">{children()}</div> }
+pub fn CardDescription(
+    #[prop(optional, into)]
+    class: String,
+    children: Children,
+) -> impl IntoView {
+    let classes = format!("text-sm text-muted-foreground {}", class);
+    view! { <div class=classes>{children()}</div> }
 }
 
 /// Card footer.

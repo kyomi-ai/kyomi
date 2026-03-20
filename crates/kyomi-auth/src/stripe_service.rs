@@ -303,6 +303,32 @@ impl StripeService {
         self.parse_subscription_data(&updated).await
     }
 
+    /// Add a new subscription item (e.g. additional users) to an existing subscription.
+    ///
+    /// Returns the new subscription item's ID.
+    pub async fn add_subscription_item(
+        &self,
+        subscription_id: &str,
+        price_id: &str,
+        quantity: u64,
+    ) -> Result<String, StripeError> {
+        let new_item =
+            stripe_billing::subscription_item::CreateSubscriptionItem::new(subscription_id)
+                .price(price_id)
+                .quantity(quantity)
+                .send(&self.client)
+                .await?;
+
+        tracing::info!(
+            subscription_id,
+            quantity,
+            item_id = %new_item.id,
+            "Added subscription item"
+        );
+
+        Ok(new_item.id.to_string())
+    }
+
     /// Update the quantity of additional users on a Team subscription.
     pub async fn update_subscription_quantity(
         &self,
