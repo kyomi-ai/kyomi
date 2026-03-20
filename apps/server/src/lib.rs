@@ -177,6 +177,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/settings/security", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/usage", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/workspace", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/settings/analytics", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/leptos/{*path}", axum::routing::get(leptos_frontend::serve_leptos_asset))
         // Leptos server functions — typed RPC replacing REST calls
         // Uses /leptos-api/ prefix to avoid conflicts with /api/v1/ REST routes

@@ -61,6 +61,13 @@ pub fn register_server_functions() {
     use server_fns::usage::*;
     register_explicit::<GetAiUsageStatus>();
 
+    use server_fns::analytics::*;
+    register_explicit::<ListAnalyticsSites>();
+    register_explicit::<GetAnalyticsUsage>();
+    register_explicit::<CreateAnalyticsSite>();
+    register_explicit::<UpdateAnalyticsSite>();
+    register_explicit::<DeleteAnalyticsSite>();
+
     use server_fns::workspace::*;
     register_explicit::<GetWorkspaceSettings>();
     register_explicit::<UpdateWorkspaceName>();

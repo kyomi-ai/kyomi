@@ -12,6 +12,7 @@
 //! (provided at router setup). This avoids a circular dependency with the
 //! server crate's `AppState`.
 
+pub mod analytics;
 pub mod context;
 pub mod profile;
 pub mod security;

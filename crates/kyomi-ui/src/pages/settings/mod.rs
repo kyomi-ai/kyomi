@@ -3,6 +3,7 @@
 //! Settings pages — tab-based layout matching the React SettingsContent.
 
 pub mod ai_provider;
+pub mod analytics;
 pub mod profile;
 pub mod push_notifications;
 pub mod security;

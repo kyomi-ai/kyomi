@@ -10,6 +10,7 @@ use leptos_router::{
 };
 
 use crate::components::{Layout, ThemeProvider};
+use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::profile::ProfilePage;
 use crate::pages::settings::security::SecurityTab;
 use crate::pages::settings::settings_shell::SettingsShell;
@@ -76,6 +77,13 @@ pub fn App() -> impl IntoView {
                             <div class="max-w-7xl mx-auto p-6">
                                 <SettingsShell>
                                     <WorkspacePage/>
+                                </SettingsShell>
+                            </div>
+                        }/>
+                        <Route path=path!("/settings/analytics") view=|| view! {
+                            <div class="max-w-7xl mx-auto p-6">
+                                <SettingsShell>
+                                    <AnalyticsPage/>
                                 </SettingsShell>
                             </div>
                         }/>
