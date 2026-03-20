@@ -13,6 +13,7 @@ use crate::components::{Layout, ThemeProvider};
 use crate::pages::settings::profile::ProfilePage;
 use crate::pages::settings::security::SecurityTab;
 use crate::pages::settings::settings_shell::SettingsShell;
+use crate::pages::settings::usage::UsagePage;
 
 /// Shell HTML page that loads the WASM bundle.
 ///
@@ -60,6 +61,13 @@ pub fn App() -> impl IntoView {
                             <div class="max-w-7xl mx-auto p-6">
                                 <SettingsShell>
                                     <SecurityTab/>
+                                </SettingsShell>
+                            </div>
+                        }/>
+                        <Route path=path!("/settings/usage") view=|| view! {
+                            <div class="max-w-7xl mx-auto p-6">
+                                <SettingsShell>
+                                    <UsagePage/>
                                 </SettingsShell>
                             </div>
                         }/>

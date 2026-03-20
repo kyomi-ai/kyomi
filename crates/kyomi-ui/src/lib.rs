@@ -58,6 +58,9 @@ pub fn register_server_functions() {
     register_explicit::<GetRecentSessions>();
     register_explicit::<GetSidebarUser>();
 
+    use server_fns::usage::*;
+    register_explicit::<GetAiUsageStatus>();
+
     #[cfg(feature = "slack")]
     {
         use server_fns::slack::*;

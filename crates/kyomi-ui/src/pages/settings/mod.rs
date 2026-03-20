@@ -9,3 +9,4 @@ pub mod security;
 pub mod settings_shell;
 #[cfg(feature = "slack")]
 pub mod slack_connection;
+pub mod usage;

@@ -18,6 +18,7 @@ pub mod security;
 pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;
+pub mod usage;
 
 /// State provided to server functions via Leptos context.
 ///
