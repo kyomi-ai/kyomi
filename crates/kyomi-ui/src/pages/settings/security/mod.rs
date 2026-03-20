@@ -3,4 +3,5 @@
 //! Security settings sub-components.
 
 pub mod password_manager;
+pub mod session_management;
 pub mod two_factor_auth;

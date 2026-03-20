@@ -4181,6 +4181,7 @@ dependencies = [
  "leptos_router",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
  "wasm-bindgen",

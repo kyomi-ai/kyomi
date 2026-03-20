@@ -2,16 +2,19 @@
 
 //! Server functions for Security settings.
 //!
-//! These replace the REST API calls for password and TOTP management:
+//! These replace the REST API calls for password, TOTP, and session management:
 //! - `POST /auth/set-password` -> `set_password()`
 //! - `POST /auth/change-password` -> `change_password()`
 //! - `GET  /auth/2fa/status` -> `get_totp_status()`
 //! - `POST /auth/2fa/setup` -> `setup_totp()`
 //! - `POST /auth/2fa/enable` -> `enable_totp()`
 //! - `POST /auth/2fa/disable` -> `disable_totp()`
+//! - `GET  /auth/sessions` -> `get_sessions()`
+//! - `DELETE /auth/sessions/{id}` -> `revoke_session()`
+//! - `POST /auth/logout-all` -> `logout_all_sessions()`
 //!
-//! Calls the same service-layer code as `apps/server/src/routes/auth_password.rs`
-//! and `apps/server/src/routes/auth_totp.rs`.
+//! Calls the same service-layer code as `apps/server/src/routes/auth_password.rs`,
+//! `apps/server/src/routes/auth_totp.rs`, and `apps/server/src/routes/auth.rs`.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -266,5 +269,132 @@ pub async fn disable_totp() -> Result<String, ServerFnError> {
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok("2FA has been successfully disabled".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Session management server functions
+// ---------------------------------------------------------------------------
+
+/// A single session entry returned by `get_sessions()`.
+///
+/// Maps to the `SessionInfo` fields from `kyomi_auth::token_service` plus
+/// the `is_current` flag computed by comparing the caller's refresh token
+/// cookie family against each session's family.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionEntry {
+    pub token_id: String,
+    pub created_at: String,
+    pub last_used: Option<String>,
+    pub expires_at: String,
+    pub user_agent: Option<String>,
+    pub ip_address: Option<String>,
+    pub country_code: Option<String>,
+    pub oauth_client_name: Option<String>,
+    pub is_current: bool,
+}
+
+/// Get all active sessions for the current user.
+///
+/// Mirrors `GET /auth/sessions` in `apps/server/src/routes/auth.rs`.
+/// Determines the current session by comparing the refresh token cookie's
+/// family_id against each session's family_id.
+#[server(prefix = "/leptos-api")]
+pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let sessions =
+        kyomi_auth::token_service::get_user_sessions(&ctx.db, &auth.user_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Determine current session by looking up the family_id of the cookie's
+    // refresh token — same approach as the REST handler in auth.rs.
+    let headers: axum::http::HeaderMap = leptos_axum::extract().await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    let refresh_token_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+
+    #[derive(sqlx::FromRow)]
+    struct FamilyIdRow {
+        family_id: String,
+    }
+
+    let current_family_id: Option<String> =
+        if let Some(raw_token) = kyomi_auth::cookies::get_cookie_value(&headers, refresh_token_name)
+        {
+            let hash = kyomi_auth::token_service::hash_refresh_token(raw_token);
+            kyomi_core::db_fetch_optional!(
+                &ctx.db,
+                FamilyIdRow,
+                "SELECT family_id FROM refresh_tokens WHERE token_hash = $1 AND is_active = true",
+                &hash
+            )
+            .ok()
+            .flatten()
+            .map(|r| r.family_id)
+        } else {
+            None
+        };
+
+    let entries = sessions
+        .iter()
+        .map(|s| {
+            let is_current = current_family_id.as_deref() == Some(&s.family_id);
+            SessionEntry {
+                token_id: s.token_id.clone(),
+                created_at: s.created_at.to_rfc3339(),
+                last_used: s.last_used.map(|dt| dt.to_rfc3339()),
+                expires_at: s.expires_at.to_rfc3339(),
+                user_agent: s.user_agent.clone(),
+                ip_address: s.ip_address.clone(),
+                country_code: s.country_code.clone(),
+                oauth_client_name: s.oauth_client_name.clone(),
+                is_current,
+            }
+        })
+        .collect();
+
+    Ok(entries)
+}
+
+/// Revoke a specific session by token ID.
+///
+/// Mirrors `DELETE /auth/sessions/{token_id}` in `apps/server/src/routes/auth.rs`.
+/// Revokes the entire token family so rotated tokens in the same session are
+/// also invalidated.
+#[server(prefix = "/leptos-api")]
+pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let revoked =
+        kyomi_auth::token_service::revoke_user_refresh_token(&ctx.db, &auth.user_id, &token_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    if !revoked {
+        return Err(ServerFnError::new("Session not found"));
+    }
+
+    Ok("Session revoked successfully".to_string())
+}
+
+/// Log out from all devices by revoking every refresh token for the user.
+///
+/// Mirrors `POST /auth/logout-all` in `apps/server/src/routes/auth.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let revoked_count =
+        kyomi_auth::token_service::revoke_all_user_refresh_tokens(&ctx.db, &auth.user_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(format!(
+        "Logged out from all devices successfully ({revoked_count} sessions revoked)"
+    ))
 }
 

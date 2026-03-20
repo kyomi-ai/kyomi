@@ -45,6 +45,9 @@ pub fn register_server_functions() {
     register_explicit::<SetupTotp>();
     register_explicit::<EnableTotp>();
     register_explicit::<DisableTotp>();
+    register_explicit::<GetSessions>();
+    register_explicit::<RevokeSession>();
+    register_explicit::<LogoutAllSessions>();
 
     use server_fns::sidebar::*;
     register_explicit::<GetRecentSessions>();
