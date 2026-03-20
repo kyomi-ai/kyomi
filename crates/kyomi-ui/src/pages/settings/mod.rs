@@ -3,3 +3,4 @@
 //! Settings pages — tab-based layout matching the React SettingsContent.
 
 pub mod profile;
+pub mod settings_shell;

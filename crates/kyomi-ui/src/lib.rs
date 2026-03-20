@@ -34,4 +34,8 @@ pub fn register_server_functions() {
     register_explicit::<UpdateChartPalette>();
     register_explicit::<AcceptInvitation>();
     register_explicit::<DeclineInvitation>();
+
+    use server_fns::sidebar::*;
+    register_explicit::<GetRecentSessions>();
+    register_explicit::<GetSidebarUser>();
 }

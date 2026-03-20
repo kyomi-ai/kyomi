@@ -282,31 +282,6 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Extract the authenticated user from the Axum request.
+// Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-async fn extract_auth() -> Result<kyomi_auth::middleware::AuthUser, ServerFnError> {
-    let ctx = extract_context()?;
-    leptos_axum::extract_with_state::<kyomi_auth::middleware::AuthUser, _>(&ctx.auth_state)
-        .await
-        .map_err(|e| ServerFnError::new(format!("Authentication required: {e}")))
-}
-
-/// Extract the server context (db, config, auth_state) from Leptos context.
-#[cfg(feature = "ssr")]
-fn extract_context() -> Result<super::ServerContext, ServerFnError> {
-    use_context::<super::ServerContext>()
-        .ok_or_else(|| ServerFnError::new("Server context not available"))
-}
-
-/// Get workspace_id from the auth user, or error.
-#[cfg(feature = "ssr")]
-fn workspace_id(auth: &kyomi_auth::middleware::AuthUser) -> Result<&str, ServerFnError> {
-    auth.workspace
-        .workspace_id
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Workspace context required"))
-}
+use super::{extract_auth, extract_context, workspace_id};

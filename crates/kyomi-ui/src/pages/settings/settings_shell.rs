@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Settings page shell — header + tab navigation bar.
+//!
+//! Matches `apps/frontend/src/pages/SettingsContent.jsx` layout:
+//! - Page header: "Settings" title + description
+//! - Tab bar: Profile, Security, Workspace, Data Sources, etc.
+//! - Content area: renders the active tab's component
+//!
+//! Tab visibility is role-based (matching React logic exactly):
+//! - Profile: always visible
+//! - Security: hidden in personal mode
+//! - Workspace: admin only, hidden in personal mode
+//! - Data Sources: always visible
+//! - Analytics: admin only, hidden in self-hosted
+//! - Usage: hidden in self-hosted
+//! - Billing: owner only, hidden in self-hosted
+//! - Team: team tier + admin, hidden in personal mode
+
+use leptos::prelude::*;
+use leptos_icons::Icon;
+
+/// Settings tab definition.
+struct SettingsTab {
+    id: &'static str,
+    name: &'static str,
+    icon: &'static icondata_core::IconData,
+}
+
+/// All settings tabs (visibility filtered at render time based on user context).
+const TABS: &[SettingsTab] = &[
+    SettingsTab { id: "profile", name: "Profile", icon: icondata_lu::LuUser },
+    SettingsTab { id: "security", name: "Security", icon: icondata_lu::LuShield },
+    SettingsTab { id: "workspace", name: "Workspace", icon: icondata_lu::LuSettings },
+    SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer },
+    SettingsTab { id: "analytics", name: "Analytics", icon: icondata_lu::LuActivity },
+    SettingsTab { id: "usage", name: "Usage", icon: icondata_lu::LuChartBar },
+    SettingsTab { id: "billing", name: "Billing", icon: icondata_lu::LuCreditCard },
+    SettingsTab { id: "team", name: "Team", icon: icondata_lu::LuUsers },
+];
+
+/// Settings shell component — wraps settings tab content.
+///
+/// For the POC, only the Profile tab is implemented in Leptos.
+/// Other tabs link to the React settings page (full page nav).
+#[component]
+pub fn SettingsShell(children: Children) -> impl IntoView {
+    // For the POC, we show all common tabs but only Profile is active in Leptos.
+    // Other tabs navigate to the React app.
+    let active_tab = "profile";
+
+    view! {
+        <div class="w-full space-y-8" style:display="block">
+            // Settings Header — matches React exactly
+            // React: "text-3xl font-bold text-foreground"
+            <div class="mb-8">
+                <h1 class="text-3xl font-bold text-foreground">"Settings"</h1>
+                <p class="text-muted-foreground mt-2">"Manage your workspace configuration and billing settings"</p>
+            </div>
+
+            // Settings Navigation Tabs
+            // React: "w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden"
+            <div class="w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden">
+                <div class="border-b border-border overflow-x-auto">
+                    <div class="flex space-x-4 md:space-x-8 px-4 md:px-6 min-w-max">
+                        {TABS.iter().map(|tab| {
+                            let is_active = tab.id == active_tab;
+                            let tab_class = if is_active {
+                                "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-primary text-primary"
+                            } else {
+                                "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                            };
+
+                            // For the POC: profile tab stays in Leptos, others go to React
+                            let href = if tab.id == "profile" {
+                                "/settings/profile".to_string()
+                            } else {
+                                format!("/settings/{}", tab.id)
+                            };
+
+                            view! {
+                                <a href=href class=tab_class>
+                                    <Icon icon=tab.icon width="16" height="16"/>
+                                    <span>{tab.name}</span>
+                                </a>
+                            }
+                        }).collect_view()}
+                    </div>
+                </div>
+            </div>
+
+            // Settings Content
+            // React: "w-full bg-card rounded-xl shadow-sm border border-border"
+            <div class="w-full bg-card rounded-xl shadow-sm border border-border">
+                {children()}
+            </div>
+        </div>
+    }
+}

@@ -11,6 +11,7 @@ use leptos_router::{
 
 use crate::components::{Layout, ThemeProvider};
 use crate::pages::settings::profile::ProfilePage;
+use crate::pages::settings::settings_shell::SettingsShell;
 
 /// Shell HTML page that loads the WASM bundle.
 ///
@@ -47,7 +48,13 @@ pub fn App() -> impl IntoView {
             <Router>
                 <Layout>
                     <Routes fallback=|| view! { <p>"Page not found"</p> }>
-                        <Route path=path!("/settings/profile") view=ProfilePage/>
+                        <Route path=path!("/settings/profile") view=|| view! {
+                            <div class="max-w-7xl mx-auto p-6">
+                                <SettingsShell>
+                                    <ProfilePage/>
+                                </SettingsShell>
+                            </div>
+                        }/>
                     </Routes>
                 </Layout>
             </Router>

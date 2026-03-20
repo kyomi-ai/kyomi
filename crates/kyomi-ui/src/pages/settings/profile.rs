@@ -111,13 +111,8 @@ pub fn ProfilePage() -> impl IntoView {
     let invitations = Resource::new(|| (), |_| get_pending_invitations());
 
     view! {
-        <div class="w-full max-w-4xl mx-auto px-4 py-8 space-y-8">
-            <div class="mb-8">
-                <h1 class="text-3xl font-bold text-foreground">"Settings"</h1>
-                <p class="text-muted-foreground mt-2">
-                    "Manage your profile and preferences"
-                </p>
-            </div>
+        <div class="p-6">
+            <h2 class="text-xl font-semibold text-foreground mb-6">"Profile Settings"</h2>
 
             <Suspense fallback=move || view! {
                 <div class="flex items-center justify-center py-12">
