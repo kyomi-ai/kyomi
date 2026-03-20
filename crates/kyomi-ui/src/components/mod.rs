@@ -24,6 +24,7 @@ pub mod status_badge;
 pub mod switch;
 pub mod theme;
 pub mod toast;
+pub mod tooltip;
 
 // Re-export commonly used components
 pub use action_status::ActionStatus;
@@ -41,3 +42,4 @@ pub use skeleton::Skeleton;
 pub use status_badge::{StatusBadge, StatusBadgeVariant};
 pub use switch::Switch;
 pub use theme::ThemeProvider;
+pub use tooltip::Tooltip;
