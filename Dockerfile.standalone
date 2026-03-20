@@ -33,12 +33,16 @@ FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
-# Copy files needed for compilation (include_str! paths require repo layout)
-COPY apps/backend-rust/ ./apps/backend-rust/
-COPY data/chartml-spec/ ./data/chartml-spec/
+# Copy Cargo workspace and crates
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+COPY apps/server/ ./apps/server/
+COPY enterprise/ ./enterprise/
+
+# Copy files needed for include_str!/include_bytes! paths
+COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
-COPY shared/constants.toml ./shared/constants.toml
 
 # Frontend dist — rust-embed reads this at compile time to embed into the binary
 COPY --from=frontend-builder /build/apps/frontend/dist ./apps/frontend/dist
@@ -47,8 +51,8 @@ COPY --from=frontend-builder /build/apps/frontend/dist ./apps/frontend/dist
 # via include_bytes!() — no runtime model files needed.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/apps/backend-rust/target \
-    cd apps/backend-rust && cargo build --release && \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p kyomi-server && \
     cp target/release/kyomi /tmp/kyomi
 
 # ===== Stage 2: Minimal Debian runtime =====

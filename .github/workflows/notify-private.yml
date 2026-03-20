@@ -7,9 +7,8 @@
 # services have changed files.
 #
 # Path-to-service mapping (mirrors the old per-service workflow triggers):
-#   api:                apps/backend-rust/**, apps/mcp-chart-app/**, data/chartml-spec/**, packages/chart-header/**
+#   api:                apps/server/**, crates/**, enterprise/**, Cargo.*, apps/mcp-chart-app/**, data/**, packages/chart-header/**
 #   chart_renderer:     apps/chart-renderer/**, packages/chartml-transform/**
-#   analytics_collector: apps/analytics-collector/**
 #   frontend:           apps/frontend/**
 #   marketing:          apps/marketing/**, apps/docs/**
 #   infra:              k8s/**
@@ -48,7 +47,7 @@ jobs:
           MARKETING=false
           INFRA=false
 
-          if has_match '^apps/backend-rust/|^apps/mcp-chart-app/|^data/chartml-spec/|^packages/chart-header/|^packages/chartml-core/'; then
+          if has_match '^apps/server/|^crates/|^enterprise/|^Cargo\.|^apps/mcp-chart-app/|^data/|^packages/chart-header/|^packages/chartml-core/'; then
             API=true
           fi
 

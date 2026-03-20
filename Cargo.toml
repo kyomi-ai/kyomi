@@ -1,0 +1,184 @@
+[workspace]
+members = [
+    "crates/kyomi-core",
+    "crates/kyomi-auth",
+    "crates/kyomi-embed",
+    "crates/kyomi-datasource",
+    "crates/kyomi-agent",
+    "crates/kyomi-knowledge",
+    "apps/server",
+    "enterprise/kyomi-slack",
+]
+resolver = "3"
+
+[workspace.package]
+license = "AGPL-3.0-or-later"
+
+# Shared dependency versions — all crates use these
+[workspace.dependencies]
+# Web framework
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "limit", "normalize-path", "set-header", "trace"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring", "postgres", "sqlite", "mysql", "uuid", "chrono", "json", "macros", "rust_decimal", "migrate"] }
+pgvector = { version = "0.4", features = ["sqlx", "serde"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Auth
+jsonwebtoken = "9"
+bcrypt = "0.17"
+argon2 = "0.5"
+
+# Encryption
+aes-gcm = "0.10"
+base64 = "0.22"
+
+# Redis
+redis = { version = "0.29", features = ["tokio-rustls-comp", "connection-manager"] }
+
+# Embeddings
+fastembed = { version = "4", default-features = false, features = ["ort-download-binaries"] }
+
+# HTTP client (for external APIs: Anthropic, Stripe, Slack, etc.)
+# Uses native-roots so reqwest trusts both public CAs and our internal CA
+# (distributed via trust-manager's SSL_CERT_FILE bundle).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+
+# WebAuthn (passkeys)
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+webauthn-rs-proto = "0.5"
+
+# Web Push (VAPID/ECE content encoding)
+web-push-native = "0.4"
+p256 = { version = "0.13", features = ["ecdh", "pkcs8", "pem"] }
+http = "1"
+
+# URL parsing
+url = "2"
+
+# Hashing
+sha2 = "0.10"
+
+# YAML parsing (ChartML validation)
+serde_yaml = "0.9"
+
+# Regex
+regex = "1"
+
+# URL-encoded form parsing (Slack command payloads)
+serde_urlencoded = "0.7"
+
+# IANA timezone parsing (Slack user timezones)
+chrono-tz = "0.10"
+
+# Random
+rand = "0.9"
+
+# Statistics (t-distribution for forecast prediction intervals)
+statrs = "0.18"
+
+# Apache Arrow IPC (BigQuery read-arrow endpoint — REST→Arrow conversion)
+arrow-schema = "57"
+arrow-array = "57"
+arrow-ipc = "57"
+arrow-buffer = "57"
+
+# SSH key generation (Ed25519)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# Byte buffers
+bytes = "1"
+
+# Utilities
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Internal crates
+kyomi-core = { path = "crates/kyomi-core" }
+kyomi-auth = { path = "crates/kyomi-auth" }
+kyomi-embed = { path = "crates/kyomi-embed" }
+kyomi-datasource-server = { path = "crates/kyomi-datasource" }
+kyomi-agent = { path = "crates/kyomi-agent" }
+kyomi-knowledge = { path = "crates/kyomi-knowledge" }
+kyomi-connect-protocol = "1"
+kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
+
+# SQL parser (extract table/column references from agent-generated SQL)
+sqlparser = { version = "0.55", features = ["visitor"] }
+
+# Tokio utilities
+tokio-util = { version = "0.7", features = ["compat"] }
+
+# Async trait
+async-trait = "0.1"
+
+# Concurrent data structures
+dashmap = "6"
+
+# Stream utilities (for Redis pub/sub)
+futures-util = "0.3"
+
+# HMAC for trial token signing + Slack signature verification
+hmac = "0.12"
+
+# Hex encoding (Slack signature output)
+hex = "0.4"
+
+# Constant-time comparison (Slack signature verification)
+subtle = "2"
+
+# Embedded frontend assets
+rust-embed = "8"
+
+# Cron expression parsing
+cron = "0.15"
+
+# SMTP email sending (default-features off to exclude native-tls)
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "hostname", "builder", "pool"] }
+
+# Stripe billing API
+async-stripe = { version = "1.0.0-rc.1", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
+async-stripe-webhook = { version = "1.0.0-rc.1", features = [
+    "async-stripe-billing",
+    "async-stripe-checkout",
+    "async-stripe-core",
+] }
+async-stripe-billing = { version = "1.0.0-rc.1", features = [
+    "subscription",
+    "subscription_item",
+    "invoice",
+    "billing_portal_session",
+] }
+async-stripe-checkout = { version = "1.0.0-rc.1", features = ["checkout_session"] }
+async-stripe-core = { version = "1.0.0-rc.1", features = ["customer"] }
+async-stripe-product = { version = "1.0.0-rc.1", features = ["product"] }
+async-stripe-shared = { version = "1.0.0-rc.1" }
+async-stripe-types = { version = "1.0.0-rc.1" }
+
+# TOTP / 2FA
+totp-rs = { version = "5", features = ["otpauth", "gen_secret", "qr"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Uncomment to use a local checkout of kyomi-connect for development:
+# [patch.crates-io]
+# kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
+# kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }

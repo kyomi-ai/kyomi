@@ -73,16 +73,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/backend-rust
+          workspaces: .
 
       - name: Build release binary
-        working-directory: apps/backend-rust
-        run: cargo build --release -p kyomi-api
+        run: cargo build --release -p kyomi-server
 
       - name: Package binary
         run: |
           mkdir -p release
-          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          cp target/release/${{ env.BINARY_NAME }} release/
           tar -czf kyomi-linux-amd64.tar.gz -C release kyomi
           rm -rf release
 
@@ -126,16 +125,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/backend-rust
+          workspaces: .
 
       - name: Build release binary
-        working-directory: apps/backend-rust
-        run: cargo build --release -p kyomi-api
+        run: cargo build --release -p kyomi-server
 
       - name: Package binary
         run: |
           mkdir -p release
-          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          cp target/release/${{ env.BINARY_NAME }} release/
           tar -czf kyomi-linux-arm64.tar.gz -C release kyomi
           rm -rf release
 
@@ -179,16 +177,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/backend-rust
+          workspaces: .
 
       - name: Build release binary
-        working-directory: apps/backend-rust
-        run: cargo build --release -p kyomi-api
+        run: cargo build --release -p kyomi-server
 
       - name: Package binary
         run: |
           mkdir -p release
-          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          cp target/release/${{ env.BINARY_NAME }} release/
           tar -czf kyomi-macos-arm64.tar.gz -C release kyomi
           rm -rf release
 
@@ -232,16 +229,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/backend-rust
+          workspaces: .
 
       - name: Build release binary
-        working-directory: apps/backend-rust
-        run: cargo build --release -p kyomi-api
+        run: cargo build --release -p kyomi-server
 
       - name: Package binary
         run: |
           mkdir -p release
-          cp apps/backend-rust/target/release/${{ env.BINARY_NAME }} release/
+          cp target/release/${{ env.BINARY_NAME }} release/
           tar -czf kyomi-macos-amd64.tar.gz -C release kyomi
           rm -rf release
 
