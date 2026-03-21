@@ -175,7 +175,9 @@ pub fn BillingPage() -> impl IntoView {
     // Read the UserContext provided by SettingsShell to check deployment mode.
     let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
 
-    // Resources for subscription info (reload via version signal)
+    // Resources for subscription info (reload via version signal).
+    // get_subscription_info() returns Ok(None) when Stripe is not configured —
+    // not an error, just "not available for this deployment".
     let (sub_version, set_sub_version) = signal(0u32);
     let subscription = Resource::new(
         move || sub_version.get(),
@@ -450,26 +452,11 @@ pub fn BillingPage() -> impl IntoView {
                                     }.into_any()
                                 }
                                 Err(e) => {
-                                    let msg = e.to_string();
-                                    // "not available" errors (no Stripe configured) get a
-                                    // graceful informational card, not a red error banner.
-                                    if msg.contains("not available") {
-                                        view! {
-                                            <Card>
-                                                <CardContent>
-                                                    <p class="text-muted-foreground py-6">
-                                                        "Billing is not available in this deployment."
-                                                    </p>
-                                                </CardContent>
-                                            </Card>
-                                        }.into_any()
-                                    } else {
-                                        view! {
-                                            <Alert variant=AlertVariant::Error>
-                                                <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
-                                            </Alert>
-                                        }.into_any()
-                                    }
+                                    view! {
+                                        <Alert variant=AlertVariant::Error>
+                                            <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
+                                        </Alert>
+                                    }.into_any()
                                 }
                             }
                         })}

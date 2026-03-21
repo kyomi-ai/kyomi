@@ -19,6 +19,7 @@
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
+use leptos_router::components::Outlet;
 use leptos_router::hooks::use_location;
 
 use crate::server_fns::context::{get_user_context, UserContext};
@@ -37,7 +38,7 @@ const TABS: &[SettingsTab] = &[
     SettingsTab { id: "profile", name: "Profile", icon: icondata_lu::LuUser, path: "profile" },
     SettingsTab { id: "security", name: "Security", icon: icondata_lu::LuShield, path: "security" },
     SettingsTab { id: "workspace", name: "Workspace", icon: icondata_lu::LuSettings, path: "workspace" },
-    SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer, path: "datasources-v2" },
+    SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer, path: "datasources" },
     SettingsTab { id: "analytics", name: "Analytics", icon: icondata_lu::LuActivity, path: "analytics" },
     SettingsTab { id: "usage", name: "Usage", icon: icondata_lu::LuChartBar, path: "usage" },
     SettingsTab { id: "billing", name: "Billing", icon: icondata_lu::LuCreditCard, path: "billing" },
@@ -98,7 +99,7 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
 /// components via Leptos context. Settings tabs read it with
 /// `expect_context::<Resource<Result<UserContext, ServerFnError>>>()`.
 #[component]
-pub fn SettingsShell(children: Children) -> impl IntoView {
+pub fn SettingsShell() -> impl IntoView {
     // Fetch user context once — all settings tabs share this resource.
     let user_ctx = Resource::new(|| (), |_| get_user_context());
     provide_context(user_ctx);
@@ -114,50 +115,35 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
 
     view! {
         <div class="w-full space-y-8" style:display="block">
-            // Settings Header — matches React exactly
-            // React: "text-3xl font-bold text-foreground"
-            <div class="mb-8 relative">
-                <a
-                    href="/"
-                    class="absolute top-0 right-0 p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors z-10"
-                    aria-label="Close settings"
-                    title="Close settings"
-                >
-                    <Icon icon=icondata_lu::LuX width="24" height="24"/>
-                </a>
+            // Settings Header — matches React SettingsContent.jsx
+            <div class="mb-8">
                 <h1 class="text-3xl font-bold text-foreground">"Settings"</h1>
                 <p class="text-muted-foreground mt-2">"Manage your workspace configuration and billing settings"</p>
             </div>
 
             // Settings Navigation Tabs
             // React: "w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden"
+            //
+            // The tab structure is rendered once when user_ctx loads. Each tab's
+            // active class is an independent reactive signal so clicking a tab
+            // only updates CSS classes — no DOM teardown/rebuild, no flicker.
             <div class="w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden">
-                <div class="border-b border-border overflow-x-auto">
+                <div class="border-b border-border overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent">
                     <div class="flex space-x-4 md:space-x-8 px-4 md:px-6 min-w-max">
-                        {move || {
-                            // Determine which tabs are visible based on user context.
-                            // While loading, show the safe default set that requires no role info.
-                            let visible_ids: Vec<&'static str> = match user_ctx.get() {
-                                Some(Ok(ctx)) => visible_tabs(&ctx),
-                                _ => {
-                                    // Loading or error: show the always-visible tabs only.
-                                    vec!["profile", "security", "workspace", "datasources"]
-                                }
-                            };
-
-                            let current_path = active_tab.get();
+                        <Suspense fallback=move || {
+                            // While user_ctx loads, show always-visible tabs.
                             TABS.iter()
-                                .filter(|tab| visible_ids.contains(&tab.id))
+                                .filter(|tab| matches!(tab.id, "profile" | "security" | "workspace" | "datasources"))
                                 .map(|tab| {
-                                    let is_active = tab.path == current_path;
-                                    let tab_class = if is_active {
-                                        "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-primary text-primary"
-                                    } else {
-                                        "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                                    let tab_path = tab.path;
+                                    let tab_class = move || {
+                                        if active_tab.get() == tab_path {
+                                            "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-primary text-primary"
+                                        } else {
+                                            "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                                        }
                                     };
-
                                     let href = format!("/settings/{}", tab.path);
-
                                     view! {
                                         <a href=href class=tab_class>
                                             <Icon icon=tab.icon width="16" height="16"/>
@@ -166,15 +152,43 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
                                     }
                                 })
                                 .collect_view()
-                        }}
+                        }>
+                            {move || Suspend::new(async move {
+                                let visible_ids: Vec<&'static str> = match user_ctx.await {
+                                    Ok(ctx) => visible_tabs(&ctx),
+                                    _ => vec!["profile", "security", "workspace", "datasources"],
+                                };
+
+                                TABS.iter()
+                                    .filter(|tab| visible_ids.contains(&tab.id))
+                                    .map(|tab| {
+                                        let tab_path = tab.path;
+                                        let tab_class = move || {
+                                            if active_tab.get() == tab_path {
+                                                "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-primary text-primary"
+                                            } else {
+                                                "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                                            }
+                                        };
+                                        let href = format!("/settings/{}", tab.path);
+                                        view! {
+                                            <a href=href class=tab_class>
+                                                <Icon icon=tab.icon width="16" height="16"/>
+                                                <span>{tab.name}</span>
+                                            </a>
+                                        }
+                                    })
+                                    .collect_view()
+                            })}
+                        </Suspense>
                     </div>
                 </div>
             </div>
 
-            // Settings Content
+            // Settings Content — child route renders here via <Outlet/>
             // React: "w-full bg-card rounded-xl shadow-sm border border-border"
             <div class="w-full bg-card rounded-xl shadow-sm border border-border">
-                {children()}
+                <Outlet/>
             </div>
         </div>
     }

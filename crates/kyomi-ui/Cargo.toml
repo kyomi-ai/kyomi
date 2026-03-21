@@ -18,6 +18,8 @@ ssr = [
     "dep:kyomi-auth",
     "dep:kyomi-embed",
     "dep:kyomi-knowledge",
+    "dep:kyomi-datasource-server",
+    "dep:tokio",
     "dep:axum",
     "dep:sqlx",
     "dep:webauthn-rs",
@@ -73,10 +75,12 @@ tracing = { workspace = true }
 # Internal crates (server-only — gated behind ssr feature)
 kyomi-core = { workspace = true, optional = true }
 kyomi-auth = { workspace = true, optional = true }
+kyomi-datasource-server = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 
 # Knowledge graph + embedding (server-only — gated behind ssr feature)
 kyomi-embed = { workspace = true, optional = true }

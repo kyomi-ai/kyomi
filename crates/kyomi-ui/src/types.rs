@@ -93,7 +93,7 @@ pub struct WorkspaceSlackStatus {
 /// A workspace member with user details.
 ///
 /// Mirrors the JSON shape returned by `GET /api/v1/workspaces/members`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TeamMember {
     pub user_id: String,
     pub email: String,

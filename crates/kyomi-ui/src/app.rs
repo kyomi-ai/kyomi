@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 use leptos_meta::provide_meta_context;
 use leptos_router::{
-    components::{Route, Router, Routes},
+    components::{Outlet, ParentRoute, Route, Router, Routes},
     path,
 };
 
@@ -55,62 +55,36 @@ pub fn App() -> impl IntoView {
             <Router>
                 <Layout>
                     <Routes fallback=|| view! { <p>"Page not found"</p> }>
-                        <Route path=path!("/settings/profile") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <ProfilePage/>
-                                </SettingsShell>
+                        // SettingsShell mounts once; child routes swap via <Outlet/>.
+                        // No re-mount on tab navigation = no flicker.
+                        <ParentRoute path=path!("/settings") view=|| view! {
+                            <div class="flex flex-col h-full bg-muted overflow-x-hidden" style:flex-direction="column">
+                                <div class="flex-1 overflow-y-auto p-4 md:p-6 relative">
+                                    // Close button — matches React SettingsPage.jsx positioning
+                                    <a
+                                        href="/"
+                                        class="absolute top-4 right-4 md:top-6 md:right-6 p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors z-10"
+                                        aria-label="Close settings"
+                                    >
+                                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                                        </svg>
+                                    </a>
+                                    <div class="w-full">
+                                        <SettingsShell/>
+                                    </div>
+                                </div>
                             </div>
-                        }/>
-                        <Route path=path!("/settings/security") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <SecurityTab/>
-                                </SettingsShell>
-                            </div>
-                        }/>
-                        <Route path=path!("/settings/usage") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <UsagePage/>
-                                </SettingsShell>
-                            </div>
-                        }/>
-                        <Route path=path!("/settings/workspace") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <WorkspacePage/>
-                                </SettingsShell>
-                            </div>
-                        }/>
-                        <Route path=path!("/settings/analytics") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <AnalyticsPage/>
-                                </SettingsShell>
-                            </div>
-                        }/>
-                        <Route path=path!("/settings/datasources-v2") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <DatasourcesPage/>
-                                </SettingsShell>
-                            </div>
-                        }/>
-                        <Route path=path!("/settings/team") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <TeamPage/>
-                                </SettingsShell>
-                            </div>
-                        }/>
-                        <Route path=path!("/settings/billing") view=|| view! {
-                            <div class="max-w-7xl mx-auto p-6">
-                                <SettingsShell>
-                                    <BillingPage/>
-                                </SettingsShell>
-                            </div>
-                        }/>
+                        }>
+                            <Route path=path!("/profile") view=ProfilePage/>
+                            <Route path=path!("/security") view=SecurityTab/>
+                            <Route path=path!("/workspace") view=WorkspacePage/>
+                            <Route path=path!("/datasources") view=DatasourcesPage/>
+                            <Route path=path!("/analytics") view=AnalyticsPage/>
+                            <Route path=path!("/usage") view=UsagePage/>
+                            <Route path=path!("/billing") view=BillingPage/>
+                            <Route path=path!("/team") view=TeamPage/>
+                        </ParentRoute>
                     </Routes>
                 </Layout>
             </Router>

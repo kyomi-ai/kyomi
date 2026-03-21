@@ -178,19 +178,14 @@ fn is_stripe_test_mode(config: &kyomi_core::Config) -> bool {
 /// Fetch subscription info for the current workspace.
 ///
 /// Mirrors `GET /api/v1/billing/subscription-info`.
+///
+/// Note: subscription data (tier, status, period) comes from the database and
+/// is always available regardless of Stripe configuration. Only checkout and
+/// portal operations require Stripe.
 #[server(prefix = "/leptos-api")]
 pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-
-    // Guard: billing is only available when Stripe is configured (SaaS mode).
-    // Self-hosted deployments without Stripe should never reach this — the tab
-    // is hidden — but guard here for direct navigation.
-    if ctx.config.stripe_secret_key.is_none() {
-        return Err(ServerFnError::new(
-            "Billing features are not available in this deployment",
-        ));
-    }
 
     require_workspace_admin(&auth)?;
     let ws_id = workspace_id(&auth)?;
@@ -237,6 +232,12 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
 pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
+
+    // Stripe not configured — no invoices to show.
+    if ctx.config.stripe_secret_key.is_none() {
+        return Ok(vec![]);
+    }
+
     require_workspace_admin(&auth)?;
     let ws_id = workspace_id(&auth)?;
 

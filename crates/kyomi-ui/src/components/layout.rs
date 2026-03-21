@@ -17,18 +17,105 @@ use leptos_icons::Icon;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 
 /// Main layout shell wrapping all Leptos pages.
+///
+/// Matches React Sidebar.jsx mobile behaviour:
+/// - Mobile (<768px): sidebar hidden by default, hamburger header bar at top
+/// - Desktop (768px+): sidebar always visible (collapsed/expanded)
 #[component]
 pub fn Layout(children: Children) -> impl IntoView {
     let (collapsed, set_collapsed) = signal(false);
+    let (is_mobile, set_is_mobile) = signal(false);
+    let (mobile_open, set_mobile_open) = signal(false);
+
+    // Detect mobile on mount + resize
+    #[cfg(target_arch = "wasm32")]
+    {
+        use send_wrapper::SendWrapper;
+        use wasm_bindgen::prelude::*;
+
+        Effect::new(move |_| {
+            let window = web_sys::window().expect("window");
+            let width = window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
+            let mobile = width < 768.0;
+            set_is_mobile.set(mobile);
+            if mobile {
+                set_collapsed.set(true);
+            }
+
+            // Listen for resize
+            let cb = Closure::<dyn Fn()>::new(move || {
+                let w = web_sys::window().unwrap();
+                let width = w.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
+                let mobile = width < 768.0;
+                set_is_mobile.set(mobile);
+                if mobile {
+                    set_collapsed.set(true);
+                    set_mobile_open.set(false);
+                }
+            });
+            let _ = window.add_event_listener_with_callback(
+                "resize",
+                cb.as_ref().unchecked_ref(),
+            );
+            // Leak the closure — it lives for the app lifetime
+            cb.forget();
+        });
+    }
+
+    // Close mobile sidebar on navigation
+    let location = leptos_router::hooks::use_location();
+    Effect::new(move |_| {
+        let _ = location.pathname.get();
+        if is_mobile.get_untracked() {
+            set_mobile_open.set(false);
+        }
+    });
 
     view! {
         <div class="h-screen flex flex-col bg-background">
+            // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
+            <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
+                <button
+                    on:click=move |_| set_mobile_open.update(|o| *o = !*o)
+                    class="p-2 hover:bg-accent rounded-lg transition-colors relative z-10"
+                    aria-label="Toggle menu"
+                >
+                    <svg class="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                    </svg>
+                </button>
+                <div class="absolute left-1/2 -translate-x-1/2">
+                    <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-10 dark:hidden"/>
+                    <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-10 hidden dark:block"/>
+                </div>
+            </div>
+
+            // ── Mobile overlay (matches React line 283) ─────────────────
+            <Show when=move || is_mobile.get() && mobile_open.get()>
+                <div
+                    class="fixed inset-0 bg-black/50 z-20 md:hidden"
+                    on:click=move |_| set_mobile_open.set(false)
+                />
+            </Show>
+
             <div class="flex relative flex-1 overflow-hidden">
-                <Sidebar collapsed=collapsed set_collapsed=set_collapsed/>
+                <Sidebar
+                    collapsed=collapsed
+                    set_collapsed=set_collapsed
+                    is_mobile=is_mobile
+                    mobile_open=mobile_open
+                />
                 <main
                     class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out"
                     style=move || {
-                        if collapsed.get() { "margin-left: 4rem" } else { "margin-left: 20rem" }
+                        if is_mobile.get() {
+                            // Mobile: no sidebar margin, top padding for the fixed header
+                            "padding-top: 4rem".to_string()
+                        } else if collapsed.get() {
+                            "margin-left: 4rem".to_string()
+                        } else {
+                            "margin-left: 20rem".to_string()
+                        }
                     }
                 >
                     {children()}
@@ -39,25 +126,49 @@ pub fn Layout(children: Children) -> impl IntoView {
 }
 
 /// Navigation sidebar matching React `Sidebar.jsx`.
+///
+/// On mobile: hidden by default, shown as overlay when `mobile_open` is true.
+/// On desktop: always visible, collapsible.
 #[component]
 fn Sidebar(
     collapsed: ReadSignal<bool>,
     set_collapsed: WriteSignal<bool>,
+    is_mobile: ReadSignal<bool>,
+    mobile_open: ReadSignal<bool>,
 ) -> impl IntoView {
     let sessions = Resource::new(|| (), |_| get_recent_sessions());
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
     let (user_menu_open, set_user_menu_open) = signal(false);
 
+    // Matches React: isMobile && isSidebarCollapsed ? 'hidden' : 'flex'
+    // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {
         <div
-            class="bg-background border-r border-border text-foreground flex flex-col z-30 absolute left-0 inset-y-0 shadow-lg transition-all duration-300 ease-in-out"
+            class="bg-background border-r border-border text-foreground flex-col z-30 absolute left-0 shadow-lg transition-all duration-300 ease-in-out"
             style=move || {
-                if collapsed.get() { "width: 4rem" } else { "width: 20rem" }
+                let width = if is_mobile.get() {
+                    "width: 20rem"
+                } else if collapsed.get() {
+                    "width: 4rem"
+                } else {
+                    "width: 20rem"
+                };
+                let display = if is_mobile.get() && !mobile_open.get() {
+                    "display: none"
+                } else {
+                    "display: flex; flex-direction: column"
+                };
+                let pos = if is_mobile.get() {
+                    "top: 4rem; bottom: 0"
+                } else {
+                    "top: 0; bottom: 0"
+                };
+                format!("{width}; {display}; {pos}")
             }
         >
-            // ── Header: collapse toggle + logo ─────────────────────────────
+            // ── Header: collapse toggle + logo (hidden on mobile) ──────────
             // React: "hidden md:flex px-3 h-16 border-b border-border items-center justify-between"
-            <div class="flex px-3 h-16 border-b border-border items-center justify-between">
+            <div class="hidden md:flex px-3 h-16 border-b border-border items-center justify-between">
                 <div class="flex items-center">
                     // Collapse toggle — React places this FIRST (left side)
                     <button

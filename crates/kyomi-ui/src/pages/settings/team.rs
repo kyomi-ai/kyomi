@@ -10,9 +10,10 @@ use std::sync::Arc;
 use leptos::prelude::*;
 
 use crate::components::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmDialog, Modal, ModalSize,
-    INPUT_CLASS,
+    Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
+    ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
 };
+use crate::components::select::SELECT_CLASS;
 use crate::server_fns::context::get_user_context;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
@@ -85,6 +86,51 @@ pub fn TeamPage() -> impl IntoView {
         async move { cancel_ownership_transfer(id).await }
     });
 
+    // Transfer Ownership modal state
+    let show_transfer_modal = RwSignal::new(false);
+    let transfer_step = RwSignal::new(1u8);
+    let transfer_selected_user_id = RwSignal::new(String::new());
+    let transfer_confirmation = RwSignal::new(String::new());
+    let transfer_error = RwSignal::new(Option::<String>::None);
+
+    let initiate_transfer_action = Action::new(move |user_id: &String| {
+        let user_id = user_id.clone();
+        async move { initiate_ownership_transfer(user_id).await }
+    });
+
+    // Derived memos for transfer modal — avoids passing Resource through props
+    let transfer_workspace_name = Memo::new(move |_| {
+        user_ctx
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|u| u.workspace_name)
+            .unwrap_or_default()
+    });
+    let transfer_eligible_members = Memo::new(move |_| {
+        let current_user_id = user_ctx
+            .get()
+            .and_then(|r| r.ok())
+            .map(|u| u.user_id)
+            .unwrap_or_default();
+        members
+            .get()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| !m.is_owner && m.user_id != current_user_id)
+            .collect::<Vec<TeamMember>>()
+    });
+    // Memo to look up selected member details for step 2 summary
+    let transfer_selected_member = Memo::new(move |_| {
+        let selected_id = transfer_selected_user_id.get();
+        members
+            .get()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+            .into_iter()
+            .find(|m| m.user_id == selected_id)
+    });
+
     // React to action completions — refresh relevant data
     Effect::new(move || {
         if let Some(result) = invite_action.value().get() {
@@ -125,6 +171,24 @@ pub fn TeamPage() -> impl IntoView {
         if let Some(result) = cancel_transfer_action.value().get() {
             if result.is_ok() {
                 set_transfers_version.update(|v| *v += 1);
+            }
+        }
+    });
+
+    Effect::new(move || {
+        if let Some(result) = initiate_transfer_action.value().get() {
+            match result {
+                Ok(()) => {
+                    show_transfer_modal.set(false);
+                    transfer_step.set(1);
+                    transfer_selected_user_id.set(String::new());
+                    transfer_confirmation.set(String::new());
+                    transfer_error.set(None);
+                    set_transfers_version.update(|v| *v += 1);
+                }
+                Err(e) => {
+                    transfer_error.set(Some(e.to_string()));
+                }
             }
         }
     });
@@ -248,6 +312,13 @@ pub fn TeamPage() -> impl IntoView {
                                 <Button
                                     variant=ButtonVariant::Outline
                                     attr:title="Transfer Ownership"
+                                    on:click=move |_| {
+                                        transfer_step.set(1);
+                                        transfer_selected_user_id.set(String::new());
+                                        transfer_confirmation.set(String::new());
+                                        transfer_error.set(None);
+                                        show_transfer_modal.set(true);
+                                    }
                                 >
                                     <span class="inline-flex items-center gap-0 sm:gap-2">
                                         <span class="inline-flex">
@@ -468,6 +539,19 @@ pub fn TeamPage() -> impl IntoView {
                 confirm_text=dialog_confirm_text.get_untracked()
                 on_confirm=on_confirm
                 on_cancel=on_cancel
+            />
+
+            // Transfer Ownership Modal
+            <TransferOwnershipModal
+                show_modal=show_transfer_modal
+                transfer_step=transfer_step
+                transfer_selected_user_id=transfer_selected_user_id
+                transfer_confirmation=transfer_confirmation
+                transfer_error=transfer_error
+                workspace_name=transfer_workspace_name
+                eligible_members=transfer_eligible_members
+                selected_member=transfer_selected_member
+                initiate_transfer_action=initiate_transfer_action
             />
         </div>
     }
@@ -753,4 +837,245 @@ fn format_date(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
         .map(|dt| dt.format("%d/%m/%Y").to_string())
         .unwrap_or_else(|_| rfc3339.to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Transfer Ownership Modal
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Two-step Transfer Ownership modal.
+///
+/// Matches `apps/frontend/src/components/settings/TransferOwnershipModal.jsx` exactly.
+/// Step 1: warning + member select + info box.
+/// Step 2: error alert + transfer summary + workspace name confirmation input.
+///
+/// Accepts pre-derived `Memo` signals to avoid passing `Resource` through props
+/// (Leptos `Resource` generic params include the codec which causes type mismatches).
+#[component]
+fn TransferOwnershipModal(
+    show_modal: RwSignal<bool>,
+    transfer_step: RwSignal<u8>,
+    transfer_selected_user_id: RwSignal<String>,
+    transfer_confirmation: RwSignal<String>,
+    transfer_error: RwSignal<Option<String>>,
+    /// Reactive workspace name derived from user context in the parent.
+    workspace_name: Memo<String>,
+    /// Reactive list of eligible members (non-owners, not self) from the parent.
+    eligible_members: Memo<Vec<TeamMember>>,
+    /// Reactive currently selected member (derived from members + selected_user_id).
+    selected_member: Memo<Option<TeamMember>>,
+    initiate_transfer_action: Action<String, Result<(), ServerFnError>>,
+) -> impl IntoView {
+    let on_close_transfer = Callback::new(move |()| {
+        show_modal.set(false);
+        transfer_step.set(1);
+        transfer_selected_user_id.set(String::new());
+        transfer_confirmation.set(String::new());
+        transfer_error.set(None);
+    });
+
+    // Footer — re-callable Arc<dyn Fn> (required by Modal's ChildrenFn)
+    let transfer_modal_footer: Arc<dyn Fn() -> AnyView + Send + Sync> =
+        Arc::new(move || {
+            let step = transfer_step.get();
+            let ws_name = workspace_name.get();
+
+            if step == 1 {
+                let no_selection = transfer_selected_user_id.get().is_empty();
+                view! {
+                    <Button
+                        variant=ButtonVariant::Outline
+                        on:click=move |_| {
+                            show_modal.set(false);
+                        }
+                    >
+                        "Cancel"
+                    </Button>
+                    <Button
+                        variant=ButtonVariant::Default
+                        disabled=no_selection
+                        on:click=move |_| {
+                            if !transfer_selected_user_id.get_untracked().is_empty() {
+                                transfer_step.set(2);
+                            }
+                        }
+                    >
+                        "Next"
+                    </Button>
+                }.into_any()
+            } else {
+                let conf = transfer_confirmation.get();
+                let is_submitting = initiate_transfer_action.pending().get();
+                let disabled = is_submitting || conf != ws_name;
+                view! {
+                    <Button
+                        variant=ButtonVariant::Outline
+                        on:click=move |_| {
+                            transfer_step.set(1);
+                            transfer_confirmation.set(String::new());
+                        }
+                    >
+                        "Back"
+                    </Button>
+                    <Button
+                        variant=ButtonVariant::Destructive
+                        disabled=disabled
+                        on:click=move |_| {
+                            let uid = transfer_selected_user_id.get_untracked();
+                            if !uid.is_empty() {
+                                initiate_transfer_action.dispatch(uid);
+                            }
+                        }
+                    >
+                        {if is_submitting { "Transferring..." } else { "Transfer Ownership" }}
+                    </Button>
+                }.into_any()
+            }
+        });
+
+    view! {
+        <Modal
+            show=Signal::from(show_modal)
+            on_close=on_close_transfer
+            title="Transfer Workspace Ownership"
+            size=ModalSize::Md
+            footer=transfer_modal_footer
+        >
+            // Step 1: Select member
+            <Show when=move || transfer_step.get() == 1>
+                <div class="space-y-4">
+                    <Alert variant=AlertVariant::Warning>
+                        <AlertDescription>
+                            <strong>"Warning:"</strong>
+                            " Transferring ownership will remove your owner privileges. "
+                            "You will no longer be able to manage billing, delete the workspace, or transfer ownership again."
+                        </AlertDescription>
+                    </Alert>
+
+                    <div>
+                        <label class="block text-sm font-medium text-foreground mb-2">
+                            "Select New Owner"
+                        </label>
+                        {move || {
+                            let eligible = eligible_members.get();
+                            if eligible.is_empty() {
+                                view! {
+                                    <p class="text-sm text-muted-foreground mt-2">
+                                        "No eligible members. Invite members first."
+                                    </p>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <select
+                                        class=SELECT_CLASS
+                                        style="background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2.5rem;"
+                                        on:change=move |ev| {
+                                            transfer_selected_user_id.set(event_target_value(&ev));
+                                        }
+                                    >
+                                        <option value="" disabled selected>"Choose a workspace member..."</option>
+                                        {eligible.into_iter().map(|m| {
+                                            let val = m.user_id.clone();
+                                            let label = m.name
+                                                .filter(|n: &String| !n.is_empty())
+                                                .map(|n| format!("{} ({})", n, m.email))
+                                                .unwrap_or_else(|| m.email.clone());
+                                            view! {
+                                                <option value=val>{label}</option>
+                                            }
+                                        }).collect_view()}
+                                    </select>
+                                }.into_any()
+                            }
+                        }}
+                    </div>
+
+                    <div class="bg-muted p-4 rounded-md space-y-2">
+                        <h4 class="font-medium text-sm text-foreground">
+                            "What happens when you transfer ownership?"
+                        </h4>
+                        <ul class="text-sm text-muted-foreground space-y-1 list-disc list-inside">
+                            <li>"The new owner will have full control of the workspace"</li>
+                            <li>"They can manage billing, delete the workspace, and remove members"</li>
+                            <li>"You will remain as a workspace admin (unless the new owner changes your role)"</li>
+                            <li>"The transfer request expires in 7 days if not accepted"</li>
+                        </ul>
+                    </div>
+                </div>
+            </Show>
+
+            // Step 2: Final confirmation
+            <Show when=move || transfer_step.get() == 2>
+                {move || {
+                    let member = selected_member.get();
+                    let selected_name = member
+                        .as_ref()
+                        .and_then(|m| m.name.clone())
+                        .filter(|n: &String| !n.is_empty())
+                        .or_else(|| member.as_ref().map(|m| m.email.clone()))
+                        .unwrap_or_default();
+                    let selected_email = member
+                        .as_ref()
+                        .map(|m| m.email.clone())
+                        .unwrap_or_default();
+                    let ws_name = workspace_name.get();
+                    let ws_name_for_check = ws_name.clone();
+
+                    view! {
+                        <div class="space-y-4">
+                            <Alert variant=AlertVariant::Error>
+                                <AlertDescription>
+                                    <strong>"Final Confirmation Required"</strong>
+                                    <p class="mt-1">"This action cannot be undone once the recipient accepts."</p>
+                                </AlertDescription>
+                            </Alert>
+
+                            <div class="bg-muted p-4 rounded-md space-y-2">
+                                <div class="text-sm">
+                                    <span class="text-muted-foreground">"Transfer ownership to:"</span>
+                                    <div class="mt-1 font-medium text-foreground">{selected_name}</div>
+                                    <div class="text-xs text-muted-foreground">{selected_email}</div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <label class="block text-sm font-medium text-foreground mb-2">
+                                    "Type the workspace name to confirm: "
+                                    <span class="font-mono text-primary">{ws_name.clone()}</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    class=INPUT_CLASS
+                                    placeholder="Enter workspace name"
+                                    prop:value=transfer_confirmation
+                                    on:input=move |ev| transfer_confirmation.set(event_target_value(&ev))
+                                />
+                            </div>
+
+                            {move || {
+                                let conf = transfer_confirmation.get();
+                                if !conf.is_empty() && conf != ws_name_for_check {
+                                    view! {
+                                        <p class="text-sm text-error-foreground">
+                                            "Workspace name does not match"
+                                        </p>
+                                    }.into_any()
+                                } else {
+                                    view! { <span></span> }.into_any()
+                                }
+                            }}
+
+                            {move || {
+                                transfer_error.get().map(|e| view! {
+                                    <Alert variant=AlertVariant::Error>
+                                        <AlertDescription>{e}</AlertDescription>
+                                    </Alert>
+                                })
+                            }}
+                        </div>
+                    }
+                }}
+            </Show>
+        </Modal>
+    }
 }

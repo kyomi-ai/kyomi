@@ -434,6 +434,58 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
     Ok(())
 }
 
+/// Initiate an ownership transfer to another workspace member.
+///
+/// Mirrors `POST /api/v1/workspaces/ownership/transfer` in workspaces.rs.
+/// Only the workspace owner can call this.
+#[server(prefix = "/leptos-api")]
+pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    // Must be owner
+    if !auth.workspace.is_owner {
+        return Err(ServerFnError::new(
+            "Only the workspace owner can transfer ownership",
+        ));
+    }
+
+    if to_user_id == auth.user_id {
+        return Err(ServerFnError::new("You are already the owner"));
+    }
+
+    // Check no existing pending transfer
+    let existing =
+        kyomi_auth::workspace_service::get_pending_transfer_for_workspace(&ctx.db, ws_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+    if existing.is_some() {
+        return Err(ServerFnError::new(
+            "There is already a pending ownership transfer for this workspace",
+        ));
+    }
+
+    let transfer_id = format!(
+        "xfer-{}",
+        &sqlx::types::Uuid::new_v4().simple().to_string()[..24]
+    );
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+
+    kyomi_auth::workspace_service::create_ownership_transfer(
+        &ctx.db,
+        &transfer_id,
+        ws_id,
+        &auth.user_id,
+        &to_user_id,
+        expires_at,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};

@@ -220,3 +220,181 @@ pub fn StyledSelect(
         </div>
     }
 }
+
+// ---------------------------------------------------------------------------
+// DynSelect — reactive version for dynamic String options
+// ---------------------------------------------------------------------------
+
+/// Like `StyledSelect` but accepts reactive `Signal` props for both value and
+/// options. Use this when options come from server responses or change at
+/// runtime.
+#[component]
+pub fn DynSelect(
+    /// Current value (reactive).
+    value: Signal<String>,
+    /// Options list (reactive). Each entry is `(value, label)`.
+    options: Signal<Vec<(String, String)>>,
+    /// Callback when the user picks an option.
+    on_change: impl Fn(String) + 'static + Send + Sync,
+    /// Placeholder shown when value is empty.
+    #[prop(optional, into)]
+    placeholder: Option<String>,
+) -> impl IntoView {
+    let (is_open, set_is_open) = signal(false);
+    let container_ref = NodeRef::<leptos::html::Div>::new();
+    let placeholder = placeholder.unwrap_or_default();
+
+    let placeholder_for_label = placeholder.clone();
+    let display_label = Memo::new(move |_| {
+        let val = value.get();
+        if val.is_empty() {
+            return placeholder_for_label.clone();
+        }
+        options
+            .get()
+            .iter()
+            .find(|(v, _)| *v == val)
+            .map(|(_, l)| l.clone())
+            .unwrap_or_else(|| val.clone())
+    });
+
+    let on_trigger_click = move |_| {
+        set_is_open.update(|open| *open = !*open);
+    };
+
+    let on_keydown = move |ev: web_sys::KeyboardEvent| {
+        if ev.key() == "Escape" {
+            set_is_open.set(false);
+        }
+    };
+
+    // Click-outside detection
+    #[cfg(target_arch = "wasm32")]
+    {
+        use send_wrapper::SendWrapper;
+        use wasm_bindgen::prelude::*;
+
+        let cleanup: StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>> =
+            StoredValue::new(None);
+
+        Effect::new(move |_| {
+            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
+                teardown.take()();
+            }
+
+            if is_open.get() {
+                let window = web_sys::window().expect("window");
+                let container_el = container_ref.get();
+
+                let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |ev: web_sys::Event| {
+                    if let Some(target) = ev.target() {
+                        let target_node: web_sys::Node = target.unchecked_into();
+                        if let Some(ref el) = container_el {
+                            let html_el: &web_sys::HtmlElement = el;
+                            let node: &web_sys::Node = html_el.as_ref();
+                            if !node.contains(Some(&target_node)) {
+                                set_is_open.set(false);
+                            }
+                        } else {
+                            set_is_open.set(false);
+                        }
+                    }
+                });
+
+                let _ = window.add_event_listener_with_callback_and_bool(
+                    "click",
+                    cb.as_ref().unchecked_ref(),
+                    true,
+                );
+
+                let window_clone = window.clone();
+                let cb_ref: js_sys::Function =
+                    cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+                let teardown: Box<dyn FnOnce()> = Box::new(move || {
+                    let _ = window_clone.remove_event_listener_with_callback_and_bool(
+                        "click",
+                        &cb_ref,
+                        true,
+                    );
+                });
+                cb.forget();
+                cleanup.set_value(Some(SendWrapper::new(teardown)));
+            }
+        });
+
+        on_cleanup(move || {
+            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
+                teardown.take()();
+            }
+        });
+    }
+
+    let on_change = std::sync::Arc::new(on_change);
+    let placeholder_for_class = placeholder.clone();
+
+    view! {
+        <div
+            node_ref=container_ref
+            class="relative w-full"
+            on:keydown=on_keydown
+        >
+            <button
+                type="button"
+                class=TRIGGER_CLASS
+                on:click=on_trigger_click
+                aria-expanded=move || is_open.get().to_string()
+                aria-haspopup="listbox"
+            >
+                <span class=move || {
+                    if value.get().is_empty() && !placeholder_for_class.is_empty() {
+                        "line-clamp-1 text-muted-foreground"
+                    } else {
+                        "line-clamp-1"
+                    }
+                }>{move || display_label.get()}</span>
+                <Icon icon=icondata_lu::LuChevronDown attr:class=CHEVRON_CLASS/>
+            </button>
+
+            {move || {
+                let on_change = on_change.clone();
+                is_open.get().then(|| {
+                    let current_options = options.get();
+                    let items = current_options.into_iter().map(|(val_str, label_str)| {
+                        let val_for_check = val_str.clone();
+                        let val_for_click = val_str.clone();
+                        let val_for_icon = val_str.clone();
+                        let on_change = on_change.clone();
+                        view! {
+                            <div
+                                class=ITEM_CLASS
+                                role="option"
+                                aria-selected=move || (value.get() == val_for_check).to_string()
+                                on:click=move |_| {
+                                    on_change(val_for_click.clone());
+                                    set_is_open.set(false);
+                                }
+                            >
+                                {label_str}
+                                <span class=CHECK_CLASS>
+                                    {move || {
+                                        (value.get() == val_for_icon).then(|| {
+                                            view! {
+                                                <Icon icon=icondata_lu::LuCheck attr:class="h-4 w-4"/>
+                                            }
+                                        })
+                                    }}
+                                </span>
+                            </div>
+                        }
+                    }).collect_view();
+
+                    view! {
+                        <div class=CONTENT_CLASS role="listbox">
+                            {items}
+                        </div>
+                    }
+                })
+            }}
+        </div>
+    }
+}

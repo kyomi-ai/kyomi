@@ -37,7 +37,7 @@ pub use input::INPUT_CLASS;
 pub use label::Label;
 pub use layout::Layout;
 pub use modal::{Modal, ModalSize};
-pub use select::StyledSelect;
+pub use select::{DynSelect, StyledSelect};
 pub use skeleton::Skeleton;
 pub use status_badge::{StatusBadge, StatusBadgeVariant};
 pub use switch::Switch;

@@ -84,6 +84,13 @@ pub fn register_server_functions() {
     register_explicit::<GetDatasourceTypes>();
     register_explicit::<ToggleDatasource>();
     register_explicit::<DeleteDatasource>();
+    register_explicit::<CreateDatasourceModal>();
+    register_explicit::<UpdateDatasourceSettings>();
+    register_explicit::<SaveDatasourceCredentials>();
+    register_explicit::<GetDatasourceSettings>();
+    register_explicit::<TestDatasourceStandalone>();
+    register_explicit::<TestExistingDatasource>();
+    register_explicit::<DiscoverDatasourceResources>();
 
     use server_fns::billing::*;
     register_explicit::<GetSubscriptionInfo>();
