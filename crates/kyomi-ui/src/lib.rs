@@ -23,6 +23,10 @@ pub use app::App;
 #[cfg(feature = "ssr")]
 pub fn register_server_functions() {
     use leptos::server_fn::axum::register_explicit;
+    use server_fns::auth::*;
+    register_explicit::<GetAuthConfig>();
+    register_explicit::<LoginWithPassword>();
+
     use server_fns::context::*;
     register_explicit::<GetUserContext>();
 

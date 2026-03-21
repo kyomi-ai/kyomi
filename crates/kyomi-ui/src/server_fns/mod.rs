@@ -13,6 +13,7 @@
 //! server crate's `AppState`.
 
 pub mod analytics;
+pub mod auth;
 pub mod billing;
 pub mod context;
 pub mod datasources;

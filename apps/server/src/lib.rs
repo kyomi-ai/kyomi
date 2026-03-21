@@ -172,7 +172,9 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         // WebSocket routes at root level (not under /api/v1)
         .route("/ws/{user_id}", axum::routing::get(routes::websocket::ws_handler))
         .route("/ws/trial/{session_id}", axum::routing::get(routes::websocket::ws_trial_handler))
-        // Leptos frontend routes (POC — settings profile page)
+        // Leptos frontend routes — auth pages
+        .route("/login", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        // Leptos frontend routes — settings pages
         .route("/settings/profile", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/security", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/usage", axum::routing::get(leptos_frontend::serve_leptos_shell))
