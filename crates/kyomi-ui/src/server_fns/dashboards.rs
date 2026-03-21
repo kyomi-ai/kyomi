@@ -29,6 +29,17 @@ pub struct DashboardListItem {
     pub created_at: String,
 }
 
+/// Lightweight version info for the history list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VersionSummary {
+    pub version_number: i32,
+    pub title: String,
+    pub change_summary: Option<String>,
+    pub byte_size: Option<i32>,
+    pub created_at: String,
+    pub created_by_name: Option<String>,
+}
+
 /// Full dashboard detail for viewing/editing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DashboardDetail {
@@ -246,6 +257,83 @@ pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError>
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Version operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// List version history for a dashboard (most recent first).
+#[server(prefix = "/leptos-api")]
+pub async fn list_versions(dashboard_id: String) -> Result<Vec<VersionSummary>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    // Verify the dashboard belongs to this workspace
+    kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
+
+    let versions =
+        kyomi_auth::dashboard_service::list_versions(&ctx.db, &dashboard_id, 50, 0)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(versions
+        .into_iter()
+        .map(|v| VersionSummary {
+            version_number: v.version_number,
+            title: v.title,
+            change_summary: v.change_summary,
+            byte_size: v.byte_size,
+            created_at: v.created_at.to_rfc3339(),
+            created_by_name: v.created_by.name,
+        })
+        .collect())
+}
+
+/// Restore a dashboard to a previous version.
+///
+/// Creates a snapshot of the current state, then replaces the dashboard
+/// content with the specified version's content.
+#[server(prefix = "/leptos-api")]
+pub async fn restore_version(
+    dashboard_id: String,
+    version_number: i32,
+) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    kyomi_auth::dashboard_service::restore_version(
+        &ctx.db,
+        &dashboard_id,
+        ws_id,
+        &auth.user_id,
+        version_number,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Re-embed after restore (matches REST handler)
+    if let Ok(Some(d)) =
+        kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id).await
+    {
+        if let Ok(embedding_svc) = ctx.embedding.wait_ready().await {
+            kyomi_auth::dashboard_service::spawn_embedding_generation(
+                ctx.db.clone(),
+                embedding_svc.clone(),
+                dashboard_id,
+                ws_id.to_string(),
+                d.title,
+                d.content,
+            );
+        }
+    }
 
     Ok(())
 }

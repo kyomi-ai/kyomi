@@ -104,6 +104,8 @@ pub fn register_server_functions() {
     register_explicit::<CreateDashboard>();
     register_explicit::<UpdateDashboard>();
     register_explicit::<DeleteDashboard>();
+    register_explicit::<ListVersions>();
+    register_explicit::<RestoreVersion>();
 
     use server_fns::datasources::*;
     register_explicit::<ListDatasources>();
