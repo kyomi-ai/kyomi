@@ -233,9 +233,9 @@ fn ProfileInfoCard(data: ProfileData) -> impl IntoView {
                         <Label>"Email"</Label>
                         <input
                             type="email"
-                            class="w-full px-3 py-2 border border-input rounded-md bg-muted text-muted-foreground cursor-not-allowed"
+                            class="w-full px-3 py-2 border border-input rounded-md bg-muted text-foreground cursor-not-allowed"
                             disabled=true
-                            value=data.email.clone()
+                            prop:value=data.email.clone()
                         />
                         <p class="text-xs text-muted-foreground">"Email cannot be changed"</p>
                     </div>

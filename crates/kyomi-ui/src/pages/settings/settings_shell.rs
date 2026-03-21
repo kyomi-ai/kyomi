@@ -20,7 +20,6 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
-use crate::components::tooltip::Tooltip;
 use crate::server_fns::context::{get_user_context, UserContext};
 
 /// Settings tab definition.
@@ -121,15 +120,14 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
             // Settings Header — matches React exactly
             // React: "text-3xl font-bold text-foreground"
             <div class="mb-8 relative">
-                <Tooltip content="Close settings">
-                    <a
-                        href="/"
-                        class="absolute top-4 right-4 md:top-6 md:right-6 p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors z-10"
-                        aria-label="Close settings"
-                    >
-                        <Icon icon=icondata_lu::LuX width="24" height="24"/>
-                    </a>
-                </Tooltip>
+                <a
+                    href="/"
+                    class="absolute top-0 right-0 p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors z-10"
+                    aria-label="Close settings"
+                    title="Close settings"
+                >
+                    <Icon icon=icondata_lu::LuX width="24" height="24"/>
+                </a>
                 <h1 class="text-3xl font-bold text-foreground">"Settings"</h1>
                 <p class="text-muted-foreground mt-2">"Manage your workspace configuration and billing settings"</p>
             </div>
