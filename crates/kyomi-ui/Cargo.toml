@@ -103,6 +103,9 @@ kyomi-knowledge = { workspace = true, optional = true }
 chartml-core = { workspace = true }
 async-trait = { workspace = true }
 
+# Markdown rendering (shared — works in both SSR and WASM)
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
 # Date/time (used in both SSR and WASM for date formatting)
 chrono = { workspace = true }
 
