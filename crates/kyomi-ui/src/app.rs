@@ -18,6 +18,7 @@ use crate::pages::auth::passkey_recovery::PasskeyRecoveryPage;
 use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
 use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
+use crate::pages::dashboards::DashboardsListPage;
 use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::datasources::DatasourcesPage;
 use crate::pages::settings::profile::ProfilePage;
@@ -72,6 +73,8 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/auth/passkey-signup") view=PasskeySignupCompletePage/>
                         <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
                         <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
+                        // Dashboard pages
+                        <Route path=path!("/dashboards") view=DashboardsListPage/>
                         // SettingsShell mounts once; child routes swap via <Outlet/>.
                         // No re-mount on tab navigation = no flicker.
                         <ParentRoute path=path!("/settings") view=|| view! {
