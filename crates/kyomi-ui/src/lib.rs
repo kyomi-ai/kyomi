@@ -98,6 +98,13 @@ pub fn register_server_functions() {
     register_explicit::<ListOwnershipTransfers>();
     register_explicit::<CancelOwnershipTransfer>();
 
+    use server_fns::dashboards::*;
+    register_explicit::<ListDashboards>();
+    register_explicit::<GetDashboard>();
+    register_explicit::<CreateDashboard>();
+    register_explicit::<UpdateDashboard>();
+    register_explicit::<DeleteDashboard>();
+
     use server_fns::datasources::*;
     register_explicit::<ListDatasources>();
     register_explicit::<GetDatasourceTypes>();
