@@ -2,6 +2,8 @@
 
 //! Dashboard pages.
 
+pub mod dashboard_viewer;
 pub mod dashboards_list;
 
+pub use dashboard_viewer::DashboardViewerPage;
 pub use dashboards_list::DashboardsListPage;
