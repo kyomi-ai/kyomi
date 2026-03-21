@@ -28,18 +28,20 @@ struct SettingsTab {
     id: &'static str,
     name: &'static str,
     icon: &'static icondata_core::IconData,
+    /// URL path suffix. Defaults to `id` but can differ (e.g. datasources → datasources-v2).
+    path: &'static str,
 }
 
 /// All settings tabs (visibility filtered at render time based on user context).
 const TABS: &[SettingsTab] = &[
-    SettingsTab { id: "profile", name: "Profile", icon: icondata_lu::LuUser },
-    SettingsTab { id: "security", name: "Security", icon: icondata_lu::LuShield },
-    SettingsTab { id: "workspace", name: "Workspace", icon: icondata_lu::LuSettings },
-    SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer },
-    SettingsTab { id: "analytics", name: "Analytics", icon: icondata_lu::LuActivity },
-    SettingsTab { id: "usage", name: "Usage", icon: icondata_lu::LuChartBar },
-    SettingsTab { id: "billing", name: "Billing", icon: icondata_lu::LuCreditCard },
-    SettingsTab { id: "team", name: "Team", icon: icondata_lu::LuUsers },
+    SettingsTab { id: "profile", name: "Profile", icon: icondata_lu::LuUser, path: "profile" },
+    SettingsTab { id: "security", name: "Security", icon: icondata_lu::LuShield, path: "security" },
+    SettingsTab { id: "workspace", name: "Workspace", icon: icondata_lu::LuSettings, path: "workspace" },
+    SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer, path: "datasources-v2" },
+    SettingsTab { id: "analytics", name: "Analytics", icon: icondata_lu::LuActivity, path: "analytics" },
+    SettingsTab { id: "usage", name: "Usage", icon: icondata_lu::LuChartBar, path: "usage" },
+    SettingsTab { id: "billing", name: "Billing", icon: icondata_lu::LuCreditCard, path: "billing" },
+    SettingsTab { id: "team", name: "Team", icon: icondata_lu::LuUsers, path: "team" },
 ];
 
 /// Return the list of tab IDs that should be visible for the given user context.
@@ -143,18 +145,18 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
                                 }
                             };
 
-                            let current_tab = active_tab.get();
+                            let current_path = active_tab.get();
                             TABS.iter()
                                 .filter(|tab| visible_ids.contains(&tab.id))
                                 .map(|tab| {
-                                    let is_active = tab.id == current_tab;
+                                    let is_active = tab.path == current_path;
                                     let tab_class = if is_active {
                                         "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-primary text-primary"
                                     } else {
                                         "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
                                     };
 
-                                    let href = format!("/settings/{}", tab.id);
+                                    let href = format!("/settings/{}", tab.path);
 
                                     view! {
                                         <a href=href class=tab_class>
