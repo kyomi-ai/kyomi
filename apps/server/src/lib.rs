@@ -183,6 +183,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/auth/recover-passkey/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
         // Leptos frontend routes — dashboard pages
         .route("/dashboards", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/dashboard/{*path}", axum::routing::get(leptos_frontend::serve_leptos_shell))
         // Leptos frontend routes — settings pages
         .route("/settings/profile", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/security", axum::routing::get(leptos_frontend::serve_leptos_shell))
