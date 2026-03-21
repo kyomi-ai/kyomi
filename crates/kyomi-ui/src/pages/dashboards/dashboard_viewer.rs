@@ -11,7 +11,7 @@
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
-use crate::components::dashboard::MarkdownRenderer;
+use crate::components::dashboard::{HistoryPanel, MarkdownRenderer};
 use crate::components::Spinner;
 use crate::server_fns::dashboards::get_dashboard;
 
@@ -67,6 +67,17 @@ pub fn DashboardViewerPage() -> impl IntoView {
                             let edit_href = format!("/dashboard/{}/edit", dashboard.dashboard_id);
                             let created_at = dashboard.created_at.clone();
                             let updated_at = dashboard.updated_at.clone();
+                            let did_for_history = dashboard.dashboard_id.clone();
+                            let did_for_pdf = dashboard.dashboard_id.clone();
+
+                            // History panel state
+                            let (history_open, set_history_open) = signal(false);
+                            let on_history_close = Callback::new(move |()| set_history_open.set(false));
+                            let on_history_restore = Callback::new(move |()| {
+                                set_history_open.set(false);
+                                // Refetch dashboard after restore
+                                dashboard_resource.refetch();
+                            });
 
                             view! {
                                 <div class="flex flex-col h-full bg-muted overflow-hidden" style:flex-direction="column">
@@ -95,10 +106,37 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                                         // Right: action buttons
                                         <div class="flex items-center gap-1 xl:gap-2 flex-shrink-0">
-                                            // History button (placeholder)
+                                            // PDF Export button
+                                            <button
+                                                class="hidden md:flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium text-foreground bg-card border border-border hover:bg-accent rounded-lg transition-colors"
+                                                aria-label="Export as PDF"
+                                                on:click={
+                                                    let did = did_for_pdf.clone();
+                                                    move |_| {
+                                                        let url = format!("/api/v1/dashboards/{}/export/pdf", did);
+                                                        #[cfg(target_arch = "wasm32")]
+                                                        if let Some(window) = web_sys::window() {
+                                                            let _ = window.open_with_url_and_target(&url, "_blank");
+                                                        }
+                                                    }
+                                                }
+                                            >
+                                                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path
+                                                        stroke-linecap="round"
+                                                        stroke-linejoin="round"
+                                                        stroke-width="2"
+                                                        d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                                                    />
+                                                </svg>
+                                                <span class="hidden xl:inline whitespace-nowrap">"Export PDF"</span>
+                                            </button>
+
+                                            // History button
                                             <button
                                                 class="hidden md:flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium text-foreground bg-card border border-border hover:bg-accent rounded-lg transition-colors"
                                                 aria-label="View version history"
+                                                on:click=move |_| set_history_open.set(true)
                                             >
                                                 <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                     <path
@@ -208,6 +246,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             </div>
                                         </div>
                                     </div>
+
+                                    // Version history panel
+                                    <HistoryPanel
+                                        dashboard_id=did_for_history
+                                        open=Signal::derive(move || history_open.get())
+                                        on_close=on_history_close
+                                        on_restore=on_history_restore
+                                    />
                                 </div>
                             }.into_any()
                         }
