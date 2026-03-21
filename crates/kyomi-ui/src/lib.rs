@@ -26,6 +26,10 @@ pub fn register_server_functions() {
     use server_fns::auth::*;
     register_explicit::<GetAuthConfig>();
     register_explicit::<LoginWithPassword>();
+    register_explicit::<SignupStart>();
+    register_explicit::<SignupComplete>();
+    register_explicit::<GoogleOauthCallback>();
+    register_explicit::<ResendVerification>();
 
     use server_fns::context::*;
     register_explicit::<GetUserContext>();

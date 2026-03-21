@@ -14,14 +14,16 @@ use crate::components::{
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
-use crate::server_fns::auth::{get_auth_config, login_with_password, LoginResult};
+use crate::server_fns::auth::{
+    get_auth_config, login_with_password, resend_verification, signup_start, LoginResult,
+    SignupResult,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // View state machine
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)] // CheckEmail is constructed in wasm32-only signup handler
 enum LoginView {
     Credentials,
     TwoFactor { email: String },
@@ -236,124 +238,49 @@ pub fn LoginPage() -> impl IntoView {
             set_signup_loading.set(true);
             set_error.set(None);
 
-            // Direct fetch to /api/v1/auth/signup/start (server function not yet available)
-            #[cfg(target_arch = "wasm32")]
-            {
-                leptos::task::spawn_local(async move {
-                    use wasm_bindgen::prelude::*;
+            let name_opt = if self_hosted_no_smtp && !current_name.trim().is_empty() {
+                Some(current_name)
+            } else {
+                None
+            };
+            let password_opt = if self_hosted_no_smtp && !current_password.is_empty() {
+                Some(current_password)
+            } else {
+                None
+            };
 
-                    let body = {
-                        let mut map = serde_json::Map::new();
-                        map.insert("email".into(), serde_json::Value::String(current_email.clone()));
-                        if self_hosted_no_smtp {
-                            map.insert("name".into(), serde_json::Value::String(current_name));
-                            map.insert("password".into(), serde_json::Value::String(current_password));
+            leptos::task::spawn_local(async move {
+                let result = signup_start(current_email.clone(), name_opt, password_opt).await;
+
+                match result {
+                    Ok(SignupResult::AccountCreated { redirect }) => {
+                        #[cfg(target_arch = "wasm32")]
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().set_href(&redirect);
                         }
-                        serde_json::Value::Object(map).to_string()
-                    };
-
-                    let result: Result<JsValue, JsValue> = async {
-                        let window =
-                            web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-
-                        let mut opts = web_sys::RequestInit::new();
-                        opts.method("POST");
-                        opts.body(Some(&JsValue::from_str(&body)));
-
-                        let request = web_sys::Request::new_with_str_and_init(
-                            "/api/v1/auth/signup/start",
-                            &opts,
-                        )?;
-                        request
-                            .headers()
-                            .set("Content-Type", "application/json")?;
-
-                        let resp_val =
-                            wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
-                                .await?;
-                        let resp: web_sys::Response = resp_val.dyn_into()?;
-
-                        let json_val =
-                            wasm_bindgen_futures::JsFuture::from(resp.json()?).await?;
-
-                        // Parse the response
-                        let status = js_sys::Reflect::get(&json_val, &JsValue::from_str("status"))
-                            .ok()
-                            .and_then(|v| v.as_string())
-                            .unwrap_or_default();
-
-                        match status.as_str() {
-                            "account_created" => {
-                                let redirect =
-                                    js_sys::Reflect::get(&json_val, &JsValue::from_str("redirect"))
-                                        .ok()
-                                        .and_then(|v| v.as_string())
-                                        .unwrap_or_else(|| "/".to_string());
-                                let _ = window.location().set_href(&redirect);
-                            }
-                            "verification_required" => {
-                                let message = js_sys::Reflect::get(
-                                    &json_val,
-                                    &JsValue::from_str("message"),
-                                )
-                                .ok()
-                                .and_then(|v| v.as_string())
-                                .unwrap_or_else(|| {
-                                    "Please check your email to complete signup.".to_string()
-                                });
-                                set_success_msg.set(Some(message));
-                                set_view_state.set(LoginView::CheckEmail {
-                                    email: current_email,
-                                });
-                            }
-                            "pending_signup" => {
-                                let token = js_sys::Reflect::get(
-                                    &json_val,
-                                    &JsValue::from_str("token"),
-                                )
-                                .ok()
-                                .and_then(|v| v.as_string())
-                                .unwrap_or_default();
-                                let _ = window
-                                    .location()
-                                    .set_href(&format!("/signup/complete?token={}", token));
-                            }
-                            _ => {
-                                // Try to extract error detail
-                                if !resp.ok() {
-                                    let detail = js_sys::Reflect::get(
-                                        &json_val,
-                                        &JsValue::from_str("detail"),
-                                    )
-                                    .ok()
-                                    .and_then(|v| v.as_string())
-                                    .unwrap_or_else(|| {
-                                        "Signup failed. Please try again.".to_string()
-                                    });
-                                    set_error.set(Some(detail));
-                                }
-                            }
-                        }
-
-                        Ok(JsValue::NULL)
+                        let _ = &redirect; // Suppress unused warning on SSR
                     }
-                    .await;
-
-                    if let Err(_) = result {
+                    Ok(SignupResult::VerificationRequired { message }) => {
+                        set_success_msg.set(Some(message));
+                        set_view_state.set(LoginView::CheckEmail {
+                            email: current_email,
+                        });
+                    }
+                    Ok(SignupResult::Error { message }) => {
+                        set_error.set(Some(message));
+                    }
+                    Ok(SignupResult::RateLimited { .. }) => {
                         set_error.set(Some(
-                            "Signup failed. Please try again.".to_string(),
+                            "Too many signup attempts. Please try again later.".to_string(),
                         ));
                     }
+                    Err(e) => {
+                        set_error.set(Some(format!("Server error: {}", e)));
+                    }
+                }
 
-                    set_signup_loading.set(false);
-                });
-            }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                // SSR: signup requires JS fetch — no-op on server
                 set_signup_loading.set(false);
-            }
+            });
         }
     };
 
@@ -363,60 +290,19 @@ pub fn LoginPage() -> impl IntoView {
         set_resend_success.set(false);
         set_error.set(None);
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            let ver_email = verification_email.get_untracked();
-            leptos::task::spawn_local(async move {
-                use wasm_bindgen::prelude::*;
+        let ver_email = verification_email.get_untracked();
+        leptos::task::spawn_local(async move {
+            let result = resend_verification(ver_email).await;
 
-                let result: Result<(), JsValue> = async {
-                    let window =
-                        web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+            match result {
+                Ok(()) => set_resend_success.set(true),
+                Err(_) => set_error.set(Some(
+                    "Failed to resend verification email.".to_string(),
+                )),
+            }
 
-                    let body = serde_json::json!({"email": ver_email}).to_string();
-                    let mut opts = web_sys::RequestInit::new();
-                    opts.method("POST");
-                    opts.body(Some(&JsValue::from_str(&body)));
-
-                    let request = web_sys::Request::new_with_str_and_init(
-                        "/api/v1/auth/resend-verification",
-                        &opts,
-                    )?;
-                    request
-                        .headers()
-                        .set("Content-Type", "application/json")?;
-
-                    let resp_val =
-                        wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request))
-                            .await?;
-                    let resp: web_sys::Response = resp_val.dyn_into()?;
-
-                    if resp.ok() {
-                        set_resend_success.set(true);
-                    } else {
-                        set_error.set(Some(
-                            "Failed to resend verification email. Please try again.".to_string(),
-                        ));
-                    }
-
-                    Ok(())
-                }
-                .await;
-
-                if result.is_err() {
-                    set_error.set(Some(
-                        "Failed to resend verification email. Please try again.".to_string(),
-                    ));
-                }
-
-                set_resend_loading.set(false);
-            });
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
             set_resend_loading.set(false);
-        }
+        });
     };
 
     // ── Render ───────────────────────────────────────────────────────────

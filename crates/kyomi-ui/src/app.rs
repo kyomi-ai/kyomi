@@ -10,7 +10,9 @@ use leptos_router::{
 };
 
 use crate::components::{Layout, ThemeProvider};
+use crate::pages::auth::google_callback::GoogleCallbackPage;
 use crate::pages::auth::login::LoginPage;
+use crate::pages::auth::signup_complete::SignupCompletePage;
 use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::datasources::DatasourcesPage;
 use crate::pages::settings::profile::ProfilePage;
@@ -56,8 +58,10 @@ pub fn App() -> impl IntoView {
             <Router>
                 <Layout>
                     <Routes fallback=|| view! { <p>"Page not found"</p> }>
-                        // Auth pages — no layout wrapper needed (LoginPage uses AuthLayout)
+                        // Auth pages
                         <Route path=path!("/login") view=LoginPage/>
+                        <Route path=path!("/signup/complete") view=SignupCompletePage/>
+                        <Route path=path!("/auth/google/callback") view=GoogleCallbackPage/>
                         // SettingsShell mounts once; child routes swap via <Outlet/>.
                         // No re-mount on tab navigation = no flicker.
                         <ParentRoute path=path!("/settings") view=|| view! {

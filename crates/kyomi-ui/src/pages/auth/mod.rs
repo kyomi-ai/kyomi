@@ -4,4 +4,6 @@
 
 pub mod auth_layout;
 pub mod components;
+pub mod google_callback;
 pub mod login;
+pub mod signup_complete;
