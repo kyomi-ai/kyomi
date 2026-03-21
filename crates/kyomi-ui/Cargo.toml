@@ -106,6 +106,9 @@ async-trait = { workspace = true }
 # Markdown rendering (shared — works in both SSR and WASM)
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
+# Code editor (WASM-only — uses web-sys DOM APIs)
+kode = { path = "../../../../../../kode/kode" }
+
 # Date/time (used in both SSR and WASM for date formatting)
 chrono = { workspace = true }
 
