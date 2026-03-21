@@ -10,6 +10,8 @@ use leptos_router::{
 };
 
 use crate::components::{Layout, ThemeProvider};
+use crate::pages::auth::account_recovery::AccountRecoveryPage;
+use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
 use crate::pages::auth::google_callback::GoogleCallbackPage;
 use crate::pages::auth::login::LoginPage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
@@ -62,6 +64,8 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/login") view=LoginPage/>
                         <Route path=path!("/signup/complete") view=SignupCompletePage/>
                         <Route path=path!("/auth/google/callback") view=GoogleCallbackPage/>
+                        <Route path=path!("/account/recover") view=AccountRecoveryPage/>
+                        <Route path=path!("/account/recover/complete") view=AccountRecoveryCompletePage/>
                         // SettingsShell mounts once; child routes swap via <Outlet/>.
                         // No re-mount on tab navigation = no flicker.
                         <ParentRoute path=path!("/settings") view=|| view! {

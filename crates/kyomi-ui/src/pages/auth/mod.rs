@@ -2,6 +2,8 @@
 
 //! Authentication pages — login, signup, password recovery.
 
+pub mod account_recovery;
+pub mod account_recovery_complete;
 pub mod auth_layout;
 pub mod components;
 pub mod google_callback;

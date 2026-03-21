@@ -1240,6 +1240,351 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
 }
 
 // ---------------------------------------------------------------------------
+// Account Recovery
+// ---------------------------------------------------------------------------
+
+/// Result of verifying a recovery token.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RecoveryVerifyResult {
+    Success {
+        recovery_session_id: String,
+        has_passkeys: bool,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Result of setting a new password during recovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RecoverySetPasswordResult {
+    Success,
+    Error { message: String },
+}
+
+/// Start the account recovery flow by sending a recovery email.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/recovery/start` in `apps/server/src/routes/auth_recovery.rs`.
+///
+/// Always returns `Ok(())` to prevent email enumeration. If a verified account
+/// exists with the given email, a recovery link is sent in the background.
+#[server(prefix = "/leptos-api")]
+pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
+    let ctx = extract_context()?;
+
+    // Self-hosted without SMTP: account recovery via email is impossible
+    if ctx.config.self_hosted && !ctx.config.smtp_configured() {
+        return Err(ServerFnError::new(
+            "Password reset requires email. Ask your administrator to configure SMTP.",
+        ));
+    }
+
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Rate limit by IP — reuse "register" bucket (conservative: email-sending endpoint)
+    let ip = extract_client_ip(&headers);
+
+    let rate_result =
+        kyomi_auth::rate_limiter::check_rate_limit(&kv, &ip, "register", None)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Rate limiter error during recovery/start");
+                ServerFnError::new("Internal server error")
+            })?;
+    if !rate_result.allowed {
+        tracing::warn!(ip = %ip, "Account recovery/start rate limited");
+        return Err(ServerFnError::new(format!(
+            "Rate limited. Try again in {} seconds",
+            rate_result.retry_after_secs
+        )));
+    }
+
+    let email = email.to_lowercase().trim().to_string();
+
+    // Always return success to prevent email enumeration — do work silently
+    let user = kyomi_auth::user_service::get_user_by_email(&ctx.db, &email)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(user) = user {
+        if user.verified {
+            // Create recovery token (15 min = 0.25 hours)
+            if let Ok(raw_token) =
+                kyomi_auth::token_service::create_verification_token_with_expiry(
+                    &ctx.db,
+                    &email,
+                    "account_recovery",
+                    Some(0.25),
+                )
+                .await
+            {
+                let recovery_url = format!(
+                    "{}/account/recover/complete?token={raw_token}",
+                    ctx.config.frontend_url.trim_end_matches('/')
+                );
+
+                // Send recovery email (async, non-blocking)
+                let user_name = user.name.clone().unwrap_or_default();
+                let email_clone = email.clone();
+                let url_clone = recovery_url.clone();
+                tokio::spawn(async move {
+                    let email_svc = kyomi_auth::email_service::EmailService::from_env();
+                    let sent = email_svc
+                        .send_account_recovery(&email_clone, &user_name, &url_clone)
+                        .await;
+                    if sent {
+                        tracing::info!("Account recovery email sent to {email_clone}");
+                    } else {
+                        tracing::warn!(
+                            "Failed to send account recovery email to {email_clone}"
+                        );
+                        tracing::info!(
+                            "ACCOUNT RECOVERY LINK for {email_clone}: {url_clone}"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify a recovery token and create a short-lived recovery session.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/recovery/verify` in `apps/server/src/routes/auth_recovery.rs`.
+///
+/// On success, returns a `recovery_session_id` (stored in KV with 15 min TTL)
+/// and whether the user has passkeys registered.
+#[server(prefix = "/leptos-api")]
+pub async fn recovery_verify(
+    token: String,
+) -> Result<RecoveryVerifyResult, ServerFnError> {
+    let ctx = extract_context()?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Verify recovery token (one-time use)
+    let email = kyomi_auth::token_service::verify_verification_token(
+        &ctx.db,
+        &token,
+        "account_recovery",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Recovery token verification error");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    let Some(email) = email else {
+        tracing::warn!("Account recovery/verify: invalid or expired token");
+        return Ok(RecoveryVerifyResult::Error {
+            message: "Invalid or expired recovery link. Please request a new one.".into(),
+        });
+    };
+
+    // Get user and verify they're still in a valid state
+    let user = kyomi_auth::user_service::get_user_by_email(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to look up user during recovery/verify");
+            ServerFnError::new("Internal server error")
+        })?
+        .ok_or_else(|| ServerFnError::new("User not found for recovery token"))?;
+
+    if !user.verified {
+        return Ok(RecoveryVerifyResult::Error {
+            message: "Account is not verified. Please complete signup first.".into(),
+        });
+    }
+
+    // Check if user has passkeys
+    let has_passkeys = {
+        let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &user.user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to check passkeys during recovery/verify");
+                ServerFnError::new("Internal server error")
+            })?;
+        !creds.is_empty()
+    };
+
+    // Create a short-lived recovery session in KV (15 min TTL)
+    let recovery_session_id = kyomi_auth::redis_ops::generate_token();
+    kyomi_auth::redis_ops::store_recovery_session(&kv, &recovery_session_id, &user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to store recovery session");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    Ok(RecoveryVerifyResult::Success {
+        recovery_session_id,
+        has_passkeys,
+    })
+}
+
+/// Set a new password using a recovery session, completing the recovery flow.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/recovery/set-password` in `apps/server/src/routes/auth_recovery.rs`.
+///
+/// Flow:
+/// 1. Validate password (min 8 chars)
+/// 2. Peek recovery session from KV (non-destructive read)
+/// 3. Verify new password differs from existing (if any)
+/// 4. Hash password with argon2id and upsert auth method
+/// 5. Delete recovery session from KV
+/// 6. Disable TOTP if enabled
+/// 7. Create authenticated session and set cookies
+#[server(prefix = "/leptos-api")]
+pub async fn recovery_set_password(
+    recovery_session_id: String,
+    new_password: String,
+) -> Result<RecoverySetPasswordResult, ServerFnError> {
+    let ctx = extract_context()?;
+
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Validate password
+    if new_password.len() < 8 {
+        return Ok(RecoverySetPasswordResult::Error {
+            message: "Password must be at least 8 characters".into(),
+        });
+    }
+
+    // Validate recovery session from KV (non-destructive read).
+    // We peek first so the session survives validation errors (e.g., same password).
+    // The session is only deleted after the password is successfully changed.
+    let user_id = kyomi_auth::redis_ops::peek_recovery_session(&kv, &recovery_session_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to peek recovery session");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    let Some(user_id) = user_id else {
+        return Ok(RecoverySetPasswordResult::Error {
+            message: "Invalid or expired recovery session. Please start the recovery process again.".into(),
+        });
+    };
+
+    // Get user
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to look up user during recovery/set-password");
+            ServerFnError::new("Internal server error")
+        })?
+        .ok_or_else(|| ServerFnError::new("User not found for recovery session"))?;
+
+    // If the user already has a password, verify the new one is different.
+    // This is critical for security: recovery disables TOTP, so we must
+    // invalidate any compromised password by requiring a different one.
+    if let Some(existing) =
+        kyomi_auth::user_service::get_auth_method(&ctx.db, &user_id, "password")
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to get existing password auth method");
+                ServerFnError::new("Internal server error")
+            })?
+    {
+        if let Some(existing_hash) = existing.auth_data.get("hash").and_then(|v| v.as_str()) {
+            let same = kyomi_auth::password::verify_password(&new_password, existing_hash)
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Password verification error during recovery");
+                    ServerFnError::new("Internal server error")
+                })?;
+            if same {
+                return Ok(RecoverySetPasswordResult::Error {
+                    message: "New password must be different from your current password.".into(),
+                });
+            }
+        }
+    }
+
+    // Hash password and upsert auth method (create new or replace existing)
+    let hash = kyomi_auth::password::hash_password(&new_password).map_err(|e| {
+        tracing::error!(error = %e, "Failed to hash password during recovery");
+        ServerFnError::new("Internal server error")
+    })?;
+    let auth_data = serde_json::json!({"hash": hash});
+    kyomi_auth::user_service::upsert_auth_method(&ctx.db, &user_id, "password", &auth_data)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to upsert password auth method during recovery");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    // Consume the recovery session now that the password has been successfully changed.
+    kyomi_auth::redis_ops::delete_recovery_session(&kv, &recovery_session_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to delete recovery session");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    // Disable TOTP if enabled — only AFTER password has been successfully changed.
+    // Recovery proves email ownership (legitimate user). Requiring a different password
+    // ensures an attacker's stolen password is invalidated before TOTP is removed.
+    let totp_disabled =
+        kyomi_auth::user_service::remove_auth_method(&ctx.db, &user_id, "totp")
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to remove TOTP during recovery");
+                ServerFnError::new("Internal server error")
+            })?;
+    if totp_disabled {
+        tracing::info!(user_id = %user_id, "TOTP disabled during account recovery");
+    }
+
+    // Create authenticated session (log user in)
+    let device = extract_device_info(&headers);
+    let sess = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &kv,
+        &ctx.config.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(user_id = %user_id, error = %e, "Failed to create session during recovery");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    // Set HTTPOnly cookies via ResponseOptions
+    let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    for (name, value) in sess.cookie_headers.iter() {
+        if name == axum::http::header::SET_COOKIE {
+            response_options.append_header(name.clone(), value.clone());
+        }
+    }
+
+    Ok(RecoverySetPasswordResult::Success)
+}
+
+// ---------------------------------------------------------------------------
 // Private helpers (server-only)
 // ---------------------------------------------------------------------------
 

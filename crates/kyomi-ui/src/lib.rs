@@ -30,6 +30,9 @@ pub fn register_server_functions() {
     register_explicit::<SignupComplete>();
     register_explicit::<GoogleOauthCallback>();
     register_explicit::<ResendVerification>();
+    register_explicit::<RecoveryStart>();
+    register_explicit::<RecoveryVerify>();
+    register_explicit::<RecoverySetPassword>();
 
     use server_fns::context::*;
     register_explicit::<GetUserContext>();
