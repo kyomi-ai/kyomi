@@ -19,6 +19,7 @@
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
+use leptos_router::hooks::use_location;
 
 use crate::server_fns::context::{get_user_context, UserContext};
 
@@ -100,20 +101,14 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
     let user_ctx = Resource::new(|| (), |_| get_user_context());
     provide_context(user_ctx);
 
-    // Derive active tab from the current URL path.
-    let active_tab = {
-        #[cfg(target_arch = "wasm32")]
-        {
-            web_sys::window()
-                .and_then(|w| w.location().pathname().ok())
-                .and_then(|p| p.strip_prefix("/settings/").map(|s| s.to_string()))
-                .unwrap_or_else(|| "profile".to_string())
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            "profile".to_string()
-        }
-    };
+    // Reactive pathname from the Leptos router — updates when the URL changes.
+    let location = use_location();
+    let active_tab = Memo::new(move |_| {
+        let path = location.pathname.get();
+        path.strip_prefix("/settings/")
+            .unwrap_or("profile")
+            .to_string()
+    });
 
     view! {
         <div class="w-full space-y-8" style:display="block">
@@ -148,10 +143,11 @@ pub fn SettingsShell(children: Children) -> impl IntoView {
                                 }
                             };
 
+                            let current_tab = active_tab.get();
                             TABS.iter()
                                 .filter(|tab| visible_ids.contains(&tab.id))
                                 .map(|tab| {
-                                    let is_active = tab.id == active_tab;
+                                    let is_active = tab.id == current_tab;
                                     let tab_class = if is_active {
                                         "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-primary text-primary"
                                     } else {
