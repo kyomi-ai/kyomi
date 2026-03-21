@@ -21,6 +21,7 @@ use crate::components::{
     CardHeader, CardTitle, ConfirmDialog, Label, Skeleton, INPUT_CLASS,
 };
 use crate::server_fns::analytics::*;
+use crate::server_fns::context::UserContext;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -51,6 +52,9 @@ fn generate_slug(name: &str) -> String {
 /// Analytics settings page content.
 #[component]
 pub fn AnalyticsPage() -> impl IntoView {
+    // Read the UserContext provided by SettingsShell to check deployment mode.
+    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
+
     let sites_resource = Resource::new(|| (), |_| list_analytics_sites());
     let usage_resource = Resource::new(|| (), |_| get_analytics_usage());
 
@@ -58,31 +62,51 @@ pub fn AnalyticsPage() -> impl IntoView {
         <div class="p-6">
             <h2 class="text-xl font-semibold text-foreground mb-6">"Analytics"</h2>
 
-            <Suspense fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
-                {move || Suspend::new(async move {
-                    match sites_resource.await {
-                        Ok(sites) => {
-                            let usage = usage_resource.await.ok();
-                            view! {
-                                <AnalyticsContent
-                                    initial_sites=sites
-                                    usage=usage
-                                    sites_resource=sites_resource
-                                />
-                            }.into_any()
-                        }
-                        Err(e) => view! {
+            // If the user context indicates self-hosted mode, show an informational
+            // message instead of making ClickHouse-backed server calls.
+            {move || {
+                if let Some(Ok(ctx)) = user_ctx.get() {
+                    if ctx.is_self_hosted {
+                        return view! {
                             <Card>
                                 <CardContent>
-                                    <p class="text-error-foreground py-6">
-                                        {format!("Failed to load analytics sites: {e}")}
+                                    <p class="text-muted-foreground py-6">
+                                        "Analytics requires a Postgres and ClickHouse configuration. \
+                                         Not available in self-hosted mode with SQLite."
                                     </p>
                                 </CardContent>
                             </Card>
-                        }.into_any(),
+                        }.into_any();
                     }
-                })}
-            </Suspense>
+                }
+                view! {
+                    <Suspense fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
+                        {move || Suspend::new(async move {
+                            match sites_resource.await {
+                                Ok(sites) => {
+                                    let usage = usage_resource.await.ok();
+                                    view! {
+                                        <AnalyticsContent
+                                            initial_sites=sites
+                                            usage=usage
+                                            sites_resource=sites_resource
+                                        />
+                                    }.into_any()
+                                }
+                                Err(e) => view! {
+                                    <Card>
+                                        <CardContent>
+                                            <p class="text-error-foreground py-6">
+                                                {format!("Failed to load analytics sites: {e}")}
+                                            </p>
+                                        </CardContent>
+                                    </Card>
+                                }.into_any(),
+                            }
+                        })}
+                    </Suspense>
+                }.into_any()
+            }}
         </div>
     }
 }

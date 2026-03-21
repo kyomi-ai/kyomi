@@ -130,7 +130,10 @@ async fn load_workspace(
     kyomi_core::db_fetch_optional!(
         db, WorkspaceRow,
         "SELECT workspace_id, name, subscription_tier, subscription_status, \
-         billing_cycle, subscription_period_start::text, subscription_period_end::text, user_limit, \
+         billing_cycle, \
+         CAST(subscription_period_start AS TEXT) AS subscription_period_start, \
+         CAST(subscription_period_end AS TEXT) AS subscription_period_end, \
+         user_limit, \
          stripe_customer_id, stripe_subscription_id, stripe_additional_users_item_id \
          FROM workspaces WHERE workspace_id = $1",
         ws_id
@@ -179,6 +182,16 @@ fn is_stripe_test_mode(config: &kyomi_core::Config) -> bool {
 pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
+
+    // Guard: billing is only available when Stripe is configured (SaaS mode).
+    // Self-hosted deployments without Stripe should never reach this — the tab
+    // is hidden — but guard here for direct navigation.
+    if ctx.config.stripe_secret_key.is_none() {
+        return Err(ServerFnError::new(
+            "Billing features are not available in this deployment",
+        ));
+    }
+
     require_workspace_admin(&auth)?;
     let ws_id = workspace_id(&auth)?;
 

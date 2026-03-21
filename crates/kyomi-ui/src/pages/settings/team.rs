@@ -744,11 +744,13 @@ fn MemberRow(
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Format an RFC 3339 date string to a short locale-style date.
+/// Format an RFC 3339 date string to DD/MM/YYYY.
 ///
+/// Matches React's `new Date(...).toLocaleDateString()` output for
+/// the locale used in production / Playwright tests (DD/MM/YYYY).
 /// Falls back to the raw string if parsing fails.
 fn format_date(rfc3339: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(rfc3339)
-        .map(|dt| dt.format("%b %d, %Y").to_string())
+        .map(|dt| dt.format("%d/%m/%Y").to_string())
         .unwrap_or_else(|_| rfc3339.to_string())
 }

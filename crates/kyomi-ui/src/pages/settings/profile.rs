@@ -212,13 +212,12 @@ fn ProfileInfoCard(data: ProfileData) -> impl IntoView {
                 <div class="flex items-center justify-between">
                     <div>
                         <CardTitle>"Profile Information"</CardTitle>
-                        <CardDescription>"Your name and email address."</CardDescription>
                     </div>
                     <ActionStatus action=save_action/>
                 </div>
             </CardHeader>
             <CardContent>
-                <div class="space-y-4 max-w-md">
+                <div class="space-y-4">
                     <div class="space-y-2">
                         <Label>"Name"</Label>
                         <input
@@ -234,9 +233,9 @@ fn ProfileInfoCard(data: ProfileData) -> impl IntoView {
                         <Label>"Email"</Label>
                         <input
                             type="email"
-                            class=format!("{INPUT_CLASS} bg-muted text-muted-foreground")
+                            class="w-full px-3 py-2 border border-input rounded-md bg-muted text-muted-foreground cursor-not-allowed"
                             disabled=true
-                            prop:value=data.email.clone()
+                            value=data.email.clone()
                         />
                         <p class="text-xs text-muted-foreground">"Email cannot be changed"</p>
                     </div>
@@ -266,7 +265,11 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
         async move { update_theme(theme).await }
     });
 
-    let theme_options = [("light", "Light"), ("dark", "Dark"), ("system", "System")];
+    static THEME_OPTIONS: &[(&str, &str, &icondata_core::IconData)] = &[
+        ("light", "Light", icondata_lu::LuSun),
+        ("dark", "Dark", icondata_lu::LuMoon),
+        ("system", "System", icondata_lu::LuMonitor),
+    ];
 
     view! {
         <Card>
@@ -276,9 +279,10 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
             </CardHeader>
             <CardContent>
                 <div class="flex flex-wrap gap-3">
-                    {theme_options.into_iter().map(|(value, label)| {
+                    {THEME_OPTIONS.iter().map(|(value, label, icon_data)| {
                         let value_str = value.to_string();
                         let value_for_click = value.to_string();
+                        let label_str = label.to_string();
                         view! {
                             <button
                                 class=move || {
@@ -302,7 +306,8 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
                                     }
                                 }
                             >
-                                <span>{label}</span>
+                                <leptos_icons::Icon icon=*icon_data width="16" height="16"/>
+                                <span>{label_str}</span>
                             </button>
                         }
                     }).collect_view()}
@@ -358,7 +363,7 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
                 </div>
             </CardHeader>
             <CardContent>
-                <div class="space-y-6 max-w-md">
+                <div class="space-y-6">
                     // Landing Page
                     <div class="space-y-2">
                         <Label>"Landing Page"</Label>
@@ -516,7 +521,7 @@ fn QueryRetentionCard(data: ProfileData) -> impl IntoView {
                 </div>
             </CardHeader>
             <CardContent>
-                <div class="max-w-md space-y-2">
+                <div class="space-y-2">
                     <Label>"Retention Period"</Label>
                     <StyledSelect
                         value=initial_value

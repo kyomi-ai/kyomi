@@ -9,59 +9,10 @@ use leptos::prelude::*;
 
 use crate::components::{
     ActionStatus, Alert, AlertDescription, AlertVariant, Button, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, Label, INPUT_CLASS,
+    CardDescription, CardHeader, CardTitle, INPUT_CLASS,
 };
 use crate::server_fns::workspace::*;
 use crate::types::WorkspaceSettingsData;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Palette data — matches apps/frontend/src/config/chartPalettes.js
-// (shared with profile.rs — same static data)
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct PaletteInfo {
-    id: &'static str,
-    name: &'static str,
-    colors: &'static [&'static str],
-}
-
-const PALETTES: &[PaletteInfo] = &[
-    PaletteInfo {
-        id: "balanced",
-        name: "Balanced",
-        colors: &[
-            "#1A75C9", "#B8405A", "#3D8A5A", "#D9952D", "#2D7A8A", "#C9734D",
-            "#4D5A8A", "#99C94D", "#8A5A7A", "#D9B370", "#70B8D9", "#6B8A4D",
-        ],
-    },
-    PaletteInfo {
-        id: "vibrant",
-        name: "Vibrant",
-        colors: &[
-            "#1E88C7", "#D92849", "#28C75A", "#E8B733", "#28C7A8", "#E87333",
-            "#3355D9", "#A8D928", "#C728A8", "#D97328", "#28A8D9", "#73A828",
-        ],
-    },
-    PaletteInfo {
-        id: "accessible",
-        name: "Accessible",
-        colors: &[
-            "#2D5F7A", "#A83D52", "#3D7A52", "#C9A642", "#3D8A8A", "#E89970",
-            "#5C6D99", "#B8D96B", "#996B8A", "#B87752", "#85B8D9", "#85996B",
-        ],
-    },
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Model options
-// ─────────────────────────────────────────────────────────────────────────────
-
-const MODEL_OPTIONS: &[(&str, &str)] = &[
-    ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
-    ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
-    ("gpt-4o", "GPT-4o"),
-    ("gpt-4o-mini", "GPT-4o Mini"),
-];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main page
@@ -90,15 +41,9 @@ pub fn WorkspacePage() -> impl IntoView {
                 {move || {
                     settings.get().map(|result| match result {
                         Ok(data) => {
-                            let data_name = data.clone();
-                            let data_model = data.clone();
-                            let data_palette = data.clone();
-
                             view! {
                                 <div class="space-y-6">
-                                    <WorkspaceNameCard data=data_name/>
-                                    <DefaultModelCard data=data_model/>
-                                    <WorkspaceChartPaletteCard data=data_palette/>
+                                    <WorkspaceNameCard data=data/>
                                     <KnowledgeGraphCard/>
                                     <WorkspaceSlackSection/>
                                 </div>
@@ -162,134 +107,6 @@ fn WorkspaceNameCard(data: WorkspaceSettingsData) -> impl IntoView {
                     on:input=move |ev| set_name.set(event_target_value(&ev))
                     on:blur=on_blur
                 />
-            </CardContent>
-        </Card>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Default AI Model Card
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn DefaultModelCard(data: WorkspaceSettingsData) -> impl IntoView {
-    let save_action = Action::new(|model: &String| {
-        let model = model.clone();
-        async move { update_workspace_model(model).await }
-    });
-
-    view! {
-        <Card>
-            <CardHeader>
-                <div class="flex items-center justify-between">
-                    <div>
-                        <CardTitle>"Default AI Model"</CardTitle>
-                        <CardDescription>
-                            "Choose the default AI model for workspace conversations."
-                        </CardDescription>
-                    </div>
-                    <ActionStatus action=save_action/>
-                </div>
-            </CardHeader>
-            <CardContent>
-                <div class="max-w-md space-y-2">
-                    <Label>"Model"</Label>
-                    {
-                        let options: Vec<(&'static str, &'static str)> = MODEL_OPTIONS.to_vec();
-                        view! {
-                            <crate::components::StyledSelect
-                                value=data.default_model.clone()
-                                options=options
-                                on_change=move |val| {
-                                    save_action.dispatch(val);
-                                }
-                            />
-                        }
-                    }
-                </div>
-            </CardContent>
-        </Card>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Workspace Chart Palette Card
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn WorkspaceChartPaletteCard(data: WorkspaceSettingsData) -> impl IntoView {
-    let (palette, set_palette) = signal(data.chart_palette.clone());
-    let save_action = Action::new(|palette: &String| {
-        let palette = palette.clone();
-        async move { update_workspace_chartml_config(palette).await }
-    });
-
-    view! {
-        <Card>
-            <CardHeader>
-                <div class="flex items-center justify-between">
-                    <div>
-                        <CardTitle>"Workspace Chart Palette"</CardTitle>
-                        <CardDescription>"Choose the default color palette for workspace charts. Individual users can override this."</CardDescription>
-                    </div>
-                    <ActionStatus action=save_action/>
-                </div>
-            </CardHeader>
-            <CardContent>
-                <div class="space-y-3">
-                    {PALETTES.iter().map(|p| {
-                        let id = p.id.to_string();
-                        let id_for_click = p.id.to_string();
-                        let name = p.name;
-                        let colors = p.colors;
-                        view! {
-                            <button
-                                class=move || {
-                                    let base = "w-full text-left p-4 rounded-lg border-2 transition-all";
-                                    if palette.get() == id {
-                                        format!("{base} border-primary bg-primary/10")
-                                    } else {
-                                        format!("{base} border-border hover:border-border/80")
-                                    }
-                                }
-                                on:click={
-                                    let set_pal = set_palette;
-                                    let action = save_action;
-                                    move |_| {
-                                        set_pal.set(id_for_click.clone());
-                                        action.dispatch(id_for_click.clone());
-                                    }
-                                }
-                            >
-                                <div class="flex items-start justify-between mb-3">
-                                    <div class="font-medium text-foreground">{name}</div>
-                                    {move || {
-                                        if palette.get() == p.id {
-                                            view! {
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-primary">
-                                                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                                                    <polyline points="22 4 12 14.01 9 11.01"/>
-                                                </svg>
-                                            }.into_any()
-                                        } else {
-                                            view! { <span></span> }.into_any()
-                                        }
-                                    }}
-                                </div>
-                                <div class="flex flex-wrap gap-1">
-                                    {colors.iter().map(|color| {
-                                        view! {
-                                            <div
-                                                class="w-8 h-8 rounded border border-border"
-                                                style=format!("background-color: {color}")
-                                            />
-                                        }
-                                    }).collect_view()}
-                                </div>
-                            </button>
-                        }
-                    }).collect_view()}
-                </div>
             </CardContent>
         </Card>
     }

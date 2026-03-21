@@ -172,7 +172,7 @@ fn DatasourcesContent(
                         fallback=move || view! {
                             <div class="text-center py-12">
                                 <span class="mx-auto h-12 w-12 text-muted-foreground flex items-center justify-center">
-                                    <Icon icon=icondata_lu::LuDatabase/>
+                                    <Icon icon=icondata_lu::LuDatabase width="48" height="48"/>
                                 </span>
                                 <p class="mt-4 text-sm text-muted-foreground">
                                     "No datasources configured"

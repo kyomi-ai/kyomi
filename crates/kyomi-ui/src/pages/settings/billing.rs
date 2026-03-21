@@ -21,6 +21,7 @@ use crate::components::{
     StatusBadgeVariant,
 };
 use crate::server_fns::billing::*;
+use crate::server_fns::context::UserContext;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -171,6 +172,9 @@ fn external_link_icon() -> impl IntoView {
 /// Billing settings page content.
 #[component]
 pub fn BillingPage() -> impl IntoView {
+    // Read the UserContext provided by SettingsShell to check deployment mode.
+    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
+
     // Resources for subscription info (reload via version signal)
     let (sub_version, set_sub_version) = signal(0u32);
     let subscription = Resource::new(
@@ -383,69 +387,90 @@ pub fn BillingPage() -> impl IntoView {
     });
 
     view! {
-        <div class="space-y-6" style:display="block">
-            // Alerts
-            {move || error.get().map(|msg| view! {
-                <Alert variant=AlertVariant::Error class="mb-4">
-                    <AlertDescription>{msg}</AlertDescription>
-                </Alert>
-            })}
-            {move || success.get().map(|msg| view! {
-                <Alert variant=AlertVariant::Success class="mb-4">
-                    <AlertDescription>{msg}</AlertDescription>
-                </Alert>
-            })}
+        <div class="p-6">
+        // If the user context indicates self-hosted mode, show an informational
+        // message instead of loading Stripe-backed billing data.
+        {move || {
+            if let Some(Ok(ctx)) = user_ctx.get() {
+                if ctx.is_self_hosted {
+                    return view! {
+                        <Card>
+                            <CardContent>
+                                <p class="text-muted-foreground py-6">
+                                    "Billing is not available in self-hosted mode."
+                                </p>
+                            </CardContent>
+                        </Card>
+                    }.into_any();
+                }
+            }
+            view! {
+                <div class="space-y-6" style:display="block">
+                    // Alerts
+                    {move || error.get().map(|msg| view! {
+                        <Alert variant=AlertVariant::Error class="mb-4">
+                            <AlertDescription>{msg}</AlertDescription>
+                        </Alert>
+                    })}
+                    {move || success.get().map(|msg| view! {
+                        <Alert variant=AlertVariant::Success class="mb-4">
+                            <AlertDescription>{msg}</AlertDescription>
+                        </Alert>
+                    })}
 
-            // Main content
-            <Suspense fallback=move || view! {
-                <div class="flex items-center justify-center p-8">
-                    <Skeleton class="h-8 w-8 rounded-full"/>
+                    // Main content
+                    <Suspense fallback=move || view! {
+                        <div class="flex items-center justify-center p-8">
+                            <Skeleton class="h-8 w-8 rounded-full"/>
+                        </div>
+                    }>
+                        {move || Suspend::new(async move {
+                            match subscription.await {
+                                Ok(info) => {
+                                    view! {
+                                        <BillingContent
+                                            info=info
+                                            invoices=invoices
+                                            checkout_loading=checkout_loading
+                                            team_size_loading=team_size_loading
+                                            desired_team_size=desired_team_size
+                                            set_desired_team_size=set_desired_team_size
+                                            show_plans_modal=show_plans_modal
+                                            set_show_plans_modal=set_show_plans_modal
+                                            handle_upgrade=handle_upgrade
+                                            handle_manage_billing=handle_manage_billing
+                                            handle_team_size_update=handle_team_size_update
+                                            dialog_open=dialog_open
+                                            set_dialog_title=set_dialog_title
+                                            set_dialog_message=set_dialog_message
+                                            set_dialog_confirm_text=set_dialog_confirm_text
+                                            set_dialog_destructive=set_dialog_destructive
+                                            set_pending_confirm_action=set_pending_confirm_action
+                                        />
+                                    }.into_any()
+                                }
+                                Err(e) => view! {
+                                    <Alert variant=AlertVariant::Error>
+                                        <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
+                                    </Alert>
+                                }.into_any(),
+                            }
+                        })}
+                    </Suspense>
+
+                    // Confirm Dialog
+                    <ConfirmDialog
+                        open=Signal::from(dialog_open)
+                        title=dialog_title.get_untracked()
+                        message=dialog_message.get_untracked()
+                        confirm_text=dialog_confirm_text.get_untracked()
+                        destructive=dialog_destructive.get_untracked()
+                        on_confirm=on_confirm
+                        on_cancel=on_cancel_dialog
+                    />
                 </div>
-            }>
-                {move || Suspend::new(async move {
-                    match subscription.await {
-                        Ok(info) => {
-                            view! {
-                                <BillingContent
-                                    info=info
-                                    invoices=invoices
-                                    checkout_loading=checkout_loading
-                                    team_size_loading=team_size_loading
-                                    desired_team_size=desired_team_size
-                                    set_desired_team_size=set_desired_team_size
-                                    show_plans_modal=show_plans_modal
-                                    set_show_plans_modal=set_show_plans_modal
-                                    handle_upgrade=handle_upgrade
-                                    handle_manage_billing=handle_manage_billing
-                                    handle_team_size_update=handle_team_size_update
-                                    dialog_open=dialog_open
-                                    set_dialog_title=set_dialog_title
-                                    set_dialog_message=set_dialog_message
-                                    set_dialog_confirm_text=set_dialog_confirm_text
-                                    set_dialog_destructive=set_dialog_destructive
-                                    set_pending_confirm_action=set_pending_confirm_action
-                                />
-                            }.into_any()
-                        }
-                        Err(e) => view! {
-                            <Alert variant=AlertVariant::Error>
-                                <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
-                            </Alert>
-                        }.into_any(),
-                    }
-                })}
-            </Suspense>
-
-            // Confirm Dialog
-            <ConfirmDialog
-                open=Signal::from(dialog_open)
-                title=dialog_title.get_untracked()
-                message=dialog_message.get_untracked()
-                confirm_text=dialog_confirm_text.get_untracked()
-                destructive=dialog_destructive.get_untracked()
-                on_confirm=on_confirm
-                on_cancel=on_cancel_dialog
-            />
+            }.into_any()
+        }}
         </div>
     }
 }
