@@ -178,6 +178,9 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/auth/google/callback", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/passkey-signup", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/recover-passkey", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/recover-passkey/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
         // Leptos frontend routes — settings pages
         .route("/settings/profile", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/settings/security", axum::routing::get(leptos_frontend::serve_leptos_shell))

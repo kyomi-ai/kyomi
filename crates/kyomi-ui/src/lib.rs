@@ -13,6 +13,7 @@ pub mod datasource;
 pub mod pages;
 pub mod server_fns;
 pub mod types;
+pub mod utils;
 
 pub use app::App;
 
@@ -33,6 +34,12 @@ pub fn register_server_functions() {
     register_explicit::<RecoveryStart>();
     register_explicit::<RecoveryVerify>();
     register_explicit::<RecoverySetPassword>();
+    register_explicit::<PasskeyLoginStart>();
+    register_explicit::<PasskeyLoginComplete>();
+    register_explicit::<PasskeyRegisterStart>();
+    register_explicit::<PasskeyRegisterComplete>();
+    register_explicit::<PasskeySignupComplete>();
+    register_explicit::<PasskeyRecoveryVerify>();
 
     use server_fns::context::*;
     register_explicit::<GetUserContext>();

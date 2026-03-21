@@ -14,6 +14,9 @@ use crate::pages::auth::account_recovery::AccountRecoveryPage;
 use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
 use crate::pages::auth::google_callback::GoogleCallbackPage;
 use crate::pages::auth::login::LoginPage;
+use crate::pages::auth::passkey_recovery::PasskeyRecoveryPage;
+use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
+use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
 use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::datasources::DatasourcesPage;
@@ -66,6 +69,9 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/auth/google/callback") view=GoogleCallbackPage/>
                         <Route path=path!("/account/recover") view=AccountRecoveryPage/>
                         <Route path=path!("/account/recover/complete") view=AccountRecoveryCompletePage/>
+                        <Route path=path!("/auth/passkey-signup") view=PasskeySignupCompletePage/>
+                        <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
+                        <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
                         // SettingsShell mounts once; child routes swap via <Outlet/>.
                         // No re-mount on tab navigation = no flicker.
                         <ParentRoute path=path!("/settings") view=|| view! {

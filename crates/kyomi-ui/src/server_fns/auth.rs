@@ -1585,6 +1585,936 @@ pub async fn recovery_set_password(
 }
 
 // ---------------------------------------------------------------------------
+// Passkey login/register (public, unauthenticated)
+// ---------------------------------------------------------------------------
+
+/// Result of starting a passkey login challenge.
+///
+/// Contains the challenge_id (to correlate start/complete) and the serialized
+/// `PublicKeyCredentialRequestOptions` for the browser.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasskeyLoginStartResult {
+    pub challenge_id: String,
+    /// JSON string of PublicKeyCredentialRequestOptions for `navigator.credentials.get()`.
+    pub request_challenge: String,
+}
+
+/// Result of starting a passkey registration challenge.
+///
+/// Contains the challenge_id (to correlate start/complete) and the serialized
+/// `PublicKeyCredentialCreationOptions` for the browser.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PasskeyRegisterStartResult {
+    pub challenge_id: String,
+    /// JSON string of PublicKeyCredentialCreationOptions for `navigator.credentials.create()`.
+    pub creation_challenge: String,
+}
+
+/// Start passkey login — generate a WebAuthn assertion challenge.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/login/start` in `apps/server/src/routes/auth_passkeys.rs`.
+///
+/// Uses discoverable credential flow (empty `allowCredentials`) so the browser
+/// presents all available passkeys. If an email is provided and the user has
+/// registered passkeys, uses the standard flow with `allowCredentials` populated.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnError> {
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Use discoverable credential flow — no email required.
+    // The browser will show all available passkeys for this relying party.
+    let (mut rcr, disc_state) =
+        kyomi_auth::webauthn::start_discoverable_authentication(webauthn)
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Remove mediation hint — we want a modal prompt, not conditional UI autofill
+    rcr.mediation = None;
+
+    let challenge_id = kyomi_auth::redis_ops::generate_token();
+    let disc_state_json = serde_json::to_value(&disc_state)
+        .map_err(|e| ServerFnError::new(format!("Serialize discoverable state: {e}")))?;
+
+    let challenge_data = serde_json::json!({
+        "discoverable_state": disc_state_json,
+        "discoverable": true,
+    });
+    kyomi_auth::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let request_challenge = serde_json::to_string(&rcr)
+        .map_err(|e| ServerFnError::new(format!("Serialize request challenge: {e}")))?;
+
+    Ok(PasskeyLoginStartResult {
+        challenge_id,
+        request_challenge,
+    })
+}
+
+/// Complete passkey login — verify the WebAuthn assertion.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/login/complete` in `apps/server/src/routes/auth_passkeys.rs`.
+///
+/// Flow:
+/// 1. Rate limit by IP
+/// 2. Retrieve challenge state from KV (and delete to prevent replay)
+/// 3. Find user by credential ID from the assertion
+/// 4. Verify user is verified and active
+/// 5. Verify assertion with WebAuthn (discoverable or standard flow)
+/// 6. Update credential usage (sign count)
+/// 7. Create authenticated session and set cookies
+/// 8. Return LoginResult::Success
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_login_complete(
+    challenge_id: String,
+    assertion_json: String,
+) -> Result<LoginResult, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_rs::prelude::*;
+
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Extract headers for rate limiting and device info
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    // Rate limit by IP
+    let ip = extract_client_ip(&headers);
+    let rate_result = kyomi_auth::rate_limiter::check_rate_limit(&kv, &ip, "login", None)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Rate limiter error during passkey login");
+            ServerFnError::new("Internal server error")
+        })?;
+    if !rate_result.allowed {
+        return Ok(LoginResult::RateLimited {
+            retry_after_secs: rate_result.retry_after_secs,
+        });
+    }
+
+    // Parse the assertion from JSON
+    let credential: PublicKeyCredential = serde_json::from_str(&assertion_json)
+        .map_err(|e| ServerFnError::new(format!("Invalid assertion JSON: {e}")))?;
+
+    // Get challenge from KV
+    let challenge_data =
+        kyomi_auth::redis_ops::get_webauthn_challenge(&kv, &challenge_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .ok_or_else(|| {
+                tracing::warn!(ip = %ip, "Passkey login: invalid or expired challenge");
+                ServerFnError::new("Invalid or expired challenge")
+            })?;
+
+    // Delete challenge (prevent replay)
+    kyomi_auth::redis_ops::delete_webauthn_challenge(&kv, &challenge_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Find the user by credential ID
+    let cred_id_bytes: &[u8] = credential.raw_id.as_ref();
+    let credential_id_b64 = URL_SAFE_NO_PAD.encode(cred_id_bytes);
+
+    let user = kyomi_auth::user_service::find_user_by_credential_id(&ctx.db, &credential_id_b64)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to find user by credential ID");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    let Some(user) = user else {
+        return Ok(LoginResult::Error {
+            message: "Invalid credentials".to_string(),
+        });
+    };
+
+    // Check email verification
+    if !user.verified {
+        return Ok(LoginResult::VerificationRequired {
+            email: user.email.clone(),
+        });
+    }
+
+    // Verify the assertion based on challenge type (discoverable vs standard)
+    let is_discoverable = challenge_data["discoverable"].as_bool().unwrap_or(false);
+
+    if is_discoverable {
+        let disc_state: DiscoverableAuthentication = serde_json::from_value(
+            challenge_data["discoverable_state"].clone(),
+        )
+        .map_err(|e| ServerFnError::new(format!("Deserialize discoverable state: {e}")))?;
+
+        let passkeys = get_passkeys_for_auth(&ctx.db, &user.user_id).await?;
+        if passkeys.is_empty() {
+            return Ok(LoginResult::Error {
+                message: "No passkeys found for user".to_string(),
+            });
+        }
+
+        let auth_result = kyomi_auth::webauthn::finish_discoverable_authentication(
+            webauthn,
+            &credential,
+            disc_state,
+            &passkeys,
+        )
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Passkey discoverable auth failed");
+            ServerFnError::new("Authentication failed")
+        })?;
+
+        // Update credential usage
+        update_passkey_after_auth(&ctx.db, &user.user_id, &credential_id_b64, cred_id_bytes, &passkeys, &auth_result).await;
+    } else {
+        let auth_state: PasskeyAuthentication = serde_json::from_value(
+            challenge_data["authentication_state"].clone(),
+        )
+        .map_err(|e| ServerFnError::new(format!("Deserialize auth state: {e}")))?;
+
+        let auth_result = kyomi_auth::webauthn::finish_authentication(
+            webauthn,
+            &credential,
+            &auth_state,
+        )
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Passkey auth failed");
+            ServerFnError::new("Authentication failed")
+        })?;
+
+        // Update credential usage
+        let passkeys = get_passkeys_for_auth(&ctx.db, &user.user_id).await?;
+        update_passkey_after_auth(&ctx.db, &user.user_id, &credential_id_b64, cred_id_bytes, &passkeys, &auth_result).await;
+    }
+
+    // Build device info from headers
+    let device = extract_device_info(&headers);
+
+    // Create authenticated session
+    let sess = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &kv,
+        &ctx.config.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(user_id = %user.user_id, error = %e, "Failed to create session");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    // Touch last_used on webauthn auth method
+    if let Err(e) =
+        kyomi_auth::user_service::touch_auth_method(&ctx.db, &user.user_id, "webauthn").await
+    {
+        tracing::warn!(user_id = %user.user_id, error = %e, "Failed to touch webauthn auth method");
+    }
+
+    // Set HTTPOnly cookies via ResponseOptions
+    let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    for (name, value) in sess.cookie_headers.iter() {
+        if name == axum::http::header::SET_COOKIE {
+            response_options.append_header(name.clone(), value.clone());
+        }
+    }
+
+    Ok(LoginResult::Success {
+        user_id: sess.user.user_id,
+        email: sess.user.email,
+        name: sess.user.name.unwrap_or_default(),
+    })
+}
+
+/// Start passkey registration — create or find user and generate a WebAuthn challenge.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/register/start` in `apps/server/src/routes/auth_passkeys.rs`.
+///
+/// For new users: creates an unverified user, sends a verification email (SaaS)
+/// or issues a token directly (self-hosted SMTP-less).
+/// For existing verified users: starts passkey registration directly.
+/// For existing unverified users: resends verification email.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_register_start(
+    email: String,
+    name: Option<String>,
+    device_name: String,
+) -> Result<PasskeyRegisterStartResult, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_rs::prelude::*;
+
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Extract headers for rate limiting
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    // Rate limit by IP
+    let ip = extract_client_ip(&headers);
+    let rate_result = kyomi_auth::rate_limiter::check_rate_limit(&kv, &ip, "signup", None)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Rate limiter error during passkey register");
+            ServerFnError::new("Internal server error")
+        })?;
+    if !rate_result.allowed {
+        return Err(ServerFnError::new(format!(
+            "Rate limited. Try again in {} seconds",
+            rate_result.retry_after_secs
+        )));
+    }
+
+    let email = email.to_lowercase().trim().to_string();
+    let name = name.unwrap_or_default();
+    let device_name = if device_name.trim().is_empty() {
+        "Unknown Device".to_string()
+    } else {
+        device_name.trim().to_string()
+    };
+
+    // Look up existing user
+    let existing_user = kyomi_auth::user_service::get_user_by_email(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to look up user by email");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    // Get or create user — must be verified to proceed with passkey registration
+    let user = match existing_user {
+        Some(user) if user.verified => user,
+        Some(_user) => {
+            // Unverified user — cannot register passkey yet
+            return Err(ServerFnError::new(
+                "Please verify your email before registering a passkey.",
+            ));
+        }
+        None => {
+            // Create new user (unverified for SaaS, verified for SMTP-less self-hosted)
+            let smtp_less_self_hosted =
+                ctx.config.self_hosted && !ctx.config.smtp_configured();
+
+            if smtp_less_self_hosted {
+                kyomi_auth::user_service::create_user(&ctx.db, &email, Some(&name), true)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Failed to create user");
+                        ServerFnError::new("Internal server error")
+                    })?
+            } else {
+                // SaaS flow: create unverified user, send verification email
+                let user = kyomi_auth::user_service::create_user(
+                    &ctx.db, &email, Some(&name), false,
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to create user");
+                    ServerFnError::new("Internal server error")
+                })?;
+
+                let raw_token = kyomi_auth::token_service::create_verification_token(
+                    &ctx.db, &email, "signup",
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to create verification token");
+                    ServerFnError::new("Internal server error")
+                })?;
+
+                let signup_url = format!(
+                    "{}/auth/passkey-signup?token={raw_token}",
+                    ctx.config.frontend_url.trim_end_matches('/')
+                );
+                tracing::info!(
+                    "Passkey signup link for {email}: {signup_url} (user_id={})",
+                    user.user_id
+                );
+
+                spawn_verification_email(email.clone(), name.clone(), signup_url);
+
+                return Err(ServerFnError::new(
+                    "Please check your email to verify your account before registering a passkey.",
+                ));
+            }
+        }
+    };
+
+    // Generate deterministic user handle from email (same as auth_passkeys.rs)
+    let user_unique_id = webauthn_user_id(&email);
+    let display_name = user.name.as_deref().unwrap_or(&email);
+
+    // Get existing credential IDs to exclude (prevent re-registration)
+    let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &user.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut exclude_ids = Vec::new();
+    for (cred_id_b64, _) in &creds {
+        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(cred_id_b64) {
+            exclude_ids.push(CredentialID::from(bytes));
+        }
+    }
+    let exclude_opt = if exclude_ids.is_empty() {
+        None
+    } else {
+        Some(exclude_ids)
+    };
+
+    let (ccr, reg_state) = kyomi_auth::webauthn::start_registration(
+        webauthn,
+        user_unique_id,
+        &email,
+        display_name,
+        exclude_opt,
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Store challenge in KV
+    let challenge_id = kyomi_auth::redis_ops::generate_token();
+    let reg_state_json = serde_json::to_value(&reg_state)
+        .map_err(|e| ServerFnError::new(format!("Serialize reg state: {e}")))?;
+
+    let challenge_data = serde_json::json!({
+        "registration_state": reg_state_json,
+        "email": email,
+        "user_name": display_name,
+        "user_id": user.user_id,
+        "device_name": device_name,
+        "is_signup": true,
+    });
+    kyomi_auth::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let creation_challenge = serde_json::to_string(&ccr)
+        .map_err(|e| ServerFnError::new(format!("Serialize creation challenge: {e}")))?;
+
+    Ok(PasskeyRegisterStartResult {
+        challenge_id,
+        creation_challenge,
+    })
+}
+
+/// Complete passkey registration — verify the browser credential and store it.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/register/complete` in `apps/server/src/routes/auth_passkeys.rs`.
+///
+/// Flow:
+/// 1. Retrieve registration state from KV (and delete to prevent replay)
+/// 2. Parse credential from JSON
+/// 3. Verify credential with WebAuthn
+/// 4. Store passkey in DB
+/// 5. Create authenticated session and set cookies (auto-login for signup)
+/// 6. Return LoginResult::Success
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_register_complete(
+    challenge_id: String,
+    credential_json: String,
+) -> Result<LoginResult, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_rs::prelude::*;
+
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Extract headers for device info
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    // Parse credential from JSON
+    let credential: RegisterPublicKeyCredential = serde_json::from_str(&credential_json)
+        .map_err(|e| ServerFnError::new(format!("Invalid credential JSON: {e}")))?;
+
+    // Get challenge from KV
+    let challenge_data =
+        kyomi_auth::redis_ops::get_webauthn_challenge(&kv, &challenge_id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .ok_or_else(|| ServerFnError::new("Invalid or expired challenge"))?;
+
+    // Delete challenge (prevent replay)
+    kyomi_auth::redis_ops::delete_webauthn_challenge(&kv, &challenge_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Extract challenge state
+    let reg_state: PasskeyRegistration =
+        serde_json::from_value(challenge_data["registration_state"].clone())
+            .map_err(|e| ServerFnError::new(format!("Deserialize reg state: {e}")))?;
+
+    let email = challenge_data["email"]
+        .as_str()
+        .ok_or_else(|| ServerFnError::new("Missing email in challenge"))?;
+    let user_id = challenge_data["user_id"]
+        .as_str()
+        .ok_or_else(|| ServerFnError::new("Missing user_id in challenge"))?;
+    let device_name = challenge_data["device_name"]
+        .as_str()
+        .unwrap_or("Unknown Device");
+
+    // Verify the credential with webauthn-rs
+    let passkey = kyomi_auth::webauthn::finish_registration(webauthn, &credential, &reg_state)
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Extract credential ID as base64url (no padding) for storage
+    let cred_id_bytes: &[u8] = passkey.cred_id().as_ref();
+    let credential_id_b64 = URL_SAFE_NO_PAD.encode(cred_id_bytes);
+
+    // Serialize passkey for storage
+    let passkey_json = serde_json::to_value(&passkey)
+        .map_err(|e| ServerFnError::new(format!("Serialize passkey: {e}")))?;
+
+    let public_key_b64 = URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&passkey)
+            .map_err(|e| ServerFnError::new(format!("Serialize passkey bytes: {e}")))?,
+    );
+
+    let initial_counter = passkey_json
+        .get("cred")
+        .and_then(|c| c.get("counter"))
+        .and_then(|c| c.as_u64())
+        .unwrap_or(0) as u32;
+
+    // Store credential in user's webauthn auth method
+    kyomi_auth::user_service::add_passkey_to_user(
+        &ctx.db,
+        user_id,
+        &credential_id_b64,
+        &public_key_b64,
+        initial_counter,
+        device_name,
+        &passkey_json,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to store passkey credential");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    // Get user for session creation
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to get user by ID");
+            ServerFnError::new("Internal server error")
+        })?
+        .ok_or_else(|| ServerFnError::new("User not found"))?;
+
+    // Build device info from headers
+    let device = extract_device_info(&headers);
+
+    // Create authenticated session (auto-login after registration)
+    let sess = kyomi_auth::session::create_authenticated_session(
+        &ctx.db,
+        &kv,
+        &ctx.config.jwt_secret,
+        &user,
+        &device,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(user_id = %user.user_id, error = %e, "Failed to create session");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    // Set HTTPOnly cookies via ResponseOptions
+    let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    for (name, value) in sess.cookie_headers.iter() {
+        if name == axum::http::header::SET_COOKIE {
+            response_options.append_header(name.clone(), value.clone());
+        }
+    }
+
+    tracing::info!(
+        user_id = %user.user_id,
+        email = %email,
+        credential_id = %credential_id_b64,
+        "Passkey registered and user auto-logged in"
+    );
+
+    Ok(LoginResult::Success {
+        user_id: sess.user.user_id,
+        email: sess.user.email,
+        name: sess.user.name.unwrap_or_default(),
+    })
+}
+
+/// Result of verifying a passkey recovery token.
+///
+/// On success, returns the WebAuthn challenge for creating a new passkey,
+/// plus the user's email for display purposes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PasskeyRecoveryVerifyResult {
+    Success {
+        challenge_id: String,
+        /// JSON string of PublicKeyCredentialCreationOptions for `navigator.credentials.create()`.
+        creation_challenge: String,
+        email: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Verify a passkey signup token and generate a WebAuthn registration challenge.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/signup/complete` from the React backend.
+///
+/// Flow:
+/// 1. Verify the email verification token
+/// 2. Update user name, terms acceptance, marketing consent
+/// 3. Mark user as verified
+/// 4. Create personal workspace
+/// 5. Generate WebAuthn registration challenge
+/// 6. Return challenge for browser-side passkey creation
+///
+/// After this, the client calls `passkey_register_complete()` with the credential.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_signup_complete(
+    token: String,
+    name: String,
+    terms_accepted: bool,
+    marketing_consent: bool,
+) -> Result<PasskeyRegisterStartResult, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_rs::prelude::*;
+
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Validate terms acceptance
+    if !terms_accepted {
+        return Err(ServerFnError::new(
+            "You must accept the Terms of Service and Privacy Policy to create an account.",
+        ));
+    }
+
+    // Validate name
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(ServerFnError::new("Name is required"));
+    }
+
+    // Verify the email verification token
+    let email = kyomi_auth::token_service::verify_verification_token(
+        &ctx.db,
+        &token,
+        "email_verification",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to verify verification token");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    let Some(email) = email else {
+        return Err(ServerFnError::new(
+            "Invalid or expired signup link. Please request a new one.",
+        ));
+    };
+
+    // Get user (must exist — was created in signup/start or passkey_register_start)
+    let user = kyomi_auth::user_service::get_user_by_email(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to look up user");
+            ServerFnError::new("Internal server error")
+        })?
+        .ok_or_else(|| ServerFnError::new("User not found for verified token"))?;
+
+    // Update user name
+    kyomi_auth::user_service::update_user_name(&ctx.db, &user.user_id, &name)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to update user name");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    // Mark user as verified
+    kyomi_auth::user_service::mark_user_verified(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to mark user verified");
+            ServerFnError::new("Internal server error")
+        })?;
+
+    // Accept terms
+    kyomi_auth::user_service::update_terms_acceptance(
+        &ctx.db,
+        &user.user_id,
+        kyomi_core::TERMS_VERSION,
+        marketing_consent,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to update terms acceptance");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    // Store marketing consent in extra_metadata
+    if marketing_consent {
+        kyomi_auth::user_service::update_extra_metadata(
+            &ctx.db,
+            &user.user_id,
+            &serde_json::json!({"marketing_consent": true}),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to update extra metadata");
+            ServerFnError::new("Internal server error")
+        })?;
+    }
+
+    // Create personal workspace
+    kyomi_auth::user_service::create_workspace_for_user(
+        &ctx.db,
+        &user.user_id,
+        Some(&name),
+        &email,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to create workspace");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    // Generate WebAuthn registration challenge
+    let user_unique_id = webauthn_user_id(&email);
+    let display_name = &name;
+
+    // Get existing credential IDs to exclude (prevent re-registration)
+    let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &user.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut exclude_ids = Vec::new();
+    for (cred_id_b64, _) in &creds {
+        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(cred_id_b64) {
+            exclude_ids.push(CredentialID::from(bytes));
+        }
+    }
+    let exclude_opt = if exclude_ids.is_empty() {
+        None
+    } else {
+        Some(exclude_ids)
+    };
+
+    let (ccr, reg_state) = kyomi_auth::webauthn::start_registration(
+        webauthn,
+        user_unique_id,
+        &email,
+        display_name,
+        exclude_opt,
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Store challenge in KV
+    let challenge_id = kyomi_auth::redis_ops::generate_token();
+    let reg_state_json = serde_json::to_value(&reg_state)
+        .map_err(|e| ServerFnError::new(format!("Serialize reg state: {e}")))?;
+
+    let challenge_data = serde_json::json!({
+        "registration_state": reg_state_json,
+        "email": email,
+        "user_name": display_name,
+        "user_id": user.user_id,
+        "device_name": "Unknown Device",
+        "is_signup": true,
+    });
+    kyomi_auth::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let creation_challenge = serde_json::to_string(&ccr)
+        .map_err(|e| ServerFnError::new(format!("Serialize creation challenge: {e}")))?;
+
+    tracing::info!(
+        email = %email,
+        user_id = %user.user_id,
+        "Passkey signup token verified, WebAuthn challenge generated"
+    );
+
+    Ok(PasskeyRegisterStartResult {
+        challenge_id,
+        creation_challenge,
+    })
+}
+
+/// Verify a passkey recovery token and generate a WebAuthn registration challenge.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors `POST /auth/passkeys/recovery/verify` from the React backend.
+///
+/// Flow:
+/// 1. Verify the recovery token (same as `recovery_verify`)
+/// 2. Generate WebAuthn registration challenge for the user
+/// 3. Return challenge + email for display
+///
+/// After this, the client calls `passkey_register_complete()` with the credential.
+#[server(prefix = "/leptos-api")]
+pub async fn passkey_recovery_verify(
+    token: String,
+) -> Result<PasskeyRecoveryVerifyResult, ServerFnError> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use webauthn_rs::prelude::*;
+
+    let ctx = extract_context()?;
+
+    let webauthn = ctx
+        .webauthn
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebAuthn not configured"))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    // Verify the recovery token
+    let email = kyomi_auth::token_service::verify_verification_token(
+        &ctx.db,
+        &token,
+        "recovery",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to verify recovery token");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    let Some(email) = email else {
+        return Ok(PasskeyRecoveryVerifyResult::Error {
+            message: "Invalid or expired recovery link. Please request a new one.".to_string(),
+        });
+    };
+
+    // Get user
+    let user = kyomi_auth::user_service::get_user_by_email(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to look up user");
+            ServerFnError::new("Internal server error")
+        })?
+        .ok_or_else(|| ServerFnError::new("User not found for recovery token"))?;
+
+    // Generate WebAuthn registration challenge
+    let user_unique_id = webauthn_user_id(&email);
+    let display_name = user.name.as_deref().unwrap_or(&email);
+
+    // Get existing credential IDs to exclude
+    let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &user.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let mut exclude_ids = Vec::new();
+    for (cred_id_b64, _) in &creds {
+        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(cred_id_b64) {
+            exclude_ids.push(CredentialID::from(bytes));
+        }
+    }
+    let exclude_opt = if exclude_ids.is_empty() {
+        None
+    } else {
+        Some(exclude_ids)
+    };
+
+    let (ccr, reg_state) = kyomi_auth::webauthn::start_registration(
+        webauthn,
+        user_unique_id,
+        &email,
+        display_name,
+        exclude_opt,
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Store challenge in KV
+    let challenge_id = kyomi_auth::redis_ops::generate_token();
+    let reg_state_json = serde_json::to_value(&reg_state)
+        .map_err(|e| ServerFnError::new(format!("Serialize reg state: {e}")))?;
+
+    let challenge_data = serde_json::json!({
+        "registration_state": reg_state_json,
+        "email": email,
+        "user_name": display_name,
+        "user_id": user.user_id,
+        "device_name": "Unknown Device",
+        "is_signup": false,
+    });
+    kyomi_auth::redis_ops::store_webauthn_challenge(&kv, &challenge_id, &challenge_data)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let creation_challenge = serde_json::to_string(&ccr)
+        .map_err(|e| ServerFnError::new(format!("Serialize creation challenge: {e}")))?;
+
+    tracing::info!(
+        email = %email,
+        user_id = %user.user_id,
+        "Passkey recovery token verified, WebAuthn challenge generated"
+    );
+
+    Ok(PasskeyRecoveryVerifyResult::Success {
+        challenge_id,
+        creation_challenge,
+        email,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Private helpers (server-only)
 // ---------------------------------------------------------------------------
 
@@ -1606,6 +2536,86 @@ fn spawn_verification_email(email: String, name: String, url: String) {
             tracing::warn!("Failed to send verification email to {email}");
         }
     });
+}
+
+/// Generate a WebAuthn user unique ID from email (matching Python / auth_passkeys.rs).
+///
+/// `sha256(email)[:16]` interpreted as a UUID — produces a stable, deterministic user handle.
+#[cfg(feature = "ssr")]
+fn webauthn_user_id(email: &str) -> webauthn_rs::prelude::Uuid {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(email.as_bytes());
+    let hash = hasher.finalize();
+    let bytes: [u8; 16] = hash[..16].try_into().expect("16 bytes");
+    webauthn_rs::prelude::Uuid::from_bytes(bytes)
+}
+
+/// Get Passkey objects for authentication from user's stored credentials.
+///
+/// Mirrors `get_passkeys_for_auth` in `apps/server/src/routes/auth_passkeys.rs`.
+#[cfg(feature = "ssr")]
+async fn get_passkeys_for_auth(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+) -> Result<Vec<webauthn_rs::prelude::Passkey>, leptos::prelude::ServerFnError> {
+    let creds = kyomi_auth::user_service::get_passkey_credentials(db, user_id)
+        .await
+        .map_err(|e| leptos::prelude::ServerFnError::new(e.to_string()))?;
+
+    let mut passkeys = Vec::new();
+    for (_cred_id, cred_data) in &creds {
+        if let Some(passkey_json) = cred_data.get("passkey") {
+            if let Ok(passkey) =
+                serde_json::from_value::<webauthn_rs::prelude::Passkey>(passkey_json.clone())
+            {
+                passkeys.push(passkey);
+            }
+        }
+    }
+    Ok(passkeys)
+}
+
+/// Update passkey credential usage after successful authentication.
+///
+/// Finds the matching passkey, updates its sign count and serialized data.
+/// Fire-and-forget: logs a warning on failure rather than propagating errors.
+#[cfg(feature = "ssr")]
+async fn update_passkey_after_auth(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    credential_id_b64: &str,
+    cred_id_bytes: &[u8],
+    passkeys: &[webauthn_rs::prelude::Passkey],
+    auth_result: &webauthn_rs::prelude::AuthenticationResult,
+) {
+    let updated_passkey = passkeys.iter().find(|pk| {
+        let pk_cred_id: &[u8] = pk.cred_id().as_ref();
+        pk_cred_id == cred_id_bytes
+    });
+
+    if let Some(pk) = updated_passkey {
+        let mut updated_pk = pk.clone();
+        updated_pk.update_credential(auth_result);
+        let updated_json = serde_json::to_value(&updated_pk).unwrap_or_default();
+        if let Err(e) = kyomi_auth::user_service::update_credential_usage(
+            db,
+            user_id,
+            credential_id_b64,
+            auth_result.counter(),
+            &updated_json,
+        )
+        .await
+        {
+            tracing::warn!(
+                user_id = %user_id,
+                credential_id = %credential_id_b64,
+                error = %e,
+                "Failed to update credential usage after passkey auth"
+            );
+        }
+    }
 }
 
 /// Extract the client IP from request headers.

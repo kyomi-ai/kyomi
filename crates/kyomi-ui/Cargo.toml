@@ -56,7 +56,17 @@ icondata_lu = "0.1"
 console_error_panic_hook = "0.1"
 
 # Browser DOM access (for theme toggling, clipboard, etc.)
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlElement", "Element", "EventTarget", "Node", "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location", "RequestCredentials", "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer"] }
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "HtmlElement", "Element", "EventTarget", "Node",
+    "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
+    "RequestCredentials", "Navigator", "Clipboard", "Storage",
+    "ServiceWorkerContainer",
+    # WebAuthn / passkey support
+    "CredentialsContainer", "Credential", "PublicKeyCredential",
+    "AuthenticatorResponse", "AuthenticatorAttestationResponse",
+    "AuthenticatorAssertionResponse",
+    "CredentialCreationOptions", "CredentialRequestOptions",
+] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures
 send_wrapper = "0.6"

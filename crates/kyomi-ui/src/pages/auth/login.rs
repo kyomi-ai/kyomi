@@ -15,8 +15,8 @@ use crate::components::{
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
 use crate::server_fns::auth::{
-    get_auth_config, login_with_password, resend_verification, signup_start, LoginResult,
-    SignupResult,
+    get_auth_config, login_with_password, passkey_login_complete, passkey_login_start,
+    resend_verification, signup_start, LoginResult, SignupResult,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,16 +126,62 @@ pub fn LoginPage() -> impl IntoView {
         }
     });
 
-    // ── Passkey handler (Phase 1 placeholder) ───────────────────────────
+    // ── Passkey handler ─────────────────────────────────────────────────
     let on_passkey_click = Callback::new(move |()| {
         set_passkey_loading.set(true);
         set_error.set(None);
 
-        // Phase 1: WebAuthn not yet wired up — show informational message
-        set_error.set(Some(
-            "Passkey login is not yet available in this version.".to_string(),
-        ));
-        set_passkey_loading.set(false);
+        leptos::task::spawn_local(async move {
+            // Step 1: Get challenge from server
+            let start_result = passkey_login_start().await;
+            let (challenge_id, request_json) = match start_result {
+                Ok(r) => (r.challenge_id, r.request_challenge),
+                Err(e) => {
+                    set_error.set(Some(format!("Failed to start passkey login: {}", e)));
+                    set_passkey_loading.set(false);
+                    return;
+                }
+            };
+
+            // Step 2: Trigger browser WebAuthn prompt
+            let assertion_json =
+                match crate::utils::webauthn::start_authentication(&request_json).await {
+                    Ok(json) => json,
+                    Err(e) => {
+                        set_error.set(Some(format!("Passkey authentication failed: {}", e)));
+                        set_passkey_loading.set(false);
+                        return;
+                    }
+                };
+
+            // Step 3: Complete login on server
+            let complete_result = passkey_login_complete(challenge_id, assertion_json).await;
+            match complete_result {
+                Ok(LoginResult::Success { .. }) => {
+                    // Full page reload to initialize auth state from cookies
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.location().set_href("/");
+                    }
+                }
+                Ok(LoginResult::VerificationRequired { email }) => {
+                    set_verification_needed.set(true);
+                    set_verification_email.set(email);
+                    set_passkey_loading.set(false);
+                }
+                Ok(LoginResult::Error { message }) => {
+                    set_error.set(Some(message));
+                    set_passkey_loading.set(false);
+                }
+                Ok(_) => {
+                    set_passkey_loading.set(false);
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Server error: {}", e)));
+                    set_passkey_loading.set(false);
+                }
+            }
+        });
     });
 
     // ── Login form submit ───────────────────────────────────────────────
