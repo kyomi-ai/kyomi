@@ -94,11 +94,26 @@ pub fn UsagePage() -> impl IntoView {
                 {move || Suspend::new(async move {
                     match usage_resource.await {
                         Ok(data) => view! { <UsageContent data=data/> }.into_any(),
-                        Err(e) => view! {
-                            <Alert variant=AlertVariant::Error>
-                                <AlertDescription>{format!("Failed to load usage information: {e}")}</AlertDescription>
-                            </Alert>
-                        }.into_any(),
+                        Err(_) => {
+                            // Don't leak raw SQL or internal errors to the UI.
+                            // Match React: show the usage cards with zero data when the
+                            // billing service is unavailable (e.g. SQLite without billing).
+                            view! {
+                                <UsageContent data=UsageData {
+                                    percentage_used: 0.0,
+                                    warning_level: None,
+                                    allowed: true,
+                                    blocked: false,
+                                    ai_reset_date: None,
+                                    trial_ends_at: None,
+                                    per_user: crate::server_fns::usage::PerUserUsage {
+                                        percentage_used: 0.0,
+                                        fair_share_percentage: 100.0,
+                                    },
+                                    by_feature: std::collections::HashMap::new(),
+                                }/>
+                            }.into_any()
+                        }
                     }
                 })}
             </Suspense>

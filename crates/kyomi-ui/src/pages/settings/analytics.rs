@@ -93,15 +93,18 @@ pub fn AnalyticsPage() -> impl IntoView {
                                         />
                                     }.into_any()
                                 }
-                                Err(e) => view! {
-                                    <Card>
-                                        <CardContent>
-                                            <p class="text-error-foreground py-6">
-                                                {format!("Failed to load analytics sites: {e}")}
-                                            </p>
-                                        </CardContent>
-                                    </Card>
-                                }.into_any(),
+                                Err(_) => {
+                                    // Match React: show the page layout with empty state even
+                                    // when the backend errors (e.g. no ClickHouse configured).
+                                    // React shows the error as a toast but keeps the UI visible.
+                                    view! {
+                                        <AnalyticsContent
+                                            initial_sites=vec![]
+                                            usage=None
+                                            sites_resource=sites_resource
+                                        />
+                                    }.into_any()
+                                }
                             }
                         })}
                     </Suspense>

@@ -449,11 +449,28 @@ pub fn BillingPage() -> impl IntoView {
                                         />
                                     }.into_any()
                                 }
-                                Err(e) => view! {
-                                    <Alert variant=AlertVariant::Error>
-                                        <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
-                                    </Alert>
-                                }.into_any(),
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    // "not available" errors (no Stripe configured) get a
+                                    // graceful informational card, not a red error banner.
+                                    if msg.contains("not available") {
+                                        view! {
+                                            <Card>
+                                                <CardContent>
+                                                    <p class="text-muted-foreground py-6">
+                                                        "Billing is not available in this deployment."
+                                                    </p>
+                                                </CardContent>
+                                            </Card>
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <Alert variant=AlertVariant::Error>
+                                                <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
+                                            </Alert>
+                                        }.into_any()
+                                    }
+                                }
                             }
                         })}
                     </Suspense>
