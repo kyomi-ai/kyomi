@@ -24,6 +24,9 @@ ssr = [
     "dep:sqlx",
     "dep:webauthn-rs",
     "dep:sha2",
+    "dep:arrow-schema",
+    "dep:arrow-array",
+    "dep:arrow-ipc",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -86,8 +89,17 @@ tokio = { workspace = true, optional = true }
 kyomi-embed = { workspace = true, optional = true }
 kyomi-knowledge = { workspace = true, optional = true }
 
+# ChartML (Arrow-backed data tables for chart rendering)
+chartml-core = { workspace = true }
+async-trait = { workspace = true }
+
 # Date/time (used in both SSR and WASM for date formatting)
 chrono = { workspace = true }
+
+# Arrow (for converting query results to IPC bytes — server-only)
+arrow-schema = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }

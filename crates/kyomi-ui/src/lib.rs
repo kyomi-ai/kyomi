@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod components;
+pub mod datasource;
 pub mod pages;
 pub mod server_fns;
 pub mod types;
@@ -91,6 +92,7 @@ pub fn register_server_functions() {
     register_explicit::<TestDatasourceStandalone>();
     register_explicit::<TestExistingDatasource>();
     register_explicit::<DiscoverDatasourceResources>();
+    register_explicit::<QueryDatasourceArrow>();
 
     use server_fns::billing::*;
     register_explicit::<GetSubscriptionInfo>();

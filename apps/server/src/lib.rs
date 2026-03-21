@@ -193,6 +193,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 kv: Some(state.kv.clone()),
                 webauthn: Some(state.webauthn.clone()),
                 embedding: state.embedding.clone(),
+                connect_registry: Some(state.connect_registry.clone()),
                 #[cfg(feature = "slack")]
                 slack_client: extras.slack_client,
             };

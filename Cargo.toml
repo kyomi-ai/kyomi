@@ -116,6 +116,7 @@ kyomi-datasource-server = { path = "crates/kyomi-datasource" }
 kyomi-agent = { path = "crates/kyomi-agent" }
 kyomi-knowledge = { path = "crates/kyomi-knowledge" }
 kyomi-ui = { path = "crates/kyomi-ui" }
+chartml-core = { path = "../chartml-rs/crates/chartml-core" }
 kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 

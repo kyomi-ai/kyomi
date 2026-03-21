@@ -53,6 +53,10 @@ pub struct ServerContext {
     /// Required by workspace admin populate-graph server function.
     pub embedding: kyomi_embed::LazyEmbedding,
 
+    /// Connect registry for routing queries to Kyomi Connect instances.
+    /// Required for query execution against Connect-type datasources.
+    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.
     #[cfg(feature = "slack")]

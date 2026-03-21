@@ -409,6 +409,21 @@ pub struct DatasourceResult {
     pub datasource_type: String,
 }
 
+/// Result of executing a SQL query and converting to Arrow IPC format.
+///
+/// The IPC bytes are base64-encoded for transport over the Leptos server
+/// function boundary. The browser decodes and loads them into Arrow.js
+/// for zero-copy chartml-rs rendering.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QueryArrowResult {
+    /// Base64-encoded Arrow IPC stream bytes containing the RecordBatch.
+    pub ipc_base64: String,
+    /// Number of rows in the result.
+    pub num_rows: usize,
+    /// Execution time in milliseconds.
+    pub execution_time_ms: Option<i64>,
+}
+
 /// Connection test result.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestConnectionResult {
@@ -1030,4 +1045,353 @@ pub async fn discover_datasource_resources(
         resources: resources_map,
         message: "Connection successful and resources discovered".to_string(),
     })
+}
+
+// ─── Arrow Query ─────────────────────────────────────────────────────────────
+
+/// Execute a SQL query and return results as Arrow IPC bytes (base64-encoded).
+///
+/// This is the chartml-rs data path — preserves full type fidelity (timestamps,
+/// dates, decimals) by converting to Arrow format on the server before sending
+/// to the browser, avoiding JSON type loss.
+#[server(prefix = "/leptos-api")]
+pub async fn query_datasource_arrow(
+    datasource_slug: String,
+    sql: String,
+    limit: Option<i32>,
+) -> Result<QueryArrowResult, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    // Resolve datasource by slug (or UUID).
+    // `include_inactive = false` enforces the active constraint at the SQL level,
+    // so no additional `!ds.active` check is needed here.
+    let ds = kyomi_auth::datasource_service::resolve_datasource(
+        &ctx.db,
+        &datasource_slug,
+        ws_id,
+        false,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Create provider (Connect vs direct)
+    let provider: Box<dyn kyomi_datasource_server::DatasourceProvider> =
+        if ds.connection_type == "connect" {
+            let registry = ctx
+                .connect_registry
+                .as_ref()
+                .ok_or_else(|| ServerFnError::new("Connect registry not available"))?;
+            Box::new(kyomi_datasource_server::ConnectProvider::new(
+                registry.clone(),
+                ds.id.clone(),
+            ))
+        } else {
+            let encryption_key = ctx
+                .encryption_key
+                .as_deref()
+                .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+
+            let ds_type: kyomi_core::datasource_registry::DatasourceType =
+                ds.datasource_type.into();
+
+            let user_cred = kyomi_auth::datasource_service::get_user_credential(
+                &ctx.db,
+                &auth.user_id,
+                &ds.id,
+            )
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+            let credentials = if let Some(ref cred) = user_cred {
+                kyomi_auth::credential_service::decrypt_credentials(
+                    &cred.credentials,
+                    encryption_key,
+                )
+                .unwrap_or(serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            let credentials =
+                kyomi_datasource_server::ensure_valid_oauth_credentials(
+                    &credentials,
+                    &ds.connection_config,
+                    &ds_type,
+                )
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+            match tokio::time::timeout(
+                kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
+                kyomi_datasource_server::create_provider(
+                    &ds_type,
+                    &ds.connection_config,
+                    &credentials,
+                    None,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
+                    return Err(ServerFnError::new(format!(
+                        "Failed to connect to datasource: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(ServerFnError::new("Connection timed out"));
+                }
+            }
+        };
+
+    // Execute query
+    let query_limit = limit.map(|l| l.clamp(1, 10_000) as u32);
+    let result = match tokio::time::timeout(
+        kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
+        provider.execute_query(&sql, query_limit, None, false),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            provider.close().await;
+            return Err(ServerFnError::new(format!("Query failed: {e}")));
+        }
+        Err(_) => {
+            provider.close().await;
+            return Err(ServerFnError::new("Query timed out"));
+        }
+    };
+
+    provider.close().await;
+
+    // Check for query errors
+    if result.status == kyomi_datasource_server::QueryStatus::Error {
+        return Err(ServerFnError::new(
+            result
+                .error
+                .unwrap_or_else(|| "Query execution failed".to_string()),
+        ));
+    }
+
+    let columns = result.columns.as_deref().unwrap_or(&[]);
+    let rows = result.rows.as_deref().unwrap_or(&[]);
+    let execution_time_ms = result.execution_time_ms;
+    let num_rows = rows.len();
+
+    // Convert to Arrow IPC
+    let ipc_bytes = query_result_to_arrow_ipc(columns, rows)?;
+    let ipc_base64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &ipc_bytes,
+    );
+
+    Ok(QueryArrowResult {
+        ipc_base64,
+        num_rows,
+        execution_time_ms,
+    })
+}
+
+/// Convert query result columns + rows into Arrow IPC stream bytes.
+///
+/// Maps each `SimpleType` to the corresponding Arrow `DataType`, builds typed
+/// arrays from the JSON row data, and serializes the resulting `RecordBatch`
+/// into the IPC streaming format.
+#[cfg(feature = "ssr")]
+fn query_result_to_arrow_ipc(
+    columns: &[kyomi_datasource_server::ColumnInfo],
+    rows: &[Vec<serde_json::Value>],
+) -> Result<Vec<u8>, ServerFnError> {
+    use arrow_array::builder::*;
+    use arrow_array::*;
+    use arrow_ipc::writer::StreamWriter;
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use kyomi_datasource_server::SimpleType;
+    use std::sync::Arc;
+
+    // Build Arrow schema from ColumnInfo
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|col| {
+            let dt = match col.col_type {
+                SimpleType::Number => DataType::Float64,
+                SimpleType::Boolean => DataType::Boolean,
+                SimpleType::String => DataType::Utf8,
+                SimpleType::Date => DataType::Date32,
+                SimpleType::Time => DataType::Time64(TimeUnit::Microsecond),
+                SimpleType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
+                SimpleType::TimestampTz => {
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+                }
+                SimpleType::Unknown => DataType::Utf8,
+            };
+            Field::new(&col.name, dt, true)
+        })
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+
+    // Build typed arrays from JSON rows
+    let num_rows = rows.len();
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+
+    for (col_idx, col) in columns.iter().enumerate() {
+        let array: ArrayRef = match col.col_type {
+            SimpleType::Number => {
+                let mut builder = Float64Builder::with_capacity(num_rows);
+                for row in rows {
+                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    if val.is_null() {
+                        builder.append_null();
+                    } else if let Some(n) = val.as_f64() {
+                        builder.append_value(n);
+                    } else if let Some(s) = val.as_str() {
+                        if let Ok(n) = s.parse::<f64>() {
+                            builder.append_value(n);
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            SimpleType::Boolean => {
+                let mut builder = BooleanBuilder::with_capacity(num_rows);
+                for row in rows {
+                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    if val.is_null() {
+                        builder.append_null();
+                    } else if let Some(b) = val.as_bool() {
+                        builder.append_value(b);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            SimpleType::Date => {
+                let mut builder = Date32Builder::with_capacity(num_rows);
+                for row in rows {
+                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    if let Some(s) = val.as_str() {
+                        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            let days = d.signed_duration_since(epoch).num_days() as i32;
+                            builder.append_value(days);
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            SimpleType::Timestamp | SimpleType::TimestampTz => {
+                let mut builder = TimestampMicrosecondBuilder::with_capacity(num_rows);
+                for row in rows {
+                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    if let Some(s) = val.as_str() {
+                        // Try RFC 3339 first, then common formats.
+                        // Sub-second variants (%.f) must come before their
+                        // non-fractional counterparts so "12:34:56.789" is not
+                        // truncated to whole seconds.
+                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                            builder.append_value(dt.timestamp_micros());
+                        } else if let Ok(dt) =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+                        {
+                            builder.append_value(dt.and_utc().timestamp_micros());
+                        } else if let Ok(dt) =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
+                        {
+                            builder.append_value(dt.and_utc().timestamp_micros());
+                        } else if let Ok(dt) =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                        {
+                            builder.append_value(dt.and_utc().timestamp_micros());
+                        } else if let Ok(dt) =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                        {
+                            builder.append_value(dt.and_utc().timestamp_micros());
+                        } else {
+                            builder.append_null();
+                        }
+                    } else if let Some(n) = val.as_f64() {
+                        // Epoch seconds (BigQuery)
+                        builder.append_value((n * 1_000_000.0) as i64);
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                let arr = builder.finish();
+                if col.col_type == SimpleType::TimestampTz {
+                    Arc::new(arr.with_timezone("UTC"))
+                } else {
+                    Arc::new(arr)
+                }
+            }
+            SimpleType::Time => {
+                let mut builder = Time64MicrosecondBuilder::with_capacity(num_rows);
+                for row in rows {
+                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    if let Some(s) = val.as_str() {
+                        // Try sub-second format first, then whole-second.
+                        let parsed = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
+                            .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"));
+                        if let Ok(t) = parsed {
+                            let micros = t
+                                .signed_duration_since(
+                                    chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                )
+                                .num_microseconds()
+                                .unwrap_or(0);
+                            builder.append_value(micros);
+                        } else {
+                            builder.append_null();
+                        }
+                    } else {
+                        builder.append_null();
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            SimpleType::String | SimpleType::Unknown => {
+                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
+                for row in rows {
+                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
+                    if val.is_null() {
+                        builder.append_null();
+                    } else if let Some(s) = val.as_str() {
+                        builder.append_value(s);
+                    } else {
+                        builder.append_value(val.to_string());
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+        };
+        arrays.push(array);
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays)
+        .map_err(|e| ServerFnError::new(format!("Arrow batch error: {e}")))?;
+
+    // Serialize to IPC stream format
+    let mut buf = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut buf, &schema)
+            .map_err(|e| ServerFnError::new(format!("IPC writer error: {e}")))?;
+        writer
+            .write(&batch)
+            .map_err(|e| ServerFnError::new(format!("IPC write error: {e}")))?;
+        writer
+            .finish()
+            .map_err(|e| ServerFnError::new(format!("IPC finish error: {e}")))?;
+    }
+    Ok(buf)
 }
