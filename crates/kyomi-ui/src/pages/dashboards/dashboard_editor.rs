@@ -6,9 +6,9 @@
 //!
 //! Layout:
 //! ```text
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │ ← Dashboard │ Title input │ Source/Visual │ Unsaved │ History │ Save │
-//! ├──────────────────────────────┬──────────────────────────────────┤
+//! ┌──────────────────────────────────────────────────────────────────────────────────┐
+//! │ ← Dashboard │ Title │ Source/Visual │ Chart │ Link │ Unsaved │ Copilot │ History │ Save │
+//! ├──────────────────────────────┬───────────────────────────────────────────────────┤
 //! │                              │                                  │
 //! │   Kode Editor                │   Live Preview                   │
 //! │   (Language::Markdown)       │   (MarkdownRenderer)             │
@@ -27,7 +27,9 @@ use std::sync::Arc;
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
-use crate::components::dashboard::{HistoryPanel, MarkdownRenderer};
+use crate::components::dashboard::{
+    ChartBuilderModal, CopilotSidebar, HistoryPanel, InsertDashboardLinkModal, MarkdownRenderer,
+};
 use crate::components::Spinner;
 use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
 
@@ -78,6 +80,36 @@ fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
         <svg class=class fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+        </svg>
+    }
+}
+
+/// Chart bar icon (Heroicons outline) for the "Add Chart" button.
+#[component]
+fn ChartBarIcon(#[prop(into, optional)] class: String) -> impl IntoView {
+    view! {
+        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
+        </svg>
+    }
+}
+
+/// Link icon (Heroicons outline) for the "Insert Link" button.
+#[component]
+fn LinkIcon(#[prop(into, optional)] class: String) -> impl IntoView {
+    view! {
+        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+        </svg>
+    }
+}
+
+/// Sparkles icon (Heroicons outline) for the "Copilot" button.
+#[component]
+fn SparklesIcon(#[prop(into, optional)] class: String) -> impl IntoView {
+    view! {
+        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
         </svg>
     }
 }
@@ -202,6 +234,15 @@ fn DashboardEditorInner(
     let (history_open, set_history_open) = signal(false);
     let (history_preview_content, set_history_preview_content) =
         signal(Option::<String>::None);
+
+    // ── Chart builder modal ──────────────────────────────────────────────
+    let (chart_builder_open, set_chart_builder_open) = signal(false);
+
+    // ── Insert link modal ────────────────────────────────────────────────
+    let (insert_link_open, set_insert_link_open) = signal(false);
+
+    // ── Copilot sidebar ──────────────────────────────────────────────────
+    let (copilot_open, set_copilot_open) = signal(false);
 
     // ── Unsaved changes (derived) ────────────────────────────────────────
     let has_unsaved_changes = Memo::new(move |_| {
@@ -531,6 +572,26 @@ fn DashboardEditorInner(
                     </button>
                 </div>
 
+                // Add Chart button
+                <button
+                    class="flex items-center gap-1.5 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
+                    on:click=move |_| set_chart_builder_open.set(true)
+                    aria-label="Add chart"
+                >
+                    <ChartBarIcon class="w-4 h-4 flex-shrink-0" />
+                    <span class="hidden sm:inline">"Chart"</span>
+                </button>
+
+                // Insert Link button
+                <button
+                    class="flex items-center gap-1.5 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
+                    on:click=move |_| set_insert_link_open.set(true)
+                    aria-label="Insert link"
+                >
+                    <LinkIcon class="w-4 h-4 flex-shrink-0" />
+                    <span class="hidden sm:inline">"Link"</span>
+                </button>
+
                 // Unsaved indicator
                 {move || {
                     has_unsaved_changes.get().then(|| {
@@ -554,6 +615,38 @@ fn DashboardEditorInner(
                     })
                 }}
 
+                // Copilot button (only for existing dashboards)
+                {move || {
+                    is_existing.get().then(|| {
+                        view! {
+                            <button
+                                class=move || {
+                                    let base = "flex items-center gap-2 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors";
+                                    if copilot_open.get() {
+                                        format!("{base} bg-primary/10 text-primary")
+                                    } else {
+                                        format!("{base} bg-accent text-foreground hover:bg-accent/80")
+                                    }
+                                }
+                                on:click=move |_| {
+                                    if copilot_open.get() {
+                                        set_copilot_open.set(false);
+                                    } else {
+                                        // Close history panel (mutual exclusion)
+                                        set_history_open.set(false);
+                                        set_history_preview_content.set(None);
+                                        set_copilot_open.set(true);
+                                    }
+                                }
+                                aria-label="Toggle copilot"
+                            >
+                                <SparklesIcon class="w-4 h-4 flex-shrink-0" />
+                                <span class="hidden sm:inline">"Copilot"</span>
+                            </button>
+                        }
+                    })
+                }}
+
                 // History button (only for existing dashboards)
                 {move || {
                     is_existing.get().then(|| {
@@ -572,6 +665,8 @@ fn DashboardEditorInner(
                                         set_history_open.set(false);
                                         set_history_preview_content.set(None);
                                     } else {
+                                        // Close copilot panel (mutual exclusion)
+                                        set_copilot_open.set(false);
                                         set_history_open.set(true);
                                     }
                                 }
@@ -688,7 +783,62 @@ fn DashboardEditorInner(
                         }
                     })
                 }}
+
+                // Copilot sidebar (only for existing dashboards)
+                {move || {
+                    current_dashboard_id.get().map(|did| {
+                        let on_copilot_close = Callback::new(move |()| {
+                            set_copilot_open.set(false);
+                        });
+                        let on_apply_content = Callback::new(move |content: String| {
+                            // Cancel pending debounce to prevent stale preview overwrite
+                            #[cfg(target_arch = "wasm32")]
+                            debounce_handle.update_value(|h| { drop(h.take()); });
+                            set_editor_content.set(content.clone());
+                            set_preview_content.set(content);
+                        });
+                        view! {
+                            <CopilotSidebar
+                                dashboard_id=did
+                                dashboard_content=Signal::derive(move || editor_content.get())
+                                open=Signal::derive(move || copilot_open.get())
+                                on_close=on_copilot_close
+                                on_apply_content=on_apply_content
+                            />
+                        }
+                    })
+                }}
             </div>
+
+            // ── Modals (rendered outside the layout flow) ─────────────────
+            <ChartBuilderModal
+                open=Signal::derive(move || chart_builder_open.get())
+                on_close=Callback::new(move |()| set_chart_builder_open.set(false))
+                on_insert=Callback::new(move |yaml: String| {
+                    // Wrap in ```chartml fence so MarkdownRenderer recognizes it
+                    let current = editor_content.get_untracked();
+                    let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
+                    let fenced = format!("```chartml\n{yaml}```");
+                    let new_content = format!("{current}{separator}{fenced}\n");
+                    set_editor_content.set(new_content.clone());
+                    set_preview_content.set(new_content);
+                    set_chart_builder_open.set(false);
+                })
+            />
+
+            <InsertDashboardLinkModal
+                open=Signal::derive(move || insert_link_open.get())
+                on_close=Callback::new(move |()| set_insert_link_open.set(false))
+                on_insert=Callback::new(move |link: String| {
+                    // Append markdown link to editor content
+                    let current = editor_content.get_untracked();
+                    let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
+                    let new_content = format!("{current}{separator}{link}\n");
+                    set_editor_content.set(new_content.clone());
+                    set_preview_content.set(new_content);
+                    set_insert_link_open.set(false);
+                })
+            />
         </div>
     }
 }
