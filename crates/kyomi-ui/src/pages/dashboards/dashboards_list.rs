@@ -1,0 +1,533 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Dashboard list page — matches `apps/frontend/src/pages/DashboardsList.jsx`.
+//!
+//! Displays a searchable, sortable grid of dashboard cards. Uses server
+//! functions for data fetching and mutations (create, delete).
+
+use leptos::ev;
+use leptos::prelude::*;
+
+use crate::components::{
+    Button, ButtonVariant, Card, CardContent, CardFooter, CardHeader, CardTitle,
+    ConfirmDialog, Spinner, StyledSelect, INPUT_CLASS,
+};
+use crate::server_fns::dashboards::{create_dashboard, delete_dashboard, list_dashboards, DashboardListItem};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Relative time helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Converts an RFC 3339 timestamp string into a human-readable relative time.
+///
+/// Examples: "just now", "5 minutes ago", "2 hours ago", "3 days ago".
+fn format_relative_time(rfc3339: &str) -> String {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(parsed);
+
+    let seconds = duration.num_seconds();
+    if seconds < 60 {
+        return "just now".to_string();
+    }
+
+    let minutes = duration.num_minutes();
+    if minutes < 60 {
+        return if minutes == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{minutes} minutes ago")
+        };
+    }
+
+    let hours = duration.num_hours();
+    if hours < 24 {
+        return if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{hours} hours ago")
+        };
+    }
+
+    let days = duration.num_days();
+    if days < 30 {
+        return if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{days} days ago")
+        };
+    }
+
+    let months = days / 30;
+    if months < 12 {
+        return if months == 1 {
+            "1 month ago".to_string()
+        } else {
+            format!("{months} months ago")
+        };
+    }
+
+    let years = months / 12;
+    if years == 1 {
+        "1 year ago".to_string()
+    } else {
+        format!("{years} years ago")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main page component
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dashboard list page with search, sort, create, and delete functionality.
+#[component]
+pub fn DashboardsListPage() -> impl IntoView {
+    // ── Search (with debounce) ───────────────────────────────────────────
+    let (search_input, set_search_input) = signal(String::new());
+    let (query_signal, set_query_signal) = signal(Option::<String>::None);
+
+    // Debounce: update query_signal 300ms after the user stops typing
+    #[cfg(target_arch = "wasm32")]
+    {
+        use send_wrapper::SendWrapper;
+
+        let timeout_handle: StoredValue<Option<SendWrapper<gloo_timers::callback::Timeout>>> =
+            StoredValue::new(None);
+
+        Effect::new(move |_| {
+            let value = search_input.get();
+
+            // Cancel any pending timeout
+            timeout_handle.update_value(|h| {
+                drop(h.take());
+            });
+
+            let handle = gloo_timers::callback::Timeout::new(300, move || {
+                let q = if value.is_empty() { None } else { Some(value) };
+                set_query_signal.set(q);
+            });
+
+            timeout_handle.set_value(Some(SendWrapper::new(handle)));
+        });
+
+        on_cleanup(move || {
+            timeout_handle.update_value(|h| {
+                drop(h.take());
+            });
+        });
+    }
+
+    // On SSR, just set query directly (no debounce needed)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Effect::new(move |_| {
+            let value = search_input.get();
+            let q = if value.is_empty() { None } else { Some(value) };
+            set_query_signal.set(q);
+        });
+    }
+
+    // ── Sort ─────────────────────────────────────────────────────────────
+    let (sort_signal, set_sort_signal) = signal("recent".to_string());
+
+    // ── Data fetching ────────────────────────────────────────────────────
+    let dashboards_resource = Resource::new(
+        move || (query_signal.get(), sort_signal.get()),
+        move |(query, sort)| list_dashboards(query, Some(sort), None),
+    );
+
+    // ── Delete confirmation ──────────────────────────────────────────────
+    let (confirm_open, set_confirm_open) = signal(false);
+    let (deleting_dashboard, set_deleting_dashboard) =
+        signal(Option::<(String, String)>::None); // (id, title)
+
+    let on_confirm_delete = Callback::new(move |()| {
+        set_confirm_open.set(false);
+        if let Some((dashboard_id, _title)) = deleting_dashboard.get_untracked() {
+            leptos::task::spawn_local(async move {
+                if let Err(e) = delete_dashboard(dashboard_id).await {
+                    // Log error — in a real app we'd show a toast
+                    leptos::logging::error!("Failed to delete dashboard: {e}");
+                }
+                // Refetch by triggering a signal change (toggle query to force re-run)
+                // Resource will refetch because we call .refetch()
+                dashboards_resource.refetch();
+            });
+        }
+    });
+
+    let on_cancel_delete = Callback::new(move |()| {
+        set_confirm_open.set(false);
+        set_deleting_dashboard.set(None);
+    });
+
+    // ── Create new dashboard ─────────────────────────────────────────────
+    let (creating, set_creating) = signal(false);
+
+    let handle_create = move |_| {
+        set_creating.set(true);
+        leptos::task::spawn_local(async move {
+            match create_dashboard("Untitled Dashboard".to_string(), None).await {
+                Ok(dashboard_id) => {
+                    // Navigate to the edit page
+                    let url = format!("/dashboard/{dashboard_id}/edit");
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.location().set_href(&url);
+                    }
+                }
+                Err(e) => {
+                    leptos::logging::error!("Failed to create dashboard: {e}");
+                    set_creating.set(false);
+                }
+            }
+        });
+    };
+
+    // ── Confirm dialog derived signals ───────────────────────────────────
+    let confirm_title = move || {
+        deleting_dashboard
+            .get()
+            .map(|(_, title)| format!("Delete \"{title}\"?"))
+            .unwrap_or_else(|| "Delete Dashboard?".to_string())
+    };
+    let confirm_message = move || {
+        deleting_dashboard
+            .get()
+            .map(|(_, title)| {
+                format!(
+                    "Are you sure you want to delete \"{title}\"? This action cannot be undone."
+                )
+            })
+            .unwrap_or_default()
+    };
+
+    view! {
+        <div class="flex flex-col h-full bg-muted">
+            // Header
+            <div class="min-h-16 border-b border-border bg-card px-6 py-3 flex-shrink-0 flex flex-col sm:flex-row sm:items-center gap-3">
+                <h1 class="text-2xl font-semibold text-foreground flex-shrink-0">
+                    "Dashboards"
+                </h1>
+
+                // Search and Sort Controls
+                <div class="flex-1 flex items-center gap-3 justify-start sm:justify-center">
+                    // Search Input
+                    <div class="relative flex-1 max-w-md">
+                        <svg
+                            class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                        >
+                            <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                            />
+                        </svg>
+                        <input
+                            type="text"
+                            placeholder="Search dashboards..."
+                            class=format!("{INPUT_CLASS} pl-10")
+                            prop:value=move || search_input.get()
+                            on:input=move |ev| {
+                                set_search_input.set(event_target_value(&ev));
+                            }
+                        />
+                        // Clear button
+                        <Show when=move || !search_input.get().is_empty()>
+                            <button
+                                class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                aria-label="Clear search"
+                                on:click=move |_| set_search_input.set(String::new())
+                            >
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </Show>
+                    </div>
+
+                    // Sort Dropdown
+                    <div class="w-40">
+                        <StyledSelect
+                            value=sort_signal.get_untracked()
+                            options=vec![
+                                ("recent", "Recently Updated"),
+                                ("popularity", "Most Popular"),
+                                ("created", "Newest First"),
+                            ]
+                            on_change=move |val: String| set_sort_signal.set(val)
+                        />
+                    </div>
+                </div>
+
+                // Create Dashboard button
+                <div class="flex items-center gap-3 flex-shrink-0">
+                    <button
+                        class="flex items-center gap-2 px-3 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors text-white bg-primary hover:bg-primary/90"
+                        on:click=handle_create
+                        disabled=move || creating.get()
+                    >
+                        <Show
+                            when=move || !creating.get()
+                            fallback=|| view! { <Spinner class="text-white" /> }
+                        >
+                            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                            </svg>
+                        </Show>
+                        <span class="hidden sm:inline whitespace-nowrap">"Create Dashboard"</span>
+                    </button>
+                </div>
+            </div>
+
+            // Content area
+            <div class="flex-1 overflow-y-auto">
+                <div class="p-4 md:p-6">
+                    <Suspense fallback=move || view! {
+                        <div class="flex items-center justify-center py-16">
+                            <Spinner class="h-8 w-8 text-muted-foreground" />
+                        </div>
+                    }>
+                        {move || {
+                            dashboards_resource.get().map(|result| {
+                                match result {
+                                    Err(e) => {
+                                        view! {
+                                            <div class="text-center py-16 text-destructive">
+                                                <p>"Failed to load dashboards: " {e.to_string()}</p>
+                                            </div>
+                                        }.into_any()
+                                    }
+                                    Ok(dashboards) if dashboards.is_empty() => {
+                                        let create_cb = Callback::new(handle_create);
+                                        view! {
+                                            <EmptyState
+                                                has_search=Signal::derive(move || query_signal.get().is_some())
+                                                on_create=create_cb
+                                            />
+                                        }.into_any()
+                                    }
+                                    Ok(dashboards) => {
+                                        view! {
+                                            <DashboardGrid
+                                                dashboards=dashboards
+                                                on_delete=move |(id, title): (String, String)| {
+                                                    set_deleting_dashboard.set(Some((id, title)));
+                                                    set_confirm_open.set(true);
+                                                }
+                                            />
+                                        }.into_any()
+                                    }
+                                }
+                            })
+                        }}
+                    </Suspense>
+                </div>
+            </div>
+
+            // Confirm dialog for delete
+            <ConfirmDialog
+                open=Signal::derive(move || confirm_open.get())
+                title=confirm_title()
+                message=confirm_message()
+                confirm_text="Delete"
+                on_confirm=on_confirm_delete
+                on_cancel=on_cancel_delete
+            />
+        </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Empty state when no dashboards exist or search returns nothing.
+#[component]
+fn EmptyState(
+    /// Whether the user has an active search query.
+    has_search: Signal<bool>,
+    /// Callback for the "Create" button.
+    on_create: Callback<ev::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        <div class="text-center py-16 bg-card rounded-2xl shadow-sm border border-border">
+            <div class="max-w-md mx-auto">
+                <svg
+                    class="w-24 h-24 mx-auto text-muted-foreground/50 mb-6"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                >
+                    <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="1.5"
+                        d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+                    />
+                </svg>
+                <h3 class="text-xl font-semibold text-foreground mb-2">
+                    {move || {
+                        if has_search.get() {
+                            "No matching dashboards"
+                        } else {
+                            "No dashboards yet"
+                        }
+                    }}
+                </h3>
+                <p class="text-muted-foreground mb-6">
+                    {move || {
+                        if has_search.get() {
+                            "No dashboards found for your search. Try a different search term."
+                        } else {
+                            "Get started by creating your first markdown dashboard with embedded charts."
+                        }
+                    }}
+                </p>
+                <Show when=move || !has_search.get()>
+                    <button
+                        class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors text-white bg-primary hover:bg-primary/90"
+                        on:click=move |ev| on_create.run(ev)
+                    >
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                        </svg>
+                        "Create Your First Dashboard"
+                    </button>
+                </Show>
+            </div>
+        </div>
+    }
+}
+
+/// Grid of dashboard cards.
+#[component]
+fn DashboardGrid(
+    dashboards: Vec<DashboardListItem>,
+    on_delete: impl Fn((String, String)) + 'static + Clone + Send + Sync,
+) -> impl IntoView {
+    let items = dashboards
+        .into_iter()
+        .map(|dashboard| {
+            let on_delete = on_delete.clone();
+            view! { <DashboardCard dashboard=dashboard on_delete=on_delete /> }
+        })
+        .collect_view();
+
+    view! {
+        <div class="w-full grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+            {items}
+        </div>
+    }
+}
+
+/// A single dashboard card.
+#[component]
+fn DashboardCard(
+    dashboard: DashboardListItem,
+    on_delete: impl Fn((String, String)) + 'static + Send + Sync,
+) -> impl IntoView {
+    let view_href = format!("/dashboard/{}", dashboard.dashboard_id);
+    let view_href_footer = view_href.clone();
+    let edit_href = format!("/dashboard/{}/edit", dashboard.dashboard_id);
+    let title = dashboard.title.clone();
+    let delete_id = dashboard.dashboard_id.clone();
+    let delete_title = dashboard.title.clone();
+    let relative_time = format_relative_time(&dashboard.updated_at);
+    let view_count = dashboard.view_count;
+    let content_preview = dashboard.content_preview.clone();
+
+    view! {
+        <Card class="hover:border-primary/30 transition-colors duration-200 flex flex-col">
+            <CardHeader>
+                <div class="flex items-start justify-between">
+                    <CardTitle class="text-xl flex-1 pr-2 line-clamp-2">
+                        <a href=view_href.clone() class="hover:text-primary transition-colors">
+                            {title}
+                        </a>
+                    </CardTitle>
+                    <div class="flex gap-1">
+                        // Delete button
+                        <button
+                            class="flex-shrink-0 p-2 text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                            aria-label="Delete dashboard"
+                            on:click=move |_| {
+                                on_delete((delete_id.clone(), delete_title.clone()));
+                            }
+                        >
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                    stroke-width="2"
+                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </CardHeader>
+
+            <CardContent class="flex-1 flex flex-col">
+                // Content preview
+                {content_preview.map(|preview| {
+                    view! {
+                        <p class="text-sm text-muted-foreground mb-3 line-clamp-3">
+                            {preview}
+                        </p>
+                    }
+                })}
+
+                // Metadata: time + view count
+                <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-auto">
+                    <div class="flex items-center gap-1">
+                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+                            />
+                        </svg>
+                        <span class="whitespace-nowrap">"Updated " {relative_time}</span>
+                    </div>
+                    <div class="flex items-center gap-1">
+                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        <span class="whitespace-nowrap">{view_count}</span>
+                    </div>
+                </div>
+            </CardContent>
+
+            <CardFooter>
+                <div class="flex gap-2 w-full">
+                    <a href=view_href_footer class="flex-1">
+                        <Button variant=ButtonVariant::Default class="w-full">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                            </svg>
+                            "View"
+                        </Button>
+                    </a>
+                    <a href=edit_href class="flex-1">
+                        <Button variant=ButtonVariant::Outline class="w-full">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                            "Edit"
+                        </Button>
+                    </a>
+                </div>
+            </CardFooter>
+        </Card>
+    }
+}

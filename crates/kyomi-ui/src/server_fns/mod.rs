@@ -16,6 +16,7 @@ pub mod analytics;
 pub mod auth;
 pub mod billing;
 pub mod context;
+pub mod dashboards;
 pub mod datasources;
 pub mod profile;
 pub mod security;

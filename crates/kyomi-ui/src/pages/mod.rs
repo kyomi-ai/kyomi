@@ -3,4 +3,5 @@
 //! Page components — each maps to a route in the Leptos router.
 
 pub mod auth;
+pub mod dashboards;
 pub mod settings;
