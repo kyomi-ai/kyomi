@@ -159,6 +159,26 @@ fn Sidebar(
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
     let (user_menu_open, set_user_menu_open) = signal(false);
 
+    // Listen for 'sessions-deleted' custom events to refresh the recent sessions list.
+    // Matches React: Sidebar.jsx lines 171-173
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+
+        Effect::new(move |_| {
+            let window = web_sys::window().expect("window");
+            let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
+                sessions.refetch();
+            });
+            let _ = window.add_event_listener_with_callback(
+                "sessions-deleted",
+                cb.as_ref().unchecked_ref(),
+            );
+            // Leak the closure — it lives for the app lifetime
+            cb.forget();
+        });
+    }
+
     // Matches React: isMobile && isSidebarCollapsed ? 'hidden' : 'flex'
     // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {

@@ -6,21 +6,23 @@
 //! - Desktop: resizable inline sidebar (320-600px) on the right, with drag handle
 //! - Mobile: slide-in panel with backdrop overlay
 //! - Session management: create on open, delete on close
-//! - Chat interface with user/assistant messages
+//! - Chat interface with user/assistant messages and WebSocket streaming
+//! - Agent thinking events with live animation
 //! - "Apply to Dashboard" action for AI responses with suggested content
 //!
-//! ## Limitations
-//!
-//! Full copilot functionality (streaming AI responses) requires the WebSocket
-//! client (`utils/websocket.rs`) to handle copilot-specific event types
-//! (`chat_stream`, `chat_complete`). Until that is implemented, the copilot
-//! stores messages via the server function but AI responses are not yet
-//! delivered back to the UI.
+//! WebSocket streaming uses `context_type = "dashboard_copilot"` to filter
+//! events, matching React's `ChatInterface` with `contextType` prop.
+
+use std::collections::HashMap;
 
 use leptos::prelude::*;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
+use crate::components::chat::websocket_client::WebSocketContext;
+use crate::components::chat::{
+    AgentThinking, ThinkingEvent, ThinkingState, TokenUsage, process_thinking_event,
+};
 use crate::components::Spinner;
 use crate::server_fns::copilot::{
     create_copilot_session, delete_copilot_session, send_copilot_message,
@@ -70,7 +72,9 @@ fn SendIcon(#[prop(into, optional)] class: String) -> impl IntoView {
 
 /// A single chat message in the copilot conversation.
 #[derive(Clone, Debug)]
-struct ChatMessage {
+struct CopilotMessage {
+    /// Unique message ID (from WebSocket events for assistant, generated for user).
+    message_id: String,
     /// "user" or "assistant"
     role: String,
     /// The message content.
@@ -85,7 +89,8 @@ struct ChatMessage {
 ///
 /// Matches every feature of the React `DashboardCopilotSidebar`:
 /// - Session lifecycle (create on open, delete on close)
-/// - Chat interface with user/assistant messages
+/// - Chat interface with user/assistant messages and WebSocket streaming
+/// - Agent thinking events displayed per assistant message
 /// - Resizable desktop sidebar, mobile slide-in panel
 /// - "Apply to Dashboard" action for AI suggestions
 #[component]
@@ -114,13 +119,22 @@ pub fn CopilotSidebar(
     let (session_id, set_session_id) = signal(Option::<String>::None);
 
     // ── Chat state ──────────────────────────────────────────────────────
-    let (messages, set_messages) = signal(Vec::<ChatMessage>::new());
+    let (messages, set_messages) = signal(Vec::<CopilotMessage>::new());
     let (is_loading, set_is_loading) = signal(false);
     let (input_value, set_input_value) = signal(String::new());
     let (error, set_error) = signal(Option::<String>::None);
 
     // Track whether the first message has been sent (for context prefix).
     let (has_sent_first, set_has_sent_first) = signal(false);
+
+    // Monotonic counter for user message IDs (user messages don't get WS IDs).
+    let (user_msg_counter, set_user_msg_counter) = signal(0u32);
+
+    // ── Thinking state (per message_id) ─────────────────────────────────
+    let (thinking_map, set_thinking_map) = signal(HashMap::<String, ThinkingState>::new());
+
+    // ── WebSocket context ────────────────────────────────────────────────
+    let ws_ctx = use_context::<WebSocketContext>();
 
     // ── Create session when sidebar opens ───────────────────────────────
     Effect::new(move || {
@@ -130,6 +144,7 @@ pub fn CopilotSidebar(
             set_error.set(None);
             set_input_value.set(String::new());
             set_has_sent_first.set(false);
+            set_thinking_map.set(HashMap::new());
 
             let did = dashboard_id.get_value();
             leptos::task::spawn_local(async move {
@@ -169,6 +184,343 @@ pub fn CopilotSidebar(
         on_close.run(());
     };
 
+    // ── WebSocket subscriptions ─────────────────────────────────────────
+    // Matches React ChatInterface.jsx lines 207-381 with contextType="dashboard_copilot".
+    // Filters all events by context_type and session_id.
+    #[cfg(target_arch = "wasm32")]
+    {
+        Effect::new(move |_| {
+            let Some(ws) = ws_ctx.as_ref().cloned() else {
+                return;
+            };
+
+            // Helper: check if event belongs to this copilot instance.
+            // Matches React: ChatInterface.jsx lines 209-213
+            let should_handle =
+                move |event_context_type: Option<&str>, msg_session_id: Option<&str>| -> bool {
+                    // Must be dashboard_copilot context
+                    if event_context_type != Some("dashboard_copilot") {
+                        return false;
+                    }
+                    // If we have a session ID, filter by it
+                    let current_sid = session_id.get_untracked();
+                    if let Some(sid) = &current_sid {
+                        if let Some(msg_sid) = msg_session_id {
+                            if msg_sid != sid.as_str() {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                };
+
+            // ── agent_thinking ──────────────────────────────────────────
+            // Matches React: ChatInterface.jsx lines 216-271
+            let should_handle_thinking = should_handle;
+            let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
+                let data = match &msg.data {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                let thinking_event: ThinkingEvent = match data
+                    .get("event")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                {
+                    Some(e) => e,
+                    None => return,
+                };
+
+                let event_context_type = data
+                    .get("event")
+                    .and_then(|v| v.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if !should_handle_thinking(event_context_type, msg.session_id.as_deref()) {
+                    return;
+                }
+
+                let token_usage: Option<TokenUsage> = data
+                    .get("token_usage")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                // Transition to streaming: create assistant message placeholder if needed.
+                // Matches React: ChatInterface.jsx lines 235-253
+                set_messages.update(|msgs| {
+                    if !msgs.iter().any(|m| m.message_id == msg_message_id) {
+                        msgs.push(CopilotMessage {
+                            message_id: msg_message_id.clone(),
+                            role: "assistant".to_string(),
+                            content: String::new(),
+                            suggested_content: None,
+                        });
+                    }
+                });
+
+                // Mark as streaming (no longer in loading/sending state)
+                set_is_loading.set(false);
+
+                // Update thinking state. Matches React: ChatInterface.jsx lines 257-271
+                set_thinking_map.update(|map| {
+                    let current = map.get(&msg_message_id).cloned().unwrap_or_default();
+
+                    if current.cancelled {
+                        return;
+                    }
+
+                    let updated_events =
+                        process_thinking_event(&current.events, thinking_event);
+                    map.insert(
+                        msg_message_id,
+                        ThinkingState {
+                            events: updated_events,
+                            is_active: true,
+                            cancelled: false,
+                            token_usage: token_usage.or(current.token_usage),
+                        },
+                    );
+                });
+            });
+
+            // ── chat_stream ─────────────────────────────────────────────
+            // Matches React: ChatInterface.jsx lines 275-288
+            let should_handle_stream = should_handle;
+            let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if !should_handle_stream(event_context_type, msg.session_id.as_deref()) {
+                    return;
+                }
+
+                let content = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str());
+
+                let content = match content {
+                    Some(c) if !c.is_empty() => c.to_string(),
+                    _ => return,
+                };
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                set_messages.update(|msgs| {
+                    if let Some(existing) = msgs
+                        .iter_mut()
+                        .find(|m| m.message_id == msg_message_id && m.role == "assistant")
+                    {
+                        existing.content.push_str(&content);
+                    } else {
+                        msgs.push(CopilotMessage {
+                            message_id: msg_message_id,
+                            role: "assistant".to_string(),
+                            content,
+                            suggested_content: None,
+                        });
+                    }
+                });
+            });
+
+            // ── chat_complete ───────────────────────────────────────────
+            // Matches React: ChatInterface.jsx lines 291-321
+            let should_handle_complete = should_handle;
+            let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if !should_handle_complete(event_context_type, msg.session_id.as_deref()) {
+                    return;
+                }
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                let full_content = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                // Update message with full content.
+                set_messages.update(|msgs| {
+                    for m in msgs.iter_mut() {
+                        if m.message_id == msg_message_id && m.role == "assistant" {
+                            if let Some(ref content) = full_content {
+                                m.content = content.clone();
+                            }
+                        }
+                    }
+                });
+
+                // Stop thinking animation.
+                set_thinking_map.update(|map| {
+                    if let Some(entry) = map.get_mut(&msg_message_id) {
+                        if !entry.cancelled {
+                            entry.is_active = false;
+                        }
+                    }
+                });
+
+                set_is_loading.set(false);
+            });
+
+            // ── token_usage_update ──────────────────────────────────────
+            let unsub_token_usage = ws.subscribe("token_usage_update", move |msg| {
+                let data = match &msg.data {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                let token_update: TokenUsage = match data
+                    .get("token_usage")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                {
+                    Some(t) => t,
+                    None => return,
+                };
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                // Filter by session_id
+                let current_sid = session_id.get_untracked();
+                if let Some(sid) = &current_sid {
+                    if msg.session_id.as_deref() != Some(sid.as_str()) {
+                        return;
+                    }
+                }
+
+                set_thinking_map.update(|map| {
+                    let current = map.get(&msg_message_id).cloned().unwrap_or_default();
+                    if current.cancelled {
+                        return;
+                    }
+                    map.insert(
+                        msg_message_id,
+                        ThinkingState {
+                            token_usage: Some(token_update),
+                            ..current
+                        },
+                    );
+                });
+            });
+
+            // ── error ───────────────────────────────────────────────────
+            // Matches React: ChatInterface.jsx lines 359-363
+            let unsub_error = ws.subscribe("error", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                // Only handle dashboard_copilot errors
+                if event_context_type != Some("dashboard_copilot") {
+                    return;
+                }
+
+                let error_msg = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("An error occurred")
+                    .to_string();
+
+                set_error.set(Some(error_msg));
+                set_is_loading.set(false);
+            });
+
+            // ── request_cancelled ───────────────────────────────────────
+            let unsub_request_cancelled = ws.subscribe("request_cancelled", move |msg| {
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                set_messages.update(|msgs| {
+                    for m in msgs.iter_mut() {
+                        if m.message_id == msg_message_id && m.role == "assistant" {
+                            m.content = "_Request cancelled by user._".to_string();
+                        }
+                    }
+                });
+
+                set_thinking_map.update(|map| {
+                    if let Some(entry) = map.get_mut(&msg_message_id) {
+                        entry.is_active = false;
+                        entry.cancelled = true;
+                    }
+                });
+
+                set_is_loading.set(false);
+            });
+
+            // ── dashboard_update ────────────────────────────────────────
+            // Matches React: DashboardCopilotSidebar.jsx lines 92-104
+            let unsub_dashboard_update = ws.subscribe("dashboard_update", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if event_context_type != Some("dashboard_copilot") {
+                    return;
+                }
+
+                // Check session_id filter
+                let current_sid = session_id.get_untracked();
+                if let Some(sid) = &current_sid {
+                    if msg.session_id.as_deref() != Some(sid.as_str()) {
+                        return;
+                    }
+                }
+
+                if let Some(content) = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str())
+                {
+                    on_apply_content.run(content.to_string());
+                }
+            });
+
+            // ── Cleanup: unsubscribe all on component unmount ───────────
+            on_cleanup(move || {
+                unsub_agent_thinking();
+                unsub_chat_stream();
+                unsub_chat_complete();
+                unsub_token_usage();
+                unsub_error();
+                unsub_request_cancelled();
+                unsub_dashboard_update();
+            });
+        });
+    }
+
     // ── Send message handler ────────────────────────────────────────────
     let handle_send = move || {
         let msg = input_value.get_untracked().trim().to_string();
@@ -181,9 +533,15 @@ pub fn CopilotSidebar(
             None => return,
         };
 
+        // Generate a user-side message ID for the user message.
+        let counter = user_msg_counter.get_untracked();
+        set_user_msg_counter.set(counter + 1);
+        let user_msg_id = format!("user_{}", counter);
+
         // Add user message to the list.
         set_messages.update(|msgs| {
-            msgs.push(ChatMessage {
+            msgs.push(CopilotMessage {
+                message_id: user_msg_id,
                 role: "user".to_string(),
                 content: msg.clone(),
                 suggested_content: None,
@@ -208,29 +566,16 @@ pub fn CopilotSidebar(
 
         set_has_sent_first.set(true);
 
+        // Send the message via server function. The AI response arrives
+        // asynchronously via WebSocket streaming events (chat_stream,
+        // chat_complete, agent_thinking) — not in the HTTP response.
         leptos::task::spawn_local(async move {
-            match send_copilot_message(sid, msg, content_opt).await {
-                Ok(response) => {
-                    // If we got actual content back, add it as an assistant message.
-                    if !response.message.is_empty() {
-                        set_messages.update(|msgs| {
-                            msgs.push(ChatMessage {
-                                role: "assistant".to_string(),
-                                content: response.message,
-                                suggested_content: response.suggested_content,
-                            });
-                        });
-                    }
-                    // NOTE: When `response.status == "processing"`, the actual AI
-                    // response will arrive via WebSocket streaming events. Full
-                    // streaming integration requires extending the WebSocket client
-                    // to handle `chat_stream` / `chat_complete` event types.
-                }
-                Err(e) => {
-                    set_error.set(Some(format!("Failed to send message: {e}")));
-                }
+            if let Err(e) = send_copilot_message(sid, msg, content_opt).await {
+                set_error.set(Some(format!("Failed to send message: {e}")));
+                set_is_loading.set(false);
             }
-            set_is_loading.set(false);
+            // Don't set is_loading to false here — it stays true until
+            // the first agent_thinking or chat_complete event arrives.
         });
     };
 
@@ -363,48 +708,94 @@ pub fn CopilotSidebar(
                     </Show>
 
                     // Messages
-                    {move || messages.get().iter().enumerate().map(|(_idx, msg)| {
-                        let is_user = msg.role == "user";
-                        let content = msg.content.clone();
-                        let suggested = msg.suggested_content.clone();
-                        let has_suggested = suggested.is_some();
-                        let full_message = msg.content.clone();
+                    {move || {
+                        let msgs = messages.get();
+                        let thinking = thinking_map.get();
 
-                        view! {
-                            <div class=if is_user {
-                                "flex justify-end"
+                        msgs.iter().map(|msg| {
+                            let is_user = msg.role == "user";
+                            let content = msg.content.clone();
+                            let suggested = msg.suggested_content.clone();
+                            let has_suggested = suggested.is_some();
+                            let full_message = msg.content.clone();
+                            let msg_id = msg.message_id.clone();
+
+                            // Get thinking state for this message (assistant only)
+                            let thinking_state = if !is_user {
+                                thinking.get(&msg_id).cloned()
                             } else {
-                                "flex justify-start"
-                            }>
+                                None
+                            };
+                            let has_thinking = thinking_state.as_ref().map_or(false, |t| !t.events.is_empty());
+                            let thinking_events = thinking_state.as_ref().map(|t| t.events.clone()).unwrap_or_default();
+                            let thinking_active = thinking_state.as_ref().map_or(false, |t| t.is_active);
+                            let thinking_token_usage = thinking_state.as_ref().and_then(|t| t.token_usage.clone());
+
+                            view! {
                                 <div class=if is_user {
-                                    "bg-primary text-primary-foreground rounded-lg p-3 max-w-[85%]"
+                                    "flex justify-end"
                                 } else {
-                                    "bg-muted rounded-lg p-3 max-w-[85%]"
+                                    "flex justify-start"
                                 }>
-                                    <p class="text-sm whitespace-pre-wrap">{content}</p>
+                                    <div class=if is_user {
+                                        "bg-primary text-primary-foreground rounded-lg p-3 max-w-[85%]"
+                                    } else {
+                                        "bg-muted rounded-lg p-3 max-w-[85%]"
+                                    }>
+                                        // Agent thinking panel — shown for assistant messages with thinking events
+                                        {has_thinking.then(move || {
+                                            if let Some(tu) = thinking_token_usage.clone() {
+                                                view! {
+                                                    <div class="mb-2">
+                                                        <AgentThinking
+                                                            thinking_events=thinking_events.clone()
+                                                            is_active=thinking_active
+                                                            token_usage=tu
+                                                        />
+                                                    </div>
+                                                }.into_any()
+                                            } else {
+                                                view! {
+                                                    <div class="mb-2">
+                                                        <AgentThinking
+                                                            thinking_events=thinking_events.clone()
+                                                            is_active=thinking_active
+                                                        />
+                                                    </div>
+                                                }.into_any()
+                                            }
+                                        })}
 
-                                    // "Apply to Dashboard" button — only shown for assistant
-                                    // messages that have suggested_content.
-                                    {(!is_user && has_suggested).then(|| {
-                                        let apply_content = suggested
-                                            .unwrap_or_else(|| full_message.clone());
-                                        view! {
-                                            <button
-                                                class="mt-2 text-xs text-primary hover:text-primary/80 font-medium"
-                                                on:click=move |_| {
-                                                    on_apply_content.run(apply_content.clone());
-                                                }
-                                            >
-                                                "Apply to Dashboard"
-                                            </button>
-                                        }
-                                    })}
+                                        // Message content — show if non-empty or if user message
+                                        {(!content.is_empty() || is_user).then(|| {
+                                            view! {
+                                                <p class="text-sm whitespace-pre-wrap">{content.clone()}</p>
+                                            }
+                                        })}
+
+                                        // "Apply to Dashboard" button — only shown for assistant
+                                        // messages that have suggested_content.
+                                        {(!is_user && has_suggested).then(|| {
+                                            let apply_content = suggested
+                                                .unwrap_or_else(|| full_message.clone());
+                                            view! {
+                                                <button
+                                                    class="mt-2 text-xs text-primary hover:text-primary/80 font-medium"
+                                                    on:click=move |_| {
+                                                        on_apply_content.run(apply_content.clone());
+                                                    }
+                                                >
+                                                    "Apply to Dashboard"
+                                                </button>
+                                            }
+                                        })}
+                                    </div>
                                 </div>
-                            </div>
-                        }
-                    }).collect_view()}
+                            }
+                        }).collect_view()
+                    }}
 
-                    // Loading indicator
+                    // Loading indicator — shown when waiting for first thinking event
                     <Show when=move || is_loading.get()>
                         <div class="flex justify-start">
                             <div class="bg-muted rounded-lg p-3 flex items-center gap-2">
