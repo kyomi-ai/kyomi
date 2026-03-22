@@ -127,6 +127,12 @@ pub fn register_server_functions() {
     register_explicit::<GetWorkspaceDefaultDashboard>();
     register_explicit::<SetWorkspaceDefaultDashboard>();
 
+    use server_fns::sql_editor::*;
+    register_explicit::<ExecuteSqlQuery>();
+    register_explicit::<FetchQueryPage>();
+    register_explicit::<DryRunSql>();
+    register_explicit::<StartQueryStream>();
+
     use server_fns::datasources::*;
     register_explicit::<ListDatasources>();
     register_explicit::<GetDatasourceTypes>();

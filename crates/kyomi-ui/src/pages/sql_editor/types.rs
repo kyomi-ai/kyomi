@@ -116,6 +116,9 @@ pub struct QueryResult {
     /// Bytes processed by the query engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_processed: Option<u64>,
+    /// Whether more pages are available beyond the current result set.
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 /// Represents an error from query execution.

@@ -25,6 +25,7 @@ pub mod security;
 pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;
+pub mod sql_editor;
 pub mod team;
 pub mod usage;
 pub mod workspace;
@@ -60,6 +61,10 @@ pub struct ServerContext {
     /// Connect registry for routing queries to Kyomi Connect instances.
     /// Required for query execution against Connect-type datasources.
     pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+
+    /// WebSocket manager for sending real-time messages to connected clients.
+    /// Required for streaming query results via WebSocket events.
+    pub ws_manager: kyomi_auth::websocket::WebSocketManager,
 
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.

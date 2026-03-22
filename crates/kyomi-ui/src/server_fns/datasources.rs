@@ -1064,87 +1064,7 @@ pub async fn query_datasource_arrow(
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // Resolve datasource by slug (or UUID).
-    // `include_inactive = false` enforces the active constraint at the SQL level,
-    // so no additional `!ds.active` check is needed here.
-    let ds = kyomi_auth::datasource_service::resolve_datasource(
-        &ctx.db,
-        &datasource_slug,
-        ws_id,
-        false,
-    )
-    .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Create provider (Connect vs direct)
-    let provider: Box<dyn kyomi_datasource_server::DatasourceProvider> =
-        if ds.connection_type == "connect" {
-            let registry = ctx
-                .connect_registry
-                .as_ref()
-                .ok_or_else(|| ServerFnError::new("Connect registry not available"))?;
-            Box::new(kyomi_datasource_server::ConnectProvider::new(
-                registry.clone(),
-                ds.id.clone(),
-            ))
-        } else {
-            let encryption_key = ctx
-                .encryption_key
-                .as_deref()
-                .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-
-            let ds_type: kyomi_core::datasource_registry::DatasourceType =
-                ds.datasource_type.into();
-
-            let user_cred = kyomi_auth::datasource_service::get_user_credential(
-                &ctx.db,
-                &auth.user_id,
-                &ds.id,
-            )
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-            let credentials = if let Some(ref cred) = user_cred {
-                kyomi_auth::credential_service::decrypt_credentials(
-                    &cred.credentials,
-                    encryption_key,
-                )
-                .unwrap_or(serde_json::json!({}))
-            } else {
-                serde_json::json!({})
-            };
-
-            let credentials =
-                kyomi_datasource_server::ensure_valid_oauth_credentials(
-                    &credentials,
-                    &ds.connection_config,
-                    &ds_type,
-                )
-                .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-            match tokio::time::timeout(
-                kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
-                kyomi_datasource_server::create_provider(
-                    &ds_type,
-                    &ds.connection_config,
-                    &credentials,
-                    None,
-                ),
-            )
-            .await
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) => {
-                    return Err(ServerFnError::new(format!(
-                        "Failed to connect to datasource: {e}"
-                    )));
-                }
-                Err(_) => {
-                    return Err(ServerFnError::new("Connection timed out"));
-                }
-            }
-        };
+    let (_ds, provider) = create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
 
     // Execute query
     let query_limit = limit.map(|l| l.clamp(1, 10_000) as u32);
@@ -1394,4 +1314,175 @@ fn query_result_to_arrow_ipc(
             .map_err(|e| ServerFnError::new(format!("IPC finish error: {e}")))?;
     }
     Ok(buf)
+}
+
+// ---------------------------------------------------------------------------
+// Shared helper: create a query provider from a resolved datasource
+// ---------------------------------------------------------------------------
+
+/// Resolve a datasource by slug and create a provider ready for query execution.
+///
+/// This consolidates the common pattern used by `query_datasource_arrow` and the
+/// SQL editor server functions. It:
+/// 1. Resolves the datasource from slug within the workspace
+/// 2. Handles Connect vs direct provider creation
+/// 3. Decrypts user credentials and refreshes OAuth tokens
+/// 4. Applies connection timeout
+///
+/// Returns the resolved datasource row alongside the provider so callers can
+/// access metadata (e.g., `datasource_type`, `slug`).
+#[cfg(feature = "ssr")]
+pub(crate) async fn create_query_provider(
+    ctx: &super::ServerContext,
+    auth: &kyomi_auth::middleware::AuthUser,
+    workspace_id: &str,
+    datasource_slug: &str,
+) -> Result<
+    (
+        kyomi_core::models::datasource::DatasourceConfig,
+        Box<dyn kyomi_datasource_server::DatasourceProvider>,
+    ),
+    ServerFnError,
+> {
+    // Resolve datasource by slug (or UUID).
+    // `include_inactive = false` enforces the active constraint at the SQL level.
+    let ds = kyomi_auth::datasource_service::resolve_datasource(
+        &ctx.db,
+        datasource_slug,
+        workspace_id,
+        false,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let provider: Box<dyn kyomi_datasource_server::DatasourceProvider> =
+        if ds.connection_type == "connect" {
+            let registry = ctx
+                .connect_registry
+                .as_ref()
+                .ok_or_else(|| ServerFnError::new("Connect registry not available"))?;
+            Box::new(kyomi_datasource_server::ConnectProvider::new(
+                registry.clone(),
+                ds.id.clone(),
+            ))
+        } else {
+            let encryption_key = ctx
+                .encryption_key
+                .as_deref()
+                .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+
+            let ds_type: kyomi_core::datasource_registry::DatasourceType =
+                ds.datasource_type.into();
+
+            let user_cred = kyomi_auth::datasource_service::get_user_credential(
+                &ctx.db,
+                &auth.user_id,
+                &ds.id,
+            )
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+            let credentials = if let Some(ref cred) = user_cred {
+                kyomi_auth::credential_service::decrypt_credentials(
+                    &cred.credentials,
+                    encryption_key,
+                )
+                .unwrap_or(serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            };
+
+            let credentials =
+                kyomi_datasource_server::ensure_valid_oauth_credentials(
+                    &credentials,
+                    &ds.connection_config,
+                    &ds_type,
+                )
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+            // Build user context for BigQuery OAuth (kyomi_oauth auth mode).
+            let user_context = build_user_context(ctx, auth).await?;
+            let user_context_ref = user_context.as_ref();
+
+            match tokio::time::timeout(
+                kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
+                kyomi_datasource_server::create_provider(
+                    &ds_type,
+                    &ds.connection_config,
+                    &credentials,
+                    user_context_ref,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
+                    return Err(ServerFnError::new(format!(
+                        "Failed to connect to datasource: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(ServerFnError::new("Connection timed out"));
+                }
+            }
+        };
+
+    Ok((ds, provider))
+}
+
+/// Build a `UserContext` for BigQuery provider creation.
+///
+/// Loads the user's Google OAuth tokens from the DB, refreshes if expired,
+/// and returns a `UserContext` with the valid tokens. If the user has no
+/// Google OAuth data (e.g., service_account auth mode), `oauth_data` will
+/// be `None` — BigQuery will fall back to other auth modes.
+#[cfg(feature = "ssr")]
+async fn build_user_context(
+    ctx: &super::ServerContext,
+    auth: &kyomi_auth::middleware::AuthUser,
+) -> Result<Option<kyomi_datasource_server::UserContext>, ServerFnError> {
+    // Use centralized token resolution: reads DB, checks expiry, refreshes, persists.
+    let oauth_data = if let (Some(client_id), Some(client_secret)) = (
+        ctx.config.google_oauth_client_id.as_deref(),
+        ctx.config.google_oauth_client_secret.as_deref(),
+    ) {
+        let encryption_key = ctx
+            .encryption_key
+            .as_ref()
+            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+
+        match kyomi_auth::google_oauth::ensure_valid_google_token(
+            &ctx.db,
+            &auth.user_id,
+            encryption_key,
+            client_id,
+            client_secret,
+        )
+        .await
+        {
+            Ok(tokens) => {
+                let data = kyomi_auth::google_oauth::OAuthData {
+                    google_oauth_tokens: Some(tokens),
+                    ..Default::default()
+                };
+                serde_json::to_value(data).ok()
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let workspace_id = auth
+        .workspace
+        .workspace_id
+        .clone()
+        .unwrap_or_default();
+
+    Ok(Some(kyomi_datasource_server::UserContext {
+        oauth_data,
+        user_email: auth.email.clone(),
+        workspace_id,
+    }))
 }
