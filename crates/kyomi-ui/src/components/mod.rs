@@ -13,6 +13,7 @@ pub mod alert;
 pub mod badge;
 pub mod button;
 pub mod card;
+pub mod chat;
 pub mod checkbox;
 pub mod confirm_dialog;
 pub mod dashboard;

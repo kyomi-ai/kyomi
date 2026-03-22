@@ -14,6 +14,7 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::components::chat::WebSocketProvider;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 
 /// Main layout shell wrapping all Leptos pages.
@@ -26,6 +27,22 @@ pub fn Layout(children: Children) -> impl IntoView {
     let (collapsed, set_collapsed) = signal(false);
     let (is_mobile, set_is_mobile) = signal(false);
     let (mobile_open, set_mobile_open) = signal(false);
+
+    // Fetch sidebar user info — used for both the sidebar UI and WebSocket auth signals.
+    // This avoids an extra server function call just for WebSocket config.
+    let user_info = Resource::new(|| (), |_| get_sidebar_user());
+    let ws_user_id = Memo::new(move |_| {
+        user_info
+            .get()
+            .and_then(|r| r.ok())
+            .map(|u| u.user_id)
+    });
+    let ws_workspace_id = Memo::new(move |_| {
+        user_info
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|u| u.workspace_id)
+    });
 
     // Detect mobile on mount + resize
     #[cfg(target_arch = "wasm32")]
@@ -72,56 +89,58 @@ pub fn Layout(children: Children) -> impl IntoView {
     });
 
     view! {
-        <div class="h-screen flex flex-col bg-background">
-            // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
-            <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
-                <button
-                    on:click=move |_| set_mobile_open.update(|o| *o = !*o)
-                    class="p-2 hover:bg-accent rounded-lg transition-colors relative z-10"
-                    aria-label="Toggle menu"
-                >
-                    <svg class="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
-                    </svg>
-                </button>
-                <div class="absolute left-1/2 -translate-x-1/2">
-                    <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-10 dark:hidden"/>
-                    <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-10 hidden dark:block"/>
+        <WebSocketProvider user_id=ws_user_id.into() workspace_id=ws_workspace_id.into()>
+            <div class="h-screen flex flex-col bg-background">
+                // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
+                <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
+                    <button
+                        on:click=move |_| set_mobile_open.update(|o| *o = !*o)
+                        class="p-2 hover:bg-accent rounded-lg transition-colors relative z-10"
+                        aria-label="Toggle menu"
+                    >
+                        <svg class="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                        </svg>
+                    </button>
+                    <div class="absolute left-1/2 -translate-x-1/2">
+                        <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-10 dark:hidden"/>
+                        <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-10 hidden dark:block"/>
+                    </div>
+                </div>
+
+                // ── Mobile overlay (matches React line 283) ─────────────────
+                <Show when=move || is_mobile.get() && mobile_open.get()>
+                    <div
+                        class="fixed inset-0 bg-black/50 z-20 md:hidden"
+                        on:click=move |_| set_mobile_open.set(false)
+                    />
+                </Show>
+
+                <div class="flex relative flex-1 overflow-hidden">
+                    <Sidebar
+                        collapsed=collapsed
+                        set_collapsed=set_collapsed
+                        is_mobile=is_mobile
+                        mobile_open=mobile_open
+                    />
+                    <main
+                        class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out"
+                        style=move || {
+                            if is_mobile.get() {
+                                // Mobile: no sidebar margin, top padding for the fixed header
+                                "padding-top: 4rem".to_string()
+                            } else if collapsed.get() {
+                                "margin-left: 4rem".to_string()
+                            } else {
+                                "margin-left: 20rem".to_string()
+                            }
+                        }
+                    >
+                        {children()}
+                    </main>
                 </div>
             </div>
-
-            // ── Mobile overlay (matches React line 283) ─────────────────
-            <Show when=move || is_mobile.get() && mobile_open.get()>
-                <div
-                    class="fixed inset-0 bg-black/50 z-20 md:hidden"
-                    on:click=move |_| set_mobile_open.set(false)
-                />
-            </Show>
-
-            <div class="flex relative flex-1 overflow-hidden">
-                <Sidebar
-                    collapsed=collapsed
-                    set_collapsed=set_collapsed
-                    is_mobile=is_mobile
-                    mobile_open=mobile_open
-                />
-                <main
-                    class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out"
-                    style=move || {
-                        if is_mobile.get() {
-                            // Mobile: no sidebar margin, top padding for the fixed header
-                            "padding-top: 4rem".to_string()
-                        } else if collapsed.get() {
-                            "margin-left: 4rem".to_string()
-                        } else {
-                            "margin-left: 20rem".to_string()
-                        }
-                    }
-                >
-                    {children()}
-                </main>
-            </div>
-        </div>
+        </WebSocketProvider>
     }
 }
 

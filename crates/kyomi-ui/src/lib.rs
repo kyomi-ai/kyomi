@@ -99,6 +99,9 @@ pub fn register_server_functions() {
     register_explicit::<ListOwnershipTransfers>();
     register_explicit::<CancelOwnershipTransfer>();
 
+    use server_fns::chat::*;
+    register_explicit::<GetWebsocketConfig>();
+
     use server_fns::copilot::*;
     register_explicit::<CreateCopilotSession>();
     register_explicit::<SendCopilotMessage>();
