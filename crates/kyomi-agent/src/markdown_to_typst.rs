@@ -34,8 +34,26 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
     let re_ol = regex::Regex::new(r"^\d+\.\s+(.*)").expect("valid regex");
     let re_hr = regex::Regex::new(r"^[-*_]{3,}$").expect("valid regex");
 
+    // Track bracket depth for multiline Typst passthrough blocks.
+    // When we enter a Typst block (e.g. #block(...)[...]), we pass through
+    // all lines verbatim until brackets are balanced.
+    let mut typst_block_depth: i32 = 0;
+
     for line in &lines {
         let stripped = line.trim();
+
+        // If inside a multiline Typst block, pass through until balanced
+        if typst_block_depth > 0 {
+            for ch in stripped.chars() {
+                match ch {
+                    '[' | '(' => typst_block_depth += 1,
+                    ']' | ')' => typst_block_depth -= 1,
+                    _ => {}
+                }
+            }
+            output.push(stripped.to_string());
+            continue;
+        }
 
         // Empty lines — close open lists/tables, emit blank line
         if stripped.is_empty() {
@@ -51,14 +69,23 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
             continue;
         }
 
-        // Typst passthrough (markers we already inserted as valid Typst)
+        // Typst passthrough (pre-rendered Typst blocks from metric/table/chart renderers)
         if stripped.starts_with("#image(")
             || stripped.starts_with("#block(")
             || stripped.starts_with("#table(")
             || stripped.starts_with("#align(")
             || stripped.starts_with("#v(")
+            || stripped.starts_with("#text(")
         {
             close_list(&mut output, &mut in_ul, &mut in_ol);
+            // Count brackets to track multiline blocks
+            for ch in stripped.chars() {
+                match ch {
+                    '[' | '(' => typst_block_depth += 1,
+                    ']' | ')' => typst_block_depth -= 1,
+                    _ => {}
+                }
+            }
             output.push(stripped.to_string());
             continue;
         }
@@ -168,6 +195,7 @@ fn close_list(output: &mut Vec<String>, in_ul: &mut bool, in_ol: &mut bool) {
 }
 
 /// Emit a Typst table from collected header and body rows.
+/// Styled to match .kyomi-markdown table CSS: muted header, horizontal dividers, white rows.
 fn emit_table(
     output: &mut Vec<String>,
     header_cells: &[String],
@@ -178,23 +206,34 @@ fn emit_table(
         return;
     }
 
+    // Header cells: uppercase, small, muted-foreground — matching th { uppercase tracking-wider }
     let header_row = header_cells
         .iter()
-        .map(|c| format!("[*{}*]", c))
+        .map(|c| format!(r##"[#text(7pt, weight: "medium", fill: rgb("#6b7280"), tracking: 0.08em)[#upper[{}]]]"##, c))
         .collect::<Vec<_>>()
         .join(", ");
 
     let mut table = format!(
         r##"#table(
-  columns: {columns},
-  stroke: rgb("#e5e7eb"),
-  fill: (_, y) => if calc.odd(y) {{ rgb("#f9fafb") }} else {{ none }},
+  columns: (1fr,) * {columns},
+  stroke: none,
+  inset: (x: 12pt, y: 9pt),
+  fill: (_, y) => if y == 0 {{ rgb("#f9fafb") }} else {{ white }},
+  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
   table.header({header_row}),
+  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
 "##
     );
 
-    for row in body_rows {
+    for (i, row) in body_rows.iter().enumerate() {
         table.push_str(&format!("  {row},\n"));
+        // Bottom border after each body row
+        let y = i + 1; // row 0 is header
+        table.push_str(&format!(
+            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#e5e7eb")),
+"##,
+            y + 1
+        ));
     }
     table.push(')');
 
@@ -301,36 +340,49 @@ pub fn render_data_table_typst(
     let escaped_title = typst_escape(title);
     let columns = headers.len();
 
+    // Header cells: uppercase, small, muted-foreground — matching th { uppercase tracking-wider }
     let header_cells = headers
         .iter()
-        .map(|h| format!("[*{}*]", typst_escape(h)))
+        .map(|h| format!(
+            r##"[#text(7pt, weight: "medium", fill: rgb("#6b7280"), tracking: 0.08em)[#upper[{}]]]"##,
+            typst_escape(h)
+        ))
         .collect::<Vec<_>>()
         .join(", ");
 
     let mut table = format!(
-        r##"#text(12pt, weight: "semibold")[{escaped_title}]
-#v(4pt)
+        r##"#text(12pt, weight: "semibold", fill: rgb("#111827"))[{escaped_title}]
+#v(6pt)
 #table(
-  columns: {columns},
-  stroke: rgb("#e5e7eb"),
-  fill: (_, y) => if calc.odd(y) {{ rgb("#f9fafb") }} else {{ none }},
+  columns: (1fr,) * {columns},
+  stroke: none,
+  inset: (x: 12pt, y: 9pt),
+  fill: (_, y) => if y == 0 {{ rgb("#f9fafb") }} else {{ white }},
+  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
   table.header({header_cells}),
+  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
 "##
     );
 
-    for row in rows {
+    for (i, row) in rows.iter().enumerate() {
         let cells = row
             .iter()
-            .map(|c| format!("[{}]", typst_escape(c)))
+            .map(|c| format!("[#text(9pt, fill: rgb(\"#111827\"))[{}]]", typst_escape(c)))
             .collect::<Vec<_>>()
             .join(", ");
         table.push_str(&format!("  {cells},\n"));
+        let y = i + 1;
+        table.push_str(&format!(
+            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#e5e7eb")),
+"##,
+            y + 1
+        ));
     }
     table.push(')');
 
     if total_rows > max_rows {
         table.push_str(&format!(
-            "\n#text(9pt, fill: rgb(\"#6b7280\"))[Showing {} of {} rows]",
+            "\n#v(4pt)\n#text(8pt, fill: rgb(\"#6b7280\"))[Showing {} of {} rows]",
             max_rows, total_rows
         ));
     }
