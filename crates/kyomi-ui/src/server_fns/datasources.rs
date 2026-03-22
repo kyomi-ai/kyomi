@@ -29,7 +29,7 @@ use super::{extract_auth, extract_context, workspace_id};
 ///
 /// Combines data from the datasource config and the credential status endpoint
 /// into a single struct so the UI can render everything in one pass.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DatasourceInfo {
     pub id: String,
     pub name: String,
