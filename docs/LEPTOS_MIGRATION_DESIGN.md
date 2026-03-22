@@ -1,7 +1,7 @@
 # Leptos Frontend Migration — Zero-JS Architecture Design
 
-**Status:** Research complete, ready for Phase 0
-**Date:** 2026-03-20
+**Status:** Phases 0–6 complete (Settings, Auth, Dashboards, Chat, Watches, Knowledge). SQL Editor + Remaining Pages pending.
+**Date:** 2026-03-23 (updated)
 **Author:** Jason + Claude (research collaboration)
 
 ## Executive Summary
@@ -283,11 +283,11 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 | **0** | Infrastructure — `kyomi-ui` crate, Leptos+Axum integration, Tailwind, hybrid routing | Low | None | **Complete** | — |
 | **1** | **Settings** (8 tabs, ~4,500 LOC) — widest component range | Low | None | **Complete** | [`LEPTOS_SETTINGS_PLAN.md`](LEPTOS_SETTINGS_PLAN.md) |
 | **2** | **Auth** — Login, Signup, Verify Email, Password Recovery, Passkey flows | Medium | None | **Complete** | — (implemented directly) |
-| **3** | **Watches** — watch management, AI creation, cron scheduling, Gmail-style alert inbox, execution history | Low | None | **Planned** | [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) — 23 tasks, 8 phases |
-| **4** | **Knowledge** — list, tree, editor | Low | None | **Planned** | [`KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md`](KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md) |
-| **5** | **Chat** — WebSocket streaming, chartml-rs chart rendering in responses | Medium | None | **Planned** | [`CHAT_LEPTOS_MIGRATION_PLAN.md`](CHAT_LEPTOS_MIGRATION_PLAN.md) |
-| **6** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results | Medium | None | **Planned** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases |
-| **7** | **Dashboards** — kode-leptos markdown mode, chartml-rs charts, DataFusion transforms, quackstats-rs forecasting | High | None | **In Progress** | — (implemented directly on `feat/remove-react-routes`) |
+| **3** | **Dashboards** — kode-leptos markdown mode, chartml-rs charts, list/viewer/editor | High | None | **Complete** | — (21 server fns, 10 components, 3 pages) |
+| **4** | **Chat** — WebSocket streaming, chartml-rs chart rendering in responses, session management | Medium | None | **Complete** | [`CHAT_LEPTOS_MIGRATION_PLAN.md`](CHAT_LEPTOS_MIGRATION_PLAN.md) — 35 tasks |
+| **5** | **Watches** — watch management, AI creation, cron scheduling, Gmail-style alert inbox, execution history | Low | None | **Complete** | [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) — 23 tasks, 20 server fns, 8 components |
+| **6** | **Knowledge** — file tree, markdown editor, auto-save, conflict detection | Low | None | **Complete** | [`KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md`](KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md) — 17 tasks, 6 server fns, 5 components |
+| **7** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results | Medium | None | **Planned** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases |
 | **8** | **Remaining Pages** — onboarding flows, OAuth callbacks, utility pages (Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership) | Low | None | **Planned** | [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) |
 
 ### Detailed Plan Index
@@ -345,13 +345,19 @@ crates/
           markdown_renderer.rs, chart_builder.rs, chart_info_modal.rs
           copilot_sidebar.rs, history_panel.rs, parameters.rs
           insert_link_modal.rs, save_dashboard_modal.rs, shared.rs
+        knowledge/          ← Knowledge page components
+          file_tree.rs, file_editor.rs, create_item_modal.rs, tree_types.rs
+        watches/            ← Watches page components
+          watch_modal.rs, watch_preview_card.rs, watch_agent_sidebar.rs
+          alerts_history.rs, schedule_selector.rs, execution_log_viewer.rs
+          execution_selector.rs
       pages/
         settings/           ← COMPLETE — 8 tabs, all functional
         auth/               ← COMPLETE — login, signup, recovery, passkey, OAuth
-        dashboards/         ← IN PROGRESS — list, viewer, editor
-        watches/            ← PLANNED — see LEPTOS_WATCHES_PLAN.md
-        knowledge/          ← PLANNED — see LEPTOS_KNOWLEDGE_PLAN.md
-        chat/               ← PLANNED — see LEPTOS_CHAT_PLAN.md
+        dashboards/         ← COMPLETE — list, viewer, editor
+        chat/               ← COMPLETE — session list, chat page, WebSocket streaming
+        watches/            ← COMPLETE — watches page, alerts, modals, schedule selector
+        knowledge/          ← COMPLETE — file tree, editor, auto-save, CRUD
         sql_editor/         ← PLANNED — see LEPTOS_SQL_EDITOR_PLAN.md
         not_implemented.rs  ← Placeholder for unmigrated routes
       server_fns/           ← Server functions (typed RPC)
@@ -359,10 +365,12 @@ crates/
         auth.rs, profile.rs, security.rs, dashboards.rs, datasources.rs
         collections.rs, copilot.rs, context.rs, sidebar.rs
         billing.rs, analytics.rs, team.rs, workspace.rs, usage.rs
+        chat.rs, watches.rs, knowledge.rs
         slack.rs            ← (feature-gated)
       utils/
         websocket.rs        ← WebSocket hook (dashboard updates, extensible)
         webauthn.rs         ← WebAuthn passkey utilities
+        cron.rs             ← Cron description + timezone utilities
       parser/
         chartml.rs          ← ChartML markdown parser
 
