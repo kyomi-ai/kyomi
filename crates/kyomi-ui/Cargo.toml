@@ -59,8 +59,8 @@ console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = [
     "Window", "Document", "HtmlElement", "Element", "EventTarget", "Node",
     "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
-    "RequestCredentials", "Navigator", "Clipboard", "Storage",
-    "ServiceWorkerContainer",
+    "RequestCredentials", "RequestInit", "Headers",
+    "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer",
     # WebSocket support (dashboard live updates)
     "WebSocket", "MessageEvent", "CloseEvent",
     # WebAuthn / passkey support
@@ -68,6 +68,8 @@ web-sys = { version = "0.3", features = [
     "AuthenticatorResponse", "AuthenticatorAttestationResponse",
     "AuthenticatorAssertionResponse",
     "CredentialCreationOptions", "CredentialRequestOptions",
+    # PDF export (fetch → blob → download)
+    "Response", "Blob", "Url", "CustomEvent",
 ] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures
