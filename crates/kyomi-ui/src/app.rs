@@ -61,20 +61,19 @@ pub fn App() -> impl IntoView {
     view! {
         <ThemeProvider initial_preference="system">
             <Router>
-                <Layout>
-                    <Routes fallback=|| view! { <p>"Page not found"</p> }>
-                        // Auth pages
-                        <Route path=path!("/login") view=LoginPage/>
-                        <Route path=path!("/signup/complete") view=SignupCompletePage/>
-                        <Route path=path!("/auth/google/callback") view=GoogleCallbackPage/>
-                        <Route path=path!("/account/recover") view=AccountRecoveryPage/>
-                        <Route path=path!("/account/recover/complete") view=AccountRecoveryCompletePage/>
-                        <Route path=path!("/auth/passkey-signup") view=PasskeySignupCompletePage/>
-                        <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
-                        <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
-                        // SettingsShell mounts once; child routes swap via <Outlet/>.
-                        // No re-mount on tab navigation = no flicker.
-                        <ParentRoute path=path!("/settings") view=|| view! {
+                <Routes fallback=|| view! { <p>"Page not found"</p> }>
+                    // Auth pages — NO sidebar/layout wrapper
+                    <Route path=path!("/login") view=LoginPage/>
+                    <Route path=path!("/signup/complete") view=SignupCompletePage/>
+                    <Route path=path!("/auth/google/callback") view=GoogleCallbackPage/>
+                    <Route path=path!("/account/recover") view=AccountRecoveryPage/>
+                    <Route path=path!("/account/recover/complete") view=AccountRecoveryCompletePage/>
+                    <Route path=path!("/auth/passkey-signup") view=PasskeySignupCompletePage/>
+                    <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
+                    <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
+                    // Settings pages — wrapped in Layout (sidebar) + SettingsShell
+                    <ParentRoute path=path!("/settings") view=|| view! {
+                        <Layout>
                             <div class="flex flex-col h-full bg-muted overflow-x-hidden" style:flex-direction="column">
                                 <div class="flex-1 overflow-y-auto p-4 md:p-6 relative">
                                     // Close button — matches React SettingsPage.jsx positioning
@@ -92,18 +91,18 @@ pub fn App() -> impl IntoView {
                                     </div>
                                 </div>
                             </div>
-                        }>
-                            <Route path=path!("/profile") view=ProfilePage/>
-                            <Route path=path!("/security") view=SecurityTab/>
-                            <Route path=path!("/workspace") view=WorkspacePage/>
-                            <Route path=path!("/datasources") view=DatasourcesPage/>
-                            <Route path=path!("/analytics") view=AnalyticsPage/>
-                            <Route path=path!("/usage") view=UsagePage/>
-                            <Route path=path!("/billing") view=BillingPage/>
-                            <Route path=path!("/team") view=TeamPage/>
-                        </ParentRoute>
-                    </Routes>
-                </Layout>
+                        </Layout>
+                    }>
+                        <Route path=path!("/profile") view=ProfilePage/>
+                        <Route path=path!("/security") view=SecurityTab/>
+                        <Route path=path!("/workspace") view=WorkspacePage/>
+                        <Route path=path!("/datasources") view=DatasourcesPage/>
+                        <Route path=path!("/analytics") view=AnalyticsPage/>
+                        <Route path=path!("/usage") view=UsagePage/>
+                        <Route path=path!("/billing") view=BillingPage/>
+                        <Route path=path!("/team") view=TeamPage/>
+                    </ParentRoute>
+                </Routes>
             </Router>
         </ThemeProvider>
     }

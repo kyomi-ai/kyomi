@@ -116,14 +116,42 @@ pub fn LoginPage() -> impl IntoView {
         set_google_loading.set(true);
         set_error.set(None);
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(window) = web_sys::window() {
-                let _ = window
-                    .location()
-                    .set_href("/api/v1/auth/google/login");
+        leptos::task::spawn_local(async move {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::prelude::*;
+
+                let result: Result<(), String> = async {
+                    let window = web_sys::window().ok_or("no window")?;
+                    let resp_val = wasm_bindgen_futures::JsFuture::from(
+                        window.fetch_with_str("/api/v1/auth/google/login"),
+                    )
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+
+                    let resp: web_sys::Response = resp_val.dyn_into().map_err(|e| format!("{e:?}"))?;
+                    let json_val = wasm_bindgen_futures::JsFuture::from(
+                        resp.json().map_err(|e| format!("{e:?}"))?,
+                    )
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+
+                    let auth_url = js_sys::Reflect::get(&json_val, &JsValue::from_str("authorization_url"))
+                        .ok()
+                        .and_then(|v| v.as_string())
+                        .ok_or("Missing authorization_url in response")?;
+
+                    window.location().set_href(&auth_url).map_err(|e| format!("{e:?}"))?;
+                    Ok(())
+                }
+                .await;
+
+                if let Err(e) = result {
+                    set_error.set(Some(format!("Google login failed: {e}")));
+                    set_google_loading.set(false);
+                }
             }
-        }
+        });
     });
 
     // ── Passkey handler ─────────────────────────────────────────────────

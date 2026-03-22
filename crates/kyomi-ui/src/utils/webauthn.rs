@@ -124,11 +124,16 @@ mod inner {
         let opts: serde_json::Value =
             serde_json::from_str(options_json).map_err(|e| format!("invalid JSON: {e}"))?;
 
-        // Build the publicKey object with ArrayBuffer fields
-        let public_key = js_sys::JSON::parse(options_json).map_err(js_err)?;
+        // The server returns {"publicKey": {...}} — unwrap to get the inner options
+        let inner_opts = opts.get("publicKey").unwrap_or(&opts);
+
+        // Build the publicKey JS object from the inner options
+        let inner_json = serde_json::to_string(inner_opts)
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
+        let public_key = js_sys::JSON::parse(&inner_json).map_err(js_err)?;
 
         // Convert challenge: base64url string -> ArrayBuffer
-        if let Some(challenge_str) = opts.get("challenge").and_then(|v| v.as_str()) {
+        if let Some(challenge_str) = inner_opts.get("challenge").and_then(|v| v.as_str()) {
             let buf = base64url_to_array_buffer(challenge_str)?;
             js_set(&public_key, "challenge", &buf)?;
         }
@@ -212,17 +217,22 @@ mod inner {
         let opts: serde_json::Value =
             serde_json::from_str(options_json).map_err(|e| format!("invalid JSON: {e}"))?;
 
-        // Build the publicKey object with ArrayBuffer fields
-        let public_key = js_sys::JSON::parse(options_json).map_err(js_err)?;
+        // The server returns {"publicKey": {...}} — unwrap to get the inner options
+        let inner_opts = opts.get("publicKey").unwrap_or(&opts);
+
+        // Build the publicKey JS object from the inner options
+        let inner_json = serde_json::to_string(inner_opts)
+            .map_err(|e| format!("JSON serialization error: {e}"))?;
+        let public_key = js_sys::JSON::parse(&inner_json).map_err(js_err)?;
 
         // Convert challenge: base64url string -> ArrayBuffer
-        if let Some(challenge_str) = opts.get("challenge").and_then(|v| v.as_str()) {
+        if let Some(challenge_str) = inner_opts.get("challenge").and_then(|v| v.as_str()) {
             let buf = base64url_to_array_buffer(challenge_str)?;
             js_set(&public_key, "challenge", &buf)?;
         }
 
         // Convert user.id: base64url string -> ArrayBuffer
-        if let Some(user_id_str) = opts
+        if let Some(user_id_str) = inner_opts
             .get("user")
             .and_then(|u| u.get("id"))
             .and_then(|v| v.as_str())
