@@ -8,6 +8,7 @@ pub mod not_implemented;
 pub mod settings;
 pub mod chat;
 pub mod dashboards;
+pub mod knowledge;
 pub mod not_implemented;
 pub mod settings;
 pub mod watches;

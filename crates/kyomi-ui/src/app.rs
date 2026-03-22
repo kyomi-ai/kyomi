@@ -22,6 +22,7 @@ use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, Dashboar
 use crate::pages::not_implemented::NotImplementedPage;
 use crate::pages::chat::{ChatPage, ChatsListPage};
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
+use crate::pages::knowledge::KnowledgePage;
 use crate::pages::not_implemented::NotImplementedPage;
 use crate::pages::watches::WatchesPage;
 use crate::pages::settings::analytics::AnalyticsPage;
@@ -107,7 +108,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/chat/:session_id") view=|| view! { <Layout><ChatPage/></Layout> }/>
                     <Route path=path!("/chats") view=|| view! { <Layout><ChatsListPage/></Layout> }/>
                     <Route path=path!("/sql-editor") view=|| view! { <Layout><NotImplementedPage name="SQL Editor"/></Layout> }/>
-                    <Route path=path!("/knowledge") view=|| view! { <Layout><NotImplementedPage name="Knowledge"/></Layout> }/>
+                    <Route path=path!("/knowledge") view=|| view! { <Layout><KnowledgePage/></Layout> }/>
                     <Route path=path!("/watches") view=|| view! { <Layout><WatchesPage/></Layout> }/>
                     <Route path=path!("/watches/:view") view=|| view! { <Layout><WatchesPage/></Layout> }/>
                     // Flow pages — full screen, not yet implemented
