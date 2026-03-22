@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Tab bar component — horizontal scrollable bar of result tabs.
+//!
+//! Mirrors the React `TabBar.jsx` + `ResultTab.jsx` components.
+//! Each tab shows a colored circle, row count, execution time, status icon,
+//! pin button, and close button. Double-click restores query + datasource.
+
+use leptos::prelude::*;
+
+use super::state::SqlEditorState;
+use super::types::{QueryStatus, ResultTab};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tab colors — balanced chart palette
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TAB_COLORS: [&str; 8] = [
+    "#4e79a7", "#f28e2b", "#e15759", "#76b7b2",
+    "#59a14f", "#edc948", "#b07aa1", "#ff9da7",
+];
+
+fn tab_color(color_index: u8) -> &'static str {
+    TAB_COLORS[(color_index % 8) as usize]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting helpers (match React's formatTime / formatRows)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn format_time(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    }
+}
+
+fn format_rows(count: usize) -> String {
+    if count < 1_000 {
+        format!("{count}")
+    } else if count < 1_000_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    }
+}
+
+/// Build the info string for a tab (e.g. "1.2K rows · 350ms").
+fn tab_info(tab: &ResultTab) -> Option<String> {
+    if tab.status == QueryStatus::Running {
+        return Some("Running...".to_string());
+    }
+
+    if let Some(ref result) = tab.result {
+        let row_str = result
+            .total_rows
+            .or(Some(result.row_count))
+            .filter(|&c| c > 0)
+            .map(|c| format!("{} rows", format_rows(c)));
+        let time_str = result.execution_time.map(format_time);
+        let parts: Vec<String> = [row_str, time_str].into_iter().flatten().collect();
+        if !parts.is_empty() {
+            return Some(parts.join(" \u{00b7} "));
+        }
+    }
+
+    if tab.status == QueryStatus::Error || tab.error.is_some() {
+        return Some("Error".to_string());
+    }
+
+    None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TabBar component
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Horizontal tab bar with scrollable tabs and optional new-tab button.
+///
+/// Mirrors `TabBar.jsx` — each tab is rendered inline (no separate component
+/// needed since Leptos handles fine-grained reactivity via signals).
+///
+/// # Callbacks
+/// - `on_restore_query` — called on double-click with `(query, datasource_slug)`.
+#[component]
+pub fn TabBar(
+    /// Called when a tab is double-clicked to restore its query + datasource.
+    /// Arguments: `(query_text, datasource_slug)`. `None` disables the feature.
+    on_restore_query: Option<Callback<(String, Option<String>)>>,
+) -> impl IntoView {
+    let state = SqlEditorState::use_state();
+    let tabs = state.tabs;
+    let active_tab_id = state.active_tab_id;
+
+    view! {
+        <div class="flex items-center bg-muted border-b border-border">
+            // Scrollable tab area
+            <div class="flex-1 flex overflow-x-auto overflow-y-hidden scrollbar-thin">
+                {move || {
+                    let current_tabs = tabs.get();
+                    let current_active = active_tab_id.get();
+
+                    if current_tabs.is_empty() {
+                        view! {
+                            <div class="px-4 py-2 text-xs text-muted-foreground italic">
+                                "No results yet. Run a query to see results."
+                            </div>
+                        }
+                        .into_any()
+                    } else {
+                        current_tabs
+                            .into_iter()
+                            .map(|tab| {
+                                let is_active = current_active.as_deref() == Some(&tab.id);
+                                let tab_id = tab.id.clone();
+                                view! {
+                                    <SingleTab
+                                        tab=tab
+                                        is_active=is_active
+                                        on_click={
+                                            let tab_id = tab_id.clone();
+                                            move || {
+                                                state.set_active_tab(Some(tab_id.clone()));
+                                            }
+                                        }
+                                        on_close={
+                                            let tab_id = tab_id.clone();
+                                            move || {
+                                                state.remove_tab(&tab_id);
+                                            }
+                                        }
+                                        on_toggle_pin={
+                                            let tab_id = tab_id.clone();
+                                            move || {
+                                                state.toggle_pin(&tab_id);
+                                            }
+                                        }
+                                        on_restore_query=on_restore_query
+                                    />
+                                }
+                            })
+                            .collect_view()
+                            .into_any()
+                    }
+                }}
+            </div>
+        </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SingleTab component — one tab within the bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single tab in the tab bar.
+///
+/// Mirrors `ResultTab.jsx` — colored circle, info text, status icon,
+/// pin/close buttons, active indicator.
+#[component]
+fn SingleTab(
+    /// The tab data.
+    tab: ResultTab,
+    /// Whether this tab is the currently active one.
+    is_active: bool,
+    /// Called when the tab is clicked (single click).
+    on_click: impl Fn() + Send + Sync + 'static,
+    /// Called when the close button is clicked.
+    on_close: impl Fn() + Send + Sync + 'static,
+    /// Called when the pin button is clicked.
+    on_toggle_pin: impl Fn() + Send + Sync + 'static,
+    /// Called when double-clicked to restore query. `None` disables the feature.
+    on_restore_query: Option<Callback<(String, Option<String>)>>,
+) -> impl IntoView {
+    let color = tab_color(tab.color_index);
+    let info = tab_info(&tab);
+    let is_running = tab.status == QueryStatus::Running;
+    let has_error = (tab.status == QueryStatus::Error || tab.error.is_some())
+        && tab.status != QueryStatus::Running;
+    let pinned = tab.pinned;
+    let query = tab.query.clone();
+    let ds_slug = tab.datasource_slug.clone();
+    let tooltip_query = tab.query.clone();
+
+    // Container class varies by active state
+    let container_class = if is_active {
+        "flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-all relative group min-w-0 bg-card"
+    } else {
+        "flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-all relative group min-w-0 bg-muted hover:bg-accent"
+    };
+
+    // Circle opacity varies by active state
+    let circle_opacity = if is_active { "1" } else { "0.6" };
+
+    // Info text class varies by active state
+    let info_class = if is_active {
+        "text-xs font-medium select-none whitespace-nowrap text-foreground"
+    } else {
+        "text-xs font-medium select-none whitespace-nowrap text-muted-foreground"
+    };
+
+    // Pin button visibility
+    let pin_class = if pinned {
+        "p-0.5 rounded hover:bg-muted transition-colors flex-shrink-0 opacity-100"
+    } else if is_active {
+        "p-0.5 rounded hover:bg-muted transition-colors flex-shrink-0 opacity-100"
+    } else {
+        "p-0.5 rounded hover:bg-muted transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
+    };
+
+    // Close button visibility
+    let close_class = if is_active {
+        "p-0.5 rounded hover:bg-accent transition-colors flex-shrink-0 opacity-100"
+    } else {
+        "p-0.5 rounded hover:bg-accent transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
+    };
+
+    view! {
+        <div
+            class=container_class
+            on:click=move |_| on_click()
+            on:dblclick=move |ev: web_sys::MouseEvent| {
+                ev.stop_propagation();
+                if let Some(ref cb) = on_restore_query {
+                    cb.run((query.clone(), ds_slug.clone()));
+                }
+            }
+            title=tooltip_query
+        >
+            // Colored circle indicator
+            <div
+                class="w-3 h-3 rounded-full flex-shrink-0 transition-opacity"
+                style:background-color=color
+                style:opacity=circle_opacity
+            />
+
+            // Info display (rows · time)
+            {info.map(|text| {
+                view! {
+                    <span class=info_class>{text}</span>
+                }
+            })}
+
+            // Status icon: spinner for running
+            {is_running.then(|| {
+                view! {
+                    <svg
+                        class="w-3 h-3 animate-spin flex-shrink-0"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        style:color=color
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                        />
+                    </svg>
+                }
+            })}
+
+            // Status icon: info circle for error
+            {has_error.then(|| {
+                view! {
+                    <svg
+                        class="w-3 h-3 text-info-foreground flex-shrink-0"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="2"
+                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                    </svg>
+                }
+            })}
+
+            // Pin button
+            <button
+                class=pin_class
+                aria-label=if pinned {
+                    "Unpin tab (will auto-close when limit reached)"
+                } else {
+                    "Pin tab (keep permanently)"
+                }
+                on:click=move |ev: web_sys::MouseEvent| {
+                    ev.stop_propagation();
+                    on_toggle_pin();
+                }
+            >
+                {if pinned {
+                    // Filled pin icon (matches React)
+                    view! {
+                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24" style:color=color>
+                            <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
+                        </svg>
+                    }.into_any()
+                } else {
+                    // Outline bookmark icon (matches React)
+                    view! {
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2"
+                                d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"
+                            />
+                        </svg>
+                    }.into_any()
+                }}
+            </button>
+
+            // Close button
+            <button
+                class=close_class
+                aria-label="Close tab"
+                on:click=move |ev: web_sys::MouseEvent| {
+                    ev.stop_propagation();
+                    on_close();
+                }
+            >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        stroke-width="2"
+                        d="M6 18L18 6M6 6l12 12"
+                    />
+                </svg>
+            </button>
+
+            // Active tab indicator (colored bottom border)
+            {is_active.then(|| {
+                view! {
+                    <div
+                        class="absolute bottom-0 left-0 right-0 h-0.5"
+                        style:background-color=color
+                    />
+                }
+            })}
+        </div>
+    }
+}

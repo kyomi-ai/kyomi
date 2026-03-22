@@ -73,6 +73,8 @@ web-sys = { version = "0.3", features = [
     "CredentialCreationOptions", "CredentialRequestOptions",
     # PDF export (fetch → blob → download)
     "Response", "Blob", "Url", "CustomEvent",
+    # IntersectionObserver (infinite scroll in query history)
+    "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
 ] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures
