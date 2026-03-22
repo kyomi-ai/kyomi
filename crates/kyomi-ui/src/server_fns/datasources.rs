@@ -1438,7 +1438,7 @@ pub(crate) async fn create_query_provider(
 /// Google OAuth data (e.g., service_account auth mode), `oauth_data` will
 /// be `None` — BigQuery will fall back to other auth modes.
 #[cfg(feature = "ssr")]
-async fn build_user_context(
+pub(crate) async fn build_user_context(
     ctx: &super::ServerContext,
     auth: &kyomi_auth::middleware::AuthUser,
 ) -> Result<Option<kyomi_datasource_server::UserContext>, ServerFnError> {
