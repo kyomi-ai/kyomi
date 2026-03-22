@@ -142,6 +142,22 @@ pub fn register_server_functions() {
     register_explicit::<GetWorkspaceDefaultDashboard>();
     register_explicit::<SetWorkspaceDefaultDashboard>();
 
+    use server_fns::sql_editor::*;
+    register_explicit::<ExecuteSqlQuery>();
+    register_explicit::<FetchQueryPage>();
+    register_explicit::<DryRunSql>();
+    register_explicit::<StartQueryStream>();
+    register_explicit::<ListQueryHistory>();
+    register_explicit::<SaveQueryHistory>();
+    register_explicit::<UpdateQueryHistory>();
+    register_explicit::<DeleteQueryHistory>();
+    register_explicit::<GetCatalogTree>();
+    register_explicit::<SearchCatalog>();
+    register_explicit::<RefreshCatalog>();
+    register_explicit::<GetTableInfo>();
+    register_explicit::<GenerateChartFromResults>();
+    register_explicit::<GetWsConnectionInfo>();
+
     use server_fns::datasources::*;
     register_explicit::<ListDatasources>();
     register_explicit::<GetDatasourceTypes>();

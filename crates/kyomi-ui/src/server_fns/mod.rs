@@ -27,6 +27,7 @@ pub mod security;
 pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;
+pub mod sql_editor;
 pub mod team;
 pub mod usage;
 pub mod watches;
@@ -64,9 +65,8 @@ pub struct ServerContext {
     /// Required for query execution against Connect-type datasources.
     pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
 
-    /// WebSocket manager for streaming AI responses and real-time events.
-    /// Required by `send_chat_message` for session-created notifications and
-    /// agent response delivery.
+    /// WebSocket manager for streaming AI responses, real-time events,
+    /// and streaming query results via WebSocket events.
     pub ws_manager: Option<kyomi_auth::websocket::WebSocketManager>,
 
     /// Registry for cancelling in-flight agent tasks via WebSocket `cancel_request`.

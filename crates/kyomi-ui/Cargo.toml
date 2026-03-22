@@ -19,6 +19,7 @@ ssr = [
     "dep:kyomi-embed",
     "dep:kyomi-knowledge",
     "dep:kyomi-datasource-server",
+    "dep:kyomi-connect-protocol",
     "dep:tokio",
     "dep:axum",
     "dep:sqlx",
@@ -27,6 +28,8 @@ ssr = [
     "dep:arrow-schema",
     "dep:arrow-array",
     "dep:arrow-ipc",
+    "dep:futures-util",
+    "dep:uuid",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -70,6 +73,10 @@ web-sys = { version = "0.3", features = [
     "CredentialCreationOptions", "CredentialRequestOptions",
     # PDF export (fetch → blob → download)
     "Response", "Blob", "Url", "CustomEvent",
+    # IntersectionObserver (infinite scroll in query history)
+    "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
+    # SQL Editor: crypto.randomUUID() and performance.now()
+    "Crypto", "Performance",
 ] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures
@@ -93,6 +100,7 @@ tracing = { workspace = true }
 kyomi-core = { workspace = true, optional = true }
 kyomi-auth = { workspace = true, optional = true }
 kyomi-datasource-server = { workspace = true, optional = true }
+kyomi-connect-protocol = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
@@ -128,6 +136,12 @@ chrono = { workspace = true }
 arrow-schema = { workspace = true, optional = true }
 arrow-array = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true }
+
+# Futures (for StreamExt in streaming query server functions — server-only)
+futures-util = { workspace = true, optional = true }
+
+# UUID generation (for streaming request IDs — server-only)
+uuid = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
