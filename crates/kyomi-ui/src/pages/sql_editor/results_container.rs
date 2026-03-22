@@ -58,6 +58,76 @@ pub fn ResultsContainer(
     // Local signal for pagination loading overlay.
     let (is_paginating, set_is_paginating) = signal(false);
 
+    // Local signal for re-run loading state (used by ResultsError button).
+    let (is_rerunning, set_is_rerunning) = signal(false);
+
+    // ── Auto-refresh for tabs restored from localStorage ─────────────────
+    // Tabs with `needs_refresh = true` need their data re-fetched from the
+    // server. Without this effect they show a spinner forever.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let state = state;
+        Effect::new(move |_| {
+            let Some(tab) = active_tab.get() else { return };
+            if !tab.needs_refresh { return; }
+
+            let Some(ref result) = tab.result else { return };
+            let Some(ref handle) = result.query_handle else { return };
+
+            let datasource_slug = handle.datasource_slug.clone();
+            let sql = handle.sql.clone();
+            let job_id = handle.job_id.clone();
+            let tab_id = tab.id.clone();
+            let ui_state = active_table_ui.get();
+
+            leptos::task::spawn_local(async move {
+                let fetch_result = fetch_query_page(
+                    datasource_slug,
+                    sql,
+                    ui_state.current_page,
+                    ui_state.page_size,
+                    job_id,
+                    Some(false),
+                )
+                .await;
+
+                match fetch_result {
+                    Ok(new_result) => {
+                        state.update_tab(&tab_id, |tab| {
+                            tab.status = QueryStatus::Success;
+                            tab.error = None;
+                            tab.needs_refresh = false;
+                            tab.result = Some(new_result);
+                        });
+                    }
+                    Err(err) => {
+                        let msg = format!("{err}");
+                        let error_msg = if msg.contains("Not found")
+                            || msg.contains("404")
+                            || msg.contains("not found")
+                            || msg.contains("expired")
+                        {
+                            "Query results expired. Please re-run the query.".to_string()
+                        } else {
+                            msg
+                        };
+
+                        state.update_tab(&tab_id, |tab| {
+                            tab.status = QueryStatus::Error;
+                            tab.needs_refresh = false;
+                            tab.error = Some(super::types::QueryError {
+                                message: error_msg,
+                                code: None,
+                                line: None,
+                                column: None,
+                            });
+                        });
+                    }
+                }
+            });
+        });
+    }
+
     // ── Page change handler ──────────────────────────────────────────────
 
     let handle_page_change = {
@@ -240,6 +310,8 @@ pub fn ResultsContainer(
                 handle_page_change,
                 handle_page_size_change,
                 on_run_query,
+                is_rerunning.into(),
+                set_is_rerunning,
             ),
         }
     };
@@ -274,6 +346,8 @@ fn render_tab_content(
     on_page_change: Callback<u32>,
     on_page_size_change: Callback<u32>,
     on_run_query: Option<Callback<String>>,
+    is_rerunning: Signal<bool>,
+    set_is_rerunning: WriteSignal<bool>,
 ) -> AnyView {
     // Needs refresh → loading state
     if tab.needs_refresh {
@@ -300,8 +374,12 @@ fn render_tab_content(
                 message=error_message
                 on_rerun=on_run_query.map(move |cb| {
                     let query = query.clone();
-                    Callback::new(move |_: ()| cb.run(query.clone()))
+                    Callback::new(move |_: ()| {
+                        set_is_rerunning.set(true);
+                        cb.run(query.clone());
+                    })
                 })
+                is_rerunning=is_rerunning
             />
         }
         .into_any();
@@ -372,9 +450,21 @@ fn ResultsLoading(
 // Error state
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Check whether an error message indicates expired/unavailable results
+/// (as opposed to a SQL execution error).
+fn is_expired_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("expired")
+        || lower.contains("not found")
+        || lower.contains("failed to restore")
+}
+
 /// Error state displayed when a query fails or results expire.
 ///
-/// Shows the error message and an optional "Re-run Query" button.
+/// Distinguishes between:
+/// - **Expired results** (message matches "expired", "not found", "failed to restore")
+///   → informational icon, friendly heading, re-run button.
+/// - **SQL errors** → warning triangle icon with the raw error message.
 #[component]
 fn ResultsError(
     /// The error message to display.
@@ -382,40 +472,100 @@ fn ResultsError(
     message: String,
     /// Called when the user clicks "Re-run Query". If `None`, the button is hidden.
     on_rerun: Option<Callback<()>>,
+    /// Whether a re-run is currently in progress.
+    #[prop(default = false.into())]
+    is_rerunning: Signal<bool>,
 ) -> impl IntoView {
-    view! {
-        <div class="flex-1 flex items-center justify-center p-6">
-            <div class="text-center max-w-lg">
-                // Warning triangle icon
-                <svg
-                    class="w-12 h-12 mx-auto mb-4 text-destructive/60"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                >
-                    <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="1.5"
-                        d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
-                    />
-                </svg>
+    let expired = is_expired_error(&message);
 
-                <p class="text-sm text-destructive mb-4 font-mono whitespace-pre-wrap break-words">
-                    {message}
-                </p>
+    if expired {
+        // ── Expired / unavailable results ────────────────────────────────
+        view! {
+            <div class="flex-1 flex items-center justify-center p-6">
+                <div class="text-center max-w-lg">
+                    // Info circle icon
+                    <svg
+                        class="w-12 h-12 mx-auto mb-4 text-muted-foreground/60"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="1.5"
+                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                    </svg>
 
-                {on_rerun.map(|cb| {
-                    view! {
-                        <button
-                            class="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors"
-                            on:click=move |_| cb.run(())
-                        >
-                            "Re-run Query"
-                        </button>
-                    }
-                })}
+                    <h3 class="text-sm font-semibold text-foreground mb-2">
+                        "Results No Longer Available"
+                    </h3>
+                    <p class="text-sm text-muted-foreground mb-4">
+                        {message}
+                    </p>
+
+                    {on_rerun.map(|cb| {
+                        view! {
+                            <button
+                                class="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled=move || is_rerunning.get()
+                                on:click=move |_| {
+                                    if !is_rerunning.get_untracked() {
+                                        cb.run(());
+                                    }
+                                }
+                            >
+                                {move || if is_rerunning.get() { "Re-running Query..." } else { "Re-run Query" }}
+                            </button>
+                        }
+                    })}
+                </div>
             </div>
-        </div>
+        }
+        .into_any()
+    } else {
+        // ── SQL / execution error ────────────────────────────────────────
+        view! {
+            <div class="flex-1 flex items-center justify-center p-6">
+                <div class="text-center max-w-lg">
+                    // Warning triangle icon
+                    <svg
+                        class="w-12 h-12 mx-auto mb-4 text-destructive/60"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            stroke-width="1.5"
+                            d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
+                        />
+                    </svg>
+
+                    <p class="text-sm text-destructive mb-4 font-mono whitespace-pre-wrap break-words">
+                        {message}
+                    </p>
+
+                    {on_rerun.map(|cb| {
+                        view! {
+                            <button
+                                class="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled=move || is_rerunning.get()
+                                on:click=move |_| {
+                                    if !is_rerunning.get_untracked() {
+                                        cb.run(());
+                                    }
+                                }
+                            >
+                                {move || if is_rerunning.get() { "Re-running Query..." } else { "Re-run Query" }}
+                            </button>
+                        }
+                    })}
+                </div>
+            </div>
+        }
+        .into_any()
     }
 }

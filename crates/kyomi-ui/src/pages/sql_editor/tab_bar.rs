@@ -56,7 +56,6 @@ fn tab_info(tab: &ResultTab) -> Option<String> {
         let row_str = result
             .total_rows
             .or(Some(result.row_count))
-            .filter(|&c| c > 0)
             .map(|c| format!("{} rows", format_rows(c)));
         let time_str = result.execution_time.map(format_time);
         let parts: Vec<String> = [row_str, time_str].into_iter().flatten().collect();

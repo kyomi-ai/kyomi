@@ -30,7 +30,7 @@ use super::types::{ColumnMetadata, QueryResult};
 const MIN_COL_WIDTH: f64 = 50.0;
 const DEFAULT_COL_WIDTH: f64 = 150.0;
 
-const PAGE_SIZE_OPTIONS: [u32; 6] = [10, 25, 50, 100, 250, 500];
+const PAGE_SIZE_OPTIONS: [u32; 5] = [10, 25, 50, 100, 200];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cell rendering helpers
@@ -133,24 +133,18 @@ pub fn ResultsTable(
 
     let table_ref = NodeRef::<leptos::html::Table>::new();
 
-    // Get the effective width for a column.
-    let col_width = move |idx: usize| -> Option<f64> {
-        if user_resized.get_untracked() {
-            column_widths.get_untracked().get(&idx).copied()
-        } else {
-            None
-        }
-    };
-
     // Style string for a column header/cell when user has resized.
+    // Uses reactive `.get()` so Leptos can track dependencies when called
+    // inside a reactive closure (e.g. `style=move || col_style(idx)`).
     let col_style = move |idx: usize| -> String {
-        if let Some(w) = col_width(idx) {
-            format!(
-                "flex: 0 0 {w}px; width: {w}px; min-width: {w}px; max-width: {w}px;"
-            )
-        } else {
-            "flex: 1 1 0; min-width: 100px;".to_string()
+        if user_resized.get() {
+            if let Some(w) = column_widths.get().get(&idx).copied() {
+                return format!(
+                    "flex: 0 0 {w}px; width: {w}px; min-width: {w}px; max-width: {w}px;"
+                );
+            }
         }
+        "flex: 1 1 0; min-width: 100px;".to_string()
     };
 
     // ── Mousedown on resize handle ───────────────────────────────────────
@@ -198,13 +192,28 @@ pub fn ResultsTable(
         }
 
         // Install document-level mousemove/mouseup handlers.
+        // Both closures are stored in an Rc<RefCell<..>> so the up_handler
+        // can drop them after firing, preventing memory leaks.
         #[cfg(feature = "hydrate")]
         {
+            use std::cell::RefCell;
+            use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
             use wasm_bindgen::JsCast;
 
             let Some(window) = web_sys::window() else { return };
             let Some(document) = window.document() else { return };
+
+            // Shared storage for both closures — the up_handler takes
+            // ownership and drops them when the mouseup fires.
+            let closures: Rc<
+                RefCell<
+                    Option<(
+                        Closure<dyn FnMut(web_sys::MouseEvent)>,
+                        Closure<dyn FnMut()>,
+                    )>,
+                >,
+            > = Rc::new(RefCell::new(None));
 
             let move_handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
                 move |ev: web_sys::MouseEvent| {
@@ -218,21 +227,30 @@ pub fn ResultsTable(
                 },
             );
 
-            let move_ref = move_handler
+            let move_fn: js_sys::Function = move_handler
                 .as_ref()
                 .unchecked_ref::<js_sys::Function>()
                 .clone();
             let document_clone = document.clone();
-            let move_fn_clone = move_ref.clone();
+            let move_fn_clone = move_fn.clone();
+            let closures_for_up = Rc::clone(&closures);
 
             let up_handler = Closure::<dyn FnMut()>::once(move || {
                 resizing_col.set(None);
                 let _ = document_clone
                     .remove_event_listener_with_callback("mousemove", &move_fn_clone);
+                // Remove the mouseup listener itself.
+                if let Some((_, ref up_closure)) = *closures_for_up.borrow() {
+                    let up_fn: &js_sys::Function = up_closure.as_ref().unchecked_ref();
+                    let _ = document_clone
+                        .remove_event_listener_with_callback("mouseup", up_fn);
+                }
                 if let Some(body) = document_clone.body() {
                     let _ = body.style().set_property("cursor", "");
                     let _ = body.style().set_property("user-select", "");
                 }
+                // Drop both closures, freeing WASM memory.
+                closures_for_up.borrow_mut().take();
             });
 
             // Set cursor + disable selection while resizing
@@ -242,12 +260,12 @@ pub fn ResultsTable(
             }
 
             let _ = document
-                .add_event_listener_with_callback("mousemove", move_ref.unchecked_ref());
+                .add_event_listener_with_callback("mousemove", move_fn.unchecked_ref());
             let _ = document
                 .add_event_listener_with_callback("mouseup", up_handler.as_ref().unchecked_ref());
 
-            move_handler.forget();
-            up_handler.forget();
+            // Store closures so they stay alive until the up_handler drops them.
+            *closures.borrow_mut() = Some((move_handler, up_handler));
         }
     };
 
@@ -306,11 +324,10 @@ pub fn ResultsTable(
                                 .enumerate()
                                 .map(|(idx, col)| {
                                     let col_name = col.name.clone();
-                                    let style = col_style(idx);
                                     view! {
                                         <th
                                             class="resizable-table-header text-left relative transition-colors bg-accent border-b border-border font-semibold text-foreground"
-                                            style=format!("{style} padding: 6px 8px; position: sticky; top: 0; overflow: hidden;")
+                                            style=move || format!("{} padding: 6px 8px; position: sticky; top: 0; overflow: hidden;", col_style(idx))
                                         >
                                             <div class="truncate pr-2 flex items-center">
                                                 {col_name}
@@ -363,7 +380,6 @@ pub fn ResultsTable(
                                             .enumerate()
                                             .map(|(cell_idx, cell)| {
                                                 let (display_value, is_null) = format_cell(cell);
-                                                let style = col_style(cell_idx);
                                                 let align_right = is_numeric(cell)
                                                     || columns_for_body
                                                         .get(cell_idx)
@@ -378,8 +394,8 @@ pub fn ResultsTable(
                                                 view! {
                                                     <td
                                                         class="resizable-table-cell border-b border-accent text-foreground"
-                                                        style=format!(
-                                                            "{style} padding: 4px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; {text_align}"
+                                                        style=move || format!(
+                                                            "{} padding: 4px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; {text_align}", col_style(cell_idx)
                                                         )
                                                     >
                                                         {if is_null {
