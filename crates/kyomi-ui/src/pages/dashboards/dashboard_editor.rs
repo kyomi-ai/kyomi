@@ -277,7 +277,7 @@ fn DashboardEditorInner(
 
 /// Wrapper component for the Kode CodeEditor that handles conditional compilation.
 ///
-/// On WASM targets, renders the actual Kode `CodeEditor` component.
+/// On WASM targets, renders the Kode `CodeEditor` component with Markdown highlighting.
 /// On server (SSR), renders a placeholder since Kode requires browser DOM APIs.
 #[component]
 fn DashboardCodeEditor(
@@ -286,7 +286,7 @@ fn DashboardCodeEditor(
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
-        use kode::{CodeEditor, Language};
+        use kode_leptos::{CodeEditor, Language};
 
         view! {
             <CodeEditor
@@ -300,7 +300,6 @@ fn DashboardCodeEditor(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        // Suppress unused variable warnings on server target
         let _ = content;
         let _ = on_change;
 

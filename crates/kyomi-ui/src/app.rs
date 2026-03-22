@@ -73,9 +73,9 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
                     <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
                     // Dashboard pages — wrapped in Layout (sidebar)
-                    <Route path=path!("/dashboards") view=DashboardsListPage/>
-                    <Route path=path!("/dashboard/:id") view=DashboardViewerPage/>
-                    <Route path=path!("/dashboard/:id/edit") view=DashboardEditorPage/>
+                    <Route path=path!("/dashboards") view=|| view! { <Layout><DashboardsListPage/></Layout> }/>
+                    <Route path=path!("/dashboard/:id") view=|| view! { <Layout><DashboardViewerPage/></Layout> }/>
+                    <Route path=path!("/dashboard/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
                     // Settings pages — wrapped in Layout (sidebar) + SettingsShell
                     <ParentRoute path=path!("/settings") view=|| view! {
                         <Layout>
