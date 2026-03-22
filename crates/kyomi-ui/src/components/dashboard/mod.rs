@@ -4,6 +4,7 @@
 
 pub mod chart_builder;
 pub mod chart_info_modal;
+pub mod copilot_sidebar;
 pub mod history_panel;
 pub mod insert_link_modal;
 pub mod markdown_renderer;
@@ -13,6 +14,7 @@ pub(crate) mod shared;
 
 pub use chart_builder::ChartBuilderModal;
 pub use chart_info_modal::ChartInfoModal;
+pub use copilot_sidebar::CopilotSidebar;
 pub use history_panel::HistoryPanel;
 pub use insert_link_modal::InsertDashboardLinkModal;
 pub use markdown_renderer::MarkdownRenderer;

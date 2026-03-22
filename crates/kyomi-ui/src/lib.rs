@@ -99,6 +99,11 @@ pub fn register_server_functions() {
     register_explicit::<ListOwnershipTransfers>();
     register_explicit::<CancelOwnershipTransfer>();
 
+    use server_fns::copilot::*;
+    register_explicit::<CreateCopilotSession>();
+    register_explicit::<SendCopilotMessage>();
+    register_explicit::<DeleteCopilotSession>();
+
     use server_fns::collections::*;
     register_explicit::<ListCollections>();
     register_explicit::<CreateCollection>();

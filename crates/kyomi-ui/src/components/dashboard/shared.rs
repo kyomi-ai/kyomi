@@ -1,14 +1,67 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Shared utilities for dashboard modal components.
+//! Shared utilities for dashboard components.
 //!
 //! Consolidates button class constants, date formatting, SVG icon helpers,
-//! and the `DashboardListEntry` component that are used by both
-//! `save_dashboard_modal` and `insert_link_modal`.
+//! the `DashboardListEntry` component, and the `use_is_mobile` reactive hook
+//! used by sidebar/panel components.
 
 use leptos::prelude::*;
+#[cfg(feature = "hydrate")]
+use wasm_bindgen::prelude::*;
 
 use crate::server_fns::dashboards::DashboardListItem;
+
+// ─── Mobile detection ───────────────────────────────────────────────────────
+
+/// Breakpoint (in CSS pixels) below which the viewport is considered mobile.
+pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
+
+/// Returns a reactive signal tracking whether the viewport is mobile-sized.
+///
+/// Checks the initial viewport width and listens for `resize` events.
+/// Used by `history_panel`, `copilot_sidebar`, and any future panel that
+/// needs responsive desktop/mobile layout switching.
+pub(crate) fn use_is_mobile() -> Signal<bool> {
+    let (is_mobile, set_is_mobile) = signal(false);
+
+    Effect::new(move || {
+        #[cfg(feature = "hydrate")]
+        if let Some(window) = web_sys::window() {
+            let width = window
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1024.0);
+            set_is_mobile.set(width < MOBILE_BREAKPOINT);
+        }
+    });
+
+    #[cfg(feature = "hydrate")]
+    {
+        use wasm_bindgen::closure::Closure;
+
+        let handler = Closure::<dyn Fn()>::new(move || {
+            if let Some(window) = web_sys::window() {
+                let width = window
+                    .inner_width()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1024.0);
+                set_is_mobile.set(width < MOBILE_BREAKPOINT);
+            }
+        });
+
+        if let Some(window) = web_sys::window() {
+            let _ = window
+                .add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+        }
+
+        handler.forget();
+    }
+
+    is_mobile.into()
+}
 
 // ─── Button class constants ─────────────────────────────────────────────────
 

@@ -19,57 +19,13 @@ use crate::server_fns::dashboards::{
     VersionDetail, VersionSummary,
 };
 
+use super::shared::use_is_mobile;
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const MIN_WIDTH: f64 = 320.0;
 const MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 384.0;
-const MOBILE_BREAKPOINT: f64 = 768.0;
-
-// ─── Mobile detection ───────────────────────────────────────────────────────
-
-/// Returns a reactive signal tracking whether the viewport is mobile-sized.
-/// Pattern copied from `collections_sidebar.rs`.
-fn use_is_mobile() -> Signal<bool> {
-    let (is_mobile, set_is_mobile) = signal(false);
-
-    Effect::new(move || {
-        #[cfg(feature = "hydrate")]
-        if let Some(window) = web_sys::window() {
-            let width = window
-                .inner_width()
-                .ok()
-                .and_then(|v| v.as_f64())
-                .unwrap_or(1024.0);
-            set_is_mobile.set(width < MOBILE_BREAKPOINT);
-        }
-    });
-
-    #[cfg(feature = "hydrate")]
-    {
-        use wasm_bindgen::closure::Closure;
-
-        let handler = Closure::<dyn Fn()>::new(move || {
-            if let Some(window) = web_sys::window() {
-                let width = window
-                    .inner_width()
-                    .ok()
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(1024.0);
-                set_is_mobile.set(width < MOBILE_BREAKPOINT);
-            }
-        });
-
-        if let Some(window) = web_sys::window() {
-            let _ = window
-                .add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
-        }
-
-        handler.forget();
-    }
-
-    is_mobile.into()
-}
 
 // ─── Relative time formatting ───────────────────────────────────────────────
 

@@ -3,3 +3,4 @@
 //! Shared utility modules for the Leptos frontend.
 
 pub mod webauthn;
+pub mod websocket;

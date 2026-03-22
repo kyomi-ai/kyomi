@@ -61,6 +61,8 @@ web-sys = { version = "0.3", features = [
     "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
     "RequestCredentials", "Navigator", "Clipboard", "Storage",
     "ServiceWorkerContainer",
+    # WebSocket support (dashboard live updates)
+    "WebSocket", "MessageEvent", "CloseEvent",
     # WebAuthn / passkey support
     "CredentialsContainer", "Credential", "PublicKeyCredential",
     "AuthenticatorResponse", "AuthenticatorAttestationResponse",
