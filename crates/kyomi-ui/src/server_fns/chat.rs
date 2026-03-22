@@ -46,7 +46,7 @@ pub struct WebSocketConfig {
 }
 
 /// A user who created/sent something (session owner or message sender).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionUser {
     pub user_id: String,
     pub display_name: String,
@@ -76,7 +76,7 @@ pub struct ChatSessionItem {
 ///
 /// Maps from `chat_service::MessageItem`. Encrypted content is decrypted by
 /// the service layer before reaching this struct.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessageItem {
     pub message_id: String,
     pub message_type: String,
@@ -89,7 +89,7 @@ pub struct ChatMessageItem {
 }
 
 /// Session metadata returned alongside messages.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionDetail {
     pub title: Option<String>,
     pub shared: bool,
