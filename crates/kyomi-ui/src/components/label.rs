@@ -12,7 +12,13 @@ pub const LABEL_CLASS: &str = "text-sm font-medium leading-none peer-disabled:cu
 #[component]
 pub fn Label(
     #[prop(optional, into)] html_for: String,
+    #[prop(optional, into)] class: String,
     children: Children,
 ) -> impl IntoView {
-    view! { <label class=LABEL_CLASS for=html_for>{children()}</label> }
+    let classes = if class.is_empty() {
+        LABEL_CLASS.to_string()
+    } else {
+        format!("{} {}", LABEL_CLASS, class)
+    };
+    view! { <label class=classes for=html_for>{children()}</label> }
 }

@@ -455,7 +455,6 @@ fn get_watch_name(alert: &AlertItem, watches: &[WatchListItem]) -> String {
 #[component]
 pub fn AlertsHistory(
     /// Optional pre-expanded alert ID (from URL params).
-    #[prop(optional)]
     expanded_alert_id: Option<i32>,
     /// Called when user clicks "Continue in Chat" on an alert.
     on_continue_chat: Callback<String>,
@@ -775,7 +774,7 @@ pub fn AlertsHistory(
                                         <Button
                                             variant=ButtonVariant::Ghost
                                             size=ButtonSize::Sm
-                                            disabled=bulk_action_pending
+                                            disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_mark_read
                                         >
                                             <MailOpenIcon class="h-4 w-4 sm:mr-1.5" />
@@ -784,7 +783,7 @@ pub fn AlertsHistory(
                                         <Button
                                             variant=ButtonVariant::Ghost
                                             size=ButtonSize::Sm
-                                            disabled=bulk_action_pending
+                                            disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_mark_unread
                                         >
                                             <MailIcon class="h-4 w-4 sm:mr-1.5" />
@@ -794,7 +793,7 @@ pub fn AlertsHistory(
                                             variant=ButtonVariant::Ghost
                                             size=ButtonSize::Sm
                                             class="text-destructive hover:text-destructive"
-                                            disabled=bulk_action_pending
+                                            disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_delete
                                         >
                                             <TrashIcon class="h-4 w-4 sm:mr-1.5" />

@@ -213,7 +213,7 @@ pub fn KnowledgeFileEditor(
                     set_updated_at.set(Some(detail.updated_at));
                     set_updated_by.set(detail.updated_by);
                     set_save_status.set(SaveStatus::Saved);
-                    on_saved.call(());
+                    on_saved.run(());
                 }
                 Err(e) => {
                     let current_id = loaded_file_id.get_value();
@@ -303,6 +303,7 @@ pub fn KnowledgeFileEditor(
     });
 
     // ── Render ────────────────────────────────────────────────────────────
+    let on_change_for_editor = StoredValue::new(on_change.clone());
     view! {
         <Show
             when=move || selected_file.get().is_some()
@@ -440,7 +441,7 @@ pub fn KnowledgeFileEditor(
 
                         // ── Editor area ──────────────────────────────
                         {move || {
-                            let on_change_clone = on_change.clone();
+                            let on_change_clone = on_change_for_editor.get_value();
                             if mode.get() == EditorMode::Source {
                                 view! {
                                     <div class="flex flex-1 min-h-0 overflow-hidden">

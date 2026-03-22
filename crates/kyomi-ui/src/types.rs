@@ -223,7 +223,7 @@ pub struct AlertsPage {
 }
 
 /// Result of validating and describing a cron expression.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CronDescription {
     pub valid: bool,
     pub description: String,
@@ -236,7 +236,7 @@ pub struct CronDescription {
 /// A knowledge file tree entry (no content — used for tree rendering).
 ///
 /// Mirrors `KnowledgeFileTreeEntry` in `kyomi-knowledge/src/knowledge_files.rs`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeTreeEntry {
     pub id: String,
     pub parent_id: Option<String>,

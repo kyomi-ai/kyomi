@@ -193,14 +193,15 @@ fn TreeContextMenu(
     let entry_id = entry.id.clone();
     let entry_for_rename = entry.clone();
     let entry_id_for_delete = entry_id.clone();
-    let entry_id_for_move = entry_id.clone();
+    let entry_id_for_move = StoredValue::new(entry_id.clone());
+    let entry_id_for_move_memo = entry_id.clone();
     let entry_parent_id = entry.parent_id.clone();
 
     // Build move targets: "/ (root)" + all valid folders excluding self, descendants,
     // and current parent (matching React lines 90-106).
     let move_targets = Memo::new(move |_| {
         let all = entries.get();
-        let folder_targets = get_folder_targets(&all, &entry_id_for_move);
+        let folder_targets = get_folder_targets(&all, &entry_id_for_move_memo);
 
         let mut targets: Vec<(Option<String>, String)> = Vec::new();
 
@@ -349,7 +350,7 @@ fn TreeContextMenu(
                                     </div>
                                 }.into_any()
                             } else {
-                                let entry_id = entry_id_for_move.clone();
+                                let entry_id = entry_id_for_move.get_value();
                                 let on_move = on_move.clone();
                                 let on_close = on_close.clone();
                                 targets.into_iter().map(move |(folder_id, name)| {
@@ -770,10 +771,10 @@ pub fn KnowledgeFileTree(
 
                                                 {if is_folder {
                                                     let entry_id_expand = entry.id.clone();
-                                                    let is_expanded = move || expanded_folders.get().contains(&entry_id_expand);
+                                                    let is_expanded = Signal::derive(move || expanded_folders.get().contains(&entry_id_expand));
                                                     view! {
                                                         <Show
-                                                            when=is_expanded
+                                                            when=move || is_expanded.get()
                                                             fallback=move || view! {
                                                                 <ChevronRightIcon class="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground".to_string() />
                                                             }
@@ -781,7 +782,7 @@ pub fn KnowledgeFileTree(
                                                             <ChevronDownIcon class="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground".to_string() />
                                                         </Show>
                                                         <Show
-                                                            when=is_expanded
+                                                            when=move || is_expanded.get()
                                                             fallback=move || view! {
                                                                 <FolderIcon class="w-4 h-4 flex-shrink-0 text-warning-foreground".to_string() />
                                                             }

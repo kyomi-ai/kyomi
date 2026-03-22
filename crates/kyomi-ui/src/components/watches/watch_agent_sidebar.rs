@@ -73,7 +73,6 @@ pub fn WatchAgentSidebar(
     /// Called when a watch is created/updated by the agent.
     on_watch_changed: Callback<()>,
     /// Existing watch being edited (None = create mode).
-    #[prop(optional)]
     editing_watch: Option<WatchListItem>,
 ) -> impl IntoView {
     let is_mobile = use_is_mobile();
@@ -107,11 +106,11 @@ pub fn WatchAgentSidebar(
         "Edit Watch"
     };
 
-    let empty_state_message: String = if mode == "create" {
+    let empty_state_message: StoredValue<String> = StoredValue::new(if mode == "create" {
         "What would you like to monitor?".to_string()
     } else {
         format!("Editing: {}", editing_watch_name)
-    };
+    });
 
     let empty_state_subtext = if mode == "create" {
         "Describe what data to watch and when to alert you."
@@ -197,7 +196,7 @@ pub fn WatchAgentSidebar(
     // Shared between mobile and desktop layouts.
     let panel_content = move || {
         let handle_close_clone = handle_close.clone();
-        let empty_state_message = empty_state_message.clone();
+        let empty_state_message = empty_state_message.get_value();
 
         view! {
             <div class=move || {

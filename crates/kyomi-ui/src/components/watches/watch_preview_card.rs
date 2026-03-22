@@ -329,12 +329,12 @@ pub fn WatchPreviewCard(
                             } else if created.get() {
                                 view! {
                                     // CheckCircle icon (Lucide)
-                                    <Icon icon=icondata_lu::LuCheckCircle attr:class="h-4 w-4 mr-2"/>
+                                    <Icon icon=icondata_lu::LuCircleCheck attr:class="h-4 w-4 mr-2"/>
                                     "Accepted"
                                 }.into_any()
                             } else {
                                 view! {
-                                    <Icon icon=icondata_lu::LuCheckCircle attr:class="h-4 w-4 mr-2"/>
+                                    <Icon icon=icondata_lu::LuCircleCheck attr:class="h-4 w-4 mr-2"/>
                                     "Accept"
                                 }.into_any()
                             }

@@ -306,7 +306,7 @@ pub fn KnowledgePage() -> impl IntoView {
                                 == Some(&file_id)
                             {
                                 set_selected_file.update(|f| {
-                                    if let Some(ref mut file) = f {
+                                    if let Some(file) = f {
                                         file.name = name.clone();
                                     }
                                 });

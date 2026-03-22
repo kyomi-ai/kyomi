@@ -822,7 +822,7 @@ pub fn ScheduleSelector(
                     <div class=container_class>
                         <div class="flex items-start gap-2">
                             {(!desc.valid).then(|| view! {
-                                <Icon icon=icondata_lu::LuAlertCircle attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
+                                <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
                             })}
                             <div class="flex-1">
                                 <span class=text_class>{desc.description}</span>

@@ -300,7 +300,7 @@ fn WatchCard(
                         on_change=Callback::new(move |_: bool| {
                             on_toggle.run(wid_toggle.clone());
                         })
-                        disabled=move || toggle_pending.get()
+                        disabled=toggle_pending.get()
                     />
                 </div>
             </CardHeader>
@@ -649,19 +649,20 @@ pub fn WatchesPage() -> impl IntoView {
     // Timezone offset for cron descriptions.
     let tz_offset = get_tz_offset_minutes();
 
-    // Navigation helpers.
-    let nav_alerts = {
+    // Navigation helpers — stored as Callbacks so they are Copy and can be used
+    // inside `move` closures without consuming them.
+    let nav_alerts = StoredValue::new({
         let navigate = navigate.clone();
-        move |_: leptos::ev::MouseEvent| {
+        move || {
             navigate("/watches/alerts", Default::default());
         }
-    };
-    let nav_watches = {
+    });
+    let nav_watches = StoredValue::new({
         let navigate = navigate.clone();
-        move |_: leptos::ev::MouseEvent| {
+        move || {
             navigate("/watches/config", Default::default());
         }
-    };
+    });
     let handle_create_watch = move |_: leptos::ev::MouseEvent| {
         set_agent_editing_watch.set(None);
         set_show_agent_sidebar.set(true);
@@ -749,7 +750,7 @@ pub fn WatchesPage() -> impl IntoView {
                                 // View toggle — Alerts first since it's the inbox
                                 <div class="flex items-center rounded-lg bg-muted p-1">
                                     <button
-                                        on:click=nav_alerts
+                                        on:click=move |_| nav_alerts.with_value(|f| f())
                                         class=move || {
                                             if active_view.get() == "alerts" {
                                                 "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors bg-background text-foreground shadow-sm"
@@ -762,7 +763,7 @@ pub fn WatchesPage() -> impl IntoView {
                                         <span class="hidden sm:inline">"Alerts"</span>
                                     </button>
                                     <button
-                                        on:click=nav_watches
+                                        on:click=move |_| nav_watches.with_value(|f| f())
                                         class=move || {
                                             if active_view.get() == "watches" {
                                                 "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors bg-background text-foreground shadow-sm"
@@ -917,9 +918,9 @@ pub fn WatchesPage() -> impl IntoView {
                         let execs = executions_resource.get()
                             .and_then(|r| r.ok())
                             .unwrap_or_default();
-                        let selected_exec = execution_detail_resource.get().flatten();
+                        let selected_exec = StoredValue::new(execution_detail_resource.get().flatten());
                         let is_loading = Signal::derive(move || {
-                            executions_resource.loading().get() || execution_detail_resource.loading().get()
+                            executions_resource.get().is_none()
                         });
                         // Find watch name and prompt from watches resource (single lookup).
                         let (watch_name, watch_prompt) = watches_resource.get()
@@ -931,6 +932,8 @@ pub fn WatchesPage() -> impl IntoView {
                             .unwrap_or_default();
 
                         let modal_title = format!("Execution History - {watch_name}");
+                        let execs = StoredValue::new(execs);
+                        let watch_prompt = StoredValue::new(watch_prompt);
                         view! {
                             <Modal
                                 show=Signal::derive(move || show_execution_log.get())
@@ -943,11 +946,11 @@ pub fn WatchesPage() -> impl IntoView {
                                 size=ModalSize::Xl
                             >
                                 <ExecutionLogViewer
-                                    executions=execs
-                                    selected_execution=Signal::derive(move || selected_exec.clone())
+                                    executions=execs.get_value()
+                                    selected_execution=Signal::derive(move || selected_exec.get_value())
                                     on_select_execution=on_select_execution
                                     is_loading=is_loading
-                                    watch_prompt=watch_prompt
+                                    watch_prompt=watch_prompt.get_value()
                                 />
                             </Modal>
                         }

@@ -32,7 +32,7 @@ use super::ExecutionSelector;
 ///
 /// The Leptos Badge only has Default, Secondary, Destructive, Warning, Outline.
 /// We map success -> Default, info/running -> Default.
-fn status_badge_view(status: &str) -> impl IntoView {
+fn status_badge_view(status: &str) -> impl IntoView + use<> {
     match status {
         "success" => view! {
             <Badge variant=BadgeVariant::Default>"Alert Triggered"</Badge>
@@ -257,11 +257,13 @@ pub fn ExecutionLogViewer(
                         "Watch monitoring instruction".to_string()
                     };
 
+                    let status_badge = status_badge_view(&status);
+
                     view! {
                         // Summary Header
                         <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
                             <div class="flex items-center gap-3">
-                                {status_badge_view(&status)}
+                                {status_badge}
                                 <span class="text-xs text-muted-foreground">
                                     {timestamp}
                                 </span>
@@ -275,7 +277,7 @@ pub fn ExecutionLogViewer(
                         {error_message.clone().map(|err_msg| view! {
                             <div class="p-3 bg-error/10 border border-error-border rounded-lg">
                                 <div class="flex items-start gap-2">
-                                    <Icon icon=icondata_lu::LuXCircle attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
+                                    <Icon icon=icondata_lu::LuCircleX attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
                                     <div>
                                         <p class="text-sm font-medium text-error-foreground">"Execution Error"</p>
                                         <p class="text-sm text-error-foreground/80 mt-1">{err_msg}</p>

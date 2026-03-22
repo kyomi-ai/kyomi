@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::types::KnowledgeTreeEntry;
 
 /// A node in the knowledge file tree with depth information.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TreeNode {
     pub entry: KnowledgeTreeEntry,
     pub children: Vec<TreeNode>,

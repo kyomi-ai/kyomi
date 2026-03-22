@@ -26,8 +26,13 @@ pub fn Card(
 /// Card header section.
 /// React: `flex flex-col space-y-1.5 p-6`
 #[component]
-pub fn CardHeader(children: Children) -> impl IntoView {
-    view! { <div class="flex flex-col space-y-1.5 p-6">{children()}</div> }
+pub fn CardHeader(
+    #[prop(optional, into)]
+    class: String,
+    children: Children,
+) -> impl IntoView {
+    let classes = format!("flex flex-col space-y-1.5 p-6 {}", class);
+    view! { <div class=classes>{children()}</div> }
 }
 
 /// Card content section.

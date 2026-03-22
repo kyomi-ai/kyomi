@@ -126,7 +126,7 @@ pub fn WatchModal(
 
     // ── Submit handler ──────────────────────────────────────────────────
     let watch_id_for_submit = watch_id.clone();
-    let handle_submit = move |_| {
+    let handle_submit = move || {
         // Validation
         let name_val = name.get_untracked();
         let prompt_val = prompt.get_untracked();
@@ -212,12 +212,12 @@ pub fn WatchModal(
         });
     };
 
-    let handle_submit_form = handle_submit.clone();
+    let handle_submit_form = StoredValue::new(handle_submit.clone());
 
     // ── Footer ──────────────────────────────────────────────────────────
-    let footer_view: ChildrenFn = {
+    let footer_view = {
         let handle_submit = handle_submit.clone();
-        Box::new(move || {
+        ChildrenFn::to_children(move || {
             let handle_submit = handle_submit.clone();
             view! {
                 <button
@@ -232,7 +232,7 @@ pub fn WatchModal(
                     type="button"
                     class=format!("{BTN_BASE} bg-primary text-primary-foreground shadow hover:bg-primary/90 {BTN_SM}")
                     disabled=move || is_saving.get()
-                    on:click=move |ev| handle_submit(ev)
+                    on:click=move |_| handle_submit()
                 >
                     {move || {
                         if is_saving.get() {
@@ -260,9 +260,9 @@ pub fn WatchModal(
         >
             <form
                 class="space-y-5"
-                on:submit=move |ev| {
+                on:submit=move |ev: web_sys::SubmitEvent| {
                     ev.prevent_default();
-                    handle_submit_form(ev);
+                    handle_submit_form.with_value(|f| f());
                 }
             >
                 // ── Name ────────────────────────────────────────────────
@@ -567,7 +567,7 @@ pub fn WatchModal(
                         </span>
                     </Label>
                     <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                        <Icon icon=icondata_lu::LuAlertTriangle attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                        <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
                         <span>
                             "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
                         </span>
