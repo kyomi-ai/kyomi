@@ -9,6 +9,7 @@ pub mod insert_link_modal;
 pub mod markdown_renderer;
 pub mod parameters;
 pub mod save_dashboard_modal;
+pub(crate) mod shared;
 
 pub use chart_builder::ChartBuilderModal;
 pub use chart_info_modal::ChartInfoModal;

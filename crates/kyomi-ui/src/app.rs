@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 use leptos_meta::provide_meta_context;
 use leptos_router::{
-    components::{Outlet, ParentRoute, Route, Router, Routes},
+    components::{ParentRoute, Redirect, Route, Router, Routes},
     path,
 };
 
@@ -19,6 +19,7 @@ use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
 use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
+use crate::pages::not_implemented::NotImplementedPage;
 use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::datasources::DatasourcesPage;
 use crate::pages::settings::profile::ProfilePage;
@@ -72,10 +73,35 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/auth/passkey-signup") view=PasskeySignupCompletePage/>
                     <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
                     <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
+                    // Auth pages — not yet implemented
+                    <Route path=path!("/verify-email") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
+                    <Route path=path!("/verify") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
+                    <Route path=path!("/oauth-complete") view=|| view! { <NotImplementedPage name="OAuth Complete"/> }/>
+                    <Route path=path!("/auth/slack-connect") view=|| view! { <NotImplementedPage name="Slack Connect"/> }/>
+                    <Route path=path!("/auth/google/link-callback") view=|| view! { <NotImplementedPage name="Google Account Link"/> }/>
+                    <Route path=path!("/auth/oauth/:provider/callback") view=|| view! { <NotImplementedPage name="OAuth Callback"/> }/>
+                    <Route path=path!("/welcome") view=|| view! { <NotImplementedPage name="Welcome"/> }/>
+                    <Route path=path!("/unsubscribe") view=|| view! { <NotImplementedPage name="Unsubscribe"/> }/>
                     // Dashboard pages — wrapped in Layout (sidebar)
                     <Route path=path!("/dashboards") view=|| view! { <Layout><DashboardsListPage/></Layout> }/>
                     <Route path=path!("/dashboard/:id") view=|| view! { <Layout><DashboardViewerPage/></Layout> }/>
                     <Route path=path!("/dashboard/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
+                    // Main app pages — wrapped in Layout, not yet implemented
+                    <Route path=path!("/") view=|| view! { <Layout><NotImplementedPage name="Home"/></Layout> }/>
+                    <Route path=path!("/chat") view=|| view! { <Layout><NotImplementedPage name="Chat"/></Layout> }/>
+                    <Route path=path!("/chat/:session_id") view=|| view! { <Layout><NotImplementedPage name="Chat"/></Layout> }/>
+                    <Route path=path!("/chats") view=|| view! { <Layout><NotImplementedPage name="Chats"/></Layout> }/>
+                    <Route path=path!("/sql-editor") view=|| view! { <Layout><NotImplementedPage name="SQL Editor"/></Layout> }/>
+                    <Route path=path!("/knowledge") view=|| view! { <Layout><NotImplementedPage name="Knowledge"/></Layout> }/>
+                    <Route path=path!("/watches") view=|| view! { <Layout><NotImplementedPage name="Watches"/></Layout> }/>
+                    <Route path=path!("/watches/:view") view=|| view! { <Layout><NotImplementedPage name="Watches"/></Layout> }/>
+                    // Flow pages — full screen, not yet implemented
+                    <Route path=path!("/try") view=|| view! { <NotImplementedPage name="Try Kyomi"/> }/>
+                    <Route path=path!("/connect/setup") view=|| view! { <NotImplementedPage name="Connect Setup"/> }/>
+                    <Route path=path!("/setup") view=|| view! { <NotImplementedPage name="Setup"/> }/>
+                    <Route path=path!("/onboarding") view=|| view! { <NotImplementedPage name="Onboarding"/> }/>
+                    <Route path=path!("/onboarding/catalog") view=|| view! { <NotImplementedPage name="Onboarding"/> }/>
+                    <Route path=path!("/accept-ownership/:transfer_id") view=|| view! { <NotImplementedPage name="Accept Ownership"/> }/>
                     // Settings pages — wrapped in Layout (sidebar) + SettingsShell
                     <ParentRoute path=path!("/settings") view=|| view! {
                         <Layout>
@@ -98,6 +124,7 @@ pub fn App() -> impl IntoView {
                             </div>
                         </Layout>
                     }>
+                        <Route path=path!("") view=|| view! { <Redirect path="/settings/profile"/> }/>
                         <Route path=path!("/profile") view=ProfilePage/>
                         <Route path=path!("/security") view=SecurityTab/>
                         <Route path=path!("/workspace") view=WorkspacePage/>

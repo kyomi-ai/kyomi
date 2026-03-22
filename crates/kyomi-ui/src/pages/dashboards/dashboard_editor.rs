@@ -96,6 +96,12 @@ pub fn DashboardEditorPage() -> impl IntoView {
 
     let is_new = Memo::new(move |_| dashboard_id.get() == "new");
 
+    // Resource created at component level, keyed on dashboard_id
+    let dashboard_resource = Resource::new(
+        move || dashboard_id.get(),
+        move |id| get_dashboard(id),
+    );
+
     view! {
         {move || {
             if is_new.get() {
@@ -110,10 +116,6 @@ pub fn DashboardEditorPage() -> impl IntoView {
                 .into_any()
             } else {
                 // Existing dashboard: fetch then render
-                let did = dashboard_id.get();
-                let dashboard_resource =
-                    Resource::new(move || did.clone(), move |id| get_dashboard(id));
-
                 view! {
                     <Suspense fallback=move || {
                         view! {
@@ -214,6 +216,7 @@ fn DashboardEditorInner(
     > = StoredValue::new(None);
 
     let on_editor_change = Arc::new(move |text: String| {
+        set_save_error.set(None);
         set_editor_content.set(text.clone());
 
         #[cfg(target_arch = "wasm32")]
@@ -423,6 +426,10 @@ fn DashboardEditorInner(
     });
 
     let on_history_restore = Callback::new(move |()| {
+        // Cancel any pending debounce so restored content isn't overwritten
+        #[cfg(target_arch = "wasm32")]
+        debounce_handle.update_value(|h| { drop(h.take()); });
+
         // Refetch the dashboard to get restored content
         let did = current_dashboard_id.get_untracked();
         set_history_preview_content.set(None);
@@ -529,8 +536,8 @@ fn DashboardEditorInner(
                     has_unsaved_changes.get().then(|| {
                         view! {
                             <div class="flex items-center gap-1.5 whitespace-nowrap">
-                                <span class="w-2 h-2 rounded-full bg-amber-500" />
-                                <span class="text-xs text-amber-500 font-medium">"Unsaved"</span>
+                                <span class="w-2 h-2 rounded-full bg-warning-foreground" />
+                                <span class="text-xs text-warning-foreground font-medium">"Unsaved"</span>
                             </div>
                         }
                     })
@@ -694,7 +701,8 @@ fn DashboardEditorInner(
 /// On server (SSR), renders a placeholder since Kode requires browser DOM APIs.
 #[component]
 fn DashboardCodeEditor(
-    content: ReadSignal<String>,
+    #[prop(into)]
+    content: Signal<String>,
     on_change: Arc<dyn Fn(String) + Send + Sync>,
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
@@ -704,7 +712,7 @@ fn DashboardCodeEditor(
         view! {
             <CodeEditor
                 language=Signal::stored(Language::Markdown)
-                content=Signal::derive(move || content.get())
+                content=content
                 on_change=on_change
             />
         }

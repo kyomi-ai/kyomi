@@ -28,11 +28,9 @@ pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
         return file_response(path, &file, &headers);
     }
 
-    // SPA fallback: serve index.html for any unmatched path
-    match FrontendAssets::get("index.html") {
-        Some(file) => file_response("index.html", &file, &headers),
-        None => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
-    }
+    // SPA fallback: serve the Leptos shell for any unmatched page request.
+    // React's index.html is no longer used — all routing is handled by Leptos.
+    crate::leptos_frontend::serve_leptos_shell().await
 }
 
 /// Files that should never be cached (always revalidated by the browser).

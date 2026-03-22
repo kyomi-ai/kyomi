@@ -21,20 +21,7 @@ use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::DynSelect;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
-// ─── Constants ──────────────────────────────────────────────────────────────
-
-/// Button base classes — same as `save_dashboard_modal.rs`.
-const BTN_BASE: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";
-
-/// Default (primary) button variant classes.
-const BTN_DEFAULT: &str =
-    "bg-primary text-primary-foreground shadow hover:bg-primary/90";
-
-/// Outline button variant classes.
-const BTN_OUTLINE: &str = "border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground";
-
-/// Default button size classes.
-const BTN_SIZE: &str = "h-9 px-4 py-2";
+use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_OUTLINE, BTN_SIZE};
 
 /// Label classes — matches the project's design system.
 const LABEL_CLASS: &str = "text-sm font-medium text-foreground";
@@ -57,6 +44,8 @@ const CHART_TYPES: &[(&str, &str)] = &[
 /// A single Y-axis series entry.
 #[derive(Clone, Debug)]
 struct SeriesEntry {
+    /// Unique ID for stable keying in `<For>` loops.
+    id: u32,
     y_field: String,
     label: String,
 }
@@ -100,10 +89,6 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
         return chart;
     };
 
-    if let Some(title) = doc.get("title").and_then(|v| v.as_str()) {
-        chart.title = title.to_string();
-    }
-
     if let Some(data) = doc.get("data") {
         if let Some(ds) = data.get("datasource").and_then(|v| v.as_str()) {
             chart.datasource_slug = ds.to_string();
@@ -122,22 +107,59 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
         if let Some(ct) = vis.get("type").and_then(|v| v.as_str()) {
             chart.chart_type = ct.to_string();
         }
-        if let Some(x) = vis.get("x").and_then(|v| v.as_str()) {
+        if let Some(x) = vis.get("columns").and_then(|v| v.as_str()) {
             chart.x_field = x.to_string();
         }
-        if let Some(serde_yaml::Value::Sequence(series_seq)) = vis.get("series") {
-            for entry in series_seq {
-                let y = entry
-                    .get("y")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let label = entry
-                    .get("label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                chart.series.push(SeriesEntry { y_field: y, label });
+
+        // Title lives under visualize.style.title
+        if let Some(style) = vis.get("style") {
+            if let Some(title) = style.get("title").and_then(|v| v.as_str()) {
+                chart.title = title.to_string();
+            }
+        }
+
+        // Parse rows — can be a bare string or a sequence of {field, label} objects
+        if let Some(rows_val) = vis.get("rows") {
+            match rows_val {
+                serde_yaml::Value::String(s) => {
+                    // Single row as bare string
+                    chart.series.push(SeriesEntry {
+                        id: 0,
+                        y_field: s.clone(),
+                        label: String::new(),
+                    });
+                }
+                serde_yaml::Value::Sequence(rows_seq) => {
+                    for (i, entry) in rows_seq.iter().enumerate() {
+                        match entry {
+                            serde_yaml::Value::String(s) => {
+                                chart.series.push(SeriesEntry {
+                                    id: i as u32,
+                                    y_field: s.clone(),
+                                    label: String::new(),
+                                });
+                            }
+                            _ => {
+                                let field = entry
+                                    .get("field")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let label = entry
+                                    .get("label")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                chart.series.push(SeriesEntry {
+                                    id: i as u32,
+                                    y_field: field,
+                                    label,
+                                });
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -166,7 +188,6 @@ fn build_yaml(
     let mut yaml = format!(
         r#"- type: chart
   version: 1
-  title: "{title}"
   data:
     datasource: "{datasource_slug}"
     sql: |
@@ -175,25 +196,34 @@ fn build_yaml(
     type: {chart_type}"#
     );
 
-    // x axis — only for chart types that use it
+    // columns — only for chart types that use axes
     let needs_axes = !matches!(chart_type, "metric" | "pie" | "doughnut");
     if needs_axes && !x_field.is_empty() {
-        yaml.push_str(&format!("\n    x: {x_field}"));
+        yaml.push_str(&format!("\n    columns: {x_field}"));
     }
 
-    // Series
-    let has_series = series.iter().any(|s| !s.y_field.is_empty());
-    if has_series {
-        yaml.push_str("\n    series:");
-        for entry in series {
-            if entry.y_field.is_empty() {
-                continue;
-            }
-            yaml.push_str(&format!("\n      - y: {}", entry.y_field));
-            if !entry.label.is_empty() {
-                yaml.push_str(&format!("\n        label: \"{}\"", entry.label));
+    // rows — single row uses bare string form, multiple use object form
+    let non_empty_series: Vec<&SeriesEntry> =
+        series.iter().filter(|s| !s.y_field.is_empty()).collect();
+    if !non_empty_series.is_empty() {
+        if non_empty_series.len() == 1 && non_empty_series[0].label.is_empty() {
+            // Single series without label — bare string form
+            yaml.push_str(&format!("\n    rows: {}", non_empty_series[0].y_field));
+        } else {
+            // Multi series or series with labels — object form
+            yaml.push_str("\n    rows:");
+            for entry in &non_empty_series {
+                yaml.push_str(&format!("\n      - field: {}", entry.y_field));
+                if !entry.label.is_empty() {
+                    yaml.push_str(&format!("\n        label: \"{}\"", entry.label));
+                }
             }
         }
+    }
+
+    // Title under visualize.style.title
+    if !title.is_empty() {
+        yaml.push_str(&format!("\n    style:\n      title: \"{title}\""));
     }
 
     yaml.push('\n');
@@ -225,12 +255,18 @@ pub fn ChartBuilderModal(
     on_insert: Callback<String>,
 ) -> impl IntoView {
     let is_edit_mode = existing_yaml.is_some();
+    let existing_yaml_stored = StoredValue::new(existing_yaml.clone());
 
     // Parse existing YAML or use defaults
     let initial = existing_yaml
         .as_ref()
         .map(|y| parse_existing_yaml(y))
         .unwrap_or_default();
+
+    // ── Unique ID counter for series entries ─────────────────────────────
+    let (next_series_id, set_next_series_id) = signal(
+        if initial.series.is_empty() { 1u32 } else { initial.series.len() as u32 }
+    );
 
     // ── Form state ──────────────────────────────────────────────────────
 
@@ -254,6 +290,7 @@ pub fn ChartBuilderModal(
 
     let initial_series = if initial.series.is_empty() {
         vec![SeriesEntry {
+            id: 0,
             y_field: String::new(),
             label: String::new(),
         }]
@@ -261,6 +298,43 @@ pub fn ChartBuilderModal(
         initial.series.clone()
     };
     let (series, set_series) = signal(initial_series);
+
+    // ── Reset form state when modal opens with different yaml ────────────
+    Effect::new(move || {
+        if open.get() {
+            let yaml = existing_yaml_stored.get_value();
+            let parsed = yaml
+                .as_ref()
+                .map(|y| parse_existing_yaml(y))
+                .unwrap_or_default();
+
+            set_title.set(if parsed.title.is_empty() {
+                "New Chart".to_string()
+            } else {
+                parsed.title.clone()
+            });
+            set_datasource_slug.set(parsed.datasource_slug.clone());
+            set_sql.set(parsed.sql.clone());
+            set_chart_type.set(if parsed.chart_type.is_empty() {
+                "bar".to_string()
+            } else {
+                parsed.chart_type.clone()
+            });
+            set_x_field.set(parsed.x_field.clone());
+
+            if parsed.series.is_empty() {
+                set_next_series_id.set(1);
+                set_series.set(vec![SeriesEntry {
+                    id: 0,
+                    y_field: String::new(),
+                    label: String::new(),
+                }]);
+            } else {
+                set_next_series_id.set(parsed.series.len() as u32);
+                set_series.set(parsed.series);
+            }
+        }
+    });
 
     // ── Datasource options from server ──────────────────────────────────
     let datasources_resource = Resource::new(
@@ -291,8 +365,11 @@ pub fn ChartBuilderModal(
     // ── Series management ───────────────────────────────────────────────
 
     let add_series = move |_: web_sys::MouseEvent| {
+        let id = next_series_id.get_untracked();
+        set_next_series_id.set(id + 1);
         set_series.update(|s| {
             s.push(SeriesEntry {
+                id,
                 y_field: String::new(),
                 label: String::new(),
             });
@@ -476,7 +553,7 @@ pub fn ChartBuilderModal(
                             let s = series.get();
                             s.into_iter().enumerate().collect::<Vec<_>>()
                         }
-                        key=|(idx, _)| *idx
+                        key=|(_, entry)| entry.id
                         let:item
                     >
                         {
