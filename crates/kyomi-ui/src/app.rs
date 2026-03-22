@@ -43,7 +43,7 @@ pub fn Shell(#[prop(optional)] children: Option<Children>) -> impl IntoView {
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-                <title>"Kyomi — Settings"</title>
+                <title>"Kyomi"</title>
                 <leptos_meta::MetaTags/>
             </head>
             <body class="min-h-screen bg-background text-foreground antialiased">

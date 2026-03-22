@@ -25,55 +25,7 @@ use crate::server_fns::chat::{
 };
 use crate::server_fns::context::get_user_context;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Relative time helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Converts an RFC 3339 timestamp string into a compact relative time string.
-///
-/// Matches the React `formatDate` in ChatsList.jsx:
-/// - "Just now" (< 60s)
-/// - "Xm ago" (< 60m)
-/// - "Xh ago" (< 24h)
-/// - "Xd ago" (< 7d)
-/// - "Mar 15" (>= 7d, same year)
-/// - "Mar 15, 2025" (different year)
-fn format_relative_time(rfc3339: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
-        return rfc3339.to_string();
-    };
-
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(parsed);
-
-    let seconds = duration.num_seconds();
-    if seconds < 60 {
-        return "Just now".to_string();
-    }
-
-    let minutes = duration.num_minutes();
-    if minutes < 60 {
-        return format!("{minutes}m ago");
-    }
-
-    let hours = duration.num_hours();
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-
-    let days = duration.num_days();
-    if days < 7 {
-        return format!("{days}d ago");
-    }
-
-    // For older dates, show "Mar 15" or "Mar 15, 2025"
-    let parsed_utc = parsed.with_timezone(&chrono::Utc);
-    if parsed_utc.format("%Y").to_string() == now.format("%Y").to_string() {
-        parsed_utc.format("%b %-d").to_string()
-    } else {
-        parsed_utc.format("%b %-d, %Y").to_string()
-    }
-}
+use super::format_relative_time;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chat status / ownership helpers
@@ -101,6 +53,12 @@ fn get_chat_status(session: &ChatSessionItem, current_user_id: &str) -> ChatStat
 }
 
 /// Whether the current user owns the session — matches React `isOwned`.
+///
+/// React also checks `session.user_id === user?.user_id` as a fallback, but
+/// `SessionListItem` from `kyomi_auth::chat_service` does not expose a top-level
+/// `user_id` field. The `created_by` check is equivalent because the service
+/// layer always populates `created_by` for sessions the user owns, so the
+/// fallback is unnecessary here.
 fn is_session_owned(session: &ChatSessionItem, current_user_id: &str) -> bool {
     if let Some(ref created_by) = session.created_by {
         created_by.user_id == current_user_id
@@ -281,6 +239,10 @@ pub fn ChatsListPage() -> impl IntoView {
     }
 
     // ── Task 6.4: Listen for sessions-deleted DOM event ──────────────────
+    // NOTE: This Effect::new closure only runs once despite being inside an
+    // effect, because all captured signals (`set_sessions`, `set_selected_chats`)
+    // are write-only — no reactive reads trigger re-execution. The `on_cleanup`
+    // inside correctly removes the listener when the component unmounts.
     #[cfg(target_arch = "wasm32")]
     {
         use send_wrapper::SendWrapper;
@@ -437,8 +399,10 @@ pub fn ChatsListPage() -> impl IntoView {
                 .collect(),
         };
 
-        // Sort by updated_at (most recent first) — matches React's sort by
-        // last_activity_at || created_at
+        // Sort by most recent first. React sorts by `last_activity_at || created_at`,
+        // but `SessionListItem` from `kyomi_auth::chat_service` does not expose
+        // `last_activity_at`. We use `updated_at` which the service layer updates
+        // on every message, making it functionally equivalent.
         filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         filtered
     };
@@ -920,15 +884,25 @@ pub fn ChatsListPage() -> impl IntoView {
                 </Suspense>
             </div>
 
-            // Confirm Dialog
-            <ConfirmDialog
-                open=Signal::derive(move || confirm_open.get())
-                title=confirm_title.get_untracked()
-                message=confirm_message.get_untracked()
-                confirm_text="Delete"
-                on_confirm=on_confirm
-                on_cancel=on_cancel
-            />
+            // Confirm Dialog — wrapped in a reactive closure so the title and
+            // message re-render with fresh signal values each time they change.
+            // ConfirmDialog accepts `title: String` and `message: String` (owned,
+            // non-reactive), so without this wrapper they would be captured once
+            // at mount time and stay blank forever.
+            {move || {
+                let title = confirm_title.get();
+                let message = confirm_message.get();
+                view! {
+                    <ConfirmDialog
+                        open=Signal::derive(move || confirm_open.get())
+                        title=title
+                        message=message
+                        confirm_text="Delete"
+                        on_confirm=on_confirm
+                        on_cancel=on_cancel
+                    />
+                }
+            }}
         </div>
     }
 }

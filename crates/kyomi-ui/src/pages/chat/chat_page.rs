@@ -227,6 +227,11 @@ pub fn ChatPage() -> impl IntoView {
     // Phase 9 — shared conversation: skip AI response checkbox
     let (skip_ai_response, set_skip_ai_response) = signal(false);
 
+    // M8 — Track just-created sessions to skip redundant reload when URL changes.
+    // When on_send creates a new session and navigates, the URL change triggers
+    // the session loading effect. This signal lets us skip that redundant load.
+    let just_created_session: RwSignal<Option<String>> = RwSignal::new(None);
+
     // Phase 9 — dashboard modal state (read signals used when SaveDashboardModal
     // is wired in Phase 13)
     let (_dashboard_modal_open, set_dashboard_modal_open) = signal(false);
@@ -298,6 +303,13 @@ pub fn ChatPage() -> impl IntoView {
         match (&new_session_id, &current) {
             // URL has a session ID and it's different from current — load it
             (Some(sid), _) if Some(sid) != current.as_ref() => {
+                // M8 — Skip reload for sessions we just created (data is already loaded)
+                if just_created_session.get_untracked().as_deref() == Some(sid.as_str()) {
+                    just_created_session.set(None);
+                    set_current_session_id.set(Some(sid.clone()));
+                    return;
+                }
+
                 let sid = sid.clone();
                 set_messages.set(Vec::new());
                 set_current_greeting.set(String::new());
@@ -313,6 +325,7 @@ pub fn ChatPage() -> impl IntoView {
                             if let Some(ref title) = response.session.title {
                                 set_session_title.set(title.clone());
                             }
+                            let is_shared = response.session.shared;
                             set_session_metadata.set(response.session);
 
                             // Build thinking state from stored events
@@ -343,7 +356,19 @@ pub fn ChatPage() -> impl IntoView {
                             }
                             set_thinking_map.set(thinking);
 
+                            // M16 — Capture last message ID before the move
+                            let last_msg_id = response.messages.last().map(|m| m.message_id.clone());
                             set_messages.set(response.messages);
+
+                            // M16 — Mark session read for shared conversations
+                            // immediately after loading, instead of in a separate
+                            // Effect that over-fires on metadata changes.
+                            if is_shared {
+                                let read_sid = sid.clone();
+                                leptos::task::spawn_local(async move {
+                                    let _ = mark_session_read(read_sid, last_msg_id).await;
+                                });
+                            }
                         }
                         Err(_e) => {
                             // Gracefully handle by setting empty messages
@@ -399,11 +424,15 @@ pub fn ChatPage() -> impl IntoView {
                 let client_height = container.client_height();
                 let distance_from_bottom = scroll_height - scroll_top - client_height;
 
-                // Only auto-scroll if within 100px of bottom
+                // Only auto-scroll if within 100px of bottom.
+                // MINOR: 50ms debounce matches React's scrollToBottom behavior.
                 if distance_from_bottom < 100 {
-                    let opts = web_sys::ScrollIntoViewOptions::new();
-                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                    end_el.scroll_into_view_with_scroll_into_view_options(&opts);
+                    gloo_timers::callback::Timeout::new(50, move || {
+                        let opts = web_sys::ScrollIntoViewOptions::new();
+                        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                        end_el.scroll_into_view_with_scroll_into_view_options(&opts);
+                    })
+                    .forget();
                 }
             }
         });
@@ -440,6 +469,13 @@ pub fn ChatPage() -> impl IntoView {
                 let current_sid = current_session_id.get_untracked();
                 let state = chat_state_session.state().get_untracked();
 
+                // Skip if this session was just created by on_send — metadata is already set
+                if let Some(msg_sid) = &msg.session_id {
+                    if just_created_session.get_untracked().as_deref() == Some(msg_sid.as_str()) {
+                        return;
+                    }
+                }
+
                 // Only process if we don't have a session ID yet AND we're in SENDING state
                 if current_sid.is_none()
                     && msg.session_id.is_some()
@@ -451,7 +487,10 @@ pub fn ChatPage() -> impl IntoView {
 
                     // Navigate to the new session URL (replace: true for new chat)
                     let path = format!("/chat/{}", session_id);
-                    navigate_session(&path, Default::default());
+                    navigate_session(&path, leptos_router::NavigateOptions {
+                        replace: true,
+                        ..Default::default()
+                    });
 
                     // Set title if present (null title = will arrive later via title_update)
                     if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
@@ -977,6 +1016,10 @@ pub fn ChatPage() -> impl IntoView {
     // Whether any messages are pinned (controls filter button visibility).
     let has_pinned = Memo::new(move |_| messages.get().iter().any(|m| m.pinned));
 
+    // TODO: C5 — MCP deep-link chart context (?chart=<id>) — requires server function
+    // to fetch stored chart context from backend. Not yet implemented.
+    // React reference: Chat.jsx lines 835-886
+
     // ── Phase 11 — Chart exploration context ─────────────────────────────
     // Handle "Ask about this chart" navigation. When the user navigates to
     // /chat with ?exploreChart=true&chartMarkdown=... or ?createWatch=true,
@@ -1056,26 +1099,26 @@ pub fn ChatPage() -> impl IntoView {
                 set_session_title.set("Setting up a Watch".to_string());
                 set_current_greeting.set(String::new());
             }
-        });
-    }
 
-    // ── Phase 9 — Mark session read for shared conversations ──────────
-    // When loading a shared session, mark it as read (fire-and-forget).
-    // Matches React: Chat.jsx lines 1044-1051.
-    {
-        Effect::new(move |_| {
-            let metadata = session_metadata.get();
-            let session_id = current_session_id.get();
-            if metadata.shared {
-                if let Some(sid) = session_id {
-                    leptos::task::spawn_local(async move {
-                        // Fire-and-forget — ignore errors
-                        let _ = mark_session_read(sid, None).await;
-                    });
+            // M14 — Clear query params after processing so browser refresh
+            // doesn't re-trigger the context effect.
+            if has_explore_chart || has_create_watch {
+                if let Some(window) = web_sys::window() {
+                    if let Ok(location) = window.location().pathname() {
+                        let navigate = leptos_router::hooks::use_navigate();
+                        navigate(&location, leptos_router::NavigateOptions {
+                            replace: true,
+                            ..Default::default()
+                        });
+                    }
                 }
             }
         });
     }
+
+    // M16 — mark-session-read is now called inside the session loading
+    // spawn_local (above) right after messages are loaded, rather than in a
+    // separate Effect that over-fires on metadata/session_id changes.
 
     // ── Callbacks ───────────────────────────────────────────────────────
 
@@ -1170,11 +1213,16 @@ pub fn ChatPage() -> impl IntoView {
     // Phase 9 — Update session title handler
     // Matches React: Chat.jsx lines 1293-1303
     let on_title_save = Callback::new(move |new_title: String| {
-        set_session_title.set(new_title.clone());
+        // M15 — Guard against empty titles (matches React: if (!newTitle.trim()) return)
+        let trimmed = new_title.trim().to_string();
+        if trimmed.is_empty() {
+            return;
+        }
+        set_session_title.set(trimmed.clone());
         let sid = current_session_id.get_untracked();
         if let Some(session_id) = sid {
             leptos::task::spawn_local(async move {
-                let _ = update_session_title(session_id, new_title).await;
+                let _ = update_session_title(session_id, trimmed).await;
             });
         }
     });
@@ -1204,7 +1252,7 @@ pub fn ChatPage() -> impl IntoView {
         // Create optimistic user message with generated ID
         let user_message_id = generate_user_message_id();
         let user_message = ChatMessageItem {
-            message_id: user_message_id,
+            message_id: user_message_id.clone(),
             message_type: "user".to_string(),
             content: input_text.clone(),
             timestamp: String::new(), // Will be set by server
@@ -1247,6 +1295,10 @@ pub fn ChatPage() -> impl IntoView {
         // Call send_chat_message server function
         let chat_state_inner = chat_state_send.clone();
         let navigate_inner = navigate_send.clone();
+        // C4 — Keep optimistic message ID for updating after server response
+        let optimistic_id = user_message_id.clone();
+        // M9 — Pass client_msg_id for shared conversation deduplication
+        let client_msg_id = Some(user_message_id);
         leptos::task::spawn_local(async move {
             let time_ctx = if time_context.is_empty() {
                 None
@@ -1260,10 +1312,22 @@ pub fn ChatPage() -> impl IntoView {
                 time_ctx,
                 skip_ai,
                 None, // model (use default)
+                client_msg_id,
             )
             .await
             {
                 Ok(response) => {
+                    // C4 — Update optimistic user message ID to server-assigned ID.
+                    // React does: response.user_message_id → update optimistic msg.
+                    if !response.user_message_id.is_empty() {
+                        let server_id = response.user_message_id.clone();
+                        set_messages.update(|msgs| {
+                            if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == optimistic_id) {
+                                msg.message_id = server_id;
+                            }
+                        });
+                    }
+
                     // Phase 9 — If skip_ai was enabled, reset state and return
                     // (no AI response expected). Matches React: Chat.jsx lines 1147-1151.
                     if response.skip_ai {
@@ -1271,28 +1335,45 @@ pub fn ChatPage() -> impl IntoView {
                         set_skip_ai_response.set(false);
                         // Still need to update session_id if new
                         if session_id.is_none() {
+                            // M8 — Mark as just-created to skip redundant reload
+                            just_created_session.set(Some(response.session_id.clone()));
                             set_current_session_id.set(Some(response.session_id.clone()));
                             let path = format!("/chat/{}", response.session_id);
-                            navigate_inner(&path, Default::default());
+                            navigate_inner(&path, leptos_router::NavigateOptions {
+                                replace: true,
+                                ..Default::default()
+                            });
                         }
                         return;
                     }
 
                     // Update current_session_id from response (for new chats)
                     if session_id.is_none() {
+                        // M8 — Mark as just-created to skip redundant reload
+                        just_created_session.set(Some(response.session_id.clone()));
                         set_current_session_id.set(Some(response.session_id.clone()));
 
                         // Navigate to the new session URL
                         let path = format!("/chat/{}", response.session_id);
-                        navigate_inner(&path, Default::default());
+                        navigate_inner(&path, leptos_router::NavigateOptions {
+                            replace: true,
+                            ..Default::default()
+                        });
                     }
                 }
                 Err(err) => {
-                    // Display error as an assistant message
+                    // M11 — Display actual error text instead of generic message.
+                    // React distinguishes budget-exhausted errors, etc.
+                    let error_text = err.to_string();
+                    let error_content = if error_text.is_empty() {
+                        "Sorry, I encountered an error. Please try again.".to_string()
+                    } else {
+                        error_text.clone()
+                    };
                     let error_msg = ChatMessageItem {
                         message_id: generate_user_message_id().replace("user-", "error-"),
                         message_type: "assistant".to_string(),
-                        content: "Sorry, I encountered an error. Please try again.".to_string(),
+                        content: error_content,
                         timestamp: String::new(),
                         pinned: false,
                         sent_by: None,
@@ -1303,7 +1384,6 @@ pub fn ChatPage() -> impl IntoView {
                         msgs.push(error_msg);
                     });
 
-                    let error_text = err.to_string();
                     chat_state_inner.set_error(&error_text);
                 }
             }
@@ -1749,9 +1829,10 @@ pub fn ChatPage() -> impl IntoView {
                             <div node_ref=messages_end_ref />
                         </div>
 
-                        // Phase 9 — "Skip AI response" checkbox for shared conversations
-                        // Matches React: Chat.jsx skip_ai checkbox behavior
-                        <Show when=move || session_metadata.get().shared>
+                        // Phase 9 — "Skip AI response" checkbox for existing sessions
+                        // M13: React shows this for ALL existing sessions (currentSessionId &&),
+                        // not just shared ones.
+                        <Show when=move || current_session_id.get().is_some()>
                             <div class="flex items-center gap-2 px-4 py-2 border-t border-border bg-card">
                                 <input
                                     type="checkbox"

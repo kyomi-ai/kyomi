@@ -131,10 +131,21 @@ pub fn CopilotSidebar(
     let (user_msg_counter, set_user_msg_counter) = signal(0u32);
 
     // ── Thinking state (per message_id) ─────────────────────────────────
+    // NOTE: Thinking events are processed inline rather than through ThinkingManager
+    // because the copilot sidebar has its own independent thinking_map signal.
+    // This is intentional — the ThinkingManager pattern is used in chat_page.rs
+    // where the lifecycle is more complex.
     let (thinking_map, set_thinking_map) = signal(HashMap::<String, ThinkingState>::new());
 
     // ── WebSocket context ────────────────────────────────────────────────
     let ws_ctx = use_context::<WebSocketContext>();
+
+    #[cfg(debug_assertions)]
+    {
+        if ws_ctx.is_none() {
+            leptos::logging::warn!("CopilotSidebar: WebSocketContext not found — WebSocket features will be disabled");
+        }
+    }
 
     // ── Create session when sidebar opens ───────────────────────────────
     Effect::new(move || {
@@ -196,19 +207,23 @@ pub fn CopilotSidebar(
 
             // Helper: check if event belongs to this copilot instance.
             // Matches React: ChatInterface.jsx lines 209-213
+            // This closure captures only `session_id` (a ReadSignal, which is Copy),
+            // so the closure itself is Copy and can be used directly in all subscription
+            // callbacks without renaming or duplicating.
             let should_handle =
                 move |event_context_type: Option<&str>, msg_session_id: Option<&str>| -> bool {
                     // Must be dashboard_copilot context
                     if event_context_type != Some("dashboard_copilot") {
                         return false;
                     }
-                    // If we have a session ID, filter by it
+                    // No session established yet — reject all events
                     let current_sid = session_id.get_untracked();
-                    if let Some(sid) = &current_sid {
-                        if let Some(msg_sid) = msg_session_id {
-                            if msg_sid != sid.as_str() {
-                                return false;
-                            }
+                    let Some(sid) = &current_sid else {
+                        return false;
+                    };
+                    if let Some(msg_sid) = msg_session_id {
+                        if msg_sid != sid.as_str() {
+                            return false;
                         }
                     }
                     true
@@ -216,7 +231,6 @@ pub fn CopilotSidebar(
 
             // ── agent_thinking ──────────────────────────────────────────
             // Matches React: ChatInterface.jsx lines 216-271
-            let should_handle_thinking = should_handle;
             let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
                 let data = match &msg.data {
                     Some(d) => d,
@@ -231,12 +245,17 @@ pub fn CopilotSidebar(
                     None => return,
                 };
 
+                // NOTE: For agent_thinking events, context_type is nested at
+                // data.event.context_type (not data.context_type like chat_stream/chat_complete).
+                // This matches the backend: kyomi-agent/src/thinking.rs send_event() wraps
+                // the thinking payload in {"event": {..."context_type": ...}} before passing
+                // it to send_agent_thinking(), which sets that as the message data directly.
                 let event_context_type = data
                     .get("event")
                     .and_then(|v| v.get("context_type"))
                     .and_then(|v| v.as_str());
 
-                if !should_handle_thinking(event_context_type, msg.session_id.as_deref()) {
+                if !should_handle(event_context_type, msg.session_id.as_deref()) {
                     return;
                 }
 
@@ -289,7 +308,6 @@ pub fn CopilotSidebar(
 
             // ── chat_stream ─────────────────────────────────────────────
             // Matches React: ChatInterface.jsx lines 275-288
-            let should_handle_stream = should_handle;
             let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
                 let event_context_type = msg
                     .data
@@ -297,7 +315,7 @@ pub fn CopilotSidebar(
                     .and_then(|d| d.get("context_type"))
                     .and_then(|v| v.as_str());
 
-                if !should_handle_stream(event_context_type, msg.session_id.as_deref()) {
+                if !should_handle(event_context_type, msg.session_id.as_deref()) {
                     return;
                 }
 
@@ -336,7 +354,6 @@ pub fn CopilotSidebar(
 
             // ── chat_complete ───────────────────────────────────────────
             // Matches React: ChatInterface.jsx lines 291-321
-            let should_handle_complete = should_handle;
             let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
                 let event_context_type = msg
                     .data
@@ -344,7 +361,7 @@ pub fn CopilotSidebar(
                     .and_then(|d| d.get("context_type"))
                     .and_then(|v| v.as_str());
 
-                if !should_handle_complete(event_context_type, msg.session_id.as_deref()) {
+                if !should_handle(event_context_type, msg.session_id.as_deref()) {
                     return;
                 }
 

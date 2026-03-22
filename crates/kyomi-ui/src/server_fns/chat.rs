@@ -433,6 +433,11 @@ pub async fn send_chat_message(
     current_time_user_tz: Option<String>,
     skip_ai: bool,
     model: Option<String>,
+    // client_msg_id is the optimistic message ID from the client, used for
+    // deduplication when shared_chat_message WebSocket broadcast arrives.
+    // TODO: Thread through to send_shared_chat_message via AgentExecutionConfig
+    // once that struct supports it.
+    _client_msg_id: Option<String>,
 ) -> Result<SendMessageResponse, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;

@@ -146,6 +146,13 @@ pub fn AgentThinking(
     /// Token usage information (prompt + completion counts).
     #[prop(optional)]
     token_usage: Option<TokenUsage>,
+    /// Optional start time in milliseconds (from `js_sys::Date::now()`).
+    /// When provided, the live timer measures elapsed time from this value
+    /// instead of from the moment the component mounts. This prevents the
+    /// timer from resetting when the parent re-renders and re-mounts the
+    /// component with new events.
+    #[prop(optional)]
+    start_time_ms: Option<f64>,
 ) -> impl IntoView {
     let variant = ThinkingVariant::from_str(variant);
 
@@ -172,7 +179,7 @@ pub fn AgentThinking(
 
         // Start/stop interval based on is_active
         if is_active {
-            let start_time = js_sys::Date::now();
+            let start_time = start_time_ms.unwrap_or_else(js_sys::Date::now);
             let interval = gloo_timers::callback::Interval::new(100, move || {
                 let now = js_sys::Date::now();
                 set_elapsed_time.set((now - start_time) as u64);
@@ -189,17 +196,21 @@ pub fn AgentThinking(
     // Suppress unused warnings on SSR
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = (set_elapsed_time,);
+        let _ = (set_elapsed_time, start_time_ms);
     }
 
-    // -- Auto-scroll: scroll to bottom when new events arrive --
+    // -- Auto-scroll: scroll to bottom on mount when expanded --
+    // NOTE: `thinking_events` is a non-reactive `Vec`, so `events_len` is a plain
+    // `usize` captured at construction time. This effect re-runs only when
+    // `is_expanded` changes, not when new events arrive. This is intentional —
+    // the parent re-mounts the component each time it passes a new Vec of events,
+    // so the scroll-on-mount behavior is sufficient in practice.
     #[cfg(target_arch = "wasm32")]
     {
         let is_expanded = is_expanded;
         let events_len = thinking_events.len();
         let thinking_end_ref = thinking_end_ref;
 
-        // Use Effect to scroll when expanded and events change
         Effect::new(move |_| {
             if is_expanded.get() && events_len > 0 {
                 if let Some(el) = thinking_end_ref.get() {

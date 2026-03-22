@@ -33,6 +33,11 @@ pub fn InlineEditableTitle(
     let (is_editing, set_is_editing) = signal(false);
     let (edit_value, set_edit_value) = signal(String::new());
     let input_ref = NodeRef::<leptos::html::Input>::new();
+    // Guard flag: prevents blur handler from saving after Escape cancels.
+    // When Escape is pressed, `handle_cancel` sets this to true and hides
+    // the input, which triggers blur. The blur handler checks this flag
+    // and skips saving if it was a cancel-initiated blur.
+    let (cancelled, set_cancelled) = signal(false);
 
     // When entering edit mode, copy current value to edit buffer
     let start_editing = move |_| {
@@ -70,6 +75,7 @@ pub fn InlineEditableTitle(
 
     // Cancel handler — reverts to original value
     let handle_cancel = move || {
+        set_cancelled.set(true);
         set_edit_value.set(value.get_untracked());
         set_is_editing.set(false);
     };
@@ -143,7 +149,13 @@ pub fn InlineEditableTitle(
                         }
                     }
                     on:keydown=on_keydown
-                    on:blur=move |_| handle_save()
+                    on:blur=move |_| {
+                        // Only save on blur if still in editing mode (not already saved/cancelled)
+                        if is_editing.get_untracked() && !cancelled.get_untracked() {
+                            handle_save();
+                        }
+                        set_cancelled.set(false);
+                    }
                     placeholder=placeholder
                     class="text-base font-semibold px-2 py-1 border-0 border-b-2 border-b-transparent bg-transparent focus:outline-none focus:border-b-ring text-foreground min-w-0 flex-1 transition-colors"
                 />

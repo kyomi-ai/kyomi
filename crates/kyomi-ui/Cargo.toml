@@ -64,7 +64,7 @@ web-sys = { version = "0.3", features = [
     "Window", "Document", "HtmlElement", "HtmlTextAreaElement", "HtmlInputElement",
     "Element", "EventTarget", "Node",
     "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
-    "ScrollIntoViewOptions", "ScrollBehavior",
+    "ScrollIntoViewOptions", "ScrollBehavior", "CssStyleDeclaration",
     "RequestCredentials", "RequestInit", "Headers",
     "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer",
     # WebSocket support (dashboard live updates)

@@ -31,6 +31,9 @@ pub fn ChatInput(
     /// Whether to show the stop button instead of the send button.
     #[prop(into)]
     show_stop_button: Signal<bool>,
+    /// Whether the stop/cancel action is available (maps to React's `canCancel`).
+    #[prop(into, default = Signal::derive(|| true))]
+    can_cancel: Signal<bool>,
     /// WebSocket connection state string ("connected", "connecting", "reconnecting", "disconnected").
     #[prop(into)]
     connection_state: Signal<String>,
@@ -75,7 +78,7 @@ pub fn ChatInput(
             if let Some(el) = textarea_ref.get() {
                 use wasm_bindgen::JsCast;
                 if let Some(textarea) = el.dyn_ref::<web_sys::HtmlTextAreaElement>() {
-                    textarea.style().set_property("height", "auto").ok();
+                    web_sys::HtmlElement::style(textarea).set_property("height", "auto").ok();
                 }
             }
             // Refocus after clearing
@@ -96,11 +99,10 @@ pub fn ChatInput(
                 if let Some(textarea) = target.dyn_ref::<web_sys::HtmlTextAreaElement>() {
                     set_input_value.set(textarea.value());
                     // Auto-expand: reset height then set to scrollHeight (capped)
-                    textarea.style().set_property("height", "auto").ok();
+                    web_sys::HtmlElement::style(textarea).set_property("height", "auto").ok();
                     let scroll_height = textarea.scroll_height();
                     let capped = scroll_height.min(max_height as i32);
-                    textarea
-                        .style()
+                    web_sys::HtmlElement::style(textarea)
                         .set_property("height", &format!("{}px", capped))
                         .ok();
                 }
@@ -193,7 +195,8 @@ pub fn ChatInput(
                                 on:input=on_input
                                 on:keydown=on_keydown
                                 placeholder=placeholder
-                                class="w-full pr-12 resize-none border border-input focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px] max-h-[200px]"
+                                class="w-full pr-12 resize-none border border-input focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px]"
+                                style=format!("max-height: {}px", max_height)
                                 rows="1"
                                 disabled=move || !can_send.get()
                             />
@@ -226,9 +229,10 @@ pub fn ChatInput(
                                 // Stop button
                                 <button
                                     on:click=move |_| on_cancel.run(())
+                                    disabled=move || !can_cancel.get()
                                     class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-1.5"
                                     aria-label="Stop generating"
-                                    title="Stop generating"
+                                    title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
                                 >
                                     // X/stop SVG
                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
