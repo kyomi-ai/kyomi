@@ -299,9 +299,9 @@ All detailed implementation plans live alongside this document:
 | [`LEPTOS_SETTINGS_PLAN.md`](LEPTOS_SETTINGS_PLAN.md) | Settings (8 tabs) — profile, security, workspace, datasources, analytics, billing, team, usage | 28 | ~51 | ~10 |
 | [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) | Watches — CRUD, AI agent sidebar, cron scheduling, Gmail-style alerts, execution history | 23 | ~20 | ~11 |
 | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) | SQL Editor — kode-leptos editor, query execution, schema browser, tabbed results, streaming | 28 | ~12 | ~14 |
-| [`LEPTOS_CHAT_PLAN.md`](LEPTOS_CHAT_PLAN.md) | Chat — session management, WebSocket streaming, markdown + chart rendering, shared ChatInterface | TBD | TBD | TBD |
-| [`LEPTOS_KNOWLEDGE_PLAN.md`](LEPTOS_KNOWLEDGE_PLAN.md) | Knowledge — file list, tree navigation, markdown editor | TBD | TBD | TBD |
-| [`LEPTOS_REMAINING_PAGES_PLAN.md`](LEPTOS_REMAINING_PAGES_PLAN.md) | Onboarding, OAuth callbacks, Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership | TBD | TBD | TBD |
+| [`CHAT_LEPTOS_MIGRATION_PLAN.md`](CHAT_LEPTOS_MIGRATION_PLAN.md) | Chat — session management, WebSocket streaming, markdown + chart rendering, shared ChatInterface | 35 | ~12 | ~11 |
+| [`KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md`](KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md) | Knowledge — file tree, markdown/WYSIWYG editor, auto-save, conflict detection | 17 | ~8 | ~6 |
+| [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) | Trial chat, onboarding, setup wizard, Connect setup, Welcome, Unsubscribe, Accept Ownership | 18 | ~18 | ~5 |
 
 #### Why Settings First
 - Exercises the **widest range of UI components** (40+ different component types)
