@@ -101,6 +101,18 @@ pub fn register_server_functions() {
 
     use server_fns::chat::*;
     register_explicit::<GetWebsocketConfig>();
+    register_explicit::<ListChatSessions>();
+    register_explicit::<GetSessionMessages>();
+    register_explicit::<UpdateSessionTitle>();
+    register_explicit::<DeleteChatSession>();
+    register_explicit::<BulkDeleteSessions>();
+    register_explicit::<SearchChatMessages>();
+    register_explicit::<SendChatMessage>();
+    register_explicit::<ShareSession>();
+    register_explicit::<UnshareSession>();
+    register_explicit::<MarkSessionRead>();
+    register_explicit::<ToggleMessagePin>();
+    register_explicit::<UpdateMessageContent>();
 
     use server_fns::copilot::*;
     register_explicit::<CreateCopilotSession>();

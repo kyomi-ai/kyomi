@@ -206,6 +206,11 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 webauthn: Some(state.webauthn.clone()),
                 embedding: state.embedding.clone(),
                 connect_registry: Some(state.connect_registry.clone()),
+                ws_manager: Some(state.ws_manager.clone()),
+                cancel_registry: Some(kyomi_ui::server_fns::CancelRegistry::from_shared(
+                    state.cancel_registry.tokens.clone(),
+                )),
+                platforms: Some(state.platforms.clone()),
                 #[cfg(feature = "slack")]
                 slack_client: extras.slack_client,
             };

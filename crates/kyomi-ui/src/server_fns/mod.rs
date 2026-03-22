@@ -62,10 +62,76 @@ pub struct ServerContext {
     /// Required for query execution against Connect-type datasources.
     pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
 
+    /// WebSocket manager for streaming AI responses and real-time events.
+    /// Required by `send_chat_message` for session-created notifications and
+    /// agent response delivery.
+    pub ws_manager: Option<kyomi_auth::websocket::WebSocketManager>,
+
+    /// Registry for cancelling in-flight agent tasks via WebSocket `cancel_request`.
+    /// Uses the same DashMap<(user_id, session_id), CancellationToken> pattern as
+    /// `apps/server/src/cancel_registry.rs`. Optional — agent execution is skipped
+    /// when not provided.
+    pub cancel_registry: Option<CancelRegistry>,
+
+    /// Platform registry for messaging integrations (Slack, Teams, etc.).
+    /// Required by agent execution for platform-aware tool dispatch.
+    pub platforms: Option<std::sync::Arc<kyomi_core::platform::PlatformRegistry>>,
+
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.
     #[cfg(feature = "slack")]
     pub slack_client: Option<kyomi_slack::client::SlackClient>,
+}
+
+/// Registry for cancelling in-flight agent tasks via WebSocket `cancel_request`.
+///
+/// Mirrors `apps/server/src/cancel_registry.rs` — a cheaply cloneable wrapper
+/// around `DashMap<(user_id, session_id), CancellationToken>`.
+///
+/// When running inside the full server, use `from_shared()` to wrap the same
+/// underlying `DashMap` that the server's `CancelRegistry` uses, so that
+/// WebSocket `cancel_request` messages can cancel tokens registered by
+/// `send_chat_message`.
+#[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub struct CancelRegistry {
+    tokens: std::sync::Arc<dashmap::DashMap<(String, String), tokio_util::sync::CancellationToken>>,
+}
+
+#[cfg(feature = "ssr")]
+impl CancelRegistry {
+    /// Create a `CancelRegistry` that shares the same underlying storage as
+    /// the server's `CancelRegistry`. Both registries will see each other's
+    /// tokens, enabling the WebSocket handler to cancel agent tasks spawned
+    /// by server functions.
+    pub fn from_shared(
+        tokens: std::sync::Arc<dashmap::DashMap<(String, String), tokio_util::sync::CancellationToken>>,
+    ) -> Self {
+        Self { tokens }
+    }
+
+    /// Register a cancellation token for an in-flight agent task.
+    pub fn register(&self, user_id: &str, session_id: &str, token: tokio_util::sync::CancellationToken) {
+        self.tokens
+            .insert((user_id.to_string(), session_id.to_string()), token);
+    }
+
+    /// Cancel an in-flight agent task. Returns `true` if a token was found and cancelled.
+    pub fn cancel(&self, user_id: &str, session_id: &str) -> bool {
+        let key = (user_id.to_string(), session_id.to_string());
+        if let Some((_k, token)) = self.tokens.remove(&key) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a token after the agent task completes (prevents stale entries).
+    pub fn remove(&self, user_id: &str, session_id: &str) {
+        let key = (user_id.to_string(), session_id.to_string());
+        self.tokens.remove(&key);
+    }
 }
 
 /// Extract the authenticated user from the Axum request.
