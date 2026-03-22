@@ -4,7 +4,8 @@
 //!
 //! These replace the REST API calls for listing, viewing, creating,
 //! updating, and deleting dashboards. Each function calls the same
-//! service-layer code as the existing REST routes.
+//! service-layer code as the existing REST routes in
+//! `apps/server/src/routes/dashboards.rs`.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -13,20 +14,41 @@ use serde::{Deserialize, Serialize};
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A dashboard in a list/search result (lightweight).
+/// A dashboard in a list/search result.
 ///
-/// Intentionally omits `user_id`, `workspace_id`, and full `content` to keep
-/// the serialized payload small. Use `get_dashboard` for the full detail.
+/// Maps 1:1 from `dashboard_service::DashboardSearchResult`, with timestamps
+/// converted to RFC 3339 strings and summary extracted from content.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DashboardListItem {
     pub dashboard_id: String,
+    pub user_id: String,
+    pub workspace_id: String,
     pub title: String,
+    pub content: String,
     pub content_preview: Option<String>,
+    pub summary: Option<String>,
+    pub last_change_summary: Option<String>,
     pub popularity_score: f64,
     pub view_count: i64,
     pub recent_views: i64,
     pub updated_at: String,
     pub created_at: String,
+}
+
+/// Full dashboard detail for viewing/editing.
+///
+/// Returned by `get_dashboard`, includes full content and extracted summary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DashboardDetail {
+    pub dashboard_id: String,
+    pub user_id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub content: String,
+    pub summary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_change_summary: Option<String>,
 }
 
 /// Lightweight version info for the history list.
@@ -40,18 +62,6 @@ pub struct VersionSummary {
     pub created_by_name: Option<String>,
 }
 
-/// Full dashboard detail for viewing/editing.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DashboardDetail {
-    pub dashboard_id: String,
-    pub title: String,
-    pub content: String,
-    pub summary: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub last_change_summary: Option<String>,
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Read operations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +71,8 @@ pub struct DashboardDetail {
 /// When `query` is provided, searches by title/content. Otherwise lists all.
 /// `sort_by` accepts "popularity", "recent" (default), or "created".
 /// `limit` defaults to 50, clamped to [1, 100].
+///
+/// Mirrors `GET /dashboards/` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_dashboards(
     query: Option<String>,
@@ -91,15 +103,23 @@ pub async fn list_dashboards(
 
     Ok(results
         .into_iter()
-        .map(|r| DashboardListItem {
-            dashboard_id: r.dashboard_id,
-            title: r.title,
-            content_preview: r.content_preview,
-            popularity_score: r.popularity_score,
-            view_count: r.view_count,
-            recent_views: r.recent_views,
-            updated_at: r.updated_at.to_rfc3339(),
-            created_at: r.created_at.to_rfc3339(),
+        .map(|r| {
+            let summary = kyomi_auth::dashboard_service::extract_summary(&r.content);
+            DashboardListItem {
+                dashboard_id: r.dashboard_id,
+                user_id: r.user_id,
+                workspace_id: r.workspace_id,
+                title: r.title,
+                content: r.content,
+                content_preview: r.content_preview,
+                summary,
+                last_change_summary: r.last_change_summary,
+                popularity_score: r.popularity_score,
+                view_count: r.view_count,
+                recent_views: r.recent_views,
+                updated_at: r.updated_at.to_rfc3339(),
+                created_at: r.created_at.to_rfc3339(),
+            }
         })
         .collect())
 }
@@ -107,6 +127,9 @@ pub async fn list_dashboards(
 /// Get a single dashboard by ID, including full content.
 ///
 /// Records a view for popularity tracking (fire-and-forget).
+/// Returns a 404-equivalent error if the dashboard is not found.
+///
+/// Mirrors `GET /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, ServerFnError> {
     let auth = extract_auth().await?;
@@ -134,6 +157,8 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
 
     Ok(DashboardDetail {
         dashboard_id: dashboard.dashboard_id,
+        user_id: dashboard.user_id,
+        workspace_id: dashboard.workspace_id,
         title: dashboard.title,
         content: dashboard.content,
         summary,
@@ -148,6 +173,11 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a new dashboard. Returns the new dashboard_id.
+///
+/// The service layer enforces free-tier dashboard limits (5 per workspace).
+/// After creation, fires off background embedding generation.
+///
+/// Mirrors `POST /dashboards/` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_dashboard(
     title: String,
@@ -169,27 +199,27 @@ pub async fn create_dashboard(
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Fire-and-forget embedding generation (matches REST handler)
-    let db = ctx.db.clone();
-    let did = dashboard_id.clone();
-    let ws = ws_id.to_string();
-    let t = title.clone();
-    let c = content.clone();
-    if let Ok(embedding_svc) = ctx.embedding.wait_ready().await {
-        kyomi_auth::dashboard_service::spawn_embedding_generation(
-            db,
-            embedding_svc.clone(),
-            did,
-            ws,
-            t,
-            c,
-        );
-    }
+    // Fire-and-forget embedding generation (matches REST handler — propagates error)
+    let embedding_svc = ctx.embedding.wait_ready().await
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+    kyomi_auth::dashboard_service::spawn_embedding_generation(
+        ctx.db.clone(),
+        embedding_svc.clone(),
+        dashboard_id.clone(),
+        ws_id.to_string(),
+        title.trim().to_string(),
+        content.clone(),
+    );
 
     Ok(dashboard_id)
 }
 
 /// Update an existing dashboard's title, content, and/or change summary.
+///
+/// Rejects no-op updates where all fields are `None`.
+/// Re-embeds the dashboard if title or content changed.
+///
+/// Mirrors `PATCH /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn update_dashboard(
     dashboard_id: String,
@@ -218,24 +248,21 @@ pub async fn update_dashboard(
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Re-embed if content or title changed (matches REST handler)
+    // Re-embed if content or title changed (matches REST handler — propagates error)
     if title.is_some() || content.is_some() {
-        let db = ctx.db.clone();
-        let ws = ws_id.to_string();
-        if let Ok(embedding_svc) = ctx.embedding.wait_ready().await {
-            // Fetch current state for embedding
-            if let Ok(Some(d)) =
-                kyomi_auth::dashboard_service::get_dashboard(&db, &dashboard_id, &ws).await
-            {
-                kyomi_auth::dashboard_service::spawn_embedding_generation(
-                    db,
-                    embedding_svc.clone(),
-                    dashboard_id,
-                    ws,
-                    d.title,
-                    d.content,
-                );
-            }
+        let embedding_svc = ctx.embedding.wait_ready().await
+            .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+        if let Ok(Some(d)) =
+            kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id).await
+        {
+            kyomi_auth::dashboard_service::spawn_embedding_generation(
+                ctx.db.clone(),
+                embedding_svc.clone(),
+                dashboard_id,
+                ws_id.to_string(),
+                d.title,
+                d.content,
+            );
         }
     }
 
@@ -243,6 +270,8 @@ pub async fn update_dashboard(
 }
 
 /// Delete a dashboard by ID.
+///
+/// Mirrors `DELETE /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
@@ -319,20 +348,20 @@ pub async fn restore_version(
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Re-embed after restore (matches REST handler)
+    // Re-embed after restore (matches REST handler — propagates error)
+    let embedding_svc = ctx.embedding.wait_ready().await
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
     if let Ok(Some(d)) =
         kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id).await
     {
-        if let Ok(embedding_svc) = ctx.embedding.wait_ready().await {
-            kyomi_auth::dashboard_service::spawn_embedding_generation(
-                ctx.db.clone(),
-                embedding_svc.clone(),
-                dashboard_id,
-                ws_id.to_string(),
-                d.title,
-                d.content,
-            );
-        }
+        kyomi_auth::dashboard_service::spawn_embedding_generation(
+            ctx.db.clone(),
+            embedding_svc.clone(),
+            dashboard_id,
+            ws_id.to_string(),
+            d.title,
+            d.content,
+        );
     }
 
     Ok(())

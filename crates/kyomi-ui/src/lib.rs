@@ -11,6 +11,7 @@ pub mod app;
 pub mod components;
 pub mod datasource;
 pub mod pages;
+pub mod parser;
 pub mod server_fns;
 pub mod types;
 pub mod utils;
@@ -97,6 +98,14 @@ pub fn register_server_functions() {
     register_explicit::<CancelInvitation>();
     register_explicit::<ListOwnershipTransfers>();
     register_explicit::<CancelOwnershipTransfer>();
+
+    use server_fns::collections::*;
+    register_explicit::<ListCollections>();
+    register_explicit::<CreateCollection>();
+    register_explicit::<UpdateCollection>();
+    register_explicit::<DeleteCollection>();
+    register_explicit::<AddDashboardToCollection>();
+    register_explicit::<RemoveDashboardFromCollection>();
 
     use server_fns::dashboards::*;
     register_explicit::<ListDashboards>();
