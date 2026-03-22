@@ -62,6 +62,36 @@ pub struct VersionSummary {
     pub created_by_name: Option<String>,
 }
 
+/// Full version detail including content.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VersionDetail {
+    pub version_number: i32,
+    pub title: String,
+    pub content: String,
+    pub change_summary: Option<String>,
+    pub byte_size: Option<i32>,
+    pub created_at: String,
+    pub created_by_name: Option<String>,
+}
+
+/// Diff between two versions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VersionDiff {
+    pub from_version: i32,
+    pub to_version: i32,
+    pub additions: i32,
+    pub deletions: i32,
+    pub diff_lines: Vec<DiffLine>,
+}
+
+/// A single line in a version diff.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiffLine {
+    /// "add", "delete", or "context"
+    pub line_type: String,
+    pub content: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Read operations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -323,6 +353,117 @@ pub async fn list_versions(dashboard_id: String) -> Result<Vec<VersionSummary>, 
             created_by_name: v.created_by.name,
         })
         .collect())
+}
+
+/// Get a specific version's full content.
+#[server(prefix = "/leptos-api")]
+pub async fn get_version(
+    dashboard_id: String,
+    version_number: i32,
+) -> Result<VersionDetail, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    // Verify dashboard belongs to workspace
+    kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
+
+    let version =
+        kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, version_number)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .ok_or_else(|| {
+                ServerFnError::new(format!(
+                    "Version {version_number} not found for dashboard {dashboard_id}"
+                ))
+            })?;
+
+    Ok(VersionDetail {
+        version_number: version.version_number,
+        title: version.title,
+        content: version.content,
+        change_summary: version.change_summary,
+        byte_size: version.byte_size,
+        created_at: version.created_at.to_rfc3339(),
+        created_by_name: None, // get_version returns user_id only; name resolved by list_versions
+    })
+}
+
+/// Diff two versions of a dashboard.
+///
+/// Returns added/removed line counts and the actual diff lines.
+#[server(prefix = "/leptos-api")]
+pub async fn diff_versions(
+    dashboard_id: String,
+    from_version: i32,
+    to_version: i32,
+) -> Result<VersionDiff, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    // Verify dashboard belongs to workspace
+    kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
+
+    let from =
+        kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, from_version)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .ok_or_else(|| {
+                ServerFnError::new(format!("Version {from_version} not found"))
+            })?;
+
+    let to =
+        kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, to_version)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .ok_or_else(|| {
+                ServerFnError::new(format!("Version {to_version} not found"))
+            })?;
+
+    // Simple line-based diff (matches REST handler)
+    let from_lines: Vec<&str> = from.content.lines().collect();
+    let to_lines: Vec<&str> = to.content.lines().collect();
+
+    let from_set: std::collections::HashSet<&str> = from_lines.iter().copied().collect();
+    let to_set: std::collections::HashSet<&str> = to_lines.iter().copied().collect();
+
+    let mut diff_lines = Vec::new();
+
+    for line in &from_lines {
+        if !to_set.contains(line) {
+            diff_lines.push(DiffLine {
+                line_type: "delete".to_string(),
+                content: line.to_string(),
+            });
+        }
+    }
+
+    for line in &to_lines {
+        if !from_set.contains(line) {
+            diff_lines.push(DiffLine {
+                line_type: "add".to_string(),
+                content: line.to_string(),
+            });
+        }
+    }
+
+    let additions = diff_lines.iter().filter(|l| l.line_type == "add").count() as i32;
+    let deletions = diff_lines.iter().filter(|l| l.line_type == "delete").count() as i32;
+
+    Ok(VersionDiff {
+        from_version,
+        to_version,
+        additions,
+        deletions,
+        diff_lines,
+    })
 }
 
 /// Restore a dashboard to a previous version.
