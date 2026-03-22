@@ -509,6 +509,133 @@ pub async fn restore_version(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Default dashboard operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Get the user's personal default dashboard ID.
+///
+/// Reads from `users.extra_metadata.default_dashboard_id`.
+/// Returns `None` if no default is set.
+///
+/// Mirrors `PATCH /users/me/preferences` read path in `apps/server/src/routes/users.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn get_user_default_dashboard() -> Result<Option<String>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("User not found"))?;
+
+    let default_id = user
+        .extra_metadata
+        .as_ref()
+        .and_then(|m| m.get("default_dashboard_id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(default_id)
+}
+
+/// Set or clear the user's personal default dashboard.
+///
+/// Writes to `users.extra_metadata.default_dashboard_id`.
+/// Pass `None` or empty string to clear the default.
+///
+/// Mirrors `PATCH /users/me/preferences` write path in `apps/server/src/routes/users.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    let value = match dashboard_id {
+        Some(id) if !id.is_empty() => serde_json::json!({ "default_dashboard_id": id }),
+        _ => serde_json::json!({ "default_dashboard_id": null }),
+    };
+
+    kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &value)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Get the workspace default dashboard ID (any authenticated user can read).
+///
+/// Reads from `workspaces.settings.default_dashboard_id` (top-level, not custom_settings).
+/// Returns `None` if no default is set.
+///
+/// Mirrors `GET /workspaces/default-dashboard` in `apps/server/src/routes/workspaces.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let default_id = workspace
+        .settings
+        .as_ref()
+        .and_then(|s| s.get("default_dashboard_id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(default_id)
+}
+
+/// Set or clear the workspace default dashboard (admin only).
+///
+/// Writes to `workspaces.settings.default_dashboard_id` (top-level).
+/// Pass `None` or empty string to clear the default.
+///
+/// Mirrors `PATCH /workspaces/settings` write path in `apps/server/src/routes/workspaces.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn set_workspace_default_dashboard(
+    dashboard_id: Option<String>,
+) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+
+    // Require workspace admin role
+    if !auth
+        .workspace
+        .workspace_roles
+        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
+    {
+        return Err(ServerFnError::new("Workspace admin access required"));
+    }
+
+    let ws_id = workspace_id(&auth)?;
+
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let mut current_settings = workspace.settings.clone().unwrap_or(serde_json::json!({}));
+
+    let dashboard_value = match dashboard_id {
+        Some(id) if !id.is_empty() => serde_json::json!(id),
+        _ => serde_json::Value::Null,
+    };
+
+    if let Some(obj) = current_settings.as_object_mut() {
+        obj.insert("default_dashboard_id".to_string(), dashboard_value);
+    }
+
+    kyomi_auth::workspace_service::update_workspace_settings(&ctx.db, ws_id, &current_settings)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers — delegate to shared extractors in parent module
 // ─────────────────────────────────────────────────────────────────────────────
 

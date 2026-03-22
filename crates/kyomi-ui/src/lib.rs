@@ -117,6 +117,10 @@ pub fn register_server_functions() {
     register_explicit::<GetVersion>();
     register_explicit::<DiffVersions>();
     register_explicit::<RestoreVersion>();
+    register_explicit::<GetUserDefaultDashboard>();
+    register_explicit::<SetUserDefaultDashboard>();
+    register_explicit::<GetWorkspaceDefaultDashboard>();
+    register_explicit::<SetWorkspaceDefaultDashboard>();
 
     use server_fns::datasources::*;
     register_explicit::<ListDatasources>();
