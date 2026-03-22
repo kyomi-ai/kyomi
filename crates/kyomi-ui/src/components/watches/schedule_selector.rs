@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{DynSelect, Label, Switch, INPUT_CLASS};
-use crate::utils::cron::{describe_cron, local_hour_to_utc, utc_to_local_hour};
+use crate::utils::cron::{describe_cron, get_tz_offset_minutes, local_hour_to_utc, utc_to_local_hour};
 
 // ---------------------------------------------------------------------------
 // Button CSS constants (from button.rs) for toggle buttons that need
@@ -24,25 +24,6 @@ const BTN_DEFAULT: &str = "bg-primary text-primary-foreground shadow hover:bg-pr
 const BTN_OUTLINE: &str = "border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground";
 const BTN_GHOST: &str = "text-foreground hover:bg-accent hover:text-accent-foreground";
 const BTN_SM: &str = "h-8 rounded-md px-3 text-xs";
-
-// ---------------------------------------------------------------------------
-// Timezone offset helper
-// ---------------------------------------------------------------------------
-
-/// Get the browser's timezone offset in minutes.
-///
-/// Uses `js_sys::Date::new_0().get_timezone_offset()` on WASM targets.
-/// Returns 0 (UTC) on the server side.
-fn get_tz_offset_minutes() -> i32 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        js_sys::Date::new_0().get_timezone_offset() as i32
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        0
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Pure helper functions (ported from the React source)

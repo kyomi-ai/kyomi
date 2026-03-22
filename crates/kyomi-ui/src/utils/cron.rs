@@ -9,6 +9,22 @@
 
 use crate::types::CronDescription;
 
+/// Get the browser's timezone offset in minutes.
+///
+/// Returns the value of JavaScript's `new Date().getTimezoneOffset()`, which is
+/// positive for zones west of UTC and negative for zones east.
+/// Returns 0 on the server (SSR).
+pub fn get_tz_offset_minutes() -> i32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::new_0().get_timezone_offset() as i32
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
+
 /// Result of converting a UTC hour to local time.
 #[derive(Clone, Debug)]
 pub struct HourConversion {
