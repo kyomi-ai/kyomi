@@ -2,5 +2,6 @@
 
 //! Shared utility modules for the Leptos frontend.
 
+pub mod cron;
 pub mod webauthn;
 pub mod websocket;

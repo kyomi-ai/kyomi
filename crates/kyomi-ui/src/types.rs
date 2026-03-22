@@ -132,3 +132,93 @@ pub struct OwnershipTransferData {
     pub is_initiator: bool,
     pub is_recipient: bool,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Watch types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A watch in a list result.
+///
+/// Maps from `kyomi_core::models::Watch` with timestamps converted to RFC 3339
+/// strings and alert channel info resolved from the platform layer.
+///
+/// Mirrors `WatchResponse` in `apps/server/src/routes/watches.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WatchListItem {
+    pub watch_id: String,
+    pub name: String,
+    pub prompt: String,
+    pub schedule: String,
+    pub mode: String,
+    pub enabled: bool,
+    pub last_run_at: Option<String>,
+    pub last_run_status: Option<String>,
+    pub next_run_at: Option<String>,
+    pub created_at: String,
+    pub created_by: String,
+    pub alert_emails: Option<String>,
+    pub alert_emails_enabled: bool,
+    pub queries: Option<serde_json::Value>,
+    pub slack_channel_id: Option<String>,
+    pub slack_channel_name: Option<String>,
+}
+
+/// A watch execution record.
+///
+/// Maps from `kyomi_core::models::WatchExecution` with timestamps converted to
+/// RFC 3339 strings and enum fields converted to strings.
+///
+/// Mirrors `ExecutionResponse` in `apps/server/src/routes/watches.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WatchExecutionItem {
+    pub id: i32,
+    pub watch_id: Option<String>,
+    pub watch_name: Option<String>,
+    pub mode: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub status: String,
+    pub agent_response: Option<String>,
+    pub error_message: Option<String>,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub alert_triggered: bool,
+    pub notification_id: Option<String>,
+    pub execution_trace: Option<serde_json::Value>,
+    pub read_at: Option<String>,
+    pub deleted_at: Option<String>,
+    pub deleted_by: Option<String>,
+}
+
+/// An alert item (a watch execution that triggered an alert).
+///
+/// Mirrors the alert entries in `AlertHistoryResponse` in
+/// `apps/server/src/routes/watches.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertItem {
+    pub id: i32,
+    pub watch_id: Option<String>,
+    pub watch_name: Option<String>,
+    pub mode: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub status: String,
+    pub agent_response: Option<String>,
+    pub error_message: Option<String>,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub alert_triggered: bool,
+    pub notification_id: Option<String>,
+    pub execution_trace: Option<serde_json::Value>,
+    pub read_at: Option<String>,
+    pub deleted_at: Option<String>,
+    pub deleted_by: Option<String>,
+}
+
+/// Result of validating and describing a cron expression.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CronDescription {
+    pub valid: bool,
+    pub description: String,
+}
+

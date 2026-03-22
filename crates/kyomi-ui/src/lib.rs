@@ -99,6 +99,21 @@ pub fn register_server_functions() {
     register_explicit::<ListOwnershipTransfers>();
     register_explicit::<CancelOwnershipTransfer>();
 
+    use server_fns::chat::*;
+    register_explicit::<GetWebsocketConfig>();
+    register_explicit::<ListChatSessions>();
+    register_explicit::<GetSessionMessages>();
+    register_explicit::<UpdateSessionTitle>();
+    register_explicit::<DeleteChatSession>();
+    register_explicit::<BulkDeleteSessions>();
+    register_explicit::<SearchChatMessages>();
+    register_explicit::<SendChatMessage>();
+    register_explicit::<ShareSession>();
+    register_explicit::<UnshareSession>();
+    register_explicit::<MarkSessionRead>();
+    register_explicit::<ToggleMessagePin>();
+    register_explicit::<UpdateMessageContent>();
+
     use server_fns::copilot::*;
     register_explicit::<CreateCopilotSession>();
     register_explicit::<SendCopilotMessage>();
@@ -156,6 +171,29 @@ pub fn register_server_functions() {
     register_explicit::<UpdateWorkspaceModel>();
     register_explicit::<UpdateWorkspaceChartmlConfig>();
     register_explicit::<PopulateKnowledgeGraph>();
+
+    use server_fns::watches::*;
+    register_explicit::<ListWatches>();
+    register_explicit::<CreateWatch>();
+    register_explicit::<GetWatch>();
+    register_explicit::<UpdateWatch>();
+    register_explicit::<DeleteWatch>();
+    register_explicit::<ToggleWatch>();
+    register_explicit::<RunWatchNow>();
+    register_explicit::<GetWatchExecutions>();
+    register_explicit::<GetWatchExecution>();
+    register_explicit::<GetAlerts>();
+    register_explicit::<GetUnreadAlertsCount>();
+    register_explicit::<MarkAlertRead>();
+    register_explicit::<MarkAlertUnread>();
+    register_explicit::<DeleteAlert>();
+    register_explicit::<RestoreAlert>();
+    register_explicit::<BulkDeleteAlerts>();
+    register_explicit::<BulkMarkAlertsRead>();
+    register_explicit::<BulkMarkAlertsUnread>();
+    register_explicit::<ContinueAlertInChat>();
+    register_explicit::<GetLastExecution>();
+    register_explicit::<GetThinkingEvents>();
 
     #[cfg(feature = "slack")]
     {
