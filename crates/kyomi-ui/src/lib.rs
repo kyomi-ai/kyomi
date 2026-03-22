@@ -172,6 +172,14 @@ pub fn register_server_functions() {
     register_explicit::<UpdateWorkspaceChartmlConfig>();
     register_explicit::<PopulateKnowledgeGraph>();
 
+    use server_fns::knowledge::*;
+    register_explicit::<ListKnowledgeTree>();
+    register_explicit::<GetKnowledgeFile>();
+    register_explicit::<SearchKnowledgeFiles>();
+    register_explicit::<CreateKnowledgeFile>();
+    register_explicit::<UpdateKnowledgeFile>();
+    register_explicit::<DeleteKnowledgeFile>();
+
     use server_fns::watches::*;
     register_explicit::<ListWatches>();
     register_explicit::<CreateWatch>();

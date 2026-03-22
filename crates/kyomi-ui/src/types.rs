@@ -229,3 +229,51 @@ pub struct CronDescription {
     pub description: String,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Knowledge types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A knowledge file tree entry (no content — used for tree rendering).
+///
+/// Mirrors `KnowledgeFileTreeEntry` in `kyomi-knowledge/src/knowledge_files.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KnowledgeTreeEntry {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub is_folder: bool,
+    pub sort_order: i32,
+    pub updated_at: String,
+    pub updated_by: Option<String>,
+}
+
+/// Full knowledge file detail with content (used by editor).
+///
+/// Mirrors `FileResponse` in `apps/server/src/routes/knowledge_files.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KnowledgeFileDetail {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub is_folder: bool,
+    pub content: Option<String>,
+    pub content_hash: Option<String>,
+    pub sort_order: i32,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A knowledge file search result.
+///
+/// Mirrors `KnowledgeFileSearchResult` in `kyomi-knowledge/src/knowledge_files.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KnowledgeSearchResult {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub is_folder: bool,
+    pub content_preview: Option<String>,
+}
+

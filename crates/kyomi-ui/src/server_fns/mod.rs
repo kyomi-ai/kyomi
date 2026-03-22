@@ -21,6 +21,7 @@ pub mod copilot;
 pub mod context;
 pub mod dashboards;
 pub mod datasources;
+pub mod knowledge;
 pub mod profile;
 pub mod security;
 pub mod sidebar;
