@@ -20,6 +20,10 @@ use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
 use crate::pages::not_implemented::NotImplementedPage;
+use crate::pages::chat::{ChatPage, ChatsListPage};
+use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
+use crate::pages::not_implemented::NotImplementedPage;
+use crate::pages::watches::WatchesPage;
 use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::datasources::DatasourcesPage;
 use crate::pages::settings::profile::ProfilePage;
@@ -43,6 +47,7 @@ pub fn Shell(#[prop(optional)] children: Option<Children>) -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <title>"Kyomi — Settings"</title>
+                <title>"Kyomi"</title>
                 <leptos_meta::MetaTags/>
             </head>
             <body class="min-h-screen bg-background text-foreground antialiased">
@@ -95,6 +100,16 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/knowledge") view=|| view! { <Layout><NotImplementedPage name="Knowledge"/></Layout> }/>
                     <Route path=path!("/watches") view=|| view! { <Layout><NotImplementedPage name="Watches"/></Layout> }/>
                     <Route path=path!("/watches/:view") view=|| view! { <Layout><NotImplementedPage name="Watches"/></Layout> }/>
+                    // Main app pages — wrapped in Layout
+                    <Route path=path!("/") view=|| view! { <Layout><NotImplementedPage name="Home"/></Layout> }/>
+                    // Chat pages — ChatPage handles both new (/chat) and existing (/chat/:session_id)
+                    <Route path=path!("/chat") view=|| view! { <Layout><ChatPage/></Layout> }/>
+                    <Route path=path!("/chat/:session_id") view=|| view! { <Layout><ChatPage/></Layout> }/>
+                    <Route path=path!("/chats") view=|| view! { <Layout><ChatsListPage/></Layout> }/>
+                    <Route path=path!("/sql-editor") view=|| view! { <Layout><NotImplementedPage name="SQL Editor"/></Layout> }/>
+                    <Route path=path!("/knowledge") view=|| view! { <Layout><NotImplementedPage name="Knowledge"/></Layout> }/>
+                    <Route path=path!("/watches") view=|| view! { <Layout><WatchesPage/></Layout> }/>
+                    <Route path=path!("/watches/:view") view=|| view! { <Layout><WatchesPage/></Layout> }/>
                     // Flow pages — full screen, not yet implemented
                     <Route path=path!("/try") view=|| view! { <NotImplementedPage name="Try Kyomi"/> }/>
                     <Route path=path!("/connect/setup") view=|| view! { <NotImplementedPage name="Connect Setup"/> }/>

@@ -13,6 +13,7 @@ pub mod alert;
 pub mod badge;
 pub mod button;
 pub mod card;
+pub mod chat;
 pub mod checkbox;
 pub mod confirm_dialog;
 pub mod dashboard;
@@ -28,6 +29,7 @@ pub mod switch;
 pub mod theme;
 pub mod toast;
 pub mod tooltip;
+pub mod watches;
 
 // Re-export commonly used components
 pub use action_status::ActionStatus;
