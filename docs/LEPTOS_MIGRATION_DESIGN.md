@@ -1,7 +1,7 @@
 # Leptos Frontend Migration — Zero-JS Architecture Design
 
-**Status:** Phases 0–6 complete (Settings, Auth, Dashboards, Chat, Watches, Knowledge). SQL Editor + Remaining Pages pending.
-**Date:** 2026-03-23 (updated)
+**Status:** Phases 0–7 complete (Settings, Auth, Dashboards, Chat, Watches, Knowledge, SQL Editor). Remaining Pages pending.
+**Date:** 2026-03-23 (updated — SQL Editor phase complete)
 **Author:** Jason + Claude (research collaboration)
 
 ## Executive Summary
@@ -167,7 +167,7 @@ view! {
 }
 ```
 
-**Current consumers:** Dashboard editor (Markdown mode), Chart builder (SQL mode), SQL Editor (planned).
+**Current consumers:** Dashboard editor (Markdown mode), Chart builder (SQL mode), SQL Editor (SQL mode with dry run + cursor tracking).
 
 #### Rich Text / Dashboard Editing — kode-leptos markdown mode + comrak
 
@@ -287,7 +287,7 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 | **4** | **Chat** — WebSocket streaming, chartml-rs chart rendering in responses, session management | Medium | None | **Complete** | [`CHAT_LEPTOS_MIGRATION_PLAN.md`](CHAT_LEPTOS_MIGRATION_PLAN.md) — 35 tasks |
 | **5** | **Watches** — watch management, AI creation, cron scheduling, Gmail-style alert inbox, execution history | Low | None | **Complete** | [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) — 23 tasks, 20 server fns, 8 components |
 | **6** | **Knowledge** — file tree, markdown editor, auto-save, conflict detection | Low | None | **Complete** | [`KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md`](KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md) — 17 tasks, 6 server fns, 5 components |
-| **7** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results | Medium | None | **Planned** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases |
+| **7** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results, streaming | Medium | None | **Complete** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases, 13 server fns, 14 components |
 | **8** | **Remaining Pages** — onboarding flows, OAuth callbacks, utility pages (Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership) | Low | None | **Planned** | [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) |
 
 ### Detailed Plan Index
@@ -311,7 +311,7 @@ All detailed implementation plans live alongside this document:
 - Validates the full Leptos + Singlestage + Tailwind stack before committing to harder pages
 
 #### Pages NOT Suitable for Early Migration (historical context — some now complete)
-- **SQL Editor** — needed kode-leptos editor built first (now available)
+- **SQL Editor** — needed kode-leptos editor built first — **now complete** (8,301 LOC, 13 server fns)
 - **Dashboard Editor** — needed kode-leptos + chartml-rs + DataFusion (now in progress)
 - **Chat** — needed WebSocket patterns established + chartml-rs for inline charts
 - **Login** — too risky as a first page (blocks all users if broken) — **now complete**
