@@ -73,7 +73,7 @@ pub fn StatusBar(
     cursor_col: Signal<usize>,
 ) -> impl IntoView {
     view! {
-        <div class="px-4 py-2 border-t border-border bg-muted flex-shrink-0 overflow-hidden flex items-center justify-between">
+        <div class="px-4 py-2 border-t border-border bg-muted flex-shrink-0 overflow-hidden flex items-center justify-between" role="status" aria-live="polite">
             // Left side: dry run status
             <div class="flex-1 min-w-0">
                 {move || {

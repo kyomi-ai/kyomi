@@ -262,8 +262,52 @@ pub fn SqlEditorPage() -> impl IntoView {
         run_query(state, sql, slug, ds_type, set_query_running);
     });
 
+    // ── Page-level keyboard shortcuts ───────────────────────────────────
+    // - Cmd/Ctrl+S: prevent browser save dialog
+    // - Escape: close sidebar if open
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::JsCast;
+
+        let keydown_handler = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
+            let key = ev.key();
+            let meta_or_ctrl = ev.meta_key() || ev.ctrl_key();
+
+            // Cmd/Ctrl+S — prevent browser "Save As" dialog.
+            if meta_or_ctrl && key == "s" {
+                ev.prevent_default();
+            }
+
+            // Escape — close sidebar if open.
+            if key == "Escape" && state.active_right_tab.get_untracked().is_some() {
+                state.set_active_right_tab(None);
+            }
+        });
+
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            let _ = doc.add_event_listener_with_callback(
+                "keydown",
+                keydown_handler.as_ref().unchecked_ref(),
+            );
+        }
+
+        // Store the closure in an Owner-scoped cleanup via on_cleanup.
+        on_cleanup(move || {
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                let _ = doc.remove_event_listener_with_callback(
+                    "keydown",
+                    keydown_handler.as_ref().unchecked_ref(),
+                );
+            }
+            drop(keydown_handler);
+        });
+    }
+
     // Datasource slug as a Signal for passing to child components.
     let ds_slug_signal: Signal<Option<String>> = Signal::derive(move || ds_selection.slug.get());
+    // Track whether a datasource is selected (for empty state messaging).
+    let has_datasource = Memo::new(move |_| ds_selection.slug.get().is_some());
 
     view! {
         <div class="flex flex-col h-full bg-muted" style:flex-direction="column">
@@ -282,8 +326,9 @@ pub fn SqlEditorPage() -> impl IntoView {
                     // Run button
                     <button
                         on:click=handle_run_query
-                        disabled=move || query_running.get()
+                        disabled=move || query_running.get() || !has_datasource.get()
                         class="px-3 py-1.5 text-xs font-medium bg-primary text-white hover:bg-primary/90 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                        aria-label=move || if query_running.get() { "Query running" } else { "Run query" }
                     >
                         {move || if query_running.get() { "Running..." } else { "Run Query" }}
                     </button>
@@ -312,6 +357,18 @@ pub fn SqlEditorPage() -> impl IntoView {
                     </button>
                 </div>
             </div>
+
+            // ── "No datasource" banner ────────────────────────────────────
+            <Show when=move || !has_datasource.get()>
+                <div class="px-4 sm:px-6 py-2 bg-warning/10 border-b border-warning/30 flex items-center gap-2 text-sm text-warning-foreground flex-shrink-0">
+                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                    </svg>
+                    <span>"No datasource selected. "</span>
+                    <a href="/settings" class="text-primary hover:underline font-medium">"Connect a datasource in Settings"</a>
+                    <span>" to start querying."</span>
+                </div>
+            </Show>
 
             // ── Content area: editor + results (left) | sidebar (right) ──
             <div class="flex flex-1 min-h-0 relative">
@@ -426,7 +483,10 @@ fn ResizeHandle() -> impl IntoView {
         <div
             class="flex items-center justify-center cursor-row-resize select-none py-1 -my-2 relative z-10"
             on:mousedown=on_mousedown
-            aria-label="Drag to resize"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Drag to resize editor and results panels"
+            tabindex="0"
         >
             <div class="h-1 w-12 bg-border hover:bg-muted-foreground rounded transition-colors"/>
         </div>

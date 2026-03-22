@@ -98,9 +98,8 @@ pub fn ResultsTable(
     on_page_change: Callback<u32>,
     /// Called when the user changes the page size.
     on_page_size_change: Callback<u32>,
-    /// Optional header actions (e.g. "Create Chart" button).
-    #[prop(optional)]
-    header_actions: Option<Children>,
+    // NOTE: header_actions prop removed — chart button is rendered in TabBar instead.
+    // ResultsTable focuses on data display only.
 ) -> impl IntoView {
     // ── Pagination calculations ──────────────────────────────────────────
 
@@ -290,7 +289,6 @@ pub fn ResultsTable(
                     {if num_columns != 1 { " columns" } else { " column" }}
                 </span>
                 <div class="flex items-center gap-2">
-                    {header_actions.map(|children| children())}
                 </div>
             </div>
 
@@ -336,6 +334,9 @@ pub fn ResultsTable(
                                             <div
                                                 class="resize-handle resizable-table-resize-handle absolute right-0 top-0 bottom-0 cursor-col-resize"
                                                 style="user-select: none; width: 12px; display: flex; align-items: center; justify-content: center;"
+                                                role="separator"
+                                                aria-orientation="vertical"
+                                                tabindex="0"
                                                 on:mousedown={
                                                     let on_resize_start = on_resize_start.clone();
                                                     move |ev: web_sys::MouseEvent| {
@@ -454,12 +455,13 @@ fn PaginationControls(
     let is_last = current_page >= total_pages;
 
     view! {
-        <div class="px-2 sm:px-4 py-2 border-t flex items-center justify-between flex-shrink-0 min-w-0 bg-muted border-border">
+        <div class="px-2 sm:px-4 py-2 border-t flex items-center justify-between flex-shrink-0 min-w-0 bg-muted border-border" role="navigation" aria-label="Results pagination">
             // Page size selector
             <div class="flex items-center gap-1 sm:gap-2 text-xs whitespace-nowrap text-muted-foreground">
                 <span class="hidden sm:inline">"Rows per page:"</span>
                 <select
                     class="h-7 text-xs rounded-md border border-input bg-transparent px-2 py-1 text-foreground cursor-pointer focus:outline-none focus:ring-1 focus:ring-ring"
+                    aria-label="Rows per page"
                     on:change=move |ev| {
                         let value = event_target_value(&ev);
                         if let Ok(size) = value.parse::<u32>() {

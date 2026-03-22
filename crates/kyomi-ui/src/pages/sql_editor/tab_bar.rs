@@ -87,15 +87,18 @@ pub fn TabBar(
     /// Called when a tab is double-clicked to restore its query + datasource.
     /// Arguments: `(query_text, datasource_slug)`. `None` disables the feature.
     on_restore_query: Option<Callback<(String, Option<String>)>>,
+    /// Optional actions rendered on the right side of the tab bar (e.g. "Create Chart" button).
+    #[prop(optional)]
+    header_actions: Option<impl IntoView + 'static>,
 ) -> impl IntoView {
     let state = SqlEditorState::use_state();
     let tabs = state.tabs;
     let active_tab_id = state.active_tab_id;
 
     view! {
-        <div class="flex items-center bg-muted border-b border-border">
+        <div class="flex items-center bg-muted border-b border-border" role="tablist" aria-label="Query result tabs">
             // Scrollable tab area
-            <div class="flex-1 flex overflow-x-auto overflow-y-hidden scrollbar-thin">
+            <div class="flex-1 flex overflow-x-auto overflow-y-hidden scrollbar-thin min-w-0">
                 {move || {
                     let current_tabs = tabs.get();
                     let current_active = active_tab_id.get();
@@ -144,6 +147,14 @@ pub fn TabBar(
                     }
                 }}
             </div>
+            // Header actions area (e.g. Create Chart button)
+            {header_actions.map(|actions| {
+                view! {
+                    <div class="flex items-center gap-2 px-2 flex-shrink-0">
+                        {actions}
+                    </div>
+                }
+            })}
         </div>
     }
 }
@@ -217,6 +228,9 @@ fn SingleTab(
     view! {
         <div
             class=container_class
+            role="tab"
+            aria-selected=if is_active { "true" } else { "false" }
+            tabindex=if is_active { "0" } else { "-1" }
             on:click=move |_| on_click()
             on:dblclick=move |ev: web_sys::MouseEvent| {
                 ev.stop_propagation();

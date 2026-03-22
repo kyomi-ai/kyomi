@@ -249,16 +249,20 @@ pub fn SqlEditorSidebar(
             <div class="flex flex-col flex-1 min-w-0 h-full">
                 // Sidebar header with tabs
                 <div class="p-3 border-b border-border flex items-center justify-between flex-shrink-0">
-                    <div class="flex items-center gap-1 bg-accent rounded-lg p-1">
+                    <div class="flex items-center gap-1 bg-accent rounded-lg p-1" role="tablist" aria-label="Sidebar panels">
                         <button
                             class=move || tab_class(SidebarTab::Catalog)
                             on:click=set_catalog_tab
+                            role="tab"
+                            aria-selected=move || if active_tab.get() == SidebarTab::Catalog { "true" } else { "false" }
                         >
                             "Catalog"
                         </button>
                         <button
                             class=move || tab_class(SidebarTab::History)
                             on:click=set_history_tab
+                            role="tab"
+                            aria-selected=move || if active_tab.get() == SidebarTab::History { "true" } else { "false" }
                         >
                             "History"
                         </button>
@@ -445,7 +449,10 @@ pub fn SqlEditorSidebar(
                             <div
                                 class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
                                 on:mousedown=handle_resize_start.clone()
-                                aria-label="Drag to resize"
+                                role="separator"
+                                aria-orientation="vertical"
+                                aria-label="Drag to resize sidebar"
+                                tabindex="0"
                             >
                                 <div class="w-1 h-12 bg-border hover:bg-muted-foreground rounded transition-colors" />
                             </div>

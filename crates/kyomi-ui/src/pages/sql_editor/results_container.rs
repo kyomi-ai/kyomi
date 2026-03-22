@@ -20,6 +20,8 @@ use super::types::{QueryStatus, ResultTab};
 use crate::components::Spinner;
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::sql_editor::fetch_query_page;
+#[cfg(target_arch = "wasm32")]
+use crate::server_fns::sql_editor::generate_chart_from_results;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ResultsContainer component
@@ -316,6 +318,74 @@ pub fn ResultsContainer(
         }
     };
 
+    // ── Chart generation state ───────────────────────────────────────────
+    let (chart_generating, set_chart_generating) = signal(false);
+    let (chart_yaml, set_chart_yaml) = signal(None::<String>);
+    let (chart_error, set_chart_error) = signal(None::<String>);
+    let (show_chart_modal, set_show_chart_modal) = signal(false);
+    // Track clipboard feedback.
+    let (copied, set_copied) = signal(false);
+
+    let handle_create_chart = {
+        Callback::new(move |_: ()| {
+            let Some(tab) = active_tab.get() else { return };
+            let Some(ref result) = tab.result else { return };
+            if result.columns.is_empty() || result.rows.is_empty() {
+                return;
+            }
+
+            let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+            // Take first 100 rows as sample.
+            let sample_rows: Vec<Vec<serde_json::Value>> = result
+                .rows
+                .iter()
+                .take(100)
+                .cloned()
+                .collect();
+            let sql = tab.query.clone();
+
+            set_chart_generating.set(true);
+            set_chart_error.set(None);
+
+            #[cfg(target_arch = "wasm32")]
+            leptos::task::spawn_local(async move {
+                match generate_chart_from_results(columns, sample_rows, sql).await {
+                    Ok(chart) => {
+                        set_chart_yaml.set(Some(chart.chartml_yaml));
+                        set_show_chart_modal.set(true);
+                    }
+                    Err(err) => {
+                        set_chart_error.set(Some(format!("{err}")));
+                    }
+                }
+                set_chart_generating.set(false);
+            });
+        })
+    };
+
+    let handle_copy_yaml = move |_| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(yaml) = chart_yaml.get_untracked() {
+                if let Some(window) = web_sys::window() {
+                    if let Some(clipboard) = window.navigator().clipboard() {
+                        let _ = clipboard.write_text(&yaml);
+                        set_copied.set(true);
+                        // Reset after 2 seconds.
+                        leptos::task::spawn_local(async move {
+                            gloo_timers::future::TimeoutFuture::new(2000).await;
+                            set_copied.set(false);
+                        });
+                    }
+                }
+            }
+        }
+    };
+
+    let close_chart_modal = move |_| {
+        set_show_chart_modal.set(false);
+    };
+
     // ── Render ───────────────────────────────────────────────────────────
 
     // Don't render at all if there are no tabs.
@@ -325,10 +395,62 @@ pub fn ResultsContainer(
             return None;
         }
 
+        // "Create Chart" button — shown only when there are results.
+        let chart_button = {
+            let generating = chart_generating;
+            let error = chart_error;
+            let create_chart = handle_create_chart;
+
+            view! {
+                <button
+                    class="px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground bg-background border border-input rounded-md hover:bg-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                    disabled=move || generating.get()
+                    aria-label="Create chart from results"
+                    on:click=move |_| create_chart.run(())
+                >
+                    {move || if generating.get() {
+                        view! {
+                            <Spinner class="!h-3 !w-3" />
+                            <span>"Generating..."</span>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                    stroke-width="2"
+                                    d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+                                />
+                            </svg>
+                            <span>"Create Chart"</span>
+                        }.into_any()
+                    }}
+                </button>
+                // Inline error message.
+                {move || error.get().map(|msg| {
+                    let title = msg.clone();
+                    view! {
+                        <span class="text-xs text-destructive truncate max-w-[200px]" title=title>{msg}</span>
+                    }
+                })}
+            }
+        };
+
         Some(view! {
-            <div class="flex-1 flex flex-col min-h-0 border border-input rounded-md overflow-hidden bg-card">
-                <TabBar on_restore_query=on_restore_query />
+            <div class="flex-1 flex flex-col min-h-0 border border-input rounded-md overflow-hidden bg-card" role="tabpanel" aria-label="Query results">
+                <TabBar on_restore_query=on_restore_query header_actions=chart_button />
                 {tab_content}
+
+                // ChartML preview modal
+                <Show when=move || show_chart_modal.get()>
+                    <ChartYamlModal
+                        yaml=Signal::derive(move || chart_yaml.get().unwrap_or_default())
+                        copied=Signal::derive(move || copied.get())
+                        on_copy=handle_copy_yaml
+                        on_close=close_chart_modal
+                    />
+                </Show>
             </div>
         })
     }
@@ -567,5 +689,92 @@ fn ResultsError(
             </div>
         }
         .into_any()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ChartML YAML preview modal
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Simple modal that displays generated ChartML YAML with a copy button.
+///
+/// This is a lightweight alternative to the full ChartBuilder — shows the raw
+/// YAML in a scrollable code block with copy-to-clipboard support.
+#[component]
+fn ChartYamlModal(
+    /// The generated ChartML YAML string.
+    #[prop(into)]
+    yaml: Signal<String>,
+    /// Whether the "Copied!" feedback is active.
+    #[prop(into)]
+    copied: Signal<bool>,
+    /// Called when the copy button is clicked.
+    on_copy: impl Fn(web_sys::MouseEvent) + Send + Sync + 'static,
+    /// Called when the close button or backdrop is clicked.
+    on_close: impl Fn(web_sys::MouseEvent) + Send + Sync + Clone + 'static,
+) -> impl IntoView {
+    let on_close_backdrop = on_close.clone();
+
+    view! {
+        // Backdrop
+        <div
+            class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            on:click=move |ev: web_sys::MouseEvent| {
+                // Only close on direct backdrop click, not bubbled clicks.
+                if ev.target() == ev.current_target() {
+                    on_close_backdrop(ev);
+                }
+            }
+            role="dialog"
+            aria-modal="true"
+            aria-label="Generated ChartML"
+        >
+            <div class="bg-card rounded-lg shadow-xl border border-border w-full max-w-2xl max-h-[80vh] flex flex-col">
+                // Header
+                <div class="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
+                    <h2 class="text-sm font-semibold text-foreground">"Generated ChartML"</h2>
+                    <div class="flex items-center gap-2">
+                        // Copy button
+                        <button
+                            class="px-3 py-1.5 text-xs font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors flex items-center gap-1.5"
+                            on:click=on_copy
+                            aria-label="Copy ChartML to clipboard"
+                        >
+                            {move || if copied.get() {
+                                view! {
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                    <span>"Copied!"</span>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                                    </svg>
+                                    <span>"Copy"</span>
+                                }.into_any()
+                            }}
+                        </button>
+                        // Close button
+                        <button
+                            class="p-1 text-muted-foreground hover:text-foreground rounded transition-colors"
+                            on:click=on_close
+                            aria-label="Close modal"
+                        >
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                // Body — scrollable YAML code block
+                <div class="flex-1 overflow-auto p-4">
+                    <pre class="text-xs font-mono text-foreground bg-muted rounded-md p-4 whitespace-pre-wrap break-words border border-border">
+                        {move || yaml.get()}
+                    </pre>
+                </div>
+            </div>
+        </div>
     }
 }
