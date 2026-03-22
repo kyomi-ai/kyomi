@@ -215,6 +215,13 @@ pub struct AlertItem {
     pub deleted_by: Option<String>,
 }
 
+/// Paginated alerts response with total count.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AlertsPage {
+    pub alerts: Vec<AlertItem>,
+    pub total: i64,
+}
+
 /// Result of validating and describing a cron expression.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CronDescription {

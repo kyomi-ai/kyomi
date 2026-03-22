@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 
-use crate::types::{AlertItem, WatchExecutionItem, WatchListItem};
+use crate::types::{AlertItem, AlertsPage, WatchExecutionItem, WatchListItem};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers (server-only)
@@ -513,7 +513,7 @@ pub async fn get_alerts(
     limit: Option<i64>,
     offset: Option<i64>,
     include_deleted: Option<bool>,
-) -> Result<Vec<AlertItem>, ServerFnError> {
+) -> Result<AlertsPage, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
@@ -522,7 +522,7 @@ pub async fn get_alerts(
     let offset = offset.unwrap_or(0).max(0);
     let include_deleted = include_deleted.unwrap_or(false);
 
-    let (executions, _total) = kyomi_auth::watch_service::get_alerts_history(
+    let (executions, total) = kyomi_auth::watch_service::get_alerts_history(
         &ctx.db,
         ws_id,
         watch_id.as_deref(),
@@ -533,7 +533,10 @@ pub async fn get_alerts(
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(executions.iter().map(execution_to_alert).collect())
+    Ok(AlertsPage {
+        alerts: executions.iter().map(execution_to_alert).collect(),
+        total,
+    })
 }
 
 /// Get unread alerts count for the sidebar badge.
