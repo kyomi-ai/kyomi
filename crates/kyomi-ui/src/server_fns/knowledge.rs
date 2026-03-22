@@ -260,7 +260,10 @@ pub async fn update_knowledge_file(
         .map_err(|e| map_service_error("Failed to update content", e))?;
 
         if result.is_none() {
-            // CAS failed — content was modified concurrently
+            // CAS failed — content was modified concurrently.
+            // The "CONFLICT:" prefix is a protocol marker checked by the file
+            // editor component (components/knowledge/file_editor.rs) to
+            // distinguish CAS failures from generic errors.
             return Err(ServerFnError::new(
                 "CONFLICT: Content was modified by another user. Reload and try again.",
             ));
