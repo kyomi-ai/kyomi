@@ -18,6 +18,7 @@ pub mod checkbox;
 pub mod confirm_dialog;
 pub mod dashboard;
 pub mod input;
+pub mod knowledge;
 pub mod label;
 pub mod layout;
 pub mod modal;
