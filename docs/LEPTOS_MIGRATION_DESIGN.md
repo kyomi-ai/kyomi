@@ -130,49 +130,48 @@ let ts = TimeSeries { timestamps, values };
 let result = forecast_auto(&ts, horizon, confidence)?;
 ```
 
-#### Code Editing — kyomi-editor (new, pure Rust)
+#### Code Editing — kode-leptos (built, pure Rust)
 
-No production-ready Rust code editor exists for the browser. Existing "Rust crates" for editors (`monaco`, `codemirror`, `leptos-tiptap`) are **wasm-bindgen wrappers around JS libraries** — they still ship the full JS bundle.
+**Status: Built and in use.** The `kode-leptos` editor (`~/repos/kode/kode-leptos/`) is a pure Rust code editor for Leptos, already integrated into the dashboard editor and chart builder.
 
-**Approach:** DOM-based transparent textarea overlay with Rust syntax highlighting.
-
-```
-┌─────────────────────────────────────┐
-│  <div style="position: relative">   │
-│                                     │
-│  <pre><code>                        │  ← Highlighted HTML from syntect
-│    <span class="keyword">SELECT</span> name
-│    <span class="keyword">FROM</span> users
-│  </code></pre>                      │
-│                                     │
-│  <textarea style="color:transparent;│  ← Real textarea on top
-│    background:transparent">          │     Native cursor, selection,
-│  </textarea>                        │     copy/paste, IME — all free
-│                                     │
-└─────────────────────────────────────┘
-```
+**Architecture:** Virtual-viewport rendering with hidden textarea for input capture. Uses `ropey` for the text buffer and `arborium` (tree-sitter) for syntax highlighting. Zero JavaScript.
 
 **Building blocks (all compile to `wasm32-unknown-unknown`):**
 
 | Crate | Purpose | WASM Status |
 |-------|---------|-------------|
-| `syntect` 5 (with `default-fancy` feature) | Syntax highlighting (Sublime Text definitions) | Compiles cleanly — uses `fancy-regex` (pure Rust), not `onig` (C) |
+| `arborium` 2.16 + `arborium-theme` | Tree-sitter syntax highlighting (Tokyo Night theme) | Compiles cleanly — pure Rust |
 | `ropey` 1 | Text rope buffer (efficient edits, cheap clone for undo) | Compiles cleanly — pure Rust |
-| `web-sys` | Browser APIs (textarea, keyboard events, clipboard) | Native WASM bindings |
+| `web-sys` | Browser APIs (textarea, keyboard events, clipboard, DOM Range) | Native WASM bindings |
+
+**Supported languages:** SQL, YAML, Markdown, Plain text.
 
 **Features:**
-- Syntax highlighting for SQL, YAML, Markdown (via syntect grammar definitions)
-- Native textarea provides: cursor, selection, copy/paste, undo/redo, IME, accessibility, find-in-page — all free
-- Line numbers, error markers, keyboard shortcuts (Cmd+Enter) added as Leptos components
-- Ropey for undo/redo history and efficient text operations
+- Virtual viewport rendering (only visible lines + 20-line buffer)
+- Cursor tracking with pixel-perfect positioning via DOM Range API
+- Full keyboard support: arrow keys, Ctrl+Z/Y undo/redo, Ctrl+A select all, Ctrl+Shift+D duplicate
+- Mouse support: click, double-click (word), triple-click (line), drag selection
+- IME composition support for international input
+- Line numbers with dynamic gutter width
 
-**Scope:** Focused editors for short documents (SQL queries 5-50 lines, YAML specs 10-30 lines, markdown 20-100 lines). Not building VS Code — this is a purpose-built component for Kyomi's editing needs.
+**API:**
+```rust
+use kode_leptos::{CodeEditor, Language};
 
-**Estimated size:** ~500-1,000 lines of Rust, zero JS.
+view! {
+    <CodeEditor
+        language=Signal::stored(Language::Sql)
+        content=content_signal
+        on_change=Arc::new(move |text| { /* handle change */ })
+    />
+}
+```
 
-#### Rich Text / Dashboard Editing — kyomi-editor markdown mode + comrak
+**Current consumers:** Dashboard editor (Markdown mode), Chart builder (SQL mode), SQL Editor (planned).
 
-Instead of TipTap/ProseMirror WYSIWYG, use the same kyomi-editor in markdown mode with live preview. Dashboard content is stored as plain markdown with fenced `chartml` blocks.
+#### Rich Text / Dashboard Editing — kode-leptos markdown mode + comrak
+
+Instead of TipTap/ProseMirror WYSIWYG, use kode-leptos in Markdown mode with live preview. Dashboard content is stored as plain markdown with fenced `chartml` blocks. **Status: Built and in use** — the dashboard editor already uses this approach.
 
 **Markdown parsing (pure Rust, WASM-compatible):**
 - `comrak` — GFM-compatible, full AST, fenced code block support
@@ -228,7 +227,7 @@ Browser                                         Server
 │  ├── Leptos Router           │    │  ├── Server Functions (typed) │
 │  ├── Singlestage UI (shadcn) │    │  ├── WebSocket Handlers      │
 │  ├── chartml-rs (SVG)        │    │  ├── Service Layer           │
-│  ├── kyomi-editor (syntect)  │    │  │   ├── kyomi-auth          │
+│  ├── kode-leptos (arborium)  │    │  │   ├── kyomi-auth          │
 │  ├── DataFusion (Arrow SQL)  │    │  │   ├── kyomi-agent         │
 │  └── quackstats-rs (forecast)│    │  │   └── kyomi-*             │
 │         │                    │    │  ├── DbPool (PG/SQLite)      │
@@ -279,16 +278,30 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 
 ### Migration Phases
 
-| Phase | Scope | Risk | JS Interop |
-|-------|-------|------|------------|
-| **0** | Infrastructure — `kyomi-ui` crate, Leptos+Axum integration, Tailwind, Singlestage UI, hybrid routing | Low | None |
-| **1** | **Settings** (8 tabs, ~4,500 LOC) — exercises widest component range (tabs, cards, buttons, switches, selects, inputs, modals, toasts, tooltips, badges, alerts, skeletons), low risk if broken | Low | None |
-| **2** | **Auth** — Login, Signup, Verify Email, Password Recovery, Passkey flows. WebAuthn via `web_sys` directly. | Medium (blocks users if broken) | None |
-| **3** | **Watches** — list + detail views, cards + forms | Low | None |
-| **4** | **Knowledge** — list, tree, editor | Low | None |
-| **5** | **Chat** — WebSocket streaming, chartml-rs chart rendering in responses | Medium | None |
-| **6** | **SQL Editor** — kyomi-editor with SQL mode, DataFusion for query execution | Medium | None |
-| **7** | **Dashboards** — kyomi-editor markdown mode, chartml-rs charts, DataFusion transforms, quackstats-rs forecasting | High (most complex page) | None |
+| Phase | Scope | Risk | JS Interop | Status | Detailed Plan |
+|-------|-------|------|------------|--------|---------------|
+| **0** | Infrastructure — `kyomi-ui` crate, Leptos+Axum integration, Tailwind, hybrid routing | Low | None | **Complete** | — |
+| **1** | **Settings** (8 tabs, ~4,500 LOC) — widest component range | Low | None | **Complete** | [`LEPTOS_SETTINGS_PLAN.md`](LEPTOS_SETTINGS_PLAN.md) |
+| **2** | **Auth** — Login, Signup, Verify Email, Password Recovery, Passkey flows | Medium | None | **Complete** | — (implemented directly) |
+| **3** | **Watches** — watch management, AI creation, cron scheduling, Gmail-style alert inbox, execution history | Low | None | **Planned** | [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) — 23 tasks, 8 phases |
+| **4** | **Knowledge** — list, tree, editor | Low | None | **Planned** | [`KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md`](KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md) |
+| **5** | **Chat** — WebSocket streaming, chartml-rs chart rendering in responses | Medium | None | **Planned** | [`CHAT_LEPTOS_MIGRATION_PLAN.md`](CHAT_LEPTOS_MIGRATION_PLAN.md) |
+| **6** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results | Medium | None | **Planned** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases |
+| **7** | **Dashboards** — kode-leptos markdown mode, chartml-rs charts, DataFusion transforms, quackstats-rs forecasting | High | None | **In Progress** | — (implemented directly on `feat/remove-react-routes`) |
+| **8** | **Remaining Pages** — onboarding flows, OAuth callbacks, utility pages (Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership) | Low | None | **Planned** | [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) |
+
+### Detailed Plan Index
+
+All detailed implementation plans live alongside this document:
+
+| Plan | Scope | Tasks | Server Fns | Components |
+|------|-------|-------|-----------|------------|
+| [`LEPTOS_SETTINGS_PLAN.md`](LEPTOS_SETTINGS_PLAN.md) | Settings (8 tabs) — profile, security, workspace, datasources, analytics, billing, team, usage | 28 | ~51 | ~10 |
+| [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) | Watches — CRUD, AI agent sidebar, cron scheduling, Gmail-style alerts, execution history | 23 | ~20 | ~11 |
+| [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) | SQL Editor — kode-leptos editor, query execution, schema browser, tabbed results, streaming | 28 | ~12 | ~14 |
+| [`LEPTOS_CHAT_PLAN.md`](LEPTOS_CHAT_PLAN.md) | Chat — session management, WebSocket streaming, markdown + chart rendering, shared ChatInterface | TBD | TBD | TBD |
+| [`LEPTOS_KNOWLEDGE_PLAN.md`](LEPTOS_KNOWLEDGE_PLAN.md) | Knowledge — file list, tree navigation, markdown editor | TBD | TBD | TBD |
+| [`LEPTOS_REMAINING_PAGES_PLAN.md`](LEPTOS_REMAINING_PAGES_PLAN.md) | Onboarding, OAuth callbacks, Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership | TBD | TBD | TBD |
 
 #### Why Settings First
 - Exercises the **widest range of UI components** (40+ different component types)
@@ -297,15 +310,15 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 - **15+ API calls** across 8 tabs — validates the server function pattern thoroughly
 - Validates the full Leptos + Singlestage + Tailwind stack before committing to harder pages
 
-#### Pages NOT Suitable for Early Migration
-- **SQL Editor** — needs kyomi-editor to be built first
-- **Dashboard Editor** — needs kyomi-editor + chartml-rs integration + DataFusion
-- **Chat** — needs WebSocket patterns established + chartml-rs for inline charts
-- **Login** — too risky as a first page (blocks all users if broken)
+#### Pages NOT Suitable for Early Migration (historical context — some now complete)
+- **SQL Editor** — needed kode-leptos editor built first (now available)
+- **Dashboard Editor** — needed kode-leptos + chartml-rs + DataFusion (now in progress)
+- **Chat** — needed WebSocket patterns established + chartml-rs for inline charts
+- **Login** — too risky as a first page (blocks all users if broken) — **now complete**
 
 ---
 
-## New Crate Structure
+## Crate Structure
 
 ```
 crates/
@@ -315,39 +328,45 @@ crates/
   kyomi-datasource/        ← unchanged
   kyomi-embed/             ← unchanged
   kyomi-knowledge/         ← unchanged
-  kyomi-ui/                ← NEW: Leptos frontend
+  kyomi-ui/                ← Leptos frontend
     Cargo.toml
     src/
-      lib.rs               ← App root, router, Leptos config
+      lib.rs               ← App root, router, server fn registration
+      app.rs               ← Router with all routes
+      types.rs             ← Shared types (server/client boundary)
+      datasource.rs        ← KyomiDataSource (chartml-core DataSource impl)
       components/           ← Shared UI components
         mod.rs
-        toast.rs            ← Toast notifications (gap in Singlestage)
-        confirm_dialog.rs   ← Confirm dialog (compose from Dialog + Button)
-        tour.rs             ← Onboarding tour (replaces Driver.js)
+        button.rs, input.rs, label.rs, select.rs, checkbox.rs, switch.rs
+        modal.rs, card.rs, alert.rs, badge.rs, status_badge.rs
+        tooltip.rs, confirm_dialog.rs, spinner.rs, skeleton.rs
+        action_status.rs, theme.rs, layout.rs
+        dashboard/          ← Dashboard-specific shared components
+          markdown_renderer.rs, chart_builder.rs, chart_info_modal.rs
+          copilot_sidebar.rs, history_panel.rs, parameters.rs
+          insert_link_modal.rs, save_dashboard_modal.rs, shared.rs
       pages/
-        settings/
-          mod.rs            ← Tab router
-          profile.rs
-          security.rs
-          workspace.rs
-          datasources.rs
-          analytics.rs
-          billing.rs
-          team.rs
-        auth/
-          login.rs
-          signup.rs
-          passkey.rs
-          recovery.rs
-        watches/
-        knowledge/
-        chat/
-        sql_editor/
-        dashboards/
-      editor/               ← kyomi-editor (textarea + syntect + ropey)
-        mod.rs
-        highlight.rs
-        buffer.rs
+        settings/           ← COMPLETE — 8 tabs, all functional
+        auth/               ← COMPLETE — login, signup, recovery, passkey, OAuth
+        dashboards/         ← IN PROGRESS — list, viewer, editor
+        watches/            ← PLANNED — see LEPTOS_WATCHES_PLAN.md
+        knowledge/          ← PLANNED — see LEPTOS_KNOWLEDGE_PLAN.md
+        chat/               ← PLANNED — see LEPTOS_CHAT_PLAN.md
+        sql_editor/         ← PLANNED — see LEPTOS_SQL_EDITOR_PLAN.md
+        not_implemented.rs  ← Placeholder for unmigrated routes
+      server_fns/           ← Server functions (typed RPC)
+        mod.rs              ← ServerContext, extract_auth, extract_context
+        auth.rs, profile.rs, security.rs, dashboards.rs, datasources.rs
+        collections.rs, copilot.rs, context.rs, sidebar.rs
+        billing.rs, analytics.rs, team.rs, workspace.rs, usage.rs
+        slack.rs            ← (feature-gated)
+      utils/
+        websocket.rs        ← WebSocket hook (dashboard updates, extensible)
+        webauthn.rs         ← WebAuthn passkey utilities
+      parser/
+        chartml.rs          ← ChartML markdown parser
+
+~/repos/kode/kode-leptos/   ← Code editor (external crate, linked via path)
 ```
 
 ---
@@ -418,7 +437,7 @@ Same binary, same process, same crate. Eliminates the Node.js pod entirely.
 | Singlestage UI missing components | Low | Build with Tailwind + Basecoat CSS (framework-agnostic shadcn alternative) |
 | WASM bundle size (DataFusion is large) | Medium | Code-split via lazy loading; DataFusion only loaded on pages that need it |
 | Leptos ecosystem maturity vs React | Medium | Side project context — acceptable trade-off for zero-JS goal |
-| kyomi-editor limitations vs Monaco | Medium | Purpose-built for short documents; can revisit if needs grow |
+| kode-leptos limitations vs Monaco | Medium | Built and in use; lacks autocomplete and error squiggles, but status bar errors and catalog sidebar compensate. Can extend if needs grow. |
 | DataFusion SQL dialect differences | Low | Minor syntax changes (PERCENTILE_CONT, DATE_TRUNC) |
 | Migration takes too long | Low | Hybrid routing means React stays in production; no "big rewrite" risk |
 | Developer pool (Leptos vs React) | Low | Currently single developer; Rust expertise already deep |
@@ -427,11 +446,11 @@ Same binary, same process, same crate. Eliminates the Node.js pod entirely.
 
 ## Open Questions
 
-1. **WASM bundle size budget** — DataFusion + chartml-rs + syntect + quackstats-rs all in one WASM binary. What's the total? Need to measure.
+1. **WASM bundle size budget** — DataFusion + chartml-rs + arborium + quackstats-rs all in one WASM binary. What's the total? Need to measure.
 2. **Code splitting** — Can DataFusion and chartml-rs be loaded lazily (only on pages that need them)?
 3. **MCP Chart App** — Currently a Vite single-file HTML app. Migrate to Leptos or keep separate?
 4. **PWA / Service Worker** — Current React app has PWA support. Leptos PWA story?
-5. **DuckDB multi-tab coordination** — DataFusion doesn't need the Worker architecture, but do we still want cross-tab state sharing?
+5. **Shared ChatInterface** — Chat page and Watch Agent Sidebar both need a chat component. Build once in Chat migration, reuse in Watches. Watches Phase 4 depends on this.
 
 ---
 
