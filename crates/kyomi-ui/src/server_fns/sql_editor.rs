@@ -25,7 +25,7 @@ use crate::pages::sql_editor::types::{
 ///
 /// Returned by the `dry_run_sql` server function. Includes error location
 /// information for inline editor markers.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DryRunResult {
     /// `true` if the query is syntactically valid.
     pub valid: bool,
