@@ -75,6 +75,8 @@ web-sys = { version = "0.3", features = [
     "Response", "Blob", "Url", "CustomEvent",
     # IntersectionObserver (infinite scroll in query history)
     "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
+    # SQL Editor: crypto.randomUUID() and performance.now()
+    "Crypto", "Performance",
 ] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures

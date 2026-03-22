@@ -141,6 +141,7 @@ pub fn register_server_functions() {
     register_explicit::<RefreshCatalog>();
     register_explicit::<GetTableInfo>();
     register_explicit::<GenerateChartFromResults>();
+    register_explicit::<GetWsConnectionInfo>();
 
     use server_fns::datasources::*;
     register_explicit::<ListDatasources>();

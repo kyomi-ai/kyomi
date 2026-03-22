@@ -154,11 +154,13 @@ fn use_run_shortcut(on_run: Option<Callback<()>>, query_text: Signal<String>) {
         // Move the Closure into the cleanup callback so it stays alive as long as
         // the listener exists, and is properly dropped when the component unmounts
         // (instead of using closure.forget() which permanently leaks memory).
+        // SendWrapper is required because Closure is !Send but on_cleanup needs Send+Sync.
         let document_clone = document.clone();
         let closure_ref = closure.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        let closure_wrapper = send_wrapper::SendWrapper::new(closure);
         on_cleanup(move || {
             let _ = document_clone.remove_event_listener_with_callback("keydown", &closure_ref);
-            drop(closure);
+            drop(closure_wrapper);
         });
     });
 }
@@ -240,11 +242,13 @@ fn use_cursor_position() -> (RwSignal<usize>, RwSignal<usize>) {
         // Move the Closure into the cleanup callback so it stays alive as long as
         // the interval exists, and is properly dropped when the component unmounts
         // (instead of using closure.forget() which permanently leaks memory).
+        // SendWrapper is required because Closure is !Send but on_cleanup needs Send+Sync.
+        let closure_wrapper = send_wrapper::SendWrapper::new(closure);
         on_cleanup(move || {
             if let Some(window) = web_sys::window() {
                 window.clear_interval_with_handle(interval_id);
             }
-            drop(closure);
+            drop(closure_wrapper);
         });
     });
 

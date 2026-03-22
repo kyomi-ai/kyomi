@@ -91,7 +91,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/chat") view=|| view! { <Layout><NotImplementedPage name="Chat"/></Layout> }/>
                     <Route path=path!("/chat/:session_id") view=|| view! { <Layout><NotImplementedPage name="Chat"/></Layout> }/>
                     <Route path=path!("/chats") view=|| view! { <Layout><NotImplementedPage name="Chats"/></Layout> }/>
-                    <Route path=path!("/sql-editor") view=|| view! { <Layout><NotImplementedPage name="SQL Editor"/></Layout> }/>
+                    <Route path=path!("/sql-editor") view=|| view! { <Layout><crate::pages::sql_editor::SqlEditorPage/></Layout> }/>
                     <Route path=path!("/knowledge") view=|| view! { <Layout><NotImplementedPage name="Knowledge"/></Layout> }/>
                     <Route path=path!("/watches") view=|| view! { <Layout><NotImplementedPage name="Watches"/></Layout> }/>
                     <Route path=path!("/watches/:view") view=|| view! { <Layout><NotImplementedPage name="Watches"/></Layout> }/>
