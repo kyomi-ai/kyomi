@@ -61,8 +61,10 @@ console_error_panic_hook = "0.1"
 
 # Browser DOM access (for theme toggling, clipboard, etc.)
 web-sys = { version = "0.3", features = [
-    "Window", "Document", "HtmlElement", "Element", "EventTarget", "Node",
+    "Window", "Document", "HtmlElement", "HtmlTextAreaElement", "HtmlInputElement",
+    "Element", "EventTarget", "Node",
     "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
+    "ScrollIntoViewOptions", "ScrollBehavior",
     "RequestCredentials", "RequestInit", "Headers",
     "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer",
     # WebSocket support (dashboard live updates)
