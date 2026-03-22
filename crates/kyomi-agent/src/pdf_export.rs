@@ -13,14 +13,15 @@
 
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Value};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
+use crate::chartml_factory;
 use crate::chartml_utils;
 use crate::d3_format;
+use crate::markdown_to_typst;
+use crate::pdf_typst;
 use crate::tools::chart_data_resolver;
-use crate::tools::chart_renderer::ChartRendererClient;
 use crate::tools::QueryContext;
 
 // ---------------------------------------------------------------------------
@@ -52,7 +53,7 @@ pub async fn generate_dashboard_pdf(
     content: &str,
     title: &str,
     ctx: &QueryContext,
-    chart_renderer_url: &str,
+    _chart_renderer_url: &str,
     user_palette: &[String],
     parameter_values: Option<&Value>,
 ) -> Result<Vec<u8>, String> {
@@ -63,8 +64,9 @@ pub async fn generate_dashboard_pdf(
         "PDF export: found charts in dashboard '{}'", title
     );
 
-    let mut chart_images: HashMap<usize, String> = HashMap::new(); // idx -> base64 PNG
-    let mut html_rendered: HashMap<usize, String> = HashMap::new(); // idx -> native HTML
+    let mut chart_png_bytes: HashMap<String, Vec<u8>> = HashMap::new(); // filename -> PNG bytes
+    let mut chart_image_refs: HashMap<usize, String> = HashMap::new(); // spec_idx -> filename
+    let mut typst_rendered: HashMap<usize, String> = HashMap::new(); // spec_idx -> Typst markup
 
     if !extraction.specs.is_empty() {
         // 2. Resolve data for all charts sequentially
@@ -90,16 +92,16 @@ pub async fn generate_dashboard_pdf(
             }
         }
 
-        // 3. Separate metric/table (native HTML) from chart specs
+        // 3. Separate metric/table (native Typst) from chart specs
         let mut chart_render_specs: Vec<(usize, Value)> = Vec::new();
 
         for (idx, resolved) in &resolved_specs {
             match chartml_utils::get_visualize_type(resolved).as_deref() {
                 Some("metric") => {
-                    html_rendered.insert(*idx, render_metric_html(resolved));
+                    typst_rendered.insert(*idx, render_metric_typst_markup(resolved));
                 }
                 Some("table") => {
-                    html_rendered.insert(*idx, render_table_html(resolved));
+                    typst_rendered.insert(*idx, render_table_typst_markup(resolved));
                 }
                 _ => {
                     chart_render_specs.push((*idx, resolved.clone()));
@@ -107,67 +109,65 @@ pub async fn generate_dashboard_pdf(
             }
         }
 
-        // 4. Render non-metric/non-table charts via chart-renderer
-        if !chart_render_specs.is_empty() && !chart_renderer_url.is_empty() {
-            match ChartRendererClient::new(chart_renderer_url) {
-                Ok(renderer) if renderer.health_check().await => {
-                    for (idx, resolved_spec) in &chart_render_specs {
-                        // Use the spec's intended height if set
-                        let spec_height = resolved_spec
-                            .get("visualize")
-                            .and_then(|v| v.get("style"))
-                            .and_then(|v| v.get("height"))
-                            .and_then(|v| v.as_u64())
-                            .map(|h| h as u32);
-                        let chart_height = spec_height.unwrap_or(PDF_CHART_HEIGHT);
+        // 4. Render non-metric/non-table charts via chartml-rs (Rust-native)
+        for (idx, resolved_spec) in &chart_render_specs {
+            let spec_height = resolved_spec
+                .get("visualize")
+                .and_then(|v| v.get("style"))
+                .and_then(|v| v.get("height"))
+                .and_then(|v| v.as_u64())
+                .map(|h| h as u32);
+            let chart_height = spec_height.unwrap_or(PDF_CHART_HEIGHT);
 
-                        match renderer
-                            .render_chart(
-                                resolved_spec,
-                                PDF_CHART_WIDTH,
-                                chart_height,
-                                Some(user_palette),
-                                Some(PDF_CHART_DENSITY),
-                            )
-                            .await
-                        {
-                            Ok(png_bytes) => {
-                                chart_images.insert(*idx, BASE64.encode(&png_bytes));
-                            }
-                            Err(e) => {
-                                let chart_title =
-                                    chartml_utils::get_chart_title(resolved_spec);
-                                error!(
-                                    error = %e, chart_idx = idx,
-                                    "PDF export: failed to render chart '{}'", chart_title
-                                );
-                            }
-                        }
-                    }
+            let yaml = match serde_yaml::to_string(resolved_spec) {
+                Ok(y) => y,
+                Err(e) => {
+                    error!(error = %e, chart_idx = idx, "PDF export: failed to serialize spec to YAML");
+                    continue;
                 }
-                Ok(_) => {
-                    warn!("PDF export: chart renderer is not healthy, charts will show placeholders");
+            };
+
+            match chartml_factory::render_chart_to_png(
+                &yaml,
+                PDF_CHART_WIDTH,
+                chart_height,
+                PDF_CHART_DENSITY,
+                Some(user_palette),
+            )
+            .await
+            {
+                Ok(png_bytes) => {
+                    let filename = format!("chart_{idx}.png");
+                    chart_image_refs.insert(*idx, filename.clone());
+                    chart_png_bytes.insert(filename, png_bytes);
                 }
                 Err(e) => {
-                    warn!(error = %e, "PDF export: failed to create chart renderer client");
+                    let chart_title = chartml_utils::get_chart_title(resolved_spec);
+                    error!(
+                        error = %e, chart_idx = idx,
+                        "PDF export: failed to render chart '{}'", chart_title
+                    );
                 }
             }
         }
     }
 
-    // 5. Replace ChartML blocks with rendered content
-    let processed_content =
-        replace_chartml_with_images(content, &extraction, &chart_images, &html_rendered);
+    // 5. Replace ChartML blocks with Typst markers
+    let processed_content = replace_chartml_with_typst(
+        content,
+        &extraction,
+        &chart_image_refs,
+        &typst_rendered,
+    );
 
-    // 6. Convert processed markdown to HTML
-    let html_body = markdown_to_html(&processed_content);
+    // 6. Convert processed markdown to Typst markup
+    let typst_body = markdown_to_typst::markdown_to_typst(&processed_content);
 
-    // 7. Wrap in full HTML document with PDF CSS
-    let full_html = build_pdf_html(&html_body);
+    // 7. Wrap in full Typst document with page setup
+    let typst_doc = pdf_typst::wrap_document(title, &typst_body);
 
-    // 8. Convert HTML to PDF via chart-renderer
-    let renderer = ChartRendererClient::new(chart_renderer_url)?;
-    let pdf_bytes = renderer.html_to_pdf(&full_html).await?;
+    // 8. Compile Typst → PDF (pure Rust, no external deps)
+    let pdf_bytes = pdf_typst::generate_pdf(&typst_doc, &chart_png_bytes)?;
 
     info!(
         bytes = pdf_bytes.len(),
@@ -547,6 +547,207 @@ fn replace_chartml_with_images(
     }
 
     result
+}
+
+/// Replace ChartML code blocks with Typst image references or rendered Typst markup.
+fn replace_chartml_with_typst(
+    content: &str,
+    extraction: &chartml_utils::ExtractionResult,
+    chart_image_refs: &HashMap<usize, String>,
+    typst_rendered: &HashMap<usize, String>,
+) -> String {
+    if extraction.blocks.is_empty() {
+        return content.to_string();
+    }
+
+    let mut result = content.to_string();
+
+    for block in extraction.blocks.iter().rev() {
+        if block.spec_indices.is_empty() {
+            result.replace_range(block.range.clone(), "");
+            continue;
+        }
+
+        let parts: Vec<String> = block
+            .spec_indices
+            .iter()
+            .map(|&spec_idx| {
+                // Native Typst rendering (metric, table)
+                if let Some(typst) = typst_rendered.get(&spec_idx) {
+                    return typst.clone();
+                }
+                // PNG chart image reference
+                if let Some(filename) = chart_image_refs.get(&spec_idx) {
+                    format!(
+                        "#align(center)[#image(\"{filename}\", width: 100%)]",
+                    )
+                } else {
+                    let chart_title = if spec_idx < extraction.specs.len() {
+                        chartml_utils::get_chart_title(&extraction.specs[spec_idx])
+                    } else {
+                        "Chart".to_string()
+                    };
+                    let escaped = pdf_typst::typst_escape(&chart_title);
+                    format!(
+                        r##"#block(fill: rgb("#f9fafb"), stroke: rgb("#e5e7eb"), radius: 6pt, inset: 24pt, width: 100%)[
+  #align(center)[#text(fill: rgb("#6b7280"), style: "italic")[Chart unavailable: {escaped}]]
+]"##
+                    )
+                }
+            })
+            .collect();
+
+        let block_replacement = parts.join("\n");
+        result.replace_range(block.range.clone(), &block_replacement);
+    }
+
+    result
+}
+
+/// Render a metric spec as Typst markup for PDF export.
+fn render_metric_typst_markup(spec: &Value) -> String {
+    let visualize = spec.get("visualize").cloned().unwrap_or(json!({}));
+    let data = spec.get("data").cloned().unwrap_or(json!({}));
+    let rows = data
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let title = chartml_utils::get_chart_title(spec);
+
+    if rows.is_empty() {
+        return markdown_to_typst::render_metric_typst(&title, "No data", None);
+    }
+
+    let first_row = &rows[0];
+    let value_field = visualize
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let raw_value = first_row.get(value_field).cloned().unwrap_or(json!(null));
+    let format_str = visualize
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let formatted = if format_str.is_empty() {
+        match &raw_value {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    } else {
+        match raw_value.as_f64() {
+            Some(n) => d3_format::format_d3(Some(&json!(n)), Some(format_str)),
+            None => raw_value.to_string(),
+        }
+    };
+
+    // Trend calculation
+    let trend = if let Some(compare_field) = visualize.get("compareWith").and_then(|v| v.as_str()) {
+        let current = raw_value.as_f64().unwrap_or(0.0);
+        let previous = first_row
+            .get(compare_field)
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        if previous != 0.0 {
+            let pct_change = ((current - previous) / previous.abs()) * 100.0;
+            let invert = visualize
+                .get("invertTrend")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let is_positive = if invert {
+                pct_change <= 0.0
+            } else {
+                pct_change >= 0.0
+            };
+            Some((format!("{:.1}%", pct_change.abs()), is_positive))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let trend_ref = trend
+        .as_ref()
+        .map(|(pct, positive)| (pct.as_str(), *positive));
+
+    markdown_to_typst::render_metric_typst(&title, &formatted, trend_ref)
+}
+
+/// Render a table spec as Typst markup for PDF export.
+fn render_table_typst_markup(spec: &Value) -> String {
+    let visualize = spec.get("visualize").cloned().unwrap_or(json!({}));
+    let data = spec.get("data").cloned().unwrap_or(json!({}));
+    let rows = data
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let title = chartml_utils::get_chart_title(spec);
+
+    if rows.is_empty() {
+        return markdown_to_typst::render_metric_typst(&title, "No data available", None);
+    }
+
+    // Get columns from spec or auto-detect from first row
+    let columns: Vec<(String, String)> = if let Some(cols) = visualize.get("columns").and_then(|c| c.as_array()) {
+        cols.iter()
+            .map(|col| {
+                let field = col
+                    .get("field")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let label = col
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&field)
+                    .to_string();
+                (field, label)
+            })
+            .collect()
+    } else {
+        // Auto-detect columns from first row's keys
+        match rows[0].as_object() {
+            Some(obj) => obj.keys().map(|k| (k.clone(), k.clone())).collect(),
+            None => vec![],
+        }
+    };
+
+    let total_rows = rows.len();
+    let display_rows = rows.iter().take(PDF_TABLE_MAX_ROWS);
+
+    let headers: Vec<String> = columns.iter().map(|(_, label): &(String, String)| label.clone()).collect();
+    let row_data: Vec<Vec<String>> = display_rows
+        .map(|row| {
+            columns
+                .iter()
+                .map(|(field, _)| {
+                    match row.get(field) {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Number(n)) => n.to_string(),
+                        Some(Value::Bool(b)) => b.to_string(),
+                        Some(Value::Null) | None => String::new(),
+                        Some(other) => other.to_string(),
+                    }
+                })
+                .collect()
+        })
+        .collect();
+
+    markdown_to_typst::render_data_table_typst(
+        &title,
+        &headers,
+        &row_data,
+        total_rows,
+        PDF_TABLE_MAX_ROWS,
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -117,6 +117,15 @@ kyomi-knowledge = { path = "crates/kyomi-knowledge" }
 kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 
+# ChartML rendering (chartml-rs)
+chartml-core = { path = "../chartml-rs/crates/chartml-core" }
+chartml-render = { path = "../chartml-rs/crates/chartml-render" }
+chartml-chart-cartesian = { path = "../chartml-rs/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "../chartml-rs/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "../chartml-rs/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "../chartml-rs/crates/chartml-chart-metric" }
+chartml-datafusion = { path = "../chartml-rs/crates/chartml-datafusion" }
+
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }
 

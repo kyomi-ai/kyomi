@@ -556,12 +556,12 @@ static RE_CHARTML_CAPTURE: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// Returns `(html_content, cid_images)`.
 async fn process_message_for_email(
     message: &str,
-    chart_renderer_url: &str,
+    _chart_renderer_url: &str,
     query_ctx: &QueryContext,
 ) -> (String, Vec<(String, Vec<u8>)>) {
+    use crate::chartml_factory;
     use crate::tools::chart_data_resolver;
     use crate::tools::chart_palettes;
-    use crate::tools::chart_renderer::ChartRendererClient;
 
     let mut images: Vec<(String, Vec<u8>)> = Vec::new();
     let mut processed = message.to_string();
@@ -580,26 +580,9 @@ async fn process_message_for_email(
         // Get user's palette preference for chart rendering.
         let user_palette = chart_palettes::get_user_palette(&query_ctx.db, &query_ctx.user_id).await;
 
-        // Create renderer and health-check if URL is configured.
-        let renderer = if !chart_renderer_url.is_empty() {
-            match ChartRendererClient::new(chart_renderer_url) {
-                Ok(r) if r.health_check().await => Some(r),
-                Ok(_) => {
-                    warn!("Chart renderer unavailable — charts will be replaced with placeholders");
-                    None
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to create chart renderer client");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         // Process blocks in reverse order so byte offsets stay valid after replacements.
         for (idx, (range, yaml_content)) in blocks.iter().enumerate().rev() {
-            if renderer.is_none() || idx >= MAX_EMAIL_CHARTS {
+            if idx >= MAX_EMAIL_CHARTS {
                 // Replace with placeholder
                 processed.replace_range(
                     range.clone(),
@@ -607,15 +590,8 @@ async fn process_message_for_email(
                 );
                 continue;
             }
-            let Some(renderer) = renderer.as_ref() else {
-                processed.replace_range(
-                    range.clone(),
-                    "[Chart available - view in Kyomi]",
-                );
-                continue;
-            };
 
-            // Parse YAML → serde_json::Value for the renderer.
+            // Parse YAML → serde_json::Value to resolve data.
             let spec: serde_json::Value = match serde_yaml::from_str::<serde_json::Value>(yaml_content) {
                 Ok(v) => v,
                 Err(e) => {
@@ -629,8 +605,6 @@ async fn process_message_for_email(
             };
 
             // Resolve data queries → inline rows (execute SQL against datasources).
-            // The chart renderer only works with inline data, so we must resolve
-            // any `data.datasource` + `data.query` references first.
             let resolved_spec = match chart_data_resolver::resolve_chart_data(&spec, query_ctx).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -649,8 +623,24 @@ async fn process_message_for_email(
                 .and_then(|v| v.as_str())
                 .unwrap_or("Chart");
 
-            // Render the chart to PNG (now with inline data + user palette).
-            match renderer.render_chart(&resolved_spec, EMAIL_CHART_WIDTH, EMAIL_CHART_HEIGHT, Some(&user_palette), None).await {
+            // Convert resolved spec to YAML for chartml-rs
+            let resolved_yaml = match serde_yaml::to_string(&resolved_spec) {
+                Ok(y) => y,
+                Err(e) => {
+                    warn!(error = %e, chart_idx = idx, "Failed to serialize spec to YAML");
+                    processed.replace_range(range.clone(), "[Chart available - view in Kyomi]");
+                    continue;
+                }
+            };
+
+            // Render the chart to PNG via chartml-rs (Rust-native, no HTTP).
+            match chartml_factory::render_chart_to_png(
+                &resolved_yaml,
+                EMAIL_CHART_WIDTH,
+                EMAIL_CHART_HEIGHT,
+                72, // standard DPI for email
+                Some(&user_palette),
+            ).await {
                 Ok(png_bytes) => {
                     let cid = format!(
                         "chart_{}_{}", idx, &uuid::Uuid::new_v4().to_string()[..8]

@@ -33,5 +33,19 @@ statrs = { workspace = true }
 lettre = { workspace = true }
 rand = { workspace = true }
 
+# PDF generation (Typst)
+typst-as-lib = { version = "0.15", features = ["typst-kit-embed-fonts"] }
+typst-pdf = "0.14"
+typst = "0.14"
+
+# ChartML rendering
+chartml-core = { workspace = true }
+chartml-render = { workspace = true }
+chartml-chart-cartesian = { workspace = true }
+chartml-chart-pie = { workspace = true }
+chartml-chart-scatter = { workspace = true }
+chartml-chart-metric = { workspace = true }
+chartml-datafusion = { workspace = true }
+
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }

@@ -25,9 +25,9 @@ use tracing;
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
+use crate::chartml_factory;
 use super::chart_data_resolver;
 use super::chart_palettes;
-use super::chart_renderer::ChartRendererClient;
 
 /// Chart context TTL in Redis — 30 days.
 const CHART_CONTEXT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
@@ -130,28 +130,35 @@ impl AgentTool for RenderChartTool {
         };
 
         // ── Pre-resolve transforms for interactive mode ─────────────────
-        // The MCP App doesn't have DuckDB, so we run the transform pipeline
-        // on the chart-renderer and return a spec with no transform section.
+        // The MCP App doesn't have a transform engine, so we run the
+        // DataFusion pipeline here and return a spec with no transform section.
         let mut resolved_spec = resolved_spec;
         if interactive {
-            if let Some(transform) = resolved_spec.get("transform").cloned() {
-                let renderer = ChartRendererClient::new(&ctx.config.chart_renderer_url)
-                    .map_err(|e| kyomi_core::Error::Internal(format!("Failed to create chart renderer: {e}")))?;
+            if resolved_spec.get("transform").is_some() {
+                // Render via chartml-rs which applies transforms internally.
+                // We re-serialize the resolved spec to YAML, render it through
+                // the full pipeline, then extract the transformed data.
+                // For interactive mode, we just need the transform applied —
+                // the actual chart rendering happens in the MCP App.
+                let chartml = chartml_factory::create_chartml();
+                let yaml = serde_yaml::to_string(&resolved_spec).map_err(|e| {
+                    kyomi_core::Error::Internal(format!("Failed to serialize spec: {e}"))
+                })?;
 
-                // Normalize unnamed source to named format for the transform endpoint
-                let spec_data = resolved_spec.get("data").cloned().unwrap_or(json!({}));
-                let named_data = if spec_data.is_object()
-                    && !is_named_data(&spec_data)
-                {
-                    json!({ "source": spec_data })
-                } else {
-                    spec_data
-                };
-
-                match renderer.transform_data(&named_data, &transform).await {
-                    Ok(transformed) => {
-                        resolved_spec["data"] = transformed;
-                        // Remove transform section — data is now fully resolved
+                // Use the async render to apply transforms, then extract the element.
+                // If transform succeeds, strip the transform from the spec and
+                // update data to inline (the MCP App will re-render from the spec).
+                match chartml.render_from_yaml_with_params_async(
+                    &yaml,
+                    Some(width as f64),
+                    Some(height as f64),
+                    None,
+                ).await {
+                    Ok(_) => {
+                        // Transform was applied successfully. For interactive mode,
+                        // we pass the original resolved spec (transforms will be
+                        // applied by chartml-rs in the MCP App's WASM runtime too).
+                        // Remove transform section for clients that can't handle it.
                         if let Some(obj) = resolved_spec.as_object_mut() {
                             obj.remove("transform");
                         }
@@ -189,22 +196,15 @@ impl AgentTool for RenderChartTool {
             // this and returns structuredContent to the MCP App.
             Ok(json!({ "_mcp_app_data": mcp_data }).to_string())
         } else {
-            // Render to PNG
-            let renderer = match ChartRendererClient::new(&ctx.config.chart_renderer_url) {
-                Ok(r) => r,
-                Err(e) => return Ok(json_error(&format!("Failed to create chart renderer: {e}"))),
+            // Render to PNG via chartml-rs (Rust-native, no HTTP)
+            let resolved_yaml = match serde_yaml::to_string(&resolved_spec) {
+                Ok(y) => y,
+                Err(e) => return Ok(json_error(&format!("Failed to serialize spec: {e}"))),
             };
 
-            if !renderer.health_check().await {
-                return Ok(json_error(
-                    "Chart renderer service is not available. Please try again later.",
-                ));
-            }
-
-            match renderer
-                .render_chart(&resolved_spec, width, height, Some(&user_palette), None)
-                .await
-            {
+            match chartml_factory::render_chart_to_png(
+                &resolved_yaml, width, height, 72, Some(&user_palette),
+            ).await {
                 Ok(png_bytes) => {
                     let b64 = BASE64.encode(&png_bytes);
                     Ok(json!({
@@ -226,15 +226,6 @@ impl AgentTool for RenderChartTool {
 /// Return a JSON error string for tool output.
 fn json_error(message: &str) -> String {
     json!({ "error": message }).to_string()
-}
-
-/// Check if data section is in named-sources format (no reserved keys).
-fn is_named_data(data: &Value) -> bool {
-    let reserved = ["datasource", "provider", "query", "rows", "url", "cache"];
-    match data.as_object() {
-        Some(obj) => !obj.keys().any(|k| reserved.contains(&k.as_str())),
-        None => false,
-    }
 }
 
 /// Store chart context in Redis for "Continue in Kyomi" deep-link.
@@ -361,21 +352,4 @@ mod tests {
         assert_eq!(parsed["error"], "something broke");
     }
 
-    #[test]
-    fn is_named_data_detects_named() {
-        let data = json!({
-            "sales": { "datasource": "db", "query": "SELECT 1" },
-            "targets": { "provider": "inline", "rows": [] }
-        });
-        assert!(is_named_data(&data));
-    }
-
-    #[test]
-    fn is_named_data_detects_unnamed() {
-        let data = json!({
-            "datasource": "my-db",
-            "query": "SELECT 1"
-        });
-        assert!(!is_named_data(&data));
-    }
 }

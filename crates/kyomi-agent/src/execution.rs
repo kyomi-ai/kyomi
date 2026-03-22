@@ -837,6 +837,7 @@ mod tests {
             max_iterations: 10,
             component: "watch_agent".into(),
             assistant_message_id: Some("msg-pre-created".into()),
+            user_message_id: Some("msg-user-123".into()),
             conversation_history: Some(vec![
                 ("user".into(), "What's our MRR?".into()),
                 ("assistant".into(), "Let me look that up.".into()),
