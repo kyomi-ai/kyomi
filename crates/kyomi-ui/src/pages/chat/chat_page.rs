@@ -25,23 +25,35 @@
 //!   error events (Phase 8)
 //! - Cancellation flow (Phase 8)
 //! - ChatInput component integration (Phase 8)
-//!
-//! ## Features deferred to later phases:
-//! - Session header with title editing (Phase 9)
+//! - Session header: inline editable title, Slack sync badge, share/private
+//!   badge, share dropdown, pinned filter button (Phase 9)
+//! - Message actions: toggle pin via server function, dashboard modal,
+//!   chart info modal (Phase 9)
+//! - Shared conversation features: skip AI checkbox, shared_chat_message
+//!   WebSocket subscription, mark session read, sender attribution (Phase 9)
+//! - Special navigation contexts: chart exploration ("Ask about this chart"),
+//!   watch creation context (Phase 11)
+//! - Empty states: no datasources, personal mode without LLM (Phase 12)
 
 use std::collections::HashMap;
 
 use leptos::prelude::*;
-use leptos_router::hooks::{use_navigate, use_params_map};
+use leptos_router::hooks::{use_location, use_navigate, use_params_map};
 
 use super::chat_message::ChatMessage;
 use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
 use crate::components::chat::ChatInput;
-use crate::components::chat::{ChatStateMachine, ThinkingEvent, ThinkingManager, ThinkingState, TokenUsage};
+use crate::components::chat::{
+    ChatStateMachine, InlineEditableTitle, ThinkingEvent, ThinkingManager, ThinkingState,
+    TokenUsage,
+};
 use crate::components::Spinner;
 use crate::server_fns::chat::{
-    get_session_messages, send_chat_message, ChatMessageItem, SessionDetail,
+    get_session_messages, mark_session_read, send_chat_message, share_session,
+    toggle_message_pin, unshare_session, update_message_content, update_session_title,
+    ChatMessageItem, SessionDetail,
 };
+use crate::server_fns::context::get_user_context;
 
 // ─── Greetings ──────────────────────────────────────────────────────────────
 
@@ -195,17 +207,45 @@ pub fn ChatPage() -> impl IntoView {
         if id.is_empty() { None } else { Some(id) }
     });
 
+    // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
+    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+
+    // ── Query parameters (for chart exploration and watch creation) ──────
+    // The location is used on WASM for query parameter parsing (Phase 11).
+    let _location = use_location();
+
     // ── State signals ───────────────────────────────────────────────────
     // Matches React's useState declarations (Chat.jsx lines 216-233)
     let (messages, set_messages) = signal(Vec::<ChatMessageItem>::new());
     let (current_session_id, set_current_session_id) = signal(Option::<String>::None);
-    // session_title read signal will be used in Phase 9 (session header).
-    let (_session_title, set_session_title) = signal(String::new());
+    let (session_title, set_session_title) = signal(String::new());
     let (session_metadata, set_session_metadata) = signal(SessionDetail::default());
     let (is_loading, set_is_loading) = signal(false);
-    // set_show_pinned_only will be used in Phase 9 (pinned filter toggle button).
-    let (show_pinned_only, _set_show_pinned_only) = signal(false);
+    let (show_pinned_only, set_show_pinned_only) = signal(false);
     let (current_greeting, set_current_greeting) = signal(String::new());
+
+    // Phase 9 — shared conversation: skip AI response checkbox
+    let (skip_ai_response, set_skip_ai_response) = signal(false);
+
+    // Phase 9 — dashboard modal state (read signals used when SaveDashboardModal
+    // is wired in Phase 13)
+    let (_dashboard_modal_open, set_dashboard_modal_open) = signal(false);
+    let (_dashboard_modal_content, set_dashboard_modal_content) = signal(String::new());
+    let (_dashboard_modal_message_id, set_dashboard_modal_message_id) =
+        signal(Option::<String>::None);
+
+    // Phase 9 — chart info modal state (read signals used when ChartInfoModal
+    // is wired in Phase 13)
+    let (_chart_info_modal_open, _set_chart_info_modal_open) = signal(false);
+    let (_chart_info_spec, _set_chart_info_spec) = signal(Option::<String>::None);
+
+    // Phase 11 — chart exploration context
+    // Stores chart markdown to prepend to the first user message.
+    let (chart_context, set_chart_context) = signal(Option::<String>::None);
+
+    // Phase 11 — watch creation context (signals used on WASM only for
+    // query parameter handling)
+    let (_watch_context, _set_watch_context) = signal(false);
 
     // Thinking state per message — keyed by message_id.
     // Populated when loading stored thinking events from session messages,
@@ -826,6 +866,88 @@ pub fn ChatPage() -> impl IntoView {
                 });
             });
 
+            // ── shared_chat_message ────────────────────────────────────
+            // Phase 9 — Handle messages from other users in shared conversations.
+            // Matches React: Chat.jsx lines 695-744.
+            let unsub_shared_chat_message = ws.subscribe("shared_chat_message", move |msg| {
+                let data = match &msg.data {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                // Only process if this belongs to our current session
+                let msg_session_id = match &msg.session_id {
+                    Some(s) => s.clone(),
+                    None => return,
+                };
+                let current_sid = current_session_id.get_untracked();
+                if current_sid.as_deref() != Some(&msg_session_id) {
+                    return;
+                }
+
+                // Extract message fields from data
+                let message_id = data
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let client_msg_id = data
+                    .get("client_msg_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let content = data
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let msg_type = data
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("user")
+                    .to_string();
+                let timestamp = data
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let sent_by: Option<crate::server_fns::chat::SessionUser> = data
+                    .get("sent_by")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                set_messages.update(|msgs| {
+                    // Dedup by client_msg_id (optimistic message from this user)
+                    if let Some(ref cid) = client_msg_id {
+                        if let Some(existing) = msgs.iter_mut().find(|m| m.message_id == *cid) {
+                            existing.message_id = message_id.clone();
+                            return;
+                        }
+                    }
+
+                    // Dedup by message_id
+                    if msgs.iter().any(|m| m.message_id == message_id) {
+                        return;
+                    }
+
+                    // Add new message from other user
+                    msgs.push(ChatMessageItem {
+                        message_id,
+                        message_type: msg_type,
+                        content,
+                        timestamp,
+                        pinned: false,
+                        sent_by,
+                        thinking_events: Vec::new(),
+                        token_usage: None,
+                    });
+                });
+
+                // Mark session as read (fire-and-forget)
+                let sid = msg_session_id;
+                leptos::task::spawn_local(async move {
+                    let _ = mark_session_read(sid, None).await;
+                });
+            });
+
             // ── Cleanup: unsubscribe all on component unmount ───────────
             on_cleanup(move || {
                 unsub_session_created();
@@ -836,6 +958,7 @@ pub fn ChatPage() -> impl IntoView {
                 unsub_chat_complete();
                 unsub_error();
                 unsub_request_cancelled();
+                unsub_shared_chat_message();
             });
         });
     }
@@ -852,30 +975,213 @@ pub fn ChatPage() -> impl IntoView {
     });
 
     // Whether any messages are pinned (controls filter button visibility).
-    // Will be used in Phase 9 (session header with pinned filter toggle).
-    let _has_pinned = Memo::new(move |_| messages.get().iter().any(|m| m.pinned));
+    let has_pinned = Memo::new(move |_| messages.get().iter().any(|m| m.pinned));
+
+    // ── Phase 11 — Chart exploration context ─────────────────────────────
+    // Handle "Ask about this chart" navigation. When the user navigates to
+    // /chat with ?exploreChart=true&chartMarkdown=... or ?createWatch=true,
+    // we store the context and display an initial assistant message.
+    // Matches React: Chat.jsx lines 806-833, 888-916.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let location_search = _location.search.clone();
+        Effect::new(move |_| {
+            let search = location_search.get();
+            if search.is_empty() {
+                return;
+            }
+
+            // Parse query params using web_sys::UrlSearchParams for proper decoding
+            let url_params = web_sys::UrlSearchParams::new_with_str(&search).ok();
+            let get_param = |name: &str| -> Option<String> {
+                url_params.as_ref().and_then(|p| p.get(name))
+            };
+
+            let has_explore_chart = get_param("exploreChart").as_deref() == Some("true");
+            let chart_markdown = get_param("chartMarkdown");
+            let chart_title = get_param("chartTitle");
+            let has_create_watch = get_param("createWatch").as_deref() == Some("true");
+
+            if has_explore_chart {
+                if let Some(ref markdown) = chart_markdown {
+                    // Store chart context for prepending to first user message
+                    set_chart_context.set(Some(markdown.clone()));
+
+                    // Create an initial assistant message with the chart
+                    let initial_message = ChatMessageItem {
+                        message_id: format!("chart-context-{}", js_sys::Date::now() as u64),
+                        message_type: "assistant".to_string(),
+                        content: format!(
+                            "I'm ready to help you explore this chart:\n\n{}\n\nWhat would you like to know about it?",
+                            markdown
+                        ),
+                        timestamp: String::new(),
+                        pinned: false,
+                        sent_by: None,
+                        thinking_events: Vec::new(),
+                        token_usage: None,
+                    };
+
+                    set_messages.set(vec![initial_message]);
+                    set_session_title.set(
+                        chart_title
+                            .map(|t| format!("Exploring: {}", t))
+                            .unwrap_or_else(|| "Chart Exploration".to_string()),
+                    );
+                    set_current_greeting.set(String::new());
+                }
+            } else if has_create_watch {
+                // Phase 11 — Watch creation context
+                // Matches React: Chat.jsx lines 888-916
+                _set_watch_context.set(true);
+
+                let initial_message = ChatMessageItem {
+                    message_id: format!("watch-create-{}", js_sys::Date::now() as u64),
+                    message_type: "assistant".to_string(),
+                    content: "I can help you set up a watch to monitor your data. What would you like me to keep an eye on?\n\n\
+                        For example, you could say:\n\
+                        - \"Alert me if daily revenue drops more than 10%\"\n\
+                        - \"Watch for unusual spikes in error rates\"\n\
+                        - \"Monitor our conversion rate and tell me if it changes significantly\"\n\
+                        - \"Check our inventory levels daily and warn me if anything is running low\"\n\n\
+                        Just describe what you want to monitor, and I'll set it up for you.".to_string(),
+                    timestamp: String::new(),
+                    pinned: false,
+                    sent_by: None,
+                    thinking_events: Vec::new(),
+                    token_usage: None,
+                };
+
+                set_messages.set(vec![initial_message]);
+                set_session_title.set("Setting up a Watch".to_string());
+                set_current_greeting.set(String::new());
+            }
+        });
+    }
+
+    // ── Phase 9 — Mark session read for shared conversations ──────────
+    // When loading a shared session, mark it as read (fire-and-forget).
+    // Matches React: Chat.jsx lines 1044-1051.
+    {
+        Effect::new(move |_| {
+            let metadata = session_metadata.get();
+            let session_id = current_session_id.get();
+            if metadata.shared {
+                if let Some(sid) = session_id {
+                    leptos::task::spawn_local(async move {
+                        // Fire-and-forget — ignore errors
+                        let _ = mark_session_read(sid, None).await;
+                    });
+                }
+            }
+        });
+    }
 
     // ── Callbacks ───────────────────────────────────────────────────────
 
+    // Phase 9 — Toggle pin: update local state + call server function
+    // Matches React: Chat.jsx lines 1345-1359
     let on_toggle_pin = Callback::new(move |message_id: String| {
+        // Optimistically toggle local state
         set_messages.update(|msgs| {
             if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
                 msg.pinned = !msg.pinned;
             }
         });
-        // TODO: Phase 9 — call toggle_message_pin server function
+
+        // Call server function (fire-and-forget)
+        let sid = current_session_id.get_untracked();
+        if let Some(session_id) = sid {
+            let mid = message_id.clone();
+            leptos::task::spawn_local(async move {
+                if let Err(_e) = toggle_message_pin(session_id, mid).await {
+                    // Revert on error would be ideal but matches React's
+                    // fire-and-forget pattern (no error handling in React either)
+                }
+            });
+        }
     });
 
-    let on_open_dashboard_modal = Callback::new(move |_content: String| {
-        // TODO: Phase 9 — open SaveDashboardModal
+    // Phase 9 — Open dashboard modal with message content
+    // Matches React: Chat.jsx lines 1305-1311
+    let on_open_dashboard_modal = Callback::new(move |content: String| {
+        set_dashboard_modal_content.set(content);
+        set_dashboard_modal_message_id.set(None);
+        set_dashboard_modal_open.set(true);
     });
 
-    let on_message_update = Callback::new(move |(_message_id, _new_content): (String, String)| {
-        // TODO: Phase 9 — call update_message_content server function
+    // Phase 9 — Update message content via server function
+    // Matches React: Chat.jsx lines 1361-1377
+    let on_message_update = Callback::new(move |(message_id, new_content): (String, String)| {
+        // Update local state immediately
+        let updated_content = new_content.clone();
+        set_messages.update(|msgs| {
+            if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
+                msg.content = updated_content;
+            }
+        });
+
+        // Call server function
+        let sid = current_session_id.get_untracked();
+        if let Some(session_id) = sid {
+            let mid = message_id;
+            leptos::task::spawn_local(async move {
+                let _ = update_message_content(session_id, mid, new_content).await;
+            });
+        }
     });
 
-    // ── Send message handler (Task 8.1) ─────────────────────────────────
-    // Matches React's sendMessage() in ChatInterface.jsx (lines 410-460).
+    // Phase 9 — Share session handler
+    // Matches React: Chat.jsx lines 1379-1403
+    let handle_share = move |_| {
+        let sid = current_session_id.get_untracked();
+        if let Some(session_id) = sid {
+            leptos::task::spawn_local(async move {
+                match share_session(session_id).await {
+                    Ok(()) => {
+                        set_session_metadata.update(|m| m.shared = true);
+                    }
+                    Err(_e) => {
+                        // Error handling — could show toast in future
+                    }
+                }
+            });
+        }
+    };
+
+    // Phase 9 — Unshare session handler
+    // Matches React: Chat.jsx lines 1405-1428
+    let handle_unshare = move |_| {
+        let sid = current_session_id.get_untracked();
+        if let Some(session_id) = sid {
+            leptos::task::spawn_local(async move {
+                match unshare_session(session_id).await {
+                    Ok(()) => {
+                        set_session_metadata.update(|m| m.shared = false);
+                    }
+                    Err(_e) => {
+                        // Error handling — could show toast in future
+                    }
+                }
+            });
+        }
+    };
+
+    // Phase 9 — Update session title handler
+    // Matches React: Chat.jsx lines 1293-1303
+    let on_title_save = Callback::new(move |new_title: String| {
+        set_session_title.set(new_title.clone());
+        let sid = current_session_id.get_untracked();
+        if let Some(session_id) = sid {
+            leptos::task::spawn_local(async move {
+                let _ = update_session_title(session_id, new_title).await;
+            });
+        }
+    });
+
+    // ── Send message handler (Task 8.1, updated Phase 9/11) ─────────────
+    // Matches React's sendMessage() in ChatInterface.jsx (lines 410-460)
+    // and Chat.jsx lines 1121-1126 (chart context prepending).
     let chat_state_send = chat_state.clone();
     let navigate_send = navigate.clone();
     let ws_ctx_for_send = ws_ctx.clone();
@@ -913,6 +1219,22 @@ pub fn ChatPage() -> impl IntoView {
             msgs.push(user_message);
         });
 
+        // Phase 11 — If this is the first message in a chart exploration context,
+        // prepend the chart markdown. Matches React: Chat.jsx lines 1121-1126.
+        let mut message_to_send = input_text.clone();
+        if let Some(chart_md) = chart_context.get_untracked() {
+            if current_session_id.get_untracked().is_none() {
+                message_to_send = format!(
+                    "Here's a chart I'd like to explore:\n\n{}\n\nMy question: {}",
+                    chart_md, input_text
+                );
+                set_chart_context.set(None); // Clear after first use
+            }
+        }
+
+        // Phase 9 — Read skip_ai flag for shared conversations
+        let skip_ai = skip_ai_response.get_untracked();
+
         // Compute time context
         let time_context = get_time_context();
 
@@ -933,15 +1255,29 @@ pub fn ChatPage() -> impl IntoView {
             };
 
             match send_chat_message(
-                input_text,
+                message_to_send,
                 session_id.clone(),
                 time_ctx,
-                false, // skip_ai
-                None,  // model (use default)
+                skip_ai,
+                None, // model (use default)
             )
             .await
             {
                 Ok(response) => {
+                    // Phase 9 — If skip_ai was enabled, reset state and return
+                    // (no AI response expected). Matches React: Chat.jsx lines 1147-1151.
+                    if response.skip_ai {
+                        chat_state_inner.reset();
+                        set_skip_ai_response.set(false);
+                        // Still need to update session_id if new
+                        if session_id.is_none() {
+                            set_current_session_id.set(Some(response.session_id.clone()));
+                            let path = format!("/chat/{}", response.session_id);
+                            navigate_inner(&path, Default::default());
+                        }
+                        return;
+                    }
+
                     // Update current_session_id from response (for new chats)
                     if session_id.is_none() {
                         set_current_session_id.set(Some(response.session_id.clone()));
@@ -1013,118 +1349,448 @@ pub fn ChatPage() -> impl IntoView {
     let can_send_signal = chat_state.can_send;
     let show_stop_button_signal = chat_state.show_stop_button;
 
+    // ── Derived: user context fields ──────────────────────────────────────
+    let is_personal_mode = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .map(|ctx| ctx.is_personal_mode)
+            .unwrap_or(false)
+    });
+
+    let multi_user_enabled = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.capabilities.get("multi_user_enabled").copied())
+            .unwrap_or(false)
+    });
+
+    let current_user_id = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .map(|ctx| ctx.user_id.clone())
+            .unwrap_or_default()
+    });
+
+    // Check if LLM is configured — read from capabilities.
+    // In personal mode without an LLM, we show a special empty state.
+    // The `llm_configured` capability is set by the backend when an API key
+    // is present. We derive it from the user context resource.
+    let llm_configured = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.capabilities.get("llm_configured").copied())
+            .unwrap_or(true) // Default to true so we don't flash the empty state
+    });
+
+    // Check if any datasources exist (for empty state).
+    let has_datasources = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.capabilities.get("has_datasources").copied())
+            .unwrap_or(true) // Default to true so we don't flash the empty state
+    });
+
+    // Is the current user the session owner?
+    let is_owner = Signal::derive(move || {
+        let uid = current_user_id.get();
+        let metadata = session_metadata.get();
+        metadata
+            .created_by
+            .as_ref()
+            .map(|cb| cb.user_id == uid)
+            .unwrap_or(true) // If no created_by, assume owner (single-user)
+    });
+
     // ── Render ──────────────────────────────────────────────────────────
 
+    // Phase 12 — Personal mode without LLM: show settings prompt
+    // Matches React: ChatInterface.jsx lines 488-526 and Chat.jsx lines 1433-1457
+    let personal_no_llm = move || is_personal_mode.get() && !llm_configured.get();
+
+    // Phase 12 — No datasources empty state
+    // Matches React: Chat.jsx lines 1459-1461
+    let no_datasources = move || !has_datasources.get();
+
     view! {
-        <div class="flex flex-col h-full bg-muted overflow-x-hidden" style="flex-direction: column;">
-            <div class="flex-1 flex flex-col overflow-hidden">
-                // Messages container
-                <div
-                    node_ref=messages_container_ref
-                    class=move || format!(
-                        "flex-1 overflow-y-auto {}",
-                        if !messages.get().is_empty() { "p-4 md:p-6" } else { "" }
-                    )
-                >
-                    {move || {
-                        let msgs = filtered_messages.get();
-                        let loading = is_loading.get();
-                        let session = current_session_id.get();
-                        let greeting = current_greeting.get();
-
-                        if msgs.is_empty() {
-                            if loading && session.is_some() {
-                                // Loading existing session — spinner
-                                // Matches React: isLoadingSession && currentSessionId (Chat.jsx line 1618)
-                                view! {
-                                    <div class="h-full flex items-center justify-center">
-                                        <Spinner class="text-muted-foreground" />
-                                    </div>
-                                }.into_any()
-                            } else {
-                                // New chat — greeting (vertically centered)
-                                // Matches React: new chat greeting (Chat.jsx lines 1624-1689)
-                                view! {
-                                    <div class="h-full flex items-center justify-center px-4">
-                                        <div class="text-center w-full max-w-2xl -mt-24">
-                                            <div class="mb-12">
-                                                <div class="mb-6">
-                                                    // Kyomi sparkle logo (matches React's inline SVG)
-                                                    <svg class="w-16 h-16 mx-auto" viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg">
-                                                        <g transform="translate(40, 40)">
-                                                            <g fill="#d97706">
-                                                                <polygon points="0,-20 3,-8 0,-5 -3,-8"/>
-                                                                <polygon points="14,-14 8,-3 5,-5 8,-8"/>
-                                                                <polygon points="20,0 8,3 5,0 8,-3"/>
-                                                                <polygon points="14,14 3,8 0,5 3,8"/>
-                                                                <polygon points="0,20 -3,8 0,5 3,8"/>
-                                                                <polygon points="-14,14 -8,3 -5,5 -8,8"/>
-                                                                <polygon points="-20,0 -8,-3 -5,0 -8,3"/>
-                                                                <polygon points="-14,-14 -3,-8 0,-5 -3,-8"/>
-                                                            </g>
-                                                            <circle cx="0" cy="0" r="4" fill="#d97706"/>
-                                                        </g>
-                                                    </svg>
-                                                </div>
-                                                <h1 class="text-3xl md:text-4xl font-normal text-foreground mb-8">
-                                                    {greeting}
-                                                </h1>
-                                            </div>
-                                        </div>
-                                    </div>
-                                }.into_any()
-                            }
-                        } else {
-                            // Messages list
-                            // Matches React: <div className="w-full max-w-full space-y-6"> (Chat.jsx line 1692)
-                            view! {
-                                <div class="w-full max-w-full space-y-6" style="display: block;">
-                                    {msgs.into_iter().map(|message| {
-                                        let msg_id = message.message_id.clone();
-
-                                        // Create a derived signal for this message's thinking state
-                                        let thinking_signal = Signal::derive({
-                                            let msg_id = msg_id.clone();
-                                            move || {
-                                                thinking_map.get()
-                                                    .get(&msg_id)
-                                                    .cloned()
-                                                    .unwrap_or_default()
-                                            }
-                                        });
-
-                                        view! {
-                                            <ChatMessage
-                                                message=message
-                                                thinking_state=thinking_signal
-                                                is_streaming=is_streaming
-                                                active_message_id=active_message_id
-                                                current_session_id=Signal::derive(move || current_session_id.get())
-                                                session_metadata=Signal::derive(move || session_metadata.get())
-                                                current_user_id="".to_string()
-                                                on_toggle_pin=on_toggle_pin
-                                                on_open_dashboard_modal=on_open_dashboard_modal
-                                                on_message_update=on_message_update
-                                            />
-                                        }
-                                    }).collect_view()}
+        <Show
+            when=move || !personal_no_llm()
+            fallback=move || {
+                // Phase 12.2 — Personal mode without LLM configured
+                view! {
+                    <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
+                        <div class="max-w-md w-full bg-card border border-border rounded-xl p-8 shadow-sm text-center">
+                            <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+                                // Chat bubble icon (matches React's Heroicons outline)
+                                <svg class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+                                </svg>
+                            </div>
+                            <h2 class="text-2xl font-semibold text-foreground mb-3">
+                                "Chat requires an AI provider"
+                            </h2>
+                            <p class="text-muted-foreground mb-6">
+                                "Use Kyomi from Claude Code via MCP, or add your own API key in Settings."
+                            </p>
+                            <div class="flex flex-col gap-3">
+                                <a
+                                    href="/settings/profile"
+                                    class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                                >
+                                    "Open Settings"
+                                </a>
+                                <a
+                                    href="/setup"
+                                    class="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+                                >
+                                    "Learn about MCP"
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+        >
+            <Show
+                when=move || !no_datasources()
+                fallback=move || {
+                    // Phase 12.1 — No datasources empty state
+                    // Matches React: NoDatasourcesEmptyState for context="chat"
+                    view! {
+                        <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
+                            <div class="max-w-md w-full bg-card border border-border rounded-xl p-8 shadow-sm text-center">
+                                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+                                    // Database icon
+                                    <svg class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
+                                    </svg>
                                 </div>
-                            }.into_any()
-                        }
-                    }}
-                    // Scroll anchor — always at the bottom of the messages container
-                    <div node_ref=messages_end_ref />
-                </div>
+                                <h2 class="text-2xl font-semibold text-foreground mb-3">
+                                    "Connect a data source to start chatting"
+                                </h2>
+                                <p class="text-muted-foreground mb-6">
+                                    "Kyomi needs access to your data warehouse to answer questions about your data."
+                                </p>
+                                <a
+                                    href="/settings/datasources"
+                                    class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                                >
+                                    "Connect Data Source"
+                                </a>
+                            </div>
+                        </div>
+                    }
+                }
+            >
+                <div class="flex flex-col h-full bg-muted overflow-x-hidden" style="flex-direction: column;">
+                    <div class="flex-1 flex flex-col overflow-hidden">
+                        // Phase 9 — Chat Header (only shown when messages exist)
+                        // Matches React: Chat.jsx lines 1467-1613
+                        <Show when=move || !messages.get().is_empty()>
+                            <div class="flex-shrink-0 z-20 bg-card border-b border-border">
+                                <div class="flex justify-between items-center px-4 md:px-12 py-4 gap-4">
+                                    // Left side: title + badges
+                                    <div class="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                                        <Show
+                                            when=move || current_session_id.get().is_some()
+                                            fallback=move || view! {
+                                                <div class="text-base font-semibold text-muted-foreground py-1">{"\u{00A0}"}</div>
+                                            }
+                                        >
+                                            // Inline editable title
+                                            <InlineEditableTitle
+                                                value=Signal::derive(move || session_title.get())
+                                                on_save=on_title_save
+                                                placeholder="New Chat"
+                                            />
 
-                // Chat input area — wired to send_message and cancel handlers
-                <ChatInput
-                    on_send=on_send
-                    on_cancel=on_cancel
-                    can_send=can_send_signal
-                    show_stop_button=show_stop_button_signal
-                    connection_state=connection_state_signal
-                />
-            </div>
-        </div>
+                                            // Slack sync badge — show for channel threads (C/G prefix), not DMs (D prefix)
+                                            // Matches React: Chat.jsx lines 1480-1497
+                                            {move || {
+                                                let meta = session_metadata.get();
+                                                let is_slack_channel = meta.slack_channel_id.as_ref().map(|id| {
+                                                    meta.shared && !id.starts_with('D')
+                                                }).unwrap_or(false);
+
+                                                if is_slack_channel {
+                                                    view! {
+                                                        <span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold flex-shrink-0 gap-1" title="Synced with Slack channel thread">
+                                                            // Slack icon
+                                                            <svg class="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+                                                                <path d="M6 15a2 2 0 0 1-2 2a2 2 0 0 1-2-2a2 2 0 0 1 2-2h2v2zm1 0a2 2 0 0 1 2-2a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2a2 2 0 0 1-2-2v-5zm2-8a2 2 0 0 1-2-2a2 2 0 0 1 2-2a2 2 0 0 1 2 2v2H9zm0 1a2 2 0 0 1 2 2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2a2 2 0 0 1 2-2h5zm8 2a2 2 0 0 1 2-2a2 2 0 0 1 2 2a2 2 0 0 1-2 2h-2v-2zm-1 0a2 2 0 0 1-2 2a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2a2 2 0 0 1 2 2v5zm-2 8a2 2 0 0 1 2 2a2 2 0 0 1-2 2a2 2 0 0 1-2-2v-2h2zm0-1a2 2 0 0 1-2-2a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2a2 2 0 0 1-2 2h-5z"/>
+                                                            </svg>
+                                                            "Slack Sync"
+                                                        </span>
+                                                    }.into_any()
+                                                } else if multi_user_enabled.get() {
+                                                    // Share/Private status badge
+                                                    // Matches React: Chat.jsx lines 1497-1512
+                                                    let shared = meta.shared;
+                                                    let tooltip = if shared {
+                                                        meta.created_by
+                                                            .as_ref()
+                                                            .map(|cb| format!("Owner: {}", cb.display_name))
+                                                            .unwrap_or_else(|| "Owner: Unknown".to_string())
+                                                    } else {
+                                                        "Only you can see this conversation".to_string()
+                                                    };
+                                                    let badge_class = if shared {
+                                                        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold flex-shrink-0 bg-primary text-primary-foreground"
+                                                    } else {
+                                                        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold flex-shrink-0 bg-secondary text-secondary-foreground"
+                                                    };
+                                                    let label = if shared { "Shared" } else { "Private" };
+                                                    view! {
+                                                        <span class=badge_class title=tooltip>
+                                                            {label}
+                                                        </span>
+                                                    }.into_any()
+                                                } else {
+                                                    view! { <span /> }.into_any()
+                                                }
+                                            }}
+                                        </Show>
+                                    </div>
+
+                                    // Right side: actions
+                                    <div class="flex items-center gap-2">
+                                        // Share dropdown (owner only, multi-user only)
+                                        // Matches React: Chat.jsx lines 1522-1586
+                                        <Show when=move || {
+                                            current_session_id.get().is_some()
+                                            && is_owner.get()
+                                            && multi_user_enabled.get()
+                                        }>
+                                            {move || {
+                                                let shared = session_metadata.get().shared;
+                                                let slack_id = session_metadata.get().slack_channel_id.clone();
+                                                let is_slack_channel = slack_id.as_ref().map(|id| !id.starts_with('D')).unwrap_or(false);
+
+                                                if shared {
+                                                    if is_slack_channel {
+                                                        // Slack channel conversations cannot be made private
+                                                        view! {
+                                                            <button
+                                                                disabled
+                                                                class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground opacity-50 cursor-not-allowed rounded-lg border border-border"
+                                                                title="Slack channel conversations are always shared with your team"
+                                                            >
+                                                                // Lock icon
+                                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                                                </svg>
+                                                                <span class="hidden sm:inline">"Make Private"</span>
+                                                            </button>
+                                                        }.into_any()
+                                                    } else {
+                                                        view! {
+                                                            <button
+                                                                on:click=handle_unshare
+                                                                class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors border border-border"
+                                                                title="Make this conversation private"
+                                                            >
+                                                                // Lock icon
+                                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                                                </svg>
+                                                                <span class="hidden sm:inline">"Make Private"</span>
+                                                            </button>
+                                                        }.into_any()
+                                                    }
+                                                } else {
+                                                    view! {
+                                                        <button
+                                                            on:click=handle_share
+                                                            class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors border border-border"
+                                                            title="Share this conversation with your workspace"
+                                                        >
+                                                            // Share icon
+                                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                                                            </svg>
+                                                            <span class="hidden sm:inline">"Share"</span>
+                                                        </button>
+                                                    }.into_any()
+                                                }
+                                            }}
+                                        </Show>
+
+                                        // Pinned messages filter button
+                                        // Matches React: Chat.jsx lines 1588-1609
+                                        <Show when=move || current_session_id.get().is_some() && has_pinned.get()>
+                                            <button
+                                                on:click=move |_| set_show_pinned_only.update(|v| *v = !*v)
+                                                class=move || format!(
+                                                    "flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm {}",
+                                                    if show_pinned_only.get() {
+                                                        "bg-accent text-foreground"
+                                                    } else {
+                                                        "text-muted-foreground hover:text-foreground hover:bg-accent"
+                                                    }
+                                                )
+                                                aria-label=move || if show_pinned_only.get() { "Show all messages" } else { "Show only pinned messages" }
+                                            >
+                                                // Star icon
+                                                <svg
+                                                    class="w-4 h-4"
+                                                    fill=move || if show_pinned_only.get() { "currentColor" } else { "none" }
+                                                    stroke="currentColor"
+                                                    viewBox="0 0 24 24"
+                                                >
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                                                </svg>
+                                                <span>{move || if show_pinned_only.get() { "Pinned Only" } else { "Pinned" }}</span>
+                                            </button>
+                                        </Show>
+                                    </div>
+                                </div>
+                            </div>
+                        </Show>
+
+                        // Messages container
+                        <div
+                            node_ref=messages_container_ref
+                            class=move || format!(
+                                "flex-1 overflow-y-auto {}",
+                                if !messages.get().is_empty() { "p-4 md:p-6" } else { "" }
+                            )
+                        >
+                            {move || {
+                                let msgs = filtered_messages.get();
+                                let loading = is_loading.get();
+                                let session = current_session_id.get();
+                                let greeting = current_greeting.get();
+
+                                if msgs.is_empty() {
+                                    if loading && session.is_some() {
+                                        // Loading existing session — spinner
+                                        // Matches React: isLoadingSession && currentSessionId (Chat.jsx line 1618)
+                                        view! {
+                                            <div class="h-full flex items-center justify-center">
+                                                <Spinner class="text-muted-foreground" />
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        // New chat — greeting (vertically centered)
+                                        // Matches React: new chat greeting (Chat.jsx lines 1624-1689)
+                                        view! {
+                                            <div class="h-full flex items-center justify-center px-4">
+                                                <div class="text-center w-full max-w-2xl -mt-24">
+                                                    <div class="mb-12">
+                                                        <div class="mb-6">
+                                                            // Kyomi sparkle logo (matches React's inline SVG)
+                                                            <svg class="w-16 h-16 mx-auto" viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg">
+                                                                <g transform="translate(40, 40)">
+                                                                    <g fill="#d97706">
+                                                                        <polygon points="0,-20 3,-8 0,-5 -3,-8"/>
+                                                                        <polygon points="14,-14 8,-3 5,-5 8,-8"/>
+                                                                        <polygon points="20,0 8,3 5,0 8,-3"/>
+                                                                        <polygon points="14,14 3,8 0,5 3,8"/>
+                                                                        <polygon points="0,20 -3,8 0,5 3,8"/>
+                                                                        <polygon points="-14,14 -8,3 -5,5 -8,8"/>
+                                                                        <polygon points="-20,0 -8,-3 -5,0 -8,3"/>
+                                                                        <polygon points="-14,-14 -3,-8 0,-5 -3,-8"/>
+                                                                    </g>
+                                                                    <circle cx="0" cy="0" r="4" fill="#d97706"/>
+                                                                </g>
+                                                            </svg>
+                                                        </div>
+                                                        <h1 class="text-3xl md:text-4xl font-normal text-foreground mb-8">
+                                                            {greeting}
+                                                        </h1>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        }.into_any()
+                                    }
+                                } else {
+                                    // Messages list
+                                    // Matches React: <div className="w-full max-w-full space-y-6"> (Chat.jsx line 1692)
+                                    view! {
+                                        <div class="w-full max-w-full space-y-6" style="display: block;">
+                                            {msgs.into_iter().map(|message| {
+                                                let msg_id = message.message_id.clone();
+
+                                                // Create a derived signal for this message's thinking state
+                                                let thinking_signal = Signal::derive({
+                                                    let msg_id = msg_id.clone();
+                                                    move || {
+                                                        thinking_map.get()
+                                                            .get(&msg_id)
+                                                            .cloned()
+                                                            .unwrap_or_default()
+                                                    }
+                                                });
+
+                                                view! {
+                                                    <ChatMessage
+                                                        message=message
+                                                        thinking_state=thinking_signal
+                                                        is_streaming=is_streaming
+                                                        active_message_id=active_message_id
+                                                        current_session_id=Signal::derive(move || current_session_id.get())
+                                                        session_metadata=Signal::derive(move || session_metadata.get())
+                                                        current_user_id=current_user_id.get_untracked()
+                                                        on_toggle_pin=on_toggle_pin
+                                                        on_open_dashboard_modal=on_open_dashboard_modal
+                                                        on_message_update=on_message_update
+                                                    />
+                                                }
+                                            }).collect_view()}
+                                        </div>
+                                    }.into_any()
+                                }
+                            }}
+                            // Scroll anchor — always at the bottom of the messages container
+                            <div node_ref=messages_end_ref />
+                        </div>
+
+                        // Phase 9 — "Skip AI response" checkbox for shared conversations
+                        // Matches React: Chat.jsx skip_ai checkbox behavior
+                        <Show when=move || session_metadata.get().shared>
+                            <div class="flex items-center gap-2 px-4 py-2 border-t border-border bg-card">
+                                <input
+                                    type="checkbox"
+                                    id="skip-ai-checkbox"
+                                    prop:checked=move || skip_ai_response.get()
+                                    on:change=move |ev| {
+                                        #[cfg(target_arch = "wasm32")]
+                                        {
+                                            use wasm_bindgen::JsCast;
+                                            if let Some(target) = ev.target() {
+                                                if let Some(input) = target.dyn_ref::<web_sys::HtmlInputElement>() {
+                                                    set_skip_ai_response.set(input.checked());
+                                                }
+                                            }
+                                        }
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        {
+                                            let _ = ev;
+                                        }
+                                    }
+                                    class="h-4 w-4 rounded border-input text-primary focus:ring-ring"
+                                />
+                                <label for="skip-ai-checkbox" class="text-sm text-muted-foreground">
+                                    "Post as comment (skip AI response)"
+                                </label>
+                            </div>
+                        </Show>
+
+                        // Chat input area — wired to send_message and cancel handlers
+                        <ChatInput
+                            on_send=on_send
+                            on_cancel=on_cancel
+                            can_send=can_send_signal
+                            show_stop_button=show_stop_button_signal
+                            connection_state=connection_state_signal
+                        />
+                    </div>
+                </div>
+            </Show>
+        </Show>
     }
 }
