@@ -290,6 +290,29 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 | **7** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results, streaming | Medium | None | **Complete** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases, 13 server fns, 14 components |
 | **8** | **Remaining Pages** — onboarding flows, OAuth callbacks, utility pages (Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership) | Low | None | **Planned** | [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) |
 
+### Known Issues & Integration Notes
+
+#### Compilation blockers (from Chat/Watches/Knowledge phases — not SQL Editor)
+- `pub mod chat` in `server_fns/mod.rs` references a file that doesn't exist yet
+- `kyomi_agent` and `tokio_util` crates used in `CancelRegistry` but not in `kyomi-ui` Cargo.toml
+- Duplicate imports in `app.rs` (e.g., `NotImplementedPage`, `DashboardEditorPage` imported twice)
+- These must be resolved by the agent that owns the Chat/Watches/Knowledge branches
+
+#### `ws_manager` type conflict between Chat and SQL Editor
+- Chat agent declared `ws_manager: Option<kyomi_auth::websocket::WebSocketManager>` (optional)
+- SQL Editor originally declared `ws_manager: kyomi_auth::websocket::WebSocketManager` (required)
+- **Resolution:** Kept as `Option<WebSocketManager>`. SQL Editor's `start_query_stream` calls `.ok_or_else()` on it
+- `apps/server/src/lib.rs` must pass `Some(state.ws_manager.clone())` when constructing `ServerContext`
+
+#### kode-leptos limitations (documented with TODOs in code)
+- No error marker/annotation API — dry run errors display in status bar text, not as red squiggly underlines in the editor. TODO in `code_editor.rs`
+- No insert-at-cursor API — catalog table/column clicks append to end of query. TODO in `mod.rs`
+- No text selection API — dry run always validates full query text, not selected portion. TODO in `code_editor.rs`
+
+#### SQL Editor known gaps
+- **BigQuery catalog refresh** returns explicit error ("not yet supported from this interface") — the REST API uses a complex REST-based indexing flow (datasets.list, tables.list, tables.get) that wasn't ported. Connect-type BigQuery datasources work fine. Users can still refresh via the existing REST endpoint.
+- **Sidebar resize handle** uses `closure.forget()` pattern that leaks one closure per drag operation. Should migrate to the self-cleaning `Rc<RefCell>` pattern already used in `results_table.rs`. Functional, not a crash risk.
+
 ### Detailed Plan Index
 
 All detailed implementation plans live alongside this document:
