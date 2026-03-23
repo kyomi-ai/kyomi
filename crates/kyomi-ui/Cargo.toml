@@ -29,6 +29,7 @@ ssr = [
     "dep:sqlx",
     "dep:webauthn-rs",
     "dep:sha2",
+    "dep:hmac",
     "dep:arrow-schema",
     "dep:arrow-array",
     "dep:arrow-ipc",
@@ -142,6 +143,9 @@ regex = { workspace = true }
 
 # Date/time (used in both SSR and WASM for date formatting)
 chrono = { workspace = true }
+
+# HMAC (for trial chat token generation/validation — server-only)
+hmac = { workspace = true, optional = true }
 
 # Arrow (for converting query results to IPC bytes — server-only)
 arrow-schema = { workspace = true, optional = true }

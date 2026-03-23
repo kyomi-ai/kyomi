@@ -16,21 +16,7 @@
 # for X.509 cert parsing.
 # ---------------------------------------------------------------------------
 
-# ===== Stage 0: Build frontend =====
-FROM node:20-slim AS frontend-builder
-WORKDIR /build
-# Copy manifests only — cache npm ci unless deps change
-COPY apps/frontend/package.json apps/frontend/package-lock.json ./apps/frontend/
-COPY packages/chart-header/package.json ./packages/chart-header/package.json
-COPY packages/chartml-transform/package.json ./packages/chartml-transform/package.json
-RUN cd apps/frontend && npm ci
-# Copy full source for the build
-COPY apps/frontend/ ./apps/frontend/
-COPY packages/chart-header/ ./packages/chart-header/
-COPY packages/chartml-transform/ ./packages/chartml-transform/
-RUN cd apps/frontend && npm run build
-
-# ===== Stage 1: Build Rust binary =====
+# ===== Stage 0: Build Rust binary =====
 FROM rust:1-bookworm AS builder
 
 WORKDIR /build
@@ -48,9 +34,6 @@ RUN sed -i '/"apps\/desktop",/d' Cargo.toml
 COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
-
-# Frontend dist — rust-embed reads this at compile time to embed into the binary
-COPY --from=frontend-builder /build/apps/frontend/dist ./apps/frontend/dist
 
 # All SQL queries use runtime string-based sqlx::query() — no compile-time
 # checking, no .sqlx/ cache, and no DATABASE_URL needed at build time.
@@ -75,7 +58,7 @@ RUN mkdir -p /tmp/runtime-libs && \
 # Create writable /tmp for ONNX Runtime temp files.
 RUN mkdir -p /tmp/scratch-tmp && touch /tmp/scratch-tmp/.keep
 
-# ===== Stage 2: Scratch runtime =====
+# ===== Stage 1: Scratch runtime =====
 FROM scratch
 
 # Dynamic linker + shared libraries

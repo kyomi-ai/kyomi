@@ -36,7 +36,7 @@ pub struct TrialChatResponse {
     pub response: String,
     pub message_id: String,
     pub query_count: u64,
-    pub queries_remaining: i32,
+    pub queries_remaining: u64,
     pub thinking_events: Vec<serde_json::Value>,
     /// Refreshed session token (always returned for convenience).
     pub session_token: Option<String>,

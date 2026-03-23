@@ -340,7 +340,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || auth.is_owner;
+        || auth.workspace.is_owner;
 
     // Fetch active datasources
     let datasources =
@@ -492,7 +492,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        && !auth.is_owner
+        && !auth.workspace.is_owner
     {
         return Err(ServerFnError::new("Workspace admin access required"));
     }

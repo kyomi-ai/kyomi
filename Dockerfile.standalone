@@ -14,21 +14,7 @@
 # Uses debian:bookworm-slim as runtime (ONNX Runtime needs libstdc++).
 # ---------------------------------------------------------------------------
 
-# ===== Stage 0: Build frontend =====
-FROM node:20-slim AS frontend-builder
-WORKDIR /build
-# Copy manifests only — cache npm ci unless deps change
-COPY apps/frontend/package.json apps/frontend/package-lock.json ./apps/frontend/
-COPY packages/chart-header/package.json ./packages/chart-header/package.json
-COPY packages/chartml-transform/package.json ./packages/chartml-transform/package.json
-RUN cd apps/frontend && npm ci
-# Copy full source for the build
-COPY apps/frontend/ ./apps/frontend/
-COPY packages/chart-header/ ./packages/chart-header/
-COPY packages/chartml-transform/ ./packages/chartml-transform/
-RUN cd apps/frontend && npm run build
-
-# ===== Stage 1: Build Rust binary =====
+# ===== Stage 0: Build Rust binary =====
 FROM rust:1-bookworm AS builder
 
 WORKDIR /build
@@ -47,9 +33,6 @@ COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 
-# Frontend dist — rust-embed reads this at compile time to embed into the binary
-COPY --from=frontend-builder /build/apps/frontend/dist ./apps/frontend/dist
-
 # Build the binary. The ONNX model is downloaded by build.rs and embedded
 # via include_bytes!() — no runtime model files needed.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -58,7 +41,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p kyomi-server && \
     cp target/release/kyomi /tmp/kyomi
 
-# ===== Stage 2: Minimal Debian runtime =====
+# ===== Stage 1: Minimal Debian runtime =====
 FROM debian:bookworm-slim
 
 # Install only what ONNX Runtime and TLS need

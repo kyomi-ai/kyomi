@@ -5969,6 +5969,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "gloo-timers",
+ "hmac",
  "icondata_core",
  "icondata_lu",
  "js-sys",

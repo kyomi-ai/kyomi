@@ -5,7 +5,7 @@
  * consistent branding between kyomi.ai (marketing) and app.kyomi.ai (product).
  *
  * Design System Reference: docs/DESIGN_SYSTEM.md
- * App CSS Variables: apps/frontend/src/index.css
+ * App CSS Variables: crates/kyomi-ui/style/main.css
  */
 
 /* === Import Design Tokens from App === */

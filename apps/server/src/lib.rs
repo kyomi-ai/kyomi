@@ -6,7 +6,6 @@
 
 pub mod cancel_registry;
 pub mod connect;
-pub mod frontend;
 pub mod health;
 pub mod helpers;
 pub mod leptos_frontend;
@@ -228,7 +227,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 }
             }
         }))
-        .fallback(frontend::serve)
+        .fallback(leptos_frontend::serve)
         .with_state(state)
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::Extension(middleware::DemoModeFlag(demo_mode)))

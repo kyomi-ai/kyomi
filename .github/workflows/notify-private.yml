@@ -9,7 +9,7 @@
 # Path-to-service mapping (mirrors the old per-service workflow triggers):
 #   api:                apps/server/**, crates/**, enterprise/**, Cargo.*, apps/mcp-chart-app/**, data/**, packages/chart-header/**
 #   chart_renderer:     apps/chart-renderer/**, packages/chartml-transform/**
-#   frontend:           apps/frontend/**
+#   frontend:           (removed — Leptos frontend is compiled into the Rust binary)
 #   marketing:          apps/marketing/**, apps/docs/**
 #   infra:              k8s/**
 # =============================================================================
@@ -43,7 +43,6 @@ jobs:
           API=false
           CHART_RENDERER=false
           ANALYTICS_COLLECTOR=false
-          FRONTEND=false
           MARKETING=false
           INFRA=false
 
@@ -59,10 +58,6 @@ jobs:
             ANALYTICS_COLLECTOR=true
           fi
 
-          if has_match '^apps/frontend/'; then
-            FRONTEND=true
-          fi
-
           if has_match '^apps/marketing/|^apps/docs/'; then
             MARKETING=true
           fi
@@ -74,11 +69,10 @@ jobs:
           echo "api=$API" >> "$GITHUB_OUTPUT"
           echo "chart_renderer=$CHART_RENDERER" >> "$GITHUB_OUTPUT"
           echo "analytics_collector=$ANALYTICS_COLLECTOR" >> "$GITHUB_OUTPUT"
-          echo "frontend=$FRONTEND" >> "$GITHUB_OUTPUT"
           echo "marketing=$MARKETING" >> "$GITHUB_OUTPUT"
           echo "infra=$INFRA" >> "$GITHUB_OUTPUT"
 
-          echo "Changed services: api=$API chart_renderer=$CHART_RENDERER analytics_collector=$ANALYTICS_COLLECTOR frontend=$FRONTEND marketing=$MARKETING infra=$INFRA"
+          echo "Changed services: api=$API chart_renderer=$CHART_RENDERER analytics_collector=$ANALYTICS_COLLECTOR marketing=$MARKETING infra=$INFRA"
 
       - name: Dispatch to kyomi-private
         uses: peter-evans/repository-dispatch@v3
@@ -94,7 +88,6 @@ jobs:
                 "api": ${{ steps.changes.outputs.api }},
                 "chart_renderer": ${{ steps.changes.outputs.chart_renderer }},
                 "analytics_collector": ${{ steps.changes.outputs.analytics_collector }},
-                "frontend": ${{ steps.changes.outputs.frontend }},
                 "marketing": ${{ steps.changes.outputs.marketing }},
                 "infra": ${{ steps.changes.outputs.infra }}
               }

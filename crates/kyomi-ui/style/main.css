@@ -4,7 +4,7 @@
 /* Enable class-based dark mode (Tailwind v4 syntax) */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Match global font size from React frontend */
+/* Global font size */
 html {
   font-size: 15px;
 }
@@ -14,7 +14,6 @@ html {
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
 
   /* === Design System Color Tokens ===
-   * Copied from apps/frontend/src/index.css — must stay in sync.
    * Reference: docs/DESIGN_SYSTEM.md */
 
   --color-primary: #d97706;
