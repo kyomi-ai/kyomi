@@ -486,9 +486,7 @@ pub async fn send_chat_message(
     model: Option<String>,
     // client_msg_id is the optimistic message ID from the client, used for
     // deduplication when shared_chat_message WebSocket broadcast arrives.
-    // TODO: Thread through to send_shared_chat_message via AgentExecutionConfig
-    // once that struct supports it.
-    _client_msg_id: Option<String>,
+    client_msg_id: Option<String>,
 ) -> Result<SendMessageResponse, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -618,6 +616,29 @@ pub async fn send_chat_message(
             .map_err(|e| ServerFnError::new(e.to_string()))?;
     let is_shared = session_detail.as_ref().map(|s| s.shared).unwrap_or(false);
 
+    // Broadcast user message to other workspace members if session is shared.
+    if is_shared {
+        if let Some(ref ws_manager) = ctx.ws_manager {
+            let display_name = auth
+                .name
+                .as_deref()
+                .unwrap_or(&auth.email);
+            kyomi_auth::websocket::helpers::send_shared_chat_message(
+                ws_manager,
+                ws_id,
+                &session_id,
+                &user_message_id,
+                "user",
+                &message,
+                &chrono::Utc::now().to_rfc3339(),
+                Some(display_name),
+                Some(&auth.user_id),
+                client_msg_id.as_deref(),
+            )
+            .await;
+        }
+    }
+
     // 6. Build execution config and spawn agent task.
     // Requires ws_manager and cancel_registry to be provided in ServerContext.
     let ws_manager = ctx
@@ -684,6 +705,8 @@ pub async fn send_chat_message(
     let spawn_user_id = auth.user_id.clone();
     let spawn_session_id = session_id.clone();
     let spawn_assistant_message_id = assistant_message_id.clone();
+    let spawn_workspace_id = ws_id.to_string();
+    let spawn_is_shared = is_shared;
     let context_type = "chat".to_string();
 
     tokio::spawn(async move {
@@ -720,6 +743,23 @@ pub async fn send_chat_message(
                     None, // trial_session_id: not a trial chat
                 )
                 .await;
+
+                // Broadcast assistant message to shared conversation members.
+                if spawn_is_shared {
+                    kyomi_auth::websocket::helpers::send_shared_chat_message(
+                        &ws_manager,
+                        &spawn_workspace_id,
+                        &spawn_session_id,
+                        &exec_result.assistant_message_id,
+                        "assistant",
+                        &exec_result.response_text,
+                        &chrono::Utc::now().to_rfc3339(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                }
             }
             Err(e) => {
                 tracing::error!(
