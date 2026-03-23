@@ -1,7 +1,7 @@
 # Leptos Frontend Migration — Zero-JS Architecture Design
 
-**Status:** Phases 0–7 complete (Settings, Auth, Dashboards, Chat, Watches, Knowledge, SQL Editor). Remaining Pages pending.
-**Date:** 2026-03-23 (updated — SQL Editor phase complete)
+**Status:** All phases complete (0–8). All pages migrated. Deferred items resolved. React removal pending.
+**Date:** 2026-03-23 (updated — all phases complete, deferred items resolved)
 **Author:** Jason + Claude (research collaboration)
 
 ## Executive Summary
@@ -288,30 +288,51 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 | **5** | **Watches** — watch management, AI creation, cron scheduling, Gmail-style alert inbox, execution history | Low | None | **Complete** | [`LEPTOS_WATCHES_PLAN.md`](LEPTOS_WATCHES_PLAN.md) — 23 tasks, 20 server fns, 8 components |
 | **6** | **Knowledge** — file tree, markdown editor, auto-save, conflict detection | Low | None | **Complete** | [`KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md`](KNOWLEDGE_LEPTOS_MIGRATION_PLAN.md) — 17 tasks, 6 server fns, 5 components |
 | **7** | **SQL Editor** — kode-leptos SQL editor, query execution, schema browser, tabbed results, streaming | Medium | None | **Complete** | [`LEPTOS_SQL_EDITOR_PLAN.md`](LEPTOS_SQL_EDITOR_PLAN.md) — 28 tasks, 7 phases, 13 server fns, 14 components |
-| **8** | **Remaining Pages** — onboarding flows, OAuth callbacks, utility pages (Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership) | Low | None | **Planned** | [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) |
+| **8** | **Remaining Pages** — onboarding flows, OAuth callbacks, utility pages (Try, Connect Setup, Welcome, Unsubscribe, Accept Ownership) | Low | None | **Complete** | [`REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md`](REMAINING_PAGES_LEPTOS_MIGRATION_PLAN.md) — 18 tasks, 16 server fns, 8 pages |
 
 ### Known Issues & Integration Notes
 
-#### Compilation blockers (from Chat/Watches/Knowledge phases — not SQL Editor)
-- `pub mod chat` in `server_fns/mod.rs` references a file that doesn't exist yet
-- `kyomi_agent` and `tokio_util` crates used in `CancelRegistry` but not in `kyomi-ui` Cargo.toml
-- Duplicate imports in `app.rs` (e.g., `NotImplementedPage`, `DashboardEditorPage` imported twice)
-- These must be resolved by the agent that owns the Chat/Watches/Knowledge branches
+> **Updated 2026-03-23** — all previously documented issues have been resolved.
 
-#### `ws_manager` type conflict between Chat and SQL Editor
-- Chat agent declared `ws_manager: Option<kyomi_auth::websocket::WebSocketManager>` (optional)
-- SQL Editor originally declared `ws_manager: kyomi_auth::websocket::WebSocketManager` (required)
-- **Resolution:** Kept as `Option<WebSocketManager>`. SQL Editor's `start_query_stream` calls `.ok_or_else()` on it
-- `apps/server/src/lib.rs` must pass `Some(state.ws_manager.clone())` when constructing `ServerContext`
+#### RESOLVED
+- ~~Compilation blockers (missing chat module, missing deps, duplicate imports)~~ — all fixed
+- ~~ws_manager type conflict~~ — resolved as `Option<WebSocketManager>`
+- ~~BigQuery catalog refresh blocked~~ — extracted to shared service, now works from Leptos
+- ~~Sidebar resize handle closure leak~~ — migrated to `on_cleanup` pattern (along with 14 other components)
+- ~~Admin signup notifications not callable from kyomi-ui~~ — moved to `kyomi_auth::notifications`
+- ~~PDF export disabled~~ — re-enabled (backend Typst rendering + web-sys download)
+- ~~Push notifications not wired~~ — component was already built, now rendered in profile settings
+- ~~Shared chat broadcasting lost in Python→Rust migration~~ — restored with field name fixes
+- ~~closure.forget() memory leaks (36 callsites)~~ — 15 persistent listeners migrated to `on_cleanup`; one-shot timeouts left as-is (acceptable)
+- ~~Duplicated helpers (extract_client_ip, extract_device_info)~~ — made `pub(crate)` in auth.rs, deleted copies
+- ~~WebSocket token/URL helpers duplicated~~ — extracted to shared `utils/websocket.rs`
+- ~~ConnectTokenService using use_context instead of ServerContext~~ — fixed to use `ctx.connect_token`
+- ~~Trial chat redundant session_token param~~ — removed, derived from signed access token
+- ~~Chat user name placeholder~~ — wired from UserContext
+- ~~AI provider test connection stub~~ — real async test implemented (OpenAI/Anthropic/Gemini)
+- ~~Watch modal Slack integration stubbed~~ — wired to existing Slack server functions
+- ~~Watch modal datasource selector not wired~~ — fetches from ListDatasources
+- ~~Alerts checkbox indeterminate~~ — Checkbox component enhanced, wired in alerts history
+- ~~Arrow version mismatch (v54 vs v57)~~ — chartml-rs bumped to Arrow 57 + DataFusion 52
+- ~~MCP chart deep-link (?chart=) not implemented~~ — server function + chat page wiring complete
+- ~~BigQuery job_id pagination~~ — implemented via BigQuery REST API, no re-execution for page turns
 
-#### kode-leptos limitations (documented with TODOs in code)
-- No error marker/annotation API — dry run errors display in status bar text, not as red squiggly underlines in the editor. TODO in `code_editor.rs`
-- No insert-at-cursor API — catalog table/column clicks append to end of query. TODO in `mod.rs`
-- No text selection API — dry run always validates full query text, not selected portion. TODO in `code_editor.rs`
+#### Remaining known items (deferred — not blocking migration)
 
-#### SQL Editor known gaps
-- **BigQuery catalog refresh** returns explicit error ("not yet supported from this interface") — the REST API uses a complex REST-based indexing flow (datasets.list, tables.list, tables.get) that wasn't ported. Connect-type BigQuery datasources work fine. Users can still refresh via the existing REST endpoint.
-- **Sidebar resize handle** uses `closure.forget()` pattern that leaks one closure per drag operation. Should migrate to the self-cleaning `Rc<RefCell>` pattern already used in `results_table.rs`. Functional, not a crash risk.
+**kode-leptos editor API gaps** (upstream changes needed in `~/repos/kode/kode-leptos/`):
+- No error marker/annotation API — dry run errors show in status bar, not as squiggly underlines
+- No insert-at-cursor API — catalog clicks append to end of query
+- No text selection API — dry run validates full query, not selected portion
+- Documented at `~/repos/kode/docs/plans/kyomi-integration-gaps.md` for separate implementation
+
+**SQL helper duplication between catalog.rs and catalog_refresh.rs**:
+- `escape_sql_literal`, `escape_sql_identifier`, `get_tables_in_container_sql`, `get_columns_sql` exist in both files
+- Can't import from kyomi-ui into apps/server (wrong dependency direction)
+- Fix: extract to `kyomi-auth::catalog::sql_helpers` so both can import
+
+**Home page redirect vs inline chat**:
+- React renders `<Chat />` inline at `/` (URL stays `/`); Leptos redirects to `/chat`
+- Accepted as intentional — cosmetic URL difference only
 
 ### Detailed Plan Index
 
