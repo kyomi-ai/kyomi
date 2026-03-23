@@ -22,4 +22,5 @@
 pub mod helpers;
 pub mod indexers;
 pub mod search_entries;
+pub mod sql_helpers;
 pub mod types;
