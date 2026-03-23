@@ -325,10 +325,7 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 - No text selection API — dry run validates full query, not selected portion
 - Documented at `~/repos/kode/docs/plans/kyomi-integration-gaps.md` for separate implementation
 
-**SQL helper duplication between catalog.rs and catalog_refresh.rs**:
-- `escape_sql_literal`, `escape_sql_identifier`, `get_tables_in_container_sql`, `get_columns_sql` exist in both files
-- Can't import from kyomi-ui into apps/server (wrong dependency direction)
-- Fix: extract to `kyomi-auth::catalog::sql_helpers` so both can import
+~~**SQL helper duplication between catalog.rs and catalog_refresh.rs**~~ — resolved: extracted to `kyomi_auth::catalog::sql_helpers`, both consumers now import from there
 
 **Home page redirect vs inline chat**:
 - React renders `<Chat />` inline at `/` (URL stays `/`); Leptos redirects to `/chat`
