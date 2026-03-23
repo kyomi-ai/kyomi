@@ -530,12 +530,12 @@ pub async fn send_shared_chat_message(
     client_msg_id: Option<&str>,
 ) {
     let mut data = serde_json::json!({
-        "message_type": message_type,
+        "type": message_type,
         "content": content,
         "timestamp": timestamp,
     });
     if let Some(user) = sent_by_user {
-        data["sent_by_user"] = serde_json::Value::String(user.to_string());
+        data["sent_by"] = serde_json::Value::String(user.to_string());
     }
     if let Some(cid) = client_msg_id {
         data["client_msg_id"] = serde_json::Value::String(cid.to_string());
@@ -565,10 +565,10 @@ pub async fn send_user_message_to_self(
         .with_session(session_id)
         .with_message_id(message_id)
         .with_data(serde_json::json!({
-            "message_type": "user",
+            "type": "user",
             "content": content,
             "timestamp": timestamp,
-            "sent_by_user": user_display_name,
+            "sent_by": user_display_name,
         }));
 
     manager.send_to_user(user_id, msg).await;

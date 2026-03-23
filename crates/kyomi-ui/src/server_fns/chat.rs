@@ -511,7 +511,7 @@ pub async fn send_chat_message(
 
     // 3. Find or create session.
     let is_new_session = session_id.is_none();
-    let session_id = if let Some(ref sid) = session_id {
+    let (session_id, existing_session_shared) = if let Some(ref sid) = session_id {
         // Verify user has access to this session.
         let session = kyomi_auth::chat_service::get_session_info(
             &ctx.db,
@@ -523,7 +523,7 @@ pub async fn send_chat_message(
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
         match session {
-            Some(_) => sid.clone(),
+            Some(s) => (sid.clone(), s.shared),
             None => {
                 return Err(ServerFnError::new(
                     "Session not found or access denied",
@@ -559,7 +559,7 @@ pub async fn send_chat_message(
             }
         }
 
-        new_sid
+        (new_sid, false) // New sessions are always private
     };
 
     // 4. Generate user message ID.
@@ -609,12 +609,9 @@ pub async fn send_chat_message(
     // 5. Generate assistant message ID.
     let assistant_message_id = uuid::Uuid::new_v4().to_string();
 
-    // Check if this is a shared conversation.
-    let session_detail =
-        kyomi_auth::chat_service::get_session(&ctx.db, &session_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let is_shared = session_detail.as_ref().map(|s| s.shared).unwrap_or(false);
+    // Shared status from the session lookup in step 3 (no extra DB query).
+    // KNOWN: snapshot at dispatch — concurrent share/unshare during agent execution may diverge.
+    let is_shared = existing_session_shared;
 
     // Broadcast user message to other workspace members if session is shared.
     if is_shared {
