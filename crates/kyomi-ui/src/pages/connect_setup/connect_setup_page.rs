@@ -19,6 +19,7 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 use leptos_router::hooks::use_query_map;
+use wasm_bindgen::JsCast;
 
 use crate::components::input::INPUT_CLASS;
 use crate::components::{
@@ -412,8 +413,8 @@ fn AdminRequired() -> impl IntoView {
 fn SelectStep(
     datasources: ReadSignal<Vec<ConnectDatasource>>,
     generating_token_for: ReadSignal<Option<String>>,
-    on_select: impl Fn(String) + Clone + 'static,
-    on_create_new: impl Fn() + Clone + 'static,
+    on_select: impl Fn(String) + Clone + Send + Sync + 'static,
+    on_create_new: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
     let on_select = StoredValue::new(on_select);
     let on_create_new = StoredValue::new(on_create_new);
@@ -530,8 +531,8 @@ fn CreateStep(
     new_type: ReadSignal<String>,
     set_new_type: WriteSignal<String>,
     creating: ReadSignal<bool>,
-    on_submit: impl Fn(leptos::ev::SubmitEvent) + Clone + 'static,
-    on_back: impl Fn() + Clone + 'static,
+    on_submit: impl Fn(leptos::ev::SubmitEvent) + Clone + Send + Sync + 'static,
+    on_back: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {
     let on_back = StoredValue::new(on_back);
 
@@ -620,7 +621,7 @@ fn CreateStep(
             <Button
                 size=ButtonSize::Lg
                 class="w-full"
-                disabled=move || creating.get() || new_name.get().trim().is_empty()
+                disabled=Signal::derive(move || creating.get() || new_name.get().trim().is_empty())
             >
                 {move || {
                     if creating.get() {

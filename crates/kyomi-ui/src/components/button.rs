@@ -62,8 +62,8 @@ pub fn Button(
     size: ButtonSize,
     #[prop(optional, into)]
     class: String,
-    #[prop(optional)]
-    disabled: bool,
+    #[prop(optional, into)]
+    disabled: MaybeProp<bool>,
     children: Children,
 ) -> impl IntoView {
     let classes = format!(
@@ -75,7 +75,7 @@ pub fn Button(
     );
 
     view! {
-        <button class=classes disabled=disabled>
+        <button class=classes disabled=move || disabled.get().unwrap_or(false)>
             {children()}
         </button>
     }

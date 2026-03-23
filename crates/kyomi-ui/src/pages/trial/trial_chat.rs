@@ -464,10 +464,10 @@ pub fn TrialChatPage() -> impl IntoView {
     let (access_token, set_access_token) = signal(String::new());
 
     // Message ID counter for generating unique IDs.
-    let msg_counter = StoredValue::new(std::cell::Cell::new(0u64));
+    let msg_counter = RwSignal::new(0u64);
 
     // Track whether we've already auto-submitted from `?q=` param.
-    let has_auto_submitted = StoredValue::new(std::cell::Cell::new(false));
+    let has_auto_submitted = RwSignal::new(false);
 
     // Read `?q=` query parameter for auto-submission.
     let query_map = use_query_map();
@@ -479,8 +479,8 @@ pub fn TrialChatPage() -> impl IntoView {
 
     // ── Generate unique message ID ──────────────────────────────────────
     let generate_message_id = move || -> String {
-        let count = msg_counter.get_value().get();
-        msg_counter.get_value().set(count + 1);
+        let count = msg_counter.get_untracked();
+        msg_counter.set(count + 1);
         #[cfg(target_arch = "wasm32")]
         {
             format!(
@@ -562,7 +562,7 @@ pub fn TrialChatPage() -> impl IntoView {
                 Ok(response) => {
                     // Update query state
                     set_query_count.set(response.query_count);
-                    set_queries_remaining.set(response.queries_remaining);
+                    set_queries_remaining.set(response.queries_remaining.max(0) as u64);
 
                     // Replace placeholder with real response
                     set_messages.update(|msgs| {
@@ -671,8 +671,8 @@ pub fn TrialChatPage() -> impl IntoView {
 
                         // Auto-submit from ?q= parameter
                         let q = auto_question.get_value();
-                        if !q.is_empty() && !has_auto_submitted.get_value().get() {
-                            has_auto_submitted.get_value().set(true);
+                        if !q.is_empty() && !has_auto_submitted.get_untracked() {
+                            has_auto_submitted.set(true);
                             send_message.run(q);
                         }
                     }

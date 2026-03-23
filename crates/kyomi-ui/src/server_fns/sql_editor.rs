@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};
 
+#[allow(unused_imports)]
 use crate::pages::sql_editor::types::{
     CatalogNode, CatalogNodeType, ColumnMetadata, QueryHandle, QueryHistoryEntry, QueryResult,
 };

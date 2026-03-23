@@ -13,7 +13,7 @@ use leptos_icons::Icon;
 
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
-    Badge, Button, ButtonSize, ButtonVariant, DynSelect, Label, Modal, ModalSize, Spinner, Switch,
+    Label, Modal, ModalSize, Spinner, Switch,
     INPUT_CLASS,
 };
 use crate::types::WatchListItem;
@@ -70,7 +70,7 @@ pub fn WatchModal(
     let (prompt, set_prompt) = signal(watch.prompt.clone());
     let (schedule, set_schedule) = signal(watch.schedule.clone());
     let (mode, set_mode) = signal(watch.mode.clone());
-    let (slack_channel_id, set_slack_channel_id) =
+    let (slack_channel_id, _set_slack_channel_id) =
         signal(watch.slack_channel_id.clone().unwrap_or_default());
     let (alert_emails, set_alert_emails) =
         signal(watch.alert_emails.clone().unwrap_or_default());

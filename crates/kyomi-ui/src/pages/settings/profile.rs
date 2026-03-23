@@ -345,7 +345,7 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
         ("sql_editor", "SQL Editor"),
     ];
 
-    let mut dashboard_options: Vec<(&str, &str)> = vec![("", "None")];
+    let _dashboard_options: Vec<(&str, &str)> = vec![("", "None")];
     // We need to leak these strings since the component owns them
     let dash_leaked: Vec<(String, String)> = dashboards.iter()
         .map(|d| (d.dashboard_id.clone(), d.title.clone()))

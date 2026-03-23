@@ -15,7 +15,7 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 use leptos_router::hooks::use_navigate;
-use leptos_router::navigate::NavigateOptions;
+use leptos_router::NavigateOptions;
 
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{Badge, BadgeVariant, Button, ButtonVariant, Card, Spinner};
@@ -210,9 +210,8 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
                                             "Dive in with our Acme Analytics demo dataset — no setup required"
                                         </p>
                                         <Button
-                                            on_click=move |_| { handle_explore_sample.dispatch(()); }
-                                            disabled=creating_sample
                                             class="w-full"
+                                            on:click=move |_| { handle_explore_sample.dispatch(()); }
                                         >
                                             {move || if creating_sample.get() {
                                                 "Setting up...".to_string()
@@ -238,9 +237,9 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
                                         "Connect your data warehouse to ask questions about your real data"
                                     </p>
                                     <Button
-                                        on_click=handle_connect_own
                                         variant=if sample_available { ButtonVariant::Outline } else { ButtonVariant::Default }
                                         class="w-full"
+                                        on:click=handle_connect_own
                                     >
                                         "Connect Datasource"
                                     </Button>
@@ -290,7 +289,7 @@ fn CredentialSetup(
                         "/chat",
                         NavigateOptions {
                             replace: true,
-                            ..Default::default(),
+                            ..Default::default()
                         },
                     );
                 } else {
@@ -443,8 +442,8 @@ fn CredentialSetup(
 
                     <Button
                         variant=ButtonVariant::Ghost
-                        on_click=handle_skip
                         class="w-full"
+                        on:click=handle_skip
                     >
                         "Skip for now"
                     </Button>
@@ -546,8 +545,7 @@ fn CredentialRow(
         view! {
             <Button
                 variant=button_variant
-                on_click=move |_| { handle_oauth.dispatch(()); }
-                disabled=is_connecting
+                on:click=move |_| { handle_oauth.dispatch(()); }
             >
                 {move || if is_connecting.get() {
                     view! {
@@ -576,7 +574,7 @@ fn CredentialRow(
         };
 
         view! {
-            <Button on_click=handle_password>
+            <Button on:click=handle_password>
                 <Icon icon=icondata_lu::LuKey attr:class="h-4 w-4 mr-2"/>
                 "Enter Credentials"
             </Button>
@@ -617,6 +615,7 @@ fn CredentialRow(
 ///
 /// Polls every 10 seconds to check if an admin has added datasources.
 /// When datasources appear, redirects to the credential setup flow or `/chat`.
+#[allow(unused_variables)]
 #[component]
 fn WaitingForSetup(
     state_resource: Resource<Result<OnboardingState, ServerFnError>>,
@@ -664,7 +663,7 @@ fn WaitingForSetup(
                         "/onboarding",
                         NavigateOptions {
                             replace: true,
-                            ..Default::default(),
+                            ..Default::default()
                         },
                     );
                 }
@@ -694,8 +693,8 @@ fn WaitingForSetup(
                     </p>
                     <Button
                         variant=ButtonVariant::Ghost
-                        on_click=handle_go_to_chat
                         class="w-full"
+                        on:click=handle_go_to_chat
                     >
                         "Go to Chat anyway"
                     </Button>

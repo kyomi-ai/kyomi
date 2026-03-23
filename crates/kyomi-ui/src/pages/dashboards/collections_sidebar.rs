@@ -36,10 +36,10 @@ const PRESET_COLORS: &[(&str, &str)] = &[
 const DEFAULT_WIDTH: f64 = 320.0;
 
 /// Minimum sidebar width in pixels.
-const MIN_WIDTH: f64 = 280.0;
+const _MIN_WIDTH: f64 = 280.0;
 
 /// Maximum sidebar width in pixels.
-const MAX_WIDTH: f64 = 480.0;
+const _MAX_WIDTH: f64 = 480.0;
 
 /// Mobile breakpoint (matches React `window.innerWidth < 768`).
 const MOBILE_BREAKPOINT: f64 = 768.0;

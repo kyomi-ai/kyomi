@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::{Badge, BadgeVariant, DynSelect};
+use crate::components::{BadgeVariant, DynSelect};
 use crate::types::WatchExecutionItem;
 
 // ---------------------------------------------------------------------------
@@ -27,6 +27,7 @@ use crate::types::WatchExecutionItem;
 /// - no_alert -> Secondary
 /// - running -> Default (primary/amber)
 /// - fallback -> Outline
+#[allow(dead_code)]
 fn get_status_variant(status: &str) -> BadgeVariant {
     match status {
         "success" => BadgeVariant::Default,

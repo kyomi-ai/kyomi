@@ -88,8 +88,7 @@ fn ConnectDataStep() -> impl IntoView {
                         <div class="flex items-start gap-4">
                             <Icon
                                 icon=icondata_lu::LuDatabase
-                                width="24" height="24"
-                                class="mt-0.5 text-muted-foreground flex-shrink-0"
+                                attr:class="mt-0.5 text-muted-foreground flex-shrink-0"
                             />
                             <div class="flex-1">
                                 <h3 class="font-semibold mb-1">"Connect a Database"</h3>
@@ -108,8 +107,7 @@ fn ConnectDataStep() -> impl IntoView {
                         <div class="flex items-start gap-4">
                             <Icon
                                 icon=icondata_lu::LuDatabase
-                                width="24" height="24"
-                                class="mt-0.5 text-muted-foreground flex-shrink-0"
+                                attr:class="mt-0.5 text-muted-foreground flex-shrink-0"
                             />
                             <div class="flex-1">
                                 <h3 class="font-semibold mb-1">"Explore with Sample Data"</h3>
@@ -225,7 +223,7 @@ fn ConnectAiToolStep() -> impl IntoView {
                     <div class="space-y-3 pt-2">
                         <Button class="w-full" on:click=nav_dashboards>
                             "I've Connected"
-                            <Icon icon=icondata_lu::LuArrowRight width="16" height="16" class="ml-2"/>
+                            <Icon icon=icondata_lu::LuArrowRight attr:class="ml-2"/>
                         </Button>
                         <p class="text-sm text-center">
                             <button
@@ -300,7 +298,7 @@ fn cursor_tab(mcp_url: &str) -> impl IntoView {
                     rel="noopener noreferrer"
                     class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2"
                 >
-                    <Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                    <Icon icon=icondata_lu::LuExternalLink/>
                     "Connect with Cursor"
                 </a>
             </div>
@@ -361,9 +359,9 @@ fn CodeBlock(text: String) -> impl IntoView {
             >
                 {move || {
                     if copied.get() {
-                        view! { <Icon icon=icondata_lu::LuCopyCheck width="16" height="16"/> }.into_any()
+                        view! { <Icon icon=icondata_lu::LuCopyCheck/> }.into_any()
                     } else {
-                        view! { <Icon icon=icondata_lu::LuCopy width="16" height="16"/> }.into_any()
+                        view! { <Icon icon=icondata_lu::LuCopy/> }.into_any()
                     }
                 }}
             </button>

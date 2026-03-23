@@ -2,8 +2,6 @@
 
 //! Input component — matches `apps/frontend/src/components/ui/input.jsx` exactly.
 
-use leptos::prelude::*;
-
 /// Input class string matching the React Input component exactly.
 /// React: `flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-base
 ///          text-foreground shadow-sm transition-colors file:border-0 file:bg-transparent

@@ -21,7 +21,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::components::chat::websocket_client::WebSocketContext;
 use crate::components::chat::{
-    AgentThinking, ThinkingEvent, ThinkingState, TokenUsage, process_thinking_event,
+    AgentThinking, ThinkingState,
 };
 use crate::components::Spinner;
 use crate::server_fns::copilot::{
@@ -32,8 +32,8 @@ use super::shared::use_is_mobile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const MIN_WIDTH: f64 = 320.0;
-const MAX_WIDTH: f64 = 600.0;
+const _MIN_WIDTH: f64 = 320.0;
+const _MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 384.0;
 
 // ─── SVG Icons ──────────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ pub fn CopilotSidebar(
     let is_mobile = use_is_mobile();
 
     // ── Panel width (desktop resize) ────────────────────────────────────
-    let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
+    let (panel_width, _set_panel_width) = signal(DEFAULT_WIDTH);
     let (is_resizing, set_is_resizing) = signal(false);
 
     // ── Session state ───────────────────────────────────────────────────

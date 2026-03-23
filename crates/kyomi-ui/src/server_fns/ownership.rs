@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// This is a slimmer type than `OwnershipTransferData` in `types.rs` — it
 /// includes the workspace name (resolved from the workspace record) and
 /// only the fields the page actually needs.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OwnershipTransfer {
     pub transfer_id: String,
     pub workspace_name: String,

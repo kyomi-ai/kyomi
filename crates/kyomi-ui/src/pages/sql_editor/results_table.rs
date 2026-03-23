@@ -27,7 +27,7 @@ use super::types::{ColumnMetadata, QueryResult};
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MIN_COL_WIDTH: f64 = 50.0;
+const _MIN_COL_WIDTH: f64 = 50.0;
 const DEFAULT_COL_WIDTH: f64 = 150.0;
 
 const PAGE_SIZE_OPTIONS: [u32; 5] = [10, 25, 50, 100, 200];

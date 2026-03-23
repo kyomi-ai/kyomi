@@ -25,6 +25,7 @@ use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 #[component]
 pub fn Layout(children: Children) -> impl IntoView {
     let (collapsed, set_collapsed) = signal(false);
+    #[allow(unused_variables)]
     let (is_mobile, set_is_mobile) = signal(false);
     let (mobile_open, set_mobile_open) = signal(false);
 

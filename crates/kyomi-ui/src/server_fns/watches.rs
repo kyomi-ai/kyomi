@@ -8,6 +8,7 @@
 
 use leptos::prelude::*;
 
+#[allow(unused_imports)]
 use crate::types::{AlertItem, AlertsPage, WatchExecutionItem, WatchListItem};
 
 // ─────────────────────────────────────────────────────────────────────────────

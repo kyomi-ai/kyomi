@@ -11,7 +11,7 @@
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use leptos_router::navigate::NavigateOptions;
+use leptos_router::NavigateOptions;
 
 use crate::components::spinner::Spinner;
 use crate::server_fns::home::{LandingConfig, get_landing_config};

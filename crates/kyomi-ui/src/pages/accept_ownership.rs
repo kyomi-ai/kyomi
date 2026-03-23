@@ -44,6 +44,7 @@ enum PageState {
 #[component]
 pub fn AcceptOwnershipPage() -> impl IntoView {
     let (state, set_state) = signal(PageState::Loading);
+    #[allow(unused_variables)]
     let params = use_params_map();
 
     // ── Fetch transfer on mount ──────────────────────────────────────────
@@ -296,6 +297,7 @@ fn ready_view(
     let workspace_name = transfer.workspace_name.clone();
     let from_email = transfer.from_user_email.clone();
     let expires_at = transfer.expires_at.clone();
+    let date_script = format_date_script(expires_at.clone());
 
     view! {
         <div class="space-y-6">
@@ -331,7 +333,7 @@ fn ready_view(
                             {expires_at.clone()}
                         </div>
                         // Format the date client-side
-                        {format_date_script(&expires_at)}
+                        {date_script}
                     </div>
                 </div>
             </div>
@@ -459,7 +461,7 @@ fn capability_item(text: &'static str) -> impl IntoView {
 
 /// Render a small inline script that formats an ISO date string into the
 /// user's local date/time and replaces the placeholder element content.
-fn format_date_script(iso_date: &str) -> impl IntoView {
+fn format_date_script(iso_date: String) -> impl IntoView {
     let script = format!(
         r#"(function(){{var el=document.getElementById('expires-at-display');if(el){{var d=new Date('{}');el.textContent=d.toLocaleDateString()+' at '+d.toLocaleTimeString();}}}})();"#,
         iso_date
