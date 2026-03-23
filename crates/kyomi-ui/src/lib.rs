@@ -219,6 +219,36 @@ pub fn register_server_functions() {
     register_explicit::<GetLastExecution>();
     register_explicit::<GetThinkingEvents>();
 
+    use server_fns::trial::*;
+    register_explicit::<CreateTrialSession>();
+    register_explicit::<SendTrialMessage>();
+    register_explicit::<ExecuteTrialQuery>();
+
+    use server_fns::onboarding::*;
+    register_explicit::<AcceptTerms>();
+    register_explicit::<GetOnboardingState>();
+    register_explicit::<CreateSampleDatasource>();
+    register_explicit::<GetOauthConnectUrl>();
+
+    use server_fns::home::*;
+    register_explicit::<GetLandingConfig>();
+
+    use server_fns::unsubscribe::*;
+    register_explicit::<UnsubscribeEmail>();
+
+    use server_fns::ownership::*;
+    register_explicit::<GetOwnershipTransfer>();
+    register_explicit::<AcceptOwnershipTransfer>();
+    register_explicit::<DeclineOwnershipTransfer>();
+
+    use server_fns::setup::*;
+    register_explicit::<CheckHasDatasources>();
+
+    use server_fns::connect::*;
+    register_explicit::<ListConnectDatasources>();
+    register_explicit::<CreateConnectDatasource>();
+    register_explicit::<RotateConnectToken>();
+
     #[cfg(feature = "slack")]
     {
         use server_fns::slack::*;

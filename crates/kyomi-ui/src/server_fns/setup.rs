@@ -16,7 +16,7 @@ use super::{extract_auth, extract_context, workspace_id};
 /// Returns `true` if at least one datasource exists (active or inactive),
 /// `false` otherwise. Used by the setup wizard to skip the "Connect Data"
 /// step when datasources are already configured.
-#[server]
+#[server(prefix = "/leptos-api")]
 pub async fn check_has_datasources() -> Result<bool, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
