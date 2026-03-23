@@ -15,6 +15,7 @@ use crate::server_fns::dashboards::DashboardListItem;
 // ─── Mobile detection ───────────────────────────────────────────────────────
 
 /// Breakpoint (in CSS pixels) below which the viewport is considered mobile.
+#[allow(dead_code)]
 pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
 
 /// Returns a reactive signal tracking whether the viewport is mobile-sized.
@@ -23,6 +24,7 @@ pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
 /// Used by `history_panel`, `copilot_sidebar`, and any future panel that
 /// needs responsive desktop/mobile layout switching.
 pub(crate) fn use_is_mobile() -> Signal<bool> {
+    #[allow(unused_variables)]
     let (is_mobile, set_is_mobile) = signal(false);
 
     Effect::new(move || {

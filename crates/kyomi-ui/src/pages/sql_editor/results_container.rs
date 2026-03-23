@@ -133,7 +133,8 @@ pub fn ResultsContainer(
     // ── Page change handler ──────────────────────────────────────────────
 
     let handle_page_change = {
-        let state = state;
+        let _state = state;
+        #[allow(unused_variables)]
         Callback::new(move |page: u32| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };
@@ -223,7 +224,8 @@ pub fn ResultsContainer(
     // ── Page size change handler ─────────────────────────────────────────
 
     let handle_page_size_change = {
-        let state = state;
+        let _state = state;
+        #[allow(unused_variables)]
         Callback::new(move |new_page_size: u32| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };
@@ -320,13 +322,14 @@ pub fn ResultsContainer(
 
     // ── Chart generation state ───────────────────────────────────────────
     let (chart_generating, set_chart_generating) = signal(false);
-    let (chart_yaml, set_chart_yaml) = signal(None::<String>);
+    let (chart_yaml, _set_chart_yaml) = signal(None::<String>);
     let (chart_error, set_chart_error) = signal(None::<String>);
     let (show_chart_modal, set_show_chart_modal) = signal(false);
     // Track clipboard feedback.
-    let (copied, set_copied) = signal(false);
+    let (copied, _set_copied) = signal(false);
 
     let handle_create_chart = {
+        #[allow(unused_variables)]
         Callback::new(move |_: ()| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };

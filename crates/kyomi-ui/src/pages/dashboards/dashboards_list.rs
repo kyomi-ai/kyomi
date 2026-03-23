@@ -14,7 +14,7 @@ use leptos::prelude::*;
 
 use crate::components::{
     Button, ButtonVariant, Card, CardContent, CardFooter, CardHeader, CardTitle,
-    ConfirmDialog, Spinner, StyledSelect, INPUT_CLASS,
+    ConfirmDialog, Spinner, StyledSelect,
 };
 use crate::server_fns::collections::{
     list_collections, CollectionItem,

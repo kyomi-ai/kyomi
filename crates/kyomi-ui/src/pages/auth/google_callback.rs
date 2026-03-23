@@ -17,6 +17,7 @@ use crate::server_fns::auth::{google_oauth_callback, GoogleCallbackResult};
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 enum CallbackStatus {
     Processing,
     Success,
@@ -28,6 +29,7 @@ enum CallbackStatus {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Extract a query parameter value from a `?key=val&key2=val2` search string.
+#[allow(dead_code)]
 fn get_query_param(search: &str, key: &str) -> Option<String> {
     let search = search.strip_prefix('?').unwrap_or(search);
     for pair in search.split('&') {
@@ -44,6 +46,7 @@ fn get_query_param(search: &str, key: &str) -> Option<String> {
 }
 
 /// Minimal percent-decoding for URL query values.
+#[allow(dead_code)]
 fn percent_decode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.as_bytes().iter();
@@ -68,6 +71,7 @@ fn percent_decode(input: &str) -> String {
     result
 }
 
+#[allow(dead_code)]
 fn hex_val(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),

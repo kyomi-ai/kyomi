@@ -24,7 +24,7 @@ use crate::server_fns::watches::{
     bulk_delete_alerts, bulk_mark_alerts_read, bulk_mark_alerts_unread, continue_alert_in_chat,
     delete_alert, get_alerts, list_watches, mark_alert_read, mark_alert_unread, restore_alert,
 };
-use crate::types::{AlertItem, AlertsPage, WatchListItem};
+use crate::types::{AlertItem, WatchListItem};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -726,7 +726,7 @@ pub fn AlertsHistory(
                 let current_page = page.get();
 
                 // Is all selected?
-                let is_all_selected = selectable_count > 0 && current_selected.len() == selectable_count;
+                let _is_all_selected = selectable_count > 0 && current_selected.len() == selectable_count;
 
                 // Render the full component
                 view! {
@@ -735,7 +735,7 @@ pub fn AlertsHistory(
                         <div class="flex items-center gap-3 flex-wrap min-h-10">
                             // Select-all checkbox — pl-4 aligns with per-card checkboxes below
                             {(selectable_count > 0).then(|| {
-                                let selectable_ids: Vec<i32> = selectable_alerts.iter().map(|a| a.id).collect();
+                                let _selectable_ids: Vec<i32> = selectable_alerts.iter().map(|a| a.id).collect();
                                 view! {
                                     <div class="pl-4">
                                         // TODO: Add indeterminate state when Checkbox component

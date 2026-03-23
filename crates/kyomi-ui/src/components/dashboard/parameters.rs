@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 
-use crate::components::input::INPUT_CLASS;
-use crate::components::label::Label;
 use crate::components::select::DynSelect;
 use crate::parser::ParamDef;
 

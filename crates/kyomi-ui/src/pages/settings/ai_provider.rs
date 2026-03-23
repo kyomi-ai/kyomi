@@ -12,7 +12,7 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, Button, ButtonVariant, Card, CardContent, CardDescription,
-    CardHeader, CardTitle, Label, StyledSelect, INPUT_CLASS,
+    CardHeader, CardTitle, Label, INPUT_CLASS,
 };
 use crate::components::toast::{toast_error, toast_info, toast_success};
 
@@ -168,7 +168,7 @@ pub fn AiProviderCard() -> impl IntoView {
     let (base_url_override, set_base_url_override) = signal(initial_url);
     let (show_api_key, set_show_api_key) = signal(false);
 
-    let provider_options: Vec<(&'static str, &'static str)> = PROVIDERS
+    let _provider_options: Vec<(&'static str, &'static str)> = PROVIDERS
         .iter()
         .map(|p| (p.id, p.label))
         .collect();

@@ -23,8 +23,8 @@ use super::shared::use_is_mobile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const MIN_WIDTH: f64 = 320.0;
-const MAX_WIDTH: f64 = 600.0;
+const _MIN_WIDTH: f64 = 320.0;
+const _MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 384.0;
 
 // ─── Relative time formatting ───────────────────────────────────────────────
@@ -187,7 +187,7 @@ pub fn HistoryPanel(
     let is_mobile = use_is_mobile();
 
     // ── Panel width (desktop resize) ────────────────────────────────────
-    let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
+    let (panel_width, _set_panel_width) = signal(DEFAULT_WIDTH);
     let (_is_resizing, set_is_resizing) = signal(false);
 
     // ── Version list state ──────────────────────────────────────────────

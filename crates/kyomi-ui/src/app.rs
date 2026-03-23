@@ -10,6 +10,7 @@ use leptos_router::{
 };
 
 use crate::components::{Layout, ThemeProvider};
+use crate::pages::accept_ownership::AcceptOwnershipPage;
 use crate::pages::auth::account_recovery::AccountRecoveryPage;
 use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
 use crate::pages::auth::google_callback::GoogleCallbackPage;
@@ -19,19 +20,26 @@ use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
 use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
 use crate::pages::chat::{ChatPage, ChatsListPage};
+use crate::pages::connect_setup::ConnectSetupPage;
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
+use crate::pages::home::HomePage;
 use crate::pages::knowledge::KnowledgePage;
 use crate::pages::not_implemented::NotImplementedPage;
-use crate::pages::watches::WatchesPage;
+use crate::pages::onboarding::DatasourceOnboardingPage;
 use crate::pages::settings::analytics::AnalyticsPage;
+use crate::pages::settings::billing::BillingPage;
 use crate::pages::settings::datasources::DatasourcesPage;
 use crate::pages::settings::profile::ProfilePage;
 use crate::pages::settings::security::SecurityTab;
 use crate::pages::settings::settings_shell::SettingsShell;
-use crate::pages::settings::billing::BillingPage;
 use crate::pages::settings::team::TeamPage;
 use crate::pages::settings::usage::UsagePage;
 use crate::pages::settings::workspace::WorkspacePage;
+use crate::pages::setup::personal_setup::PersonalSetupPage;
+use crate::pages::trial::TrialChatPage;
+use crate::pages::unsubscribe::UnsubscribePage;
+use crate::pages::watches::WatchesPage;
+use crate::pages::welcome::WelcomePage;
 
 /// Shell HTML page that loads the WASM bundle.
 ///
@@ -83,14 +91,22 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/auth/slack-connect") view=|| view! { <NotImplementedPage name="Slack Connect"/> }/>
                     <Route path=path!("/auth/google/link-callback") view=|| view! { <NotImplementedPage name="Google Account Link"/> }/>
                     <Route path=path!("/auth/oauth/:provider/callback") view=|| view! { <NotImplementedPage name="OAuth Callback"/> }/>
-                    <Route path=path!("/welcome") view=|| view! { <NotImplementedPage name="Welcome"/> }/>
-                    <Route path=path!("/unsubscribe") view=|| view! { <NotImplementedPage name="Unsubscribe"/> }/>
+                    // Public pages — NO layout, NO auth
+                    <Route path=path!("/try") view=TrialChatPage/>
+                    <Route path=path!("/welcome") view=WelcomePage/>
+                    <Route path=path!("/unsubscribe") view=UnsubscribePage/>
+                    // Flow pages — NO sidebar, requires auth (standalone layout)
+                    <Route path=path!("/onboarding") view=DatasourceOnboardingPage/>
+                    <Route path=path!("/onboarding/catalog") view=|| view! { <Redirect path="/onboarding"/> }/>
+                    <Route path=path!("/setup") view=PersonalSetupPage/>
+                    <Route path=path!("/connect/setup") view=ConnectSetupPage/>
+                    <Route path=path!("/accept-ownership/:transfer_id") view=AcceptOwnershipPage/>
                     // Dashboard pages — wrapped in Layout (sidebar)
                     <Route path=path!("/dashboards") view=|| view! { <Layout><DashboardsListPage/></Layout> }/>
                     <Route path=path!("/dashboard/:id") view=|| view! { <Layout><DashboardViewerPage/></Layout> }/>
                     <Route path=path!("/dashboard/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
                     // Main app pages — wrapped in Layout
-                    <Route path=path!("/") view=|| view! { <Layout><NotImplementedPage name="Home"/></Layout> }/>
+                    <Route path=path!("/") view=|| view! { <Layout><HomePage/></Layout> }/>
                     // Chat pages — ChatPage handles both new (/chat) and existing (/chat/:session_id)
                     <Route path=path!("/chat") view=|| view! { <Layout><ChatPage/></Layout> }/>
                     <Route path=path!("/chat/:session_id") view=|| view! { <Layout><ChatPage/></Layout> }/>
@@ -99,13 +115,6 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/knowledge") view=|| view! { <Layout><KnowledgePage/></Layout> }/>
                     <Route path=path!("/watches") view=|| view! { <Layout><WatchesPage/></Layout> }/>
                     <Route path=path!("/watches/:view") view=|| view! { <Layout><WatchesPage/></Layout> }/>
-                    // Flow pages — full screen, not yet implemented
-                    <Route path=path!("/try") view=|| view! { <NotImplementedPage name="Try Kyomi"/> }/>
-                    <Route path=path!("/connect/setup") view=|| view! { <NotImplementedPage name="Connect Setup"/> }/>
-                    <Route path=path!("/setup") view=|| view! { <NotImplementedPage name="Setup"/> }/>
-                    <Route path=path!("/onboarding") view=|| view! { <NotImplementedPage name="Onboarding"/> }/>
-                    <Route path=path!("/onboarding/catalog") view=|| view! { <NotImplementedPage name="Onboarding"/> }/>
-                    <Route path=path!("/accept-ownership/:transfer_id") view=|| view! { <NotImplementedPage name="Accept Ownership"/> }/>
                     // Settings pages — wrapped in Layout (sidebar) + SettingsShell
                     <ParentRoute path=path!("/settings") view=|| view! {
                         <Layout>

@@ -20,8 +20,8 @@ use crate::components::dashboard::shared::use_is_mobile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const MIN_WIDTH: f64 = 280.0;
-const MAX_WIDTH: f64 = 480.0;
+const _MIN_WIDTH: f64 = 280.0;
+const _MAX_WIDTH: f64 = 480.0;
 const DEFAULT_WIDTH: f64 = 320.0;
 
 // ─── Main component ────────────────────────────────────────────────────────

@@ -20,8 +20,8 @@ use crate::types::WatchListItem;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const MIN_WIDTH: f64 = 320.0;
-const MAX_WIDTH: f64 = 600.0;
+const _MIN_WIDTH: f64 = 320.0;
+const _MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 420.0;
 
 // ─── SVG Icons ──────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ pub fn WatchAgentSidebar(
     let _ = on_watch_changed;
 
     // ── Resize state (desktop only) ──────────────────────────────────────
-    let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
+    let (panel_width, _set_panel_width) = signal(DEFAULT_WIDTH);
     let (is_resizing, set_is_resizing) = signal(false);
 
     // ── Chat placeholder state ───────────────────────────────────────────
@@ -97,7 +97,7 @@ pub fn WatchAgentSidebar(
         .as_ref()
         .map(|w| w.name.clone())
         .unwrap_or_default();
-    let editing_watch = StoredValue::new(editing_watch);
+    let _editing_watch = StoredValue::new(editing_watch);
 
     // ── Mode-dependent text ──────────────────────────────────────────────
     let header_title = if mode == "create" {

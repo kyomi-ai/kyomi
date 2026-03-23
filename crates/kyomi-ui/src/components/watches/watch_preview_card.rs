@@ -15,7 +15,7 @@ use leptos_icons::Icon;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Card, CardContent, CardHeader,
+    Badge, BadgeVariant, Card, CardContent, CardHeader,
     CardTitle, Spinner,
 };
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes};

@@ -92,7 +92,7 @@ pub fn KnowledgeFileEditor(
 ) -> impl IntoView {
     // ── State signals ─────────────────────────────────────────────────────
     let (content, set_content) = signal(String::new());
-    let (content_hash, set_content_hash) = signal(Option::<String>::None);
+    let (_content_hash, set_content_hash) = signal(Option::<String>::None);
     let (save_status, set_save_status) = signal(SaveStatus::Idle);
     let (updated_at, set_updated_at) = signal(Option::<String>::None);
     let (updated_by, set_updated_by) = signal(Option::<String>::None);
@@ -183,7 +183,7 @@ pub fn KnowledgeFileEditor(
     });
 
     // ── Save function ─────────────────────────────────────────────────────
-    let do_save = move |content_to_save: String, hash_to_send: Option<String>| {
+    let _do_save = move |content_to_save: String, hash_to_send: Option<String>| {
         let file = selected_file.get_untracked();
         let file_id = match file {
             Some(ref f) if !f.is_folder => f.id.clone(),

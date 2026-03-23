@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{
-    Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
+    Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonVariant,
     Card, CardContent, CardDescription, CardHeader, CardTitle, ConfirmDialog,
 };
 use crate::server_fns::security::{

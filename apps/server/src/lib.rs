@@ -211,6 +211,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                     state.cancel_registry.tokens.clone(),
                 )),
                 platforms: Some(state.platforms.clone()),
+                connect_token: state.connect_token.clone(),
                 #[cfg(feature = "slack")]
                 slack_client: extras.slack_client,
             };

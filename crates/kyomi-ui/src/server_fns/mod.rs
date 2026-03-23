@@ -17,18 +17,25 @@ pub mod auth;
 pub mod billing;
 pub mod chat;
 pub mod collections;
+pub mod connect;
 pub mod copilot;
 pub mod context;
 pub mod dashboards;
 pub mod datasources;
+pub mod home;
 pub mod knowledge;
+pub mod onboarding;
+pub mod ownership;
 pub mod profile;
 pub mod security;
+pub mod setup;
 pub mod sidebar;
 #[cfg(feature = "slack")]
 pub mod slack;
 pub mod sql_editor;
 pub mod team;
+pub mod trial;
+pub mod unsubscribe;
 pub mod usage;
 pub mod watches;
 pub mod workspace;
@@ -78,6 +85,10 @@ pub struct ServerContext {
     /// Platform registry for messaging integrations (Slack, Teams, etc.).
     /// Required by agent execution for platform-aware tool dispatch.
     pub platforms: Option<std::sync::Arc<kyomi_core::platform::PlatformRegistry>>,
+
+    /// Connect token service for generating Kyomi Connect JWT tokens.
+    /// Required by Connect Setup server functions.
+    pub connect_token: Option<std::sync::Arc<kyomi_auth::connect_token::ConnectTokenService>>,
 
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.

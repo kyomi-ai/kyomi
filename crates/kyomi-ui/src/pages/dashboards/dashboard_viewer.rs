@@ -181,6 +181,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let (overflow_open, set_overflow_open) = signal(false);
 
     // ── PDF export loading state ────────────────────────────────────────
+    #[allow(unused_variables)]
     let (is_exporting, set_is_exporting) = signal(false);
 
     // ── Title editing state (for optimistic update) ─────────────────────
@@ -241,7 +242,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     }
                     Ok(dashboard) => {
                         let did = dashboard.dashboard_id.clone();
-                        let did_for_pdf = did.clone();
+                        let _did_for_pdf = did.clone();
                         let did_for_history = did.clone();
                         let did_for_user_default = did.clone();
                         let did_for_ws_default = did.clone();

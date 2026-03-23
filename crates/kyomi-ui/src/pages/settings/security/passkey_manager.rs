@@ -856,6 +856,7 @@ pub fn PasskeyManager() -> impl IntoView {
 /// 1. Call server to start registration (get challenge + options)
 /// 2. Call browser WebAuthn API to create credential
 /// 3. Call server to complete registration
+#[allow(unreachable_code, unused_variables)]
 async fn add_passkey_flow(device_name: &str) -> Result<String, String> {
     // Step 1: Start registration on server
     let options_json = start_passkey_registration(device_name.to_string())
