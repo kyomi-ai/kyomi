@@ -1645,58 +1645,6 @@ pub async fn get_table_info(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helper: SQL for listing tables in a container (per datasource type)
-// ---------------------------------------------------------------------------
-
-/// Generate the SQL query to list tables within a container (schema/database)
-/// for a given datasource type. Matches the REST handler's
-/// `get_tables_in_container_sql()` logic.
-#[cfg(feature = "ssr")]
-fn get_tables_in_container_sql(type_id: &str, container: &str) -> Option<String> {
-    // Escape single quotes for SQL literal interpolation.
-    let escaped = container.replace('\'', "''");
-
-    match type_id {
-        "postgres" | "redshift" => Some(format!(
-            "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = '{escaped}' ORDER BY table_name"
-        )),
-        "mysql" => Some(format!(
-            "SELECT TABLE_NAME FROM information_schema.TABLES \
-             WHERE TABLE_SCHEMA = '{escaped}' ORDER BY TABLE_NAME"
-        )),
-        "clickhouse" => Some(format!(
-            "SELECT name FROM system.tables \
-             WHERE database = '{escaped}' ORDER BY name"
-        )),
-        "sqlserver" | "synapse" => Some(format!(
-            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES \
-             WHERE TABLE_SCHEMA = '{escaped}' ORDER BY TABLE_NAME"
-        )),
-        "snowflake" => {
-            let quoted = format!("\"{}\"", escaped.replace('"', "\"\""));
-            Some(format!(
-                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
-                 FROM {quoted}.INFORMATION_SCHEMA.TABLES \
-                 WHERE TABLE_SCHEMA NOT IN ('INFORMATION_SCHEMA') \
-                   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW') \
-                 ORDER BY TABLE_SCHEMA, TABLE_NAME"
-            ))
-        }
-        "databricks" => {
-            let quoted = format!("`{}`", escaped.replace('`', "``"));
-            Some(format!(
-                "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
-                 FROM {quoted}.INFORMATION_SCHEMA.TABLES \
-                 WHERE TABLE_SCHEMA NOT IN ('information_schema') \
-                 ORDER BY TABLE_SCHEMA, TABLE_NAME"
-            ))
-        }
-        _ => None,
-    }
-}
-
 // ===========================================================================
 // Task 1.8: Chart generation server function
 // ===========================================================================
