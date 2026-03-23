@@ -10,8 +10,8 @@ use std::sync::Arc;
 use leptos::prelude::*;
 
 use crate::components::{
-    Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
-    ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
+    ButtonVariant, ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
 };
 use crate::components::select::SELECT_CLASS;
 use crate::server_fns::context::get_user_context;
@@ -283,7 +283,41 @@ pub fn TeamPage() -> impl IntoView {
         }.into_any()
     });
 
+    // Subscription tier gate — matches React SettingsContent.jsx Team Tab check:
+    // `!isAdmin || !isTeamTier` where isTeamTier = ['team','enterprise'].includes(subscription_tier)
+    let access_denied_msg = move || {
+        user_ctx.get().and_then(|r| r.ok()).map(|ctx| {
+            let is_admin = ctx.workspace_roles.iter().any(|r| r == "workspace_admin");
+            let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise");
+            if !is_admin || !is_team_tier {
+                let msg = if !is_team_tier {
+                    "Team management is only available on Team and Enterprise plans."
+                } else {
+                    "You must be a workspace administrator to manage team members."
+                };
+                Some(msg)
+            } else {
+                None
+            }
+        }).flatten()
+    };
+
     view! {
+        // Show "Access Denied" immediately once user_ctx resolves and user lacks access.
+        // Matches React SettingsContent.jsx Team Tab: renders Alert instead of TeamManagement
+        // when `!isAdmin || !isTeamTier`.
+        {move || {
+            access_denied_msg().map(|msg| view! {
+                <div class="p-6">
+                    <Alert variant=AlertVariant::Error>
+                        <AlertTitle>"Access Denied"</AlertTitle>
+                        <AlertDescription>{msg}</AlertDescription>
+                    </Alert>
+                </div>
+            })
+        }}
+        // Full team management UI — only rendered when user has access.
+        <Show when=move || access_denied_msg().is_none()>
         <div class="p-6" style="display: block; padding: 1.5rem;">
             // Header
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-6">
@@ -554,6 +588,7 @@ pub fn TeamPage() -> impl IntoView {
                 initiate_transfer_action=initiate_transfer_action
             />
         </div>
+        </Show>
     }
 }
 
