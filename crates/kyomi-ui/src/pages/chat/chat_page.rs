@@ -48,6 +48,8 @@ use crate::components::chat::{
     TokenUsage,
 };
 use crate::components::Spinner;
+#[cfg(target_arch = "wasm32")]
+use crate::server_fns::chat::get_chart_context;
 use crate::server_fns::chat::{
     get_session_messages, mark_session_read, send_chat_message, share_session,
     toggle_message_pin, unshare_session, update_message_content, update_session_title,
@@ -1016,9 +1018,115 @@ pub fn ChatPage() -> impl IntoView {
     // Whether any messages are pinned (controls filter button visibility).
     let has_pinned = Memo::new(move |_| messages.get().iter().any(|m| m.pinned));
 
-    // TODO: C5 — MCP deep-link chart context (?chart=<id>) — requires server function
-    // to fetch stored chart context from backend. Not yet implemented.
-    // React reference: Chat.jsx lines 835-886
+    // ── C5 — MCP deep-link chart context (?chart=<id>) ─────────────────
+    // When a user clicks "Continue in Kyomi" in the MCP chart app (Claude.ai),
+    // they arrive at /chat?chart=<contextId>. We fetch the stored context
+    // from KV and bootstrap the conversation with the chart.
+    // Matches React: Chat.jsx lines 835-886.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let location_search_chart = _location.search.clone();
+        Effect::new(move |_| {
+            let search = location_search_chart.get();
+            if search.is_empty() {
+                return;
+            }
+
+            let url_params = web_sys::UrlSearchParams::new_with_str(&search).ok();
+            let chart_id = url_params.as_ref().and_then(|p| p.get("chart"));
+
+            let Some(chart_id) = chart_id else {
+                return;
+            };
+
+            // Fetch chart context from KV via server function
+            leptos::task::spawn_local(async move {
+                match get_chart_context(chart_id).await {
+                    Ok(Some(ctx)) => {
+                        // Store chart context for prepending to first user message
+                        set_chart_context.set(Some(ctx.chart_markdown.clone()));
+
+                        // Create an initial assistant message with the chart
+                        let initial_message = ChatMessageItem {
+                            message_id: format!(
+                                "chart-context-{}",
+                                js_sys::Date::now() as u64
+                            ),
+                            message_type: "assistant".to_string(),
+                            content: format!(
+                                "I'm ready to help you explore this chart:\n\n{}\n\nWhat would you like to know about it?",
+                                ctx.chart_markdown
+                            ),
+                            timestamp: String::new(),
+                            pinned: false,
+                            sent_by: None,
+                            thinking_events: Vec::new(),
+                            token_usage: None,
+                        };
+
+                        set_messages.set(vec![initial_message]);
+                        set_session_title.set(
+                            if ctx.title.is_empty() {
+                                "Chart Exploration".to_string()
+                            } else {
+                                format!("Exploring: {}", ctx.title)
+                            },
+                        );
+                        set_current_greeting.set(String::new());
+                    }
+                    Ok(None) => {
+                        // Chart context expired or invalid — show friendly message
+                        let initial_message = ChatMessageItem {
+                            message_id: format!(
+                                "chart-context-error-{}",
+                                js_sys::Date::now() as u64
+                            ),
+                            message_type: "assistant".to_string(),
+                            content: "This chart link has expired or is no longer available. You can still ask me anything about your data!".to_string(),
+                            timestamp: String::new(),
+                            pinned: false,
+                            sent_by: None,
+                            thinking_events: Vec::new(),
+                            token_usage: None,
+                        };
+
+                        set_messages.set(vec![initial_message]);
+                        set_current_greeting.set(String::new());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch chart context: {e}");
+                        let initial_message = ChatMessageItem {
+                            message_id: format!(
+                                "chart-context-error-{}",
+                                js_sys::Date::now() as u64
+                            ),
+                            message_type: "assistant".to_string(),
+                            content: "This chart link has expired or is no longer available. You can still ask me anything about your data!".to_string(),
+                            timestamp: String::new(),
+                            pinned: false,
+                            sent_by: None,
+                            thinking_events: Vec::new(),
+                            token_usage: None,
+                        };
+
+                        set_messages.set(vec![initial_message]);
+                        set_current_greeting.set(String::new());
+                    }
+                }
+
+                // Clear the query parameter to prevent re-triggering on refresh
+                if let Some(window) = web_sys::window() {
+                    if let Ok(pathname) = window.location().pathname() {
+                        let navigate = leptos_router::hooks::use_navigate();
+                        navigate(&pathname, leptos_router::NavigateOptions {
+                            replace: true,
+                            ..Default::default()
+                        });
+                    }
+                }
+            });
+        });
+    }
 
     // ── Phase 11 — Chart exploration context ─────────────────────────────
     // Handle "Ask about this chart" navigation. When the user navigates to

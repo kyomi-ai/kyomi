@@ -120,6 +120,57 @@ pub struct SendMessageResponse {
     pub skip_ai: bool,
 }
 
+/// Chart context stored by the MCP chart tool for "Continue in Kyomi" deep-links.
+///
+/// The MCP chart app stores `{ spec, title, chartMarkdown }` in KV with key
+/// `chart:context:<id>`. This struct maps the camelCase JSON fields to Rust.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChartContext {
+    pub title: String,
+    #[serde(rename = "chartMarkdown")]
+    pub chart_markdown: String,
+    pub spec: serde_json::Value,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP Deep-Link: Chart Context
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch a stored chart context for "Continue in Kyomi" deep-links.
+///
+/// When a user clicks "Continue in Kyomi" in the MCP chart app (Claude.ai),
+/// they are directed to `/chat?chart=<id>`. This function retrieves the
+/// chart context stored by `kyomi-agent/src/tools/chart.rs::store_chart_context`.
+///
+/// Returns `None` if the context has expired (TTL) or the ID is invalid.
+///
+/// Mirrors `GET /api/v1/chart-context/:id` in the REST API.
+#[server(prefix = "/leptos-api")]
+pub async fn get_chart_context(chart_id: String) -> Result<Option<ChartContext>, ServerFnError> {
+    let _auth = super::extract_auth().await?;
+    let ctx = super::extract_context()?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let kv_key = format!("chart:context:{chart_id}");
+
+    match kv.get(&kv_key).await {
+        Ok(Some(json_str)) => {
+            let chart_ctx: ChartContext = serde_json::from_str(&json_str)
+                .map_err(|e| ServerFnError::new(format!("Invalid chart context data: {e}")))?;
+            Ok(Some(chart_ctx))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => {
+            tracing::warn!(error = %e, key = %kv_key, "Failed to fetch chart context from KV");
+            Ok(None)
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Config (existing)
 // ─────────────────────────────────────────────────────────────────────────────

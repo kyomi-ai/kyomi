@@ -100,6 +100,7 @@ pub fn register_server_functions() {
     register_explicit::<CancelOwnershipTransfer>();
 
     use server_fns::chat::*;
+    register_explicit::<GetChartContext>();
     register_explicit::<GetWebsocketConfig>();
     register_explicit::<ListChatSessions>();
     register_explicit::<GetSessionMessages>();
