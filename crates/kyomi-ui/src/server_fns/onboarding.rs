@@ -90,10 +90,22 @@ pub async fn accept_terms(
                 ServerFnError::new("Internal server error")
             })?;
 
-        // TODO: Admin notification (Slack + email) for new signups.
-        // The REST handler calls `admin_notify::notify_signup` here, but that
-        // module lives in the server crate which kyomi-ui cannot depend on
-        // (circular dependency). Move notification to kyomi-auth or a shared crate.
+        // Admin notification (Slack + email) — fire-and-forget
+        let notify_webhook = ctx.config.slack_feedback_webhook_url.clone();
+        let notify_support = ctx.config.support_email.clone();
+        let notify_email = email.to_string();
+        let notify_name = name.to_string();
+        let notify_user_id = user.user_id.clone();
+        tokio::spawn(async move {
+            kyomi_auth::notifications::notify_signup(
+                notify_webhook.as_deref(),
+                &notify_support,
+                &notify_email,
+                &notify_name,
+                &notify_user_id,
+            )
+            .await;
+        });
 
         // Store OAuth data
         if let Some(oauth_data_json) = signup_data.get("oauth_data") {

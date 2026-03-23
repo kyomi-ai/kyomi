@@ -12,6 +12,7 @@ use crate::components::{
     INPUT_CLASS,
 };
 use crate::pages::settings::ai_provider::AiProviderCard;
+use crate::pages::settings::push_notifications::PushNotificationsCard;
 use crate::server_fns::profile::*;
 use crate::types::{DashboardSummary, ProfileData};
 
@@ -153,7 +154,10 @@ pub fn ProfilePage() -> impl IntoView {
                                     // Slack Connection — hidden in personal mode (feature-gated)
                                     <SlackSection is_personal=is_personal/>
 
-                                    // TODO: PushNotificationsCard — requires full PushManager.subscribe() + server registration flow
+                                    // Push Notifications — hidden in personal mode
+                                    <Show when=move || !is_personal>
+                                        <PushNotificationsCard/>
+                                    </Show>
 
                                     <McpConnectionCard is_personal=is_personal/>
 

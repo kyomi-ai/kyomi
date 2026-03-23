@@ -544,10 +544,21 @@ pub async fn signup_start(
                 // Send verification email (fire-and-forget)
                 spawn_verification_email(email.clone(), String::new(), signup_url);
 
-                // TODO: Admin notification (Slack + email) for new SaaS signups.
-                // The REST handler calls `admin_notify::notify_signup` here, but that
-                // module lives in the server crate which kyomi-ui cannot depend on
-                // (circular dependency). Move notification to kyomi-auth or a shared crate.
+                // Admin notification (Slack + email) — fire-and-forget
+                let notify_webhook = ctx.config.slack_feedback_webhook_url.clone();
+                let notify_support = ctx.config.support_email.clone();
+                let notify_email = email.clone();
+                let notify_user_id = user.user_id.clone();
+                tokio::spawn(async move {
+                    kyomi_auth::notifications::notify_signup(
+                        notify_webhook.as_deref(),
+                        &notify_support,
+                        &notify_email,
+                        "",
+                        &notify_user_id,
+                    )
+                    .await;
+                });
             }
 
             Ok(SignupResult::VerificationRequired {

@@ -34,6 +34,7 @@ pub mod google_oauth;
 pub mod jwt;
 pub mod learning_service;
 pub mod middleware;
+pub mod notifications;
 pub mod password;
 pub mod push_service;
 pub mod rate_limiter;

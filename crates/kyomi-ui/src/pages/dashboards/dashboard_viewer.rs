@@ -26,6 +26,8 @@ use crate::components::Spinner;
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
 use crate::parser::parse_markdown_chartml;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 use crate::server_fns::dashboards::{
     get_dashboard, get_user_default_dashboard, get_workspace_default_dashboard,
     set_user_default_dashboard, set_workspace_default_dashboard, update_dashboard,
@@ -242,7 +244,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     }
                     Ok(dashboard) => {
                         let did = dashboard.dashboard_id.clone();
-                        let _did_for_pdf = did.clone();
+                        let did_for_pdf = did.clone();
                         let did_for_history = did.clone();
                         let did_for_user_default = did.clone();
                         let did_for_ws_default = did.clone();
@@ -332,124 +334,116 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         };
 
                         // ── PDF export handler ─────────────────────────
-                        // TODO: Re-enable PDF export with proper Leptos idioms (use gloo-download or NodeRef)
-                        // This was using raw web-sys without compilation testing. Disabled for now.
-                        /*
-                        let on_download_pdf = {
-                            let did = did_for_pdf.clone();
-                            move |_: leptos::ev::MouseEvent| {
-                                #[cfg(target_arch = "wasm32")]
-                                {
-                                    if is_exporting.get() { return; }
-                                    set_is_exporting.set(true);
-                                    let did = did.clone();
-                                    let params = param_values.get();
-                                    let title = title_signal.get();
+                        #[allow(unused_variables)]
+                        let did_for_pdf = StoredValue::new(did_for_pdf);
+                        let on_download_pdf = move |_: leptos::ev::MouseEvent| {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                if is_exporting.get() { return; }
+                                set_is_exporting.set(true);
+                                let did = did_for_pdf.get_value();
+                                let params = param_values.get();
+                                let title = title_signal.get();
 
-                                    leptos::task::spawn_local(async move {
-                                        let mut url = format!("/api/v1/dashboards/{}/export/pdf", did);
-                                        if !params.is_empty() {
-                                            if let Ok(json) = serde_json::to_string(&params) {
-                                                let encoded = js_sys::encode_uri_component(&json);
-                                                url = format!("{}?parameters={}", url, encoded);
-                                            }
+                                leptos::task::spawn_local(async move {
+                                    let mut url = format!("/api/v1/dashboards/{}/export/pdf", did);
+                                    if !params.is_empty() {
+                                        if let Ok(json) = serde_json::to_string(&params) {
+                                            let encoded = js_sys::encode_uri_component(&json);
+                                            url = format!("{}?parameters={}", url, encoded);
                                         }
+                                    }
 
-                                        // Use fetch API with credentials to download as blob
-                                        if let Some(window) = web_sys::window() {
-                                            let opts = web_sys::RequestInit::new();
-                                            opts.set_method("GET");
-                                            opts.set_credentials(web_sys::RequestCredentials::Include);
+                                    // Use fetch API with credentials to download as blob
+                                    if let Some(window) = web_sys::window() {
+                                        let opts = web_sys::RequestInit::new();
+                                        opts.set_method("GET");
+                                        opts.set_credentials(web_sys::RequestCredentials::Include);
 
-                                            let promise = window.fetch_with_str_and_init(&url, &opts);
-                                            match wasm_bindgen_futures::JsFuture::from(promise).await {
-                                                Ok(resp) => {
-                                                    let resp: web_sys::Response = resp.into();
-                                                    if resp.ok() {
-                                                        if let Ok(blob_promise) = resp.blob() {
-                                                            if let Ok(blob) = wasm_bindgen_futures::JsFuture::from(blob_promise).await {
-                                                                let blob: web_sys::Blob = blob.into();
-                                                                let blob_url = web_sys::Url::create_object_url_with_blob(&blob).unwrap_or_default();
-                                                                let document = window.document().unwrap();
-                                                                let a = document.create_element("a").unwrap();
-                                                                let _ = a.set_attribute("href", &blob_url);
+                                        let promise = window.fetch_with_str_and_init(&url, &opts);
+                                        match wasm_bindgen_futures::JsFuture::from(promise).await {
+                                            Ok(resp) => {
+                                                let resp: web_sys::Response = resp.unchecked_into();
+                                                if resp.ok() {
+                                                    if let Ok(blob_promise) = resp.blob() {
+                                                        if let Ok(blob) = wasm_bindgen_futures::JsFuture::from(blob_promise).await {
+                                                            let blob: web_sys::Blob = blob.unchecked_into();
+                                                            let blob_url = web_sys::Url::create_object_url_with_blob(&blob).unwrap_or_default();
+                                                            let document = window.document().unwrap();
+                                                            let a = document.create_element("a").unwrap();
+                                                            let _ = a.set_attribute("href", &blob_url);
 
-                                                                // Derive filename from Content-Disposition header or title
-                                                                let filename = resp.headers().get("content-disposition").ok().flatten()
-                                                                    .and_then(|cd| {
-                                                                        // Parse: attachment; filename="Some_Title.pdf"
-                                                                        cd.split(';')
-                                                                            .find_map(|part| {
-                                                                                let part = part.trim();
-                                                                                part.strip_prefix("filename=")
-                                                                                    .map(|v| v.trim_matches('"').to_string())
-                                                                            })
-                                                                    })
-                                                                    .unwrap_or_else(|| {
-                                                                        if title.is_empty() {
-                                                                            "Dashboard.pdf".to_string()
-                                                                        } else {
-                                                                            // Sanitize title: keep alphanumeric, spaces, hyphens
-                                                                            let safe: String = title.chars()
-                                                                                .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
-                                                                                .collect();
-                                                                            let safe = safe.split_whitespace().collect::<Vec<_>>().join("_");
-                                                                            format!("{}.pdf", safe)
+                                                            // Derive filename from Content-Disposition header or title
+                                                            let filename = resp.headers().get("content-disposition").ok().flatten()
+                                                                .and_then(|cd| {
+                                                                    // Parse: attachment; filename="Some_Title.pdf"
+                                                                    cd.split(';')
+                                                                        .find_map(|part| {
+                                                                            let part = part.trim();
+                                                                            part.strip_prefix("filename=")
+                                                                                .map(|v| v.trim_matches('"').to_string())
+                                                                        })
+                                                                })
+                                                                .unwrap_or_else(|| {
+                                                                    if title.is_empty() {
+                                                                        "Dashboard.pdf".to_string()
+                                                                    } else {
+                                                                        // Sanitize title: keep alphanumeric, spaces, hyphens
+                                                                        let safe: String = title.chars()
+                                                                            .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+                                                                            .collect();
+                                                                        let safe = safe.split_whitespace().collect::<Vec<_>>().join("_");
+                                                                        format!("{}.pdf", safe)
+                                                                    }
+                                                                });
+
+                                                            let _ = a.set_attribute("download", &filename);
+                                                            if let Ok(html_a) = a.dyn_into::<web_sys::HtmlElement>() {
+                                                                if let Some(body) = document.body() {
+                                                                    let _ = body.append_child(&html_a);
+                                                                    let _ = html_a.click();
+                                                                    let _ = body.remove_child(&html_a);
+                                                                }
+                                                            }
+                                                            let _ = web_sys::Url::revoke_object_url(&blob_url);
+                                                        }
+                                                    }
+                                                } else {
+                                                    let status = resp.status();
+                                                    let message = if status == 403 {
+                                                        "PDF export requires a paid plan".to_string()
+                                                    } else {
+                                                        // Try to extract detail from JSON error body
+                                                        let mut msg = format!("PDF export failed (HTTP {})", status);
+                                                        if let Ok(text_promise) = resp.text() {
+                                                            if let Ok(text_val) = wasm_bindgen_futures::JsFuture::from(text_promise).await {
+                                                                if let Some(text) = text_val.as_string() {
+                                                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                                                                        if let Some(detail) = parsed.get("detail").or(parsed.get("message")).and_then(|v| v.as_str()) {
+                                                                            msg = format!("PDF export failed: {}", detail);
                                                                         }
-                                                                    });
-
-                                                                let _ = a.set_attribute("download", &filename);
-                                                                if let Ok(html_a) = a.dyn_into::<web_sys::HtmlElement>() {
-                                                                    if let Some(body) = document.body() {
-                                                                        let _ = body.append_child(&html_a);
-                                                                        let _ = html_a.click();
-                                                                        let _ = body.remove_child(&html_a);
                                                                     }
                                                                 }
-                                                                let _ = web_sys::Url::revoke_object_url(&blob_url);
                                                             }
                                                         }
-                                                    } else {
-                                                        let status = resp.status();
-                                                        let message = if status == 403 {
-                                                            "PDF export requires a paid plan".to_string()
-                                                        } else {
-                                                            // Try to extract detail from JSON error body
-                                                            let mut msg = format!("PDF export failed (HTTP {})", status);
-                                                            if let Ok(text_promise) = resp.text() {
-                                                                if let Ok(text_val) = wasm_bindgen_futures::JsFuture::from(text_promise).await {
-                                                                    if let Some(text) = text_val.as_string() {
-                                                                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                                                                            if let Some(detail) = parsed.get("detail").or(parsed.get("message")).and_then(|v| v.as_str()) {
-                                                                                msg = format!("PDF export failed: {}", detail);
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                            msg
-                                                        };
-                                                        leptos::logging::error!("{}", message);
-                                                        toast_error(message);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    leptos::logging::error!("PDF export error: {:?}", e);
-                                                    toast_error("Failed to export PDF");
+                                                        msg
+                                                    };
+                                                    leptos::logging::error!("{}", message);
+                                                    toast_error(message);
                                                 }
                                             }
+                                            Err(e) => {
+                                                leptos::logging::error!("PDF export error: {:?}", e);
+                                                toast_error("Failed to export PDF");
+                                            }
                                         }
+                                    }
 
-                                        set_is_exporting.set(false);
-                                    });
-                                }
+                                    set_is_exporting.set(false);
+                                });
                             }
                         };
-                        */
-                        let on_download_pdf = |_: leptos::ev::MouseEvent| {
-                            // TODO: PDF export disabled - needs Leptos-idiomatic rewrite
-                        };
-                        let on_download_pdf_mobile = on_download_pdf.clone();
+                        let on_download_pdf_mobile = on_download_pdf;
 
                         // ── History panel callbacks ────────────────────
                         let on_history_close = Callback::new(move |()| set_history_open.set(false));
