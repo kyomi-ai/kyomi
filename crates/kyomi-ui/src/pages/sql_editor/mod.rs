@@ -39,6 +39,9 @@ pub use types::{
 
 use leptos::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+use kode_leptos::EditorHandle;
+
 use crate::server_fns::sql_editor::get_ws_connection_info;
 
 /// SQL Editor page — full-page component that assembles all sub-components.
@@ -69,6 +72,14 @@ pub fn SqlEditorPage() -> impl IntoView {
     // ── Provide state contexts ───────────────────────────────────────────
     let state = SqlEditorState::provide();
     let ds_selection = DatasourceSelection::provide();
+
+    // ── Editor handle (provided by CodeEditor via on_ready) ──────────────
+    // Shared via context so both the page (sidebar click handlers) and the
+    // SqlCodeEditor (dry run markers, selection) can access it.
+    #[cfg(target_arch = "wasm32")]
+    let editor_handle: RwSignal<Option<EditorHandle>> = RwSignal::new(None);
+    #[cfg(target_arch = "wasm32")]
+    provide_context(editor_handle);
 
     // ── Query running signal ─────────────────────────────────────────────
     let (query_running, set_query_running) = signal(false);
@@ -125,24 +136,40 @@ pub fn SqlEditorPage() -> impl IntoView {
     };
 
     // ── Callbacks for sidebar → editor insertion ─────────────────────────
+    // Insert at cursor position via EditorHandle when available, otherwise
+    // fall back to appending to the query text.
     let on_table_click = Callback::new(move |table_id: String| {
-        let current = state.query_text.get_untracked();
         let ds_type = ds_selection.datasource_type.get_untracked();
         let formatted = if ds_type.as_deref() == Some("bigquery") {
             format!("`{table_id}`")
         } else {
             table_id
         };
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(handle) = editor_handle.get_untracked() {
+            handle.insert_at_cursor(&formatted);
+            return;
+        }
+
+        // SSR / handle not yet ready — append to end.
+        let current = state.query_text.get_untracked();
         let separator = if current.is_empty() { "" } else { " " };
         state.set_query_text(format!("{current}{separator}{formatted}"));
     });
 
-    // TODO: kode-leptos doesn't expose an insert-at-cursor API.
-    // React uses editorRef.insertTextAtCursor(). For now, append to end.
-    // When kode-leptos adds cursor-position insertion, wire it up here.
     let on_column_click = Callback::new(move |col_name: String| {
+        let text = format!("{col_name},\n");
+
+        #[cfg(target_arch = "wasm32")]
+        if let Some(handle) = editor_handle.get_untracked() {
+            handle.insert_at_cursor(&text);
+            return;
+        }
+
+        // SSR / handle not yet ready — append to end.
         let current = state.query_text.get_untracked();
-        state.set_query_text(format!("{current}{col_name},\n"));
+        state.set_query_text(format!("{current}{text}"));
     });
 
     let on_query_select = Callback::new(move |(query_text, datasource_slug): (String, Option<String>)| {

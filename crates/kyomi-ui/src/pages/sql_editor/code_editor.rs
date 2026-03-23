@@ -7,8 +7,10 @@
 //! Features:
 //! - kode-leptos `CodeEditor` with `Language::Sql`
 //! - Keyboard shortcut: Cmd/Ctrl+Enter to run query
-//! - Cursor position display (line:column) via signals
-//! - Error display in the status bar (from dry run results)
+//! - Cursor position display (line:column) via `EditorHandle`
+//! - Error markers (squiggly underlines) from dry run results
+//! - Fallback error display in the status bar when position info unavailable
+//! - Partial dry run: validates selected text when a selection exists
 //! - Debounced dry run validation (1 second after typing stops)
 //! - WASM-only rendering with SSR placeholder
 
@@ -31,7 +33,11 @@ use super::status_bar::{DryRunStatus, StatusBar};
 ///
 /// - Watches `query_text` for changes
 /// - After 1 second of no changes, calls `dry_run_sql()` server function
+/// - If the editor has a text selection, validates only the selected text
+///   (matching React's `getSelectedOrFullText()` pattern)
 /// - Updates the `dry_run_status` signal with results
+/// - On error with position info, sets error markers on the editor
+/// - On valid result or text change, clears markers
 /// - Cancels pending requests when user types again
 ///
 /// The debounce timer is managed via `gloo_timers::callback::Timeout` which
@@ -40,6 +46,7 @@ use super::status_bar::{DryRunStatus, StatusBar};
 fn use_debounced_dry_run(
     query_text: Signal<String>,
     datasource_slug: Signal<Option<String>>,
+    editor_handle: RwSignal<Option<kode_leptos::EditorHandle>>,
 ) -> RwSignal<DryRunStatus> {
     use gloo_timers::callback::Timeout;
     use send_wrapper::SendWrapper;
@@ -61,6 +68,12 @@ fn use_debounced_dry_run(
         // Cancel any pending dry run by dropping the old timeout.
         pending.set(None);
 
+        // Clear markers on every text change (the editor also auto-clears
+        // internally, but we clear here to handle the explicit dry run flow).
+        if let Some(handle) = editor_handle.get_untracked() {
+            handle.clear_markers();
+        }
+
         // Skip if no SQL or no datasource selected.
         let sql_trimmed = sql.trim().to_string();
         if sql_trimmed.is_empty() {
@@ -78,27 +91,30 @@ fn use_debounced_dry_run(
             return;
         }
 
-        // NOTE: React's useSQLDryRun reads getSelectedOrFullText() to validate only
-        // the selected portion. kode-leptos doesn't expose a selection API yet.
-        // When it does, prefer selected text over full text for dry run validation.
-
         // Schedule dry run after 1 second of inactivity (matches React's debounce).
         let pending_clone = pending.clone();
         let timeout = Timeout::new(1_000, move || {
             // Clear the pending handle since this callback is now executing.
             pending_clone.set(None);
 
+            // If the editor has selected text, validate only the selection
+            // (matches React's getSelectedOrFullText() pattern).
+            let validate_sql = editor_handle
+                .get_untracked()
+                .and_then(|h| h.selected_text())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(sql_trimmed);
+
             // Mark as validating.
             dry_run_status.set(DryRunStatus::Validating);
 
             // Spawn the server function call.
             leptos::task::spawn_local(async move {
-                // NOTE: React's MonacoSQLEditor calls editorRef.setErrorMarkers() to show
-                // red squiggly underlines at the error location. kode-leptos does not expose
-                // an error annotation API. The error location is shown in the status bar instead.
-                // When kode-leptos adds error markers, wire them up here using dry_run.line/column.
-                match dry_run_sql(slug, sql_trimmed).await {
+                match dry_run_sql(slug, validate_sql).await {
                     Ok(result) => {
+                        // Set error markers when position info is available.
+                        apply_dry_run_markers(editor_handle, &result);
                         dry_run_status.set(DryRunStatus::Complete(result));
                     }
                     Err(e) => {
@@ -118,6 +134,49 @@ fn use_debounced_dry_run(
     });
 
     dry_run_status
+}
+
+/// Apply error markers to the editor based on dry run results.
+///
+/// When the dry run fails and provides line/column position info, we set a
+/// `Marker` with `MarkerSeverity::Error` at that position so kode-leptos
+/// renders squiggly underlines. If position info is not available, the error
+/// is shown only in the status bar (fallback).
+#[cfg(target_arch = "wasm32")]
+fn apply_dry_run_markers(
+    editor_handle: RwSignal<Option<kode_leptos::EditorHandle>>,
+    result: &DryRunResult,
+) {
+    let Some(handle) = editor_handle.get_untracked() else {
+        return;
+    };
+
+    if result.valid {
+        handle.clear_markers();
+        return;
+    }
+
+    // Only set markers when we have position info. DryRunResult uses
+    // 1-indexed line/column; kode-core Position is 0-indexed.
+    let Some(line_1) = result.line else {
+        return;
+    };
+
+    let line = line_1.saturating_sub(1) as usize;
+    let col = result.column.unwrap_or(1).saturating_sub(1) as usize;
+
+    use kode_leptos::{Marker, MarkerSeverity, Position};
+
+    // Mark from the error column to end of line. We use a large end column
+    // value; the editor will clamp it to the actual line length.
+    let marker = Marker {
+        start: Position::new(line, col),
+        end: Position::new(line, usize::MAX),
+        message: result.message.clone(),
+        severity: MarkerSeverity::Error,
+    };
+
+    handle.set_markers(vec![marker]);
 }
 
 // ─── Keyboard shortcut hook ──────────────────────────────────────────────────
@@ -170,68 +229,38 @@ fn use_run_shortcut(on_run: Option<Callback<()>>, query_text: Signal<String>) {
 
 // ─── Cursor position tracking ────────────────────────────────────────────────
 
-/// Tracks cursor position from the kode-leptos editor by polling the editor's
-/// internal state. kode-leptos does not expose a cursor change callback, so we
-/// observe the cursor element position via a periodic check.
+/// Tracks cursor position from the `EditorHandle` by polling at 200ms intervals.
 ///
-/// Returns (line, column) signals (1-indexed to match the React display).
+/// Uses `handle.cursor()` for accurate position data (0-indexed internally,
+/// returned as 1-indexed to match the React status bar display).
 #[cfg(target_arch = "wasm32")]
-fn use_cursor_position() -> (RwSignal<usize>, RwSignal<usize>) {
+fn use_cursor_position(
+    editor_handle: RwSignal<Option<kode_leptos::EditorHandle>>,
+) -> (RwSignal<usize>, RwSignal<usize>) {
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
 
     let line = RwSignal::new(1usize);
     let col = RwSignal::new(1usize);
 
-    // Use a MutationObserver + polling hybrid: poll every 200ms when focused.
-    // This is pragmatic given kode-leptos doesn't expose cursor position callbacks.
     Effect::new(move |_| {
         let Some(window) = web_sys::window() else { return };
 
         let closure = Closure::wrap(Box::new(move || {
-            let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            let Some(handle) = editor_handle.get_untracked() else {
                 return;
             };
 
-            // Read cursor position from kode-leptos's cursor element.
-            // The cursor is positioned absolutely with `top` in increments of 20px
-            // (LINE_HEIGHT) and its existence tells us the cursor's line.
-            // We also check the hidden textarea's selectionStart for column info.
-            if let Some(cursor_el) = document.get_element_by_id("kode-cursor-el") {
-                let html_el: &web_sys::HtmlElement = cursor_el.unchecked_ref();
-                let style = html_el.style();
+            let pos = handle.cursor();
+            // Convert from 0-indexed to 1-indexed for display.
+            let new_line = pos.line + 1;
+            let new_col = pos.col + 1;
 
-                // Parse line from `top` CSS property (each line is 20px)
-                if let Ok(top_str) = style.get_property_value("top") {
-                    if let Some(top_px) = top_str.strip_suffix("px") {
-                        if let Ok(top) = top_px.parse::<f64>() {
-                            let new_line = (top / 20.0).round() as usize + 1;
-                            if line.get_untracked() != new_line {
-                                line.set(new_line);
-                            }
-                        }
-                    }
-                }
-
-                // Parse column from `left` CSS property.
-                // This is approximate — kode-leptos uses variable-width measurement,
-                // but we can get the column from the hidden textarea's selection.
-                if let Some(textarea) = document.query_selector(".kode-hidden-textarea").ok().flatten() {
-                    let textarea: &web_sys::HtmlTextAreaElement = textarea.unchecked_ref();
-                    let value = textarea.value();
-                    let sel_start = textarea.selection_start().ok().flatten().unwrap_or(0) as usize;
-
-                    // Count characters from the last newline to selection_start.
-                    // This gives us the column position.
-                    let text_before = &value[..sel_start.min(value.len())];
-                    let new_col = match text_before.rfind('\n') {
-                        Some(pos) => sel_start - pos,
-                        None => sel_start + 1,
-                    };
-                    if col.get_untracked() != new_col {
-                        col.set(new_col);
-                    }
-                }
+            if line.get_untracked() != new_line {
+                line.set(new_line);
+            }
+            if col.get_untracked() != new_col {
+                col.set(new_col);
             }
         }) as Box<dyn FnMut()>);
 
@@ -287,20 +316,32 @@ pub fn SqlCodeEditor(
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
-        use kode_leptos::{CodeEditor, Language};
+        use kode_leptos::{CodeEditor, EditorHandle, Language};
 
         let content_signal: Signal<String> = content.into();
+
+        // Retrieve the editor handle signal from context (provided by SqlEditorPage).
+        let editor_handle: RwSignal<Option<EditorHandle>> =
+            use_context::<RwSignal<Option<EditorHandle>>>()
+                .unwrap_or_else(|| RwSignal::new(None));
 
         // Set up the on_change callback to write back to the RwSignal.
         let on_change: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |new_text: String| {
             content.set(new_text);
         });
 
+        // on_ready callback — store the handle in the context signal so both
+        // this component and the parent (SqlEditorPage) can use it.
+        let on_ready: Arc<dyn Fn(EditorHandle) + Send + Sync> =
+            Arc::new(move |handle: EditorHandle| {
+                editor_handle.set(Some(handle));
+            });
+
         // Set up keyboard shortcut for Cmd/Ctrl+Enter.
         use_run_shortcut(on_run, content_signal);
 
-        // Set up cursor position tracking.
-        let (cursor_line, cursor_col) = use_cursor_position();
+        // Set up cursor position tracking via EditorHandle.
+        let (cursor_line, cursor_col) = use_cursor_position(editor_handle);
 
         // Set up dry run status — either from external prop or internal debounce.
         let ds_slug = datasource_slug.unwrap_or_else(|| Signal::stored(None));
@@ -312,8 +353,8 @@ pub fn SqlCodeEditor(
                 None => DryRunStatus::Idle,
             })
         } else {
-            // Use internal debounced dry run.
-            let status = use_debounced_dry_run(content_signal, ds_slug);
+            // Use internal debounced dry run (with selection + marker support).
+            let status = use_debounced_dry_run(content_signal, ds_slug, editor_handle);
             status.into()
         };
 
@@ -325,6 +366,7 @@ pub fn SqlCodeEditor(
                         language=Signal::stored(Language::Sql)
                         content=content_signal
                         on_change=on_change
+                        on_ready=on_ready
                     />
                 </div>
 
