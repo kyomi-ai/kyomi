@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::{BadgeVariant, DynSelect};
+use crate::components::DynSelect;
 use crate::types::WatchExecutionItem;
 
 // ---------------------------------------------------------------------------
@@ -23,20 +23,7 @@ use crate::types::WatchExecutionItem;
 /// The Leptos Badge component has: Default, Secondary, Destructive, Warning, Outline.
 /// It does not have "success" or "info" variants. We map:
 /// - success -> Default (primary/amber — the closest active variant)
-/// - error -> Destructive
-/// - no_alert -> Secondary
-/// - running -> Default (primary/amber)
-/// - fallback -> Outline
-#[allow(dead_code)]
-fn get_status_variant(status: &str) -> BadgeVariant {
-    match status {
-        "success" => BadgeVariant::Default,
-        "error" => BadgeVariant::Destructive,
-        "no_alert" => BadgeVariant::Secondary,
-        "running" => BadgeVariant::Default,
-        _ => BadgeVariant::Outline,
-    }
-}
+
 
 /// Map execution status to a human-readable label (matching React exactly).
 fn get_status_label(status: &str) -> &'static str {
