@@ -319,11 +319,7 @@ Both frameworks share the same Axum server and service layer. Leptos pages use s
 
 #### Remaining known items (deferred — not blocking migration)
 
-**kode-leptos editor API gaps** (upstream changes needed in `~/repos/kode/kode-leptos/`):
-- No error marker/annotation API — dry run errors show in status bar, not as squiggly underlines
-- No insert-at-cursor API — catalog clicks append to end of query
-- No text selection API — dry run validates full query, not selected portion
-- Documented at `~/repos/kode/docs/plans/kyomi-integration-gaps.md` for separate implementation
+~~**kode-leptos editor API gaps**~~ — resolved: all three APIs (insert-at-cursor, error markers, text selection) built upstream and wired into kyomi SQL editor
 
 ~~**SQL helper duplication between catalog.rs and catalog_refresh.rs**~~ — resolved: extracted to `kyomi_auth::catalog::sql_helpers`, both consumers now import from there
 
