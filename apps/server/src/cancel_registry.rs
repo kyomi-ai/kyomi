@@ -16,7 +16,9 @@ use tokio_util::sync::CancellationToken;
 /// Cheaply cloneable (inner `Arc`). Thread-safe via `DashMap`.
 #[derive(Clone, Default)]
 pub struct CancelRegistry {
-    tokens: Arc<DashMap<(String, String), CancellationToken>>,
+    /// The inner token store. Public so `kyomi_ui::server_fns::CancelRegistry`
+    /// can share the same `DashMap` via `from_shared()`.
+    pub tokens: Arc<DashMap<(String, String), CancellationToken>>,
 }
 
 impl CancelRegistry {

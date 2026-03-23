@@ -16,11 +16,15 @@ ssr = [
     "leptos_meta/ssr",
     "dep:kyomi-core",
     "dep:kyomi-auth",
+    "dep:kyomi-agent",
     "dep:kyomi-embed",
     "dep:kyomi-knowledge",
     "dep:kyomi-datasource-server",
     "dep:kyomi-connect-protocol",
     "dep:tokio",
+    "dep:tokio-util",
+    "dep:dashmap",
+    "dep:uuid",
     "dep:axum",
     "dep:sqlx",
     "dep:webauthn-rs",
@@ -29,10 +33,6 @@ ssr = [
     "dep:arrow-array",
     "dep:arrow-ipc",
     "dep:futures-util",
-    "dep:uuid",
-    "dep:kyomi-agent",
-    "dep:tokio-util",
-    "dep:dashmap",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -63,8 +63,10 @@ console_error_panic_hook = "0.1"
 
 # Browser DOM access (for theme toggling, clipboard, etc.)
 web-sys = { version = "0.3", features = [
-    "Window", "Document", "HtmlElement", "Element", "EventTarget", "Node",
+    "Window", "Document", "HtmlElement", "HtmlTextAreaElement", "HtmlInputElement",
+    "Element", "EventTarget", "Node",
     "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
+    "ScrollIntoViewOptions", "ScrollBehavior", "CssStyleDeclaration",
     "RequestCredentials", "RequestInit", "Headers",
     "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer",
     # WebSocket support (dashboard live updates)
@@ -102,6 +104,7 @@ tracing = { workspace = true }
 # Internal crates (server-only — gated behind ssr feature)
 kyomi-core = { workspace = true, optional = true }
 kyomi-auth = { workspace = true, optional = true }
+kyomi-agent = { workspace = true, optional = true }
 kyomi-datasource-server = { workspace = true, optional = true }
 kyomi-connect-protocol = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
@@ -109,6 +112,9 @@ sqlx = { workspace = true, optional = true }
 webauthn-rs = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 
 # Knowledge graph + embedding (server-only — gated behind ssr feature)
 kyomi-embed = { workspace = true, optional = true }
@@ -142,16 +148,6 @@ arrow-ipc = { workspace = true, optional = true }
 
 # Futures (for StreamExt in streaming query server functions — server-only)
 futures-util = { workspace = true, optional = true }
-
-# UUID generation (for streaming request IDs — server-only)
-uuid = { workspace = true, optional = true }
-
-# Agent execution (for watch execution — server-only)
-kyomi-agent = { workspace = true, optional = true }
-
-# Cancellation registry (for agent task cancellation — server-only)
-tokio-util = { workspace = true, optional = true }
-dashmap = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }

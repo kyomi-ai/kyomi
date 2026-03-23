@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Chat components — WebSocket client, state machine, thinking events, message rendering, input, etc.
+
+pub mod agent_thinking;
+pub mod chat_input;
+pub mod chat_state;
+pub mod inline_editable_title;
+pub mod thinking;
+pub mod websocket_client;
+
+pub use agent_thinking::AgentThinking;
+pub use chat_input::ChatInput;
+pub use chat_state::{ChatState, ChatStateMachine};
+pub use inline_editable_title::InlineEditableTitle;
+pub use thinking::{
+    ThinkingEvent, ThinkingManager, ThinkingState, TokenUsage, process_thinking_event,
+};
+pub use websocket_client::{WebSocketContext, WebSocketProvider};

@@ -15,6 +15,8 @@ pub struct SidebarSession {
 /// User info for the sidebar user menu.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidebarUser {
+    pub user_id: String,
+    pub workspace_id: Option<String>,
     pub name: Option<String>,
     pub email: String,
     pub workspace_name: Option<String>,
@@ -61,6 +63,8 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     let ctx = super::extract_context()?;
 
     Ok(SidebarUser {
+        user_id: auth.user_id.clone(),
+        workspace_id: auth.workspace.workspace_id.clone(),
         name: auth.name.clone(),
         email: auth.email.clone(),
         workspace_name: auth.workspace.workspace_name.clone(),

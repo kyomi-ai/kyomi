@@ -66,7 +66,7 @@ pub struct ServerContext {
     pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
 
     /// WebSocket manager for streaming AI responses, real-time events,
-    /// and streaming query results via WebSocket events.
+    /// streaming query results, and agent response delivery.
     pub ws_manager: Option<kyomi_auth::websocket::WebSocketManager>,
 
     /// Registry for cancelling in-flight agent tasks via WebSocket `cancel_request`.

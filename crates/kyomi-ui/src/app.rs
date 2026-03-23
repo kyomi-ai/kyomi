@@ -18,6 +18,7 @@ use crate::pages::auth::passkey_recovery::PasskeyRecoveryPage;
 use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
 use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
+use crate::pages::chat::{ChatPage, ChatsListPage};
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
 use crate::pages::knowledge::KnowledgePage;
 use crate::pages::not_implemented::NotImplementedPage;
@@ -90,9 +91,10 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/dashboard/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
                     // Main app pages — wrapped in Layout
                     <Route path=path!("/") view=|| view! { <Layout><NotImplementedPage name="Home"/></Layout> }/>
-                    <Route path=path!("/chat") view=|| view! { <Layout><NotImplementedPage name="Chat"/></Layout> }/>
-                    <Route path=path!("/chat/:session_id") view=|| view! { <Layout><NotImplementedPage name="Chat"/></Layout> }/>
-                    <Route path=path!("/chats") view=|| view! { <Layout><NotImplementedPage name="Chats"/></Layout> }/>
+                    // Chat pages — ChatPage handles both new (/chat) and existing (/chat/:session_id)
+                    <Route path=path!("/chat") view=|| view! { <Layout><ChatPage/></Layout> }/>
+                    <Route path=path!("/chat/:session_id") view=|| view! { <Layout><ChatPage/></Layout> }/>
+                    <Route path=path!("/chats") view=|| view! { <Layout><ChatsListPage/></Layout> }/>
                     <Route path=path!("/sql-editor") view=|| view! { <Layout><crate::pages::sql_editor::SqlEditorPage/></Layout> }/>
                     <Route path=path!("/knowledge") view=|| view! { <Layout><KnowledgePage/></Layout> }/>
                     <Route path=path!("/watches") view=|| view! { <Layout><WatchesPage/></Layout> }/>
