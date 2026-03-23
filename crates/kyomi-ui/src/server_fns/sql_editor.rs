@@ -72,6 +72,47 @@ pub async fn execute_sql_query(
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
+    // Resolve datasource to check if it's a direct BigQuery connection.
+    let ds = kyomi_auth::datasource_service::resolve_datasource(
+        &ctx.db,
+        &datasource_slug,
+        ws_id,
+        false,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // BigQuery direct connections use the REST API for job_id-based pagination.
+    // Connect-mode BigQuery goes through the provider path like all other types.
+    if ds.datasource_type.as_ref() == "bigquery" && ds.connection_type != "connect" {
+        let encryption_key = ctx
+            .encryption_key
+            .as_deref()
+            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+
+        let start = std::time::Instant::now();
+
+        let (access_token, billing_project) = resolve_bq_access_for_datasource(
+            &ctx.db,
+            &ctx.config,
+            encryption_key,
+            &ds,
+            &auth.user_id,
+        )
+        .await?;
+
+        let clamped_page_size = page_size.clamp(1, 1000);
+        let (columns, rows, total_rows, job_id) =
+            execute_bigquery_query_rest(&access_token, &billing_project, &sql, clamped_page_size)
+                .await?;
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        return bq_rest_to_query_result(
+            columns, rows, total_rows, job_id, &ds.slug, &sql, elapsed_ms,
+        );
+    }
+
+    // All other datasource types (and Connect-mode BigQuery): use provider path.
     let (ds, provider) =
         super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
 
@@ -105,18 +146,548 @@ pub async fn fetch_query_page(
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // TODO: When BigQuery job_id pagination is supported at the provider level,
-    // use `job_id` to fetch the page directly instead of re-executing.
-    // For now, all providers use the same LIMIT/OFFSET re-execution path.
-    let _ = job_id;
+    // Resolve datasource to check type.
+    let ds = kyomi_auth::datasource_service::resolve_datasource(
+        &ctx.db,
+        &datasource_slug,
+        ws_id,
+        false,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let (ds, provider) =
+    // BigQuery job_id pagination: fetch page directly from a completed job
+    // without re-executing the query. Only for direct BigQuery connections.
+    if let Some(ref bq_job_id) = job_id {
+        if ds.datasource_type.as_ref() == "bigquery" && ds.connection_type != "connect" {
+            let encryption_key = ctx
+                .encryption_key
+                .as_deref()
+                .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+
+            let start = std::time::Instant::now();
+
+            let (access_token, billing_project) = resolve_bq_access_for_datasource(
+                &ctx.db,
+                &ctx.config,
+                encryption_key,
+                &ds,
+                &auth.user_id,
+            )
+            .await?;
+
+            let clamped_page_size = page_size.clamp(1, 1000);
+            let start_index = (page.saturating_sub(1) as u64) * (clamped_page_size as u64);
+
+            let (columns, rows, total_rows) = fetch_bq_job_page(
+                &access_token,
+                &billing_project,
+                bq_job_id,
+                start_index,
+                clamped_page_size,
+            )
+            .await?;
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            return bq_rest_to_query_result(
+                columns,
+                rows,
+                total_rows,
+                job_id.clone(),
+                &ds.slug,
+                &sql,
+                elapsed_ms,
+            );
+        }
+    }
+
+    // All other datasource types: re-execute with LIMIT/OFFSET.
+    let (_ds, provider) =
         super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
 
     let include_total = include_total.unwrap_or(false);
     let result = run_paginated_query(&*provider, &sql, page_size, page, include_total).await?;
 
     provider_result_to_query_result(result.0, result.1, &ds.slug, ds.datasource_type.as_ref(), &sql)
+}
+
+// ===========================================================================
+// BigQuery REST API helpers (SSR-only)
+// ===========================================================================
+
+/// BigQuery REST API base URL.
+#[cfg(feature = "ssr")]
+const BIGQUERY_API_BASE: &str = "https://bigquery.googleapis.com/bigquery/v2";
+
+/// Resolve a BigQuery access token and billing project for a datasource.
+///
+/// Supports all three auth modes:
+/// - `kyomi_oauth` — user connected via the app's Google OAuth client
+/// - `enterprise_oauth` — user connected via per-datasource OAuth credentials
+/// - `service_account` — datasource uses a service account JSON key
+///
+/// Mirrors `resolve_bq_access()` in `apps/server/src/routes/bigquery.rs`.
+#[cfg(feature = "ssr")]
+async fn resolve_bq_access_for_datasource(
+    db: &kyomi_core::DbPool,
+    config: &kyomi_core::Config,
+    encryption_key: &[u8; 32],
+    datasource: &kyomi_core::models::datasource::DatasourceConfig,
+    user_id: &str,
+) -> Result<(String, String), ServerFnError> {
+    let connection_config = &datasource.connection_config;
+    let auth_mode = connection_config
+        .get("auth_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("kyomi_oauth");
+
+    // Resolve user-level credentials for billing project override
+    let user_cred =
+        kyomi_auth::datasource_service::get_user_credential(db, user_id, &datasource.id)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let user_cred_data = if let Some(ref cred) = user_cred {
+        kyomi_auth::credential_service::decrypt_credentials(&cred.credentials, encryption_key).ok()
+    } else {
+        None
+    };
+
+    let (access_token, billing_project) = match auth_mode {
+        "kyomi_oauth" => {
+            let client_id = config.google_oauth_client_id.as_deref().ok_or_else(|| {
+                ServerFnError::new("GOOGLE_OAUTH_CLIENT_ID not configured")
+            })?;
+            let client_secret = config.google_oauth_client_secret.as_deref().ok_or_else(|| {
+                ServerFnError::new("GOOGLE_OAUTH_CLIENT_SECRET not configured")
+            })?;
+
+            let tokens = kyomi_auth::google_oauth::ensure_valid_google_token(
+                db,
+                user_id,
+                encryption_key,
+                client_id,
+                client_secret,
+            )
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+            let token = tokens.access_token.clone();
+
+            let bp = kyomi_datasource_server::providers::bigquery::resolve_billing_project(
+                connection_config,
+                user_cred_data.as_ref().unwrap_or(&serde_json::json!({})),
+                None,
+            )
+            .unwrap_or_default();
+
+            (token, bp)
+        }
+        "enterprise_oauth" => {
+            let cred_data = user_cred_data.ok_or_else(|| {
+                ServerFnError::new(
+                    "No credentials found for this datasource. Please configure OAuth.",
+                )
+            })?;
+
+            // Refresh enterprise OAuth token if expired
+            let ds_type = kyomi_core::datasource_registry::DatasourceType::BigQuery;
+            let cred_data =
+                match kyomi_datasource_server::ensure_valid_oauth_credentials(
+                    &cred_data,
+                    connection_config,
+                    &ds_type,
+                )
+                .await
+                {
+                    Ok(refreshed) if refreshed != cred_data => {
+                        // Persist refreshed token back to DB
+                        if let Some(ref cred) = user_cred {
+                            if let Err(e) = kyomi_auth::datasource_service::save_user_credential(
+                                db,
+                                encryption_key,
+                                user_id,
+                                &datasource.id,
+                                &cred.workspace_id,
+                                &refreshed,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    datasource_id = %datasource.id,
+                                    "Failed to persist refreshed enterprise OAuth token: {e}"
+                                );
+                            }
+                        }
+                        refreshed
+                    }
+                    Ok(unchanged) => unchanged,
+                    Err(e) => {
+                        tracing::warn!(
+                            datasource_id = %datasource.id,
+                            "Enterprise OAuth refresh failed, using existing token: {e}"
+                        );
+                        cred_data
+                    }
+                };
+
+            let token = cred_data
+                .get("oauth_access_token")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    ServerFnError::new("No OAuth access token found in credentials")
+                })?
+                .to_string();
+
+            let bp = kyomi_datasource_server::providers::bigquery::resolve_billing_project(
+                connection_config,
+                &cred_data,
+                None,
+            )
+            .unwrap_or_default();
+
+            (token, bp)
+        }
+        "service_account" => {
+            let client = kyomi_datasource_server::http_client()
+                .map_err(|e| ServerFnError::new(e.to_string()))?;
+            let (token, project_id) =
+                kyomi_datasource_server::providers::bigquery::exchange_service_account_jwt(
+                    &client,
+                    connection_config,
+                )
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+            let bp = kyomi_datasource_server::providers::bigquery::resolve_billing_project(
+                connection_config,
+                user_cred_data.as_ref().unwrap_or(&serde_json::json!({})),
+                Some(&project_id),
+            )
+            .unwrap_or(project_id);
+
+            (token, bp)
+        }
+        other => {
+            return Err(ServerFnError::new(format!(
+                "Unsupported BigQuery auth mode: {other}"
+            )));
+        }
+    };
+
+    if billing_project.is_empty() {
+        return Err(ServerFnError::new(
+            "No billing project configured. Please set a billing project in datasource settings.",
+        ));
+    }
+
+    Ok((access_token, billing_project))
+}
+
+/// Execute a BigQuery query via the REST API and return the first page of results.
+///
+/// Returns `(columns, rows, total_rows, job_id)`.
+///
+/// POST `https://bigquery.googleapis.com/bigquery/v2/projects/{project}/queries`
+/// with `{ "query": sql, "useLegacySql": false, "maxResults": max_results }`.
+///
+/// If `jobComplete` is false in the response, polls `getQueryResults` until complete.
+#[cfg(feature = "ssr")]
+async fn execute_bigquery_query_rest(
+    access_token: &str,
+    project_id: &str,
+    sql: &str,
+    max_results: u32,
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize, Option<String>), ServerFnError> {
+    let client = kyomi_datasource_server::http_client()
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let url = format!("{BIGQUERY_API_BASE}/projects/{project_id}/queries");
+
+    let body = serde_json::json!({
+        "query": sql,
+        "useLegacySql": false,
+        "maxResults": max_results,
+    });
+
+    let response = tokio::time::timeout(
+        kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
+        client
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send(),
+    )
+    .await
+    .map_err(|_| ServerFnError::new("BigQuery query timed out"))?
+    .map_err(|e| ServerFnError::new(format!("BigQuery query HTTP request failed: {e}")))?;
+
+    let status_code = response.status();
+    let response_body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to parse BigQuery response: {e}")))?;
+
+    if status_code.is_client_error() || status_code.is_server_error() {
+        let msg = response_body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("BigQuery query failed");
+        return Err(ServerFnError::new(format!("BigQuery error: {msg}")));
+    }
+
+    // Extract job_id from jobReference
+    let job_id = response_body
+        .get("jobReference")
+        .and_then(|jr| jr.get("jobId"))
+        .and_then(|j| j.as_str())
+        .map(String::from);
+
+    // Check if job is complete; if not, poll until it is
+    let job_complete = response_body
+        .get("jobComplete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if !job_complete {
+        // Job not complete — poll getQueryResults until done
+        let job_id_str = job_id.as_deref().ok_or_else(|| {
+            ServerFnError::new("BigQuery job not complete but no jobId returned")
+        })?;
+        return poll_bigquery_job_completion(
+            &client,
+            access_token,
+            project_id,
+            job_id_str,
+            max_results,
+        )
+        .await;
+    }
+
+    // Parse the completed response
+    let (columns, rows, total_rows) = parse_bq_query_response(&response_body)?;
+
+    Ok((columns, rows, total_rows, job_id))
+}
+
+/// Poll a BigQuery job until it completes, then return the first page of results.
+#[cfg(feature = "ssr")]
+async fn poll_bigquery_job_completion(
+    client: &reqwest::Client,
+    access_token: &str,
+    project_id: &str,
+    job_id: &str,
+    max_results: u32,
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize, Option<String>), ServerFnError> {
+    let poll_timeout = kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY;
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() >= poll_timeout {
+            return Err(ServerFnError::new(
+                "BigQuery query timed out waiting for job completion",
+            ));
+        }
+
+        // Wait before polling (backoff: 1 second between polls)
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let url = format!(
+            "{BIGQUERY_API_BASE}/projects/{project_id}/queries/{job_id}?maxResults={max_results}"
+        );
+
+        let response = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| {
+                ServerFnError::new(format!("BigQuery poll request failed: {e}"))
+            })?;
+
+        let status_code = response.status();
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| {
+                ServerFnError::new(format!("Failed to parse BigQuery poll response: {e}"))
+            })?;
+
+        if status_code.is_client_error() || status_code.is_server_error() {
+            let msg = body
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("BigQuery poll failed");
+            return Err(ServerFnError::new(format!("BigQuery error: {msg}")));
+        }
+
+        let job_complete = body
+            .get("jobComplete")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if job_complete {
+            let (columns, rows, total_rows) = parse_bq_query_response(&body)?;
+            return Ok((columns, rows, total_rows, Some(job_id.to_string())));
+        }
+    }
+}
+
+/// Fetch a specific page from a completed BigQuery job.
+///
+/// GET `https://bigquery.googleapis.com/bigquery/v2/projects/{project}/queries/{job_id}?startIndex={start_index}&maxResults={max_results}`
+///
+/// Returns `(columns, rows, total_rows)`.
+#[cfg(feature = "ssr")]
+async fn fetch_bq_job_page(
+    access_token: &str,
+    project_id: &str,
+    job_id: &str,
+    start_index: u64,
+    max_results: u32,
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize), ServerFnError> {
+    let client = kyomi_datasource_server::http_client()
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let url = format!(
+        "{BIGQUERY_API_BASE}/projects/{project_id}/queries/{job_id}?startIndex={start_index}&maxResults={max_results}"
+    );
+
+    let response = tokio::time::timeout(
+        kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
+        client.get(&url).bearer_auth(access_token).send(),
+    )
+    .await
+    .map_err(|_| ServerFnError::new("BigQuery page fetch timed out"))?
+    .map_err(|e| ServerFnError::new(format!("BigQuery page fetch failed: {e}")))?;
+
+    let status_code = response.status();
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| {
+            ServerFnError::new(format!("Failed to parse BigQuery page response: {e}"))
+        })?;
+
+    if status_code.is_client_error() || status_code.is_server_error() {
+        let msg = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("BigQuery page fetch failed");
+        return Err(ServerFnError::new(format!("BigQuery error: {msg}")));
+    }
+
+    parse_bq_query_response(&body)
+}
+
+/// Parse a BigQuery query response JSON into `(columns, rows, total_rows)`.
+///
+/// Handles the BigQuery response format:
+/// - `schema.fields[].name` for column names
+/// - `rows[].f[].v` for cell values
+/// - `totalRows` (string or number) for the total row count
+#[cfg(feature = "ssr")]
+fn parse_bq_query_response(
+    body: &serde_json::Value,
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize), ServerFnError> {
+    // Extract column names from schema
+    let columns: Vec<String> = body
+        .get("schema")
+        .and_then(|s| s.get("fields"))
+        .and_then(|f| f.as_array())
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Extract total rows
+    let total_rows = body
+        .get("totalRows")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<usize>().ok())
+                .or_else(|| v.as_u64().map(|n| n as usize))
+        })
+        .unwrap_or(0);
+
+    // Parse rows from BigQuery's rows[].f[].v format into Vec<Vec<Value>>
+    let rows: Vec<Vec<serde_json::Value>> = body
+        .get("rows")
+        .and_then(|r| r.as_array())
+        .map(|bq_rows| {
+            bq_rows
+                .iter()
+                .map(|row| {
+                    row.get("f")
+                        .and_then(|f| f.as_array())
+                        .map(|cells| {
+                            cells
+                                .iter()
+                                .map(|cell| {
+                                    cell.get("v")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((columns, rows, total_rows))
+}
+
+/// Build a `QueryResult` from BigQuery REST API response data.
+///
+/// Converts the raw column names and row values into the typed `QueryResult`
+/// expected by the SQL editor frontend.
+#[cfg(feature = "ssr")]
+fn bq_rest_to_query_result(
+    columns: Vec<String>,
+    rows: Vec<Vec<serde_json::Value>>,
+    total_rows: usize,
+    job_id: Option<String>,
+    datasource_slug: &str,
+    sql: &str,
+    elapsed_ms: u64,
+) -> Result<QueryResult, ServerFnError> {
+    let col_metadata: Vec<ColumnMetadata> = columns
+        .iter()
+        .map(|name| ColumnMetadata {
+            name: name.clone(),
+            col_type: None,
+            mode: None,
+        })
+        .collect();
+
+    let row_count = rows.len();
+
+    let query_handle = QueryHandle {
+        datasource_type: "bigquery".to_string(),
+        datasource_slug: datasource_slug.to_string(),
+        sql: sql.to_string(),
+        job_id,
+    };
+
+    Ok(QueryResult {
+        columns: col_metadata,
+        rows,
+        row_count,
+        total_rows: Some(total_rows),
+        query_handle: Some(query_handle),
+        execution_time: Some(elapsed_ms),
+        bytes_processed: None,
+        has_more: row_count < total_rows,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,11 +1662,9 @@ pub async fn search_catalog(
 
 /// Trigger a manual catalog refresh for a datasource.
 ///
-/// Only workspace admins can trigger refreshes. The actual indexing is
-/// complex and involves provider connections, so this server function
-/// delegates to the same service-layer helpers used by the REST handler.
-/// For the Leptos frontend, we perform a simplified version that triggers
-/// the refresh via the same underlying mechanisms.
+/// Only workspace admins can trigger refreshes. Delegates to the shared
+/// catalog refresh service in [`super::catalog_refresh`] which handles all
+/// datasource types including BigQuery REST API indexing.
 #[server(prefix = "/leptos-api")]
 pub async fn refresh_catalog(
     datasource_slug: String,
@@ -1138,178 +1707,15 @@ pub async fn refresh_catalog(
         ));
     }
 
-    // BigQuery direct datasources use the REST API for catalog indexing,
-    // which is handled by the existing REST endpoint. The Leptos server function
-    // doesn't yet support this path.
-    let ds_type_str = datasource.datasource_type.to_string();
-    if datasource.connection_type != "connect" && ds_type_str == "bigquery" {
-        return Err(ServerFnError::new(
-            "BigQuery catalog refresh is not yet supported from this interface. Please use the REST API endpoint."
-        ));
-    }
-
-    // Check rate limit — manual refresh uses 0 threshold so any
-    // non-running datasource is eligible.
-    let can_refresh =
-        kyomi_auth::catalog::helpers::can_refresh_now(&ctx.db, &datasource.id, 0).await;
-
-    if !can_refresh {
-        return Err(ServerFnError::new(
-            "Catalog indexing is already in progress for this datasource",
-        ));
-    }
-
-    // For Connect datasources, send discover_catalog via the Connect provider.
-    if datasource.connection_type == "connect" {
-        let registry = ctx
-            .connect_registry
-            .as_ref()
-            .ok_or_else(|| ServerFnError::new("Connect registry not available"))?;
-
-        let provider = kyomi_datasource_server::ConnectProvider::with_timeout(
-            registry.clone(),
-            datasource.id.clone(),
-            std::time::Duration::from_secs(120),
-        );
-
-        // Update status to running.
-        let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-            &ctx.db,
-            ws_id,
-            &datasource.id,
-            "running",
-            None,
-        )
-        .await;
-
-        // Test connection first.
-        use kyomi_datasource_server::provider::DatasourceProvider as _;
-        if let Err(e) = provider.test_connection().await {
-            let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-                &ctx.db,
-                ws_id,
-                &datasource.id,
-                "failed",
-                None,
-            )
-            .await;
-            return Err(ServerFnError::new(format!(
-                "Connection test failed: {e}"
-            )));
-        }
-
-        let catalog_result = match provider.discover_catalog().await {
-            Ok(cr) => cr,
-            Err(e) => {
-                let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-                    &ctx.db,
-                    ws_id,
-                    &datasource.id,
-                    "failed",
-                    None,
-                )
-                .await;
-                return Err(ServerFnError::new(format!(
-                    "Catalog discovery failed: {e}"
-                )));
-            }
-        };
-
-        // Process results into cache.
-        let encryption_key = ctx
-            .encryption_key
-            .as_deref()
-            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-
-        let indexer_ctx = kyomi_auth::catalog::helpers::IndexerContext {
-            workspace_id: ws_id.to_string(),
-            datasource_config_id: datasource.id.clone(),
-            connection_config: datasource.connection_config.clone(),
-            encryption_key: std::sync::Arc::from(*encryption_key),
-        };
-
-        let mut seen_table_ids = std::collections::HashSet::new();
-
-        let embedding = ctx
-            .embedding
-            .wait_ready()
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-        for container in &catalog_result.containers {
-            for table in &container.tables {
-                let columns: Vec<kyomi_auth::catalog::types::ColumnEntry> = table
-                    .columns
-                    .iter()
-                    .map(|col| kyomi_auth::catalog::types::ColumnEntry {
-                        name: col.name.clone(),
-                        col_type: Some(col.native_type.clone()),
-                        native_type: Some(col.native_type.clone()),
-                        description: col.description.clone(),
-                    })
-                    .collect();
-
-                let project_id = "";
-                let dataset_id = container.name.as_str();
-                let table_name = table.name.as_str();
-                let table_type = table.native_type.as_deref().unwrap_or("TABLE");
-                let full_table_id = format!("{}.{}", container.name, table.name);
-                let archive_id =
-                    kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
-                seen_table_ids.insert(archive_id);
-
-                let _ = kyomi_auth::catalog::helpers::cache_table(
-                    &ctx.db,
-                    embedding,
-                    &indexer_ctx,
-                    project_id,
-                    dataset_id,
-                    table_name,
-                    table_type,
-                    &columns,
-                    &full_table_id,
-                )
-                .await;
-            }
-        }
-
-        // Archive missing tables.
-        let _ = kyomi_auth::catalog::helpers::archive_missing_tables(
-            &ctx.db,
-            ws_id,
-            &datasource.id,
-            &seen_table_ids,
-        )
-        .await;
-
-        // Update timestamps.
-        let _ = kyomi_auth::catalog::helpers::update_datasource_last_refresh(
-            &ctx.db,
-            &datasource.id,
-        )
-        .await;
-        let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-            &ctx.db,
-            ws_id,
-            &datasource.id,
-            "idle",
-            None,
-        )
-        .await;
-
-        return Ok(());
-    }
-
-    // --- Direct datasources: create provider, run catalog indexing ---
-
     let encryption_key = ctx
         .encryption_key
-        .as_deref()
+        .as_ref()
         .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
 
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
         datasource.datasource_type.into();
 
+    // Resolve and decrypt user credentials.
     let user_cred = kyomi_auth::datasource_service::get_user_credential(
         &ctx.db,
         &auth.user_id,
@@ -1325,6 +1731,7 @@ pub async fn refresh_catalog(
         serde_json::json!({})
     };
 
+    // Refresh OAuth credentials if needed.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
         &credentials,
         &datasource.connection_config,
@@ -1333,95 +1740,21 @@ pub async fn refresh_catalog(
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let user_context =
-        super::datasources::build_user_context(&ctx, &auth).await?;
-    let user_context_ref = user_context.as_ref();
-
-    let provider = kyomi_datasource_server::create_provider(
-        &ds_type,
-        &datasource.connection_config,
-        &credentials,
-        user_context_ref,
-    )
-    .await
-    .map_err(|e| ServerFnError::new(format!("Failed to connect: {e}")))?;
-
-    // Test connection.
-    if let Err(e) = provider.test_connection().await {
-        provider.close().await;
-        return Err(ServerFnError::new(format!(
-            "Connection test failed: {e}"
-        )));
+    // Persist refreshed token if it changed.
+    if let Some(ref cred) = user_cred {
+        let _ = kyomi_auth::datasource_service::save_user_credential(
+            &ctx.db,
+            encryption_key,
+            &auth.user_id,
+            &datasource.id,
+            &cred.workspace_id,
+            &credentials,
+        )
+        .await;
     }
 
-    // Update workspace status to running.
-    let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-        &ctx.db,
-        ws_id,
-        &datasource.id,
-        "running",
-        None,
-    )
-    .await;
-
-    // Resolve containers to index.
-    let meta = kyomi_core::datasource_registry::get_metadata(&ds_type);
-    let container_key = meta.catalog_config_keys.first().copied().unwrap_or("");
-
-    let configured = if !container_key.is_empty() {
-        datasource.connection_config.get(container_key)
-    } else {
-        None
-    };
-
-    let containers: Vec<String> = if let Some(serde_json::Value::Array(arr)) = configured {
-        let configured_containers: Vec<String> = arr.iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-
-        // If the user explicitly configured an empty array, skip indexing.
-        if configured_containers.is_empty() {
-            provider.close().await;
-            let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-                &ctx.db,
-                ws_id,
-                &datasource.id,
-                "idle",
-                None,
-            )
-            .await;
-            return Ok(());
-        }
-
-        configured_containers
-    } else {
-        // Discover all — use provider's discovery method.
-        let discovery_result = provider.list_schemas().await;
-        if let Some(err) = discovery_result.error {
-            provider.close().await;
-            let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-                &ctx.db,
-                ws_id,
-                &datasource.id,
-                "failed",
-                None,
-            )
-            .await;
-            return Err(ServerFnError::new(format!(
-                "Failed to discover catalog containers: {err}"
-            )));
-        }
-        discovery_result.items
-    };
-
-    // Index tables in each container using INFORMATION_SCHEMA SQL queries
-    // executed via the provider (matching the REST handler pattern).
-    let indexer_ctx = kyomi_auth::catalog::helpers::IndexerContext {
-        workspace_id: ws_id.to_string(),
-        datasource_config_id: datasource.id.clone(),
-        connection_config: datasource.connection_config.clone(),
-        encryption_key: std::sync::Arc::from(*encryption_key),
-    };
+    let user_context =
+        super::datasources::build_user_context(&ctx, &auth).await?;
 
     let embedding = ctx
         .embedding
@@ -1429,98 +1762,28 @@ pub async fn refresh_catalog(
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let mut seen_table_ids = std::collections::HashSet::new();
-    let type_id = ds_type.as_str();
+    let params = super::catalog_refresh::CatalogRefreshParams {
+        db: &ctx.db,
+        embedding,
+        encryption_key,
+        datasource,
+        workspace_id: ws_id,
+        user_id: &auth.user_id,
+        force: false,
+        connect_registry: ctx.connect_registry.as_ref(),
+        user_context,
+        credentials,
+    };
 
-    for container in &containers {
-        // Get table listing SQL for this datasource type + container.
-        let tables_sql = match get_tables_in_container_sql(type_id, container) {
-            Some(sql) => sql,
-            None => {
-                tracing::warn!(
-                    container = %container,
-                    type_id = %type_id,
-                    "No table listing SQL for datasource type"
-                );
-                continue;
-            }
-        };
+    let result = super::catalog_refresh::execute_catalog_refresh(params)
+        .await
+        .map_err(|e: kyomi_core::Error| ServerFnError::new(e.to_string()))?;
 
-        // Execute the table listing query.
-        let result = match provider
-            .execute_query(&tables_sql, None, None, false)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    container = %container,
-                    error = %e,
-                    "Failed to list tables in container"
-                );
-                continue;
-            }
-        };
-
-        let rows = result.rows.unwrap_or_default();
-        for row in &rows {
-            // First column is always the table name.
-            let table_name = match row.first().and_then(|v| v.as_str()) {
-                Some(name) => name,
-                None => continue,
-            };
-
-            let project_id = "";
-            let full_table_id = format!("{container}.{table_name}");
-            let archive_id =
-                kyomi_core::build_full_table_name(project_id, container, table_name);
-            seen_table_ids.insert(archive_id);
-
-            // For the initial cache entry we don't fetch column details
-            // (that's done by the background indexer). We just record the
-            // table existence.
-            let _ = kyomi_auth::catalog::helpers::cache_table(
-                &ctx.db,
-                embedding,
-                &indexer_ctx,
-                project_id,
-                container,
-                table_name,
-                "TABLE",
-                &[],
-                &full_table_id,
-            )
-            .await;
-        }
+    if result.status == "error" {
+        Err(ServerFnError::new(result.message))
+    } else {
+        Ok(())
     }
-
-    provider.close().await;
-
-    // Archive missing tables.
-    let _ = kyomi_auth::catalog::helpers::archive_missing_tables(
-        &ctx.db,
-        ws_id,
-        &datasource.id,
-        &seen_table_ids,
-    )
-    .await;
-
-    // Update timestamps.
-    let _ = kyomi_auth::catalog::helpers::update_datasource_last_refresh(
-        &ctx.db,
-        &datasource.id,
-    )
-    .await;
-    let _ = kyomi_auth::catalog::helpers::update_workspace_status(
-        &ctx.db,
-        ws_id,
-        &datasource.id,
-        "idle",
-        None,
-    )
-    .await;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
