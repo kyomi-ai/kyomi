@@ -30,6 +30,9 @@ ssr = [
     "dep:arrow-ipc",
     "dep:futures-util",
     "dep:uuid",
+    "dep:kyomi-agent",
+    "dep:tokio-util",
+    "dep:dashmap",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -142,6 +145,13 @@ futures-util = { workspace = true, optional = true }
 
 # UUID generation (for streaming request IDs — server-only)
 uuid = { workspace = true, optional = true }
+
+# Agent execution (for watch execution — server-only)
+kyomi-agent = { workspace = true, optional = true }
+
+# Cancellation registry (for agent task cancellation — server-only)
+tokio-util = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
