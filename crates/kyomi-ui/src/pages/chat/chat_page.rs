@@ -212,6 +212,26 @@ pub fn ChatPage() -> impl IntoView {
     // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
     let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
 
+    // Derive the user's display name from the user context resource.
+    // Uses the user's name if available, falls back to email prefix, then "there".
+    let user_display_name = Memo::new(move |_| {
+        user_ctx_resource
+            .get()
+            .and_then(|res| res.ok())
+            .map(|ctx| {
+                ctx.name
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| {
+                        ctx.email
+                            .split('@')
+                            .next()
+                            .unwrap_or("there")
+                            .to_string()
+                    })
+            })
+            .unwrap_or_else(|| "there".to_string())
+    });
+
     // ── Query parameters (for chart exploration and watch creation) ──────
     // The location is used on WASM for query parameter parsing (Phase 11).
     let _location = use_location();
@@ -389,8 +409,7 @@ pub fn ChatPage() -> impl IntoView {
                 set_session_metadata.set(SessionDetail::default());
                 set_thinking_map.set(HashMap::new());
                 chat_state_for_load.reset();
-                // TODO: Use actual user name from auth context when wired in Phase 13
-                set_current_greeting.set(generate_greeting("there"));
+                set_current_greeting.set(generate_greeting(&user_display_name.get()));
             }
             _ => {}
         }
@@ -402,8 +421,7 @@ pub fn ChatPage() -> impl IntoView {
         let msgs = messages.get();
         let greeting = current_greeting.get();
         if msgs.is_empty() && greeting.is_empty() && url_session_id.get().is_none() {
-            // TODO: Use actual user name from auth context when wired in Phase 13
-            set_current_greeting.set(generate_greeting("there"));
+            set_current_greeting.set(generate_greeting(&user_display_name.get()));
         }
     });
 

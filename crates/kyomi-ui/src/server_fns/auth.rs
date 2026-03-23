@@ -2641,7 +2641,7 @@ async fn update_passkey_after_auth(
 /// is safe. In local dev without a reverse proxy, rate limiting will key all
 /// requests to `"unknown"`.
 #[cfg(feature = "ssr")]
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
     use std::net::IpAddr;
 
     // 1. X-Real-IP — trustworthy: set by nginx from TCP peer ($remote_addr).
@@ -2673,7 +2673,7 @@ fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
 ///
 /// Mirrors `apps/server/src/helpers.rs::extract_device_info`.
 #[cfg(feature = "ssr")]
-fn extract_device_info(headers: &axum::http::HeaderMap) -> kyomi_auth::token_service::DeviceInfo {
+pub(crate) fn extract_device_info(headers: &axum::http::HeaderMap) -> kyomi_auth::token_service::DeviceInfo {
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())

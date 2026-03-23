@@ -187,7 +187,7 @@ pub async fn accept_terms(
         })?;
 
         // Create authenticated session
-        let device = extract_device_info(&headers);
+        let device = super::auth::extract_device_info(&headers);
         let sess = kyomi_auth::session::create_authenticated_session(
             &ctx.db,
             &kv,
@@ -248,7 +248,7 @@ pub async fn accept_terms(
             .ok_or_else(|| ServerFnError::new("User not found"))?;
 
         // Create authenticated session
-        let device = extract_device_info(&headers);
+        let device = super::auth::extract_device_info(&headers);
         let sess = kyomi_auth::session::create_authenticated_session(
             &ctx.db,
             &kv,
@@ -637,68 +637,4 @@ pub async fn get_oauth_connect_url(
     };
 
     Ok(url)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers (duplicated from auth.rs — these should be extracted to a shared
-// module; see auth.rs for the canonical versions)
-// ---------------------------------------------------------------------------
-
-/// Extract the client IP address from request headers.
-///
-/// Duplicated from `server_fns::auth` (private). When a shared helpers module
-/// is created, both modules should use that instead.
-#[cfg(feature = "ssr")]
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
-    use std::net::IpAddr;
-
-    // 1. X-Real-IP — trustworthy: set by nginx from TCP peer ($remote_addr).
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let ip = real_ip.trim();
-        if ip.parse::<IpAddr>().is_ok() {
-            return ip.to_string();
-        }
-    }
-
-    // 2. X-Forwarded-For — first entry
-    if let Some(xff) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(first) = xff.split(',').next() {
-            let ip = first.trim();
-            if ip.parse::<IpAddr>().is_ok() {
-                return ip.to_string();
-            }
-        }
-    }
-
-    "unknown".to_string()
-}
-
-/// Extract device info from request headers.
-///
-/// Duplicated from `server_fns::auth` (private). When a shared helpers module
-/// is created, both modules should use that instead.
-#[cfg(feature = "ssr")]
-fn extract_device_info(headers: &axum::http::HeaderMap) -> kyomi_auth::token_service::DeviceInfo {
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let ip_address = extract_client_ip(headers);
-
-    let country_code = headers
-        .get("cf-ipcountry")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| *s != "XX")
-        .map(|s| s.to_uppercase());
-
-    kyomi_auth::token_service::DeviceInfo {
-        user_agent,
-        ip_address: Some(ip_address),
-        country_code,
-        oauth_client_id: None,
-    }
 }

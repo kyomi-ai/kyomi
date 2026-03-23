@@ -11,13 +11,15 @@
 //! - Session tokens are kept in reactive signals (not localStorage).
 //! - Message rendering is inline (not reusing the main chat module) since
 //!   trial mode is intentionally isolated from the authenticated chat flow.
-//! - Markdown in assistant responses uses simple newline-to-`<br>` conversion
-//!   (ChartML chart rendering is out of scope for this first pass).
+//! - Assistant messages are rendered with `MarkdownRenderer`, which supports
+//!   full markdown (via pulldown-cmark) and inline ChartML chart rendering.
+//!   Trial charts use embedded data so no datasource query execution is needed.
 //! - The `?q=` query parameter supports auto-submission from the marketing site.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;
 
+use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{Button, ButtonSize, Spinner};
 use crate::server_fns::trial::{
     create_trial_session, send_trial_message, ConversationEntry, TrialChatResponse,
@@ -47,8 +49,9 @@ const MAX_CONVERSATION_HISTORY: usize = 10;
 /// Local message type for the trial chat UI.
 ///
 /// This is intentionally separate from the authenticated chat's message type.
-/// Trial mode does not need pinning, dashboards, ChartML rendering, or any
-/// of the other features the full chat supports.
+/// Trial mode does not need pinning, dashboards, or any of the other
+/// interactive features the full chat supports. ChartML charts are rendered
+/// inline via `MarkdownRenderer` using embedded data (no query execution).
 #[derive(Clone, Debug)]
 struct TrialMessage {
     /// Unique client-side message ID.
@@ -229,9 +232,9 @@ fn DataItem(
 
 /// Render a single trial message bubble.
 ///
-/// User messages: right-aligned with primary background.
-/// Assistant messages: left-aligned with card background. Loading state shows spinner.
-/// Markdown is rendered as simple HTML (newlines to `<br>`).
+/// User messages: right-aligned with primary background (plain text).
+/// Assistant messages: left-aligned with card background. Uses `MarkdownRenderer`
+/// for full markdown + ChartML chart rendering. Loading state shows spinner.
 #[component]
 fn MessageBubble(message: TrialMessage) -> impl IntoView {
     let is_user = message.role == "user";
@@ -251,16 +254,6 @@ fn MessageBubble(message: TrialMessage) -> impl IntoView {
         "max-w-[80%] rounded-2xl px-4 py-3 bg-card text-card-foreground border border-border"
     };
 
-    // For assistant messages, convert newlines to <br> for basic markdown support.
-    // Full markdown/ChartML rendering is out of scope for this first pass.
-    let content_html = if is_user {
-        // User messages: plain text, escape HTML
-        html_escape(&message.content)
-    } else {
-        // Assistant messages: simple markdown-like rendering
-        simple_markdown_to_html(&message.content)
-    };
-
     view! {
         <div class=container_class>
             <div class=bubble_class>
@@ -272,9 +265,20 @@ fn MessageBubble(message: TrialMessage) -> impl IntoView {
                             <span class="text-sm">"Analyzing your question..."</span>
                         </div>
                     }.into_any()
-                } else {
+                } else if is_user {
+                    // User messages: plain text, no HTML interpretation needed
+                    let content = message.content.clone();
                     view! {
-                        <div class="whitespace-pre-wrap break-words prose prose-sm dark:prose-invert max-w-none" inner_html=content_html></div>
+                        <div class="whitespace-pre-wrap break-words">{content}</div>
+                    }.into_any()
+                } else {
+                    // Assistant messages: full markdown + ChartML rendering via MarkdownRenderer.
+                    // Trial charts have inline data (no datasource slug), so MarkdownRenderer
+                    // renders them directly without needing query execution.
+                    let content = message.content.clone();
+                    let content_signal = Signal::derive(move || content.clone());
+                    view! {
+                        <MarkdownRenderer content=content_signal />
                     }.into_any()
                 }}
             </div>
@@ -282,158 +286,6 @@ fn MessageBubble(message: TrialMessage) -> impl IntoView {
     }
 }
 
-/// Escape HTML special characters.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-}
-
-/// Convert simple markdown to HTML for assistant messages.
-///
-/// Handles: bold, italic, inline code, code blocks, newlines.
-/// This is intentionally simple — full markdown rendering (comrak) can be
-/// added later if needed.
-fn simple_markdown_to_html(text: &str) -> String {
-    let escaped = html_escape(text);
-    let mut result = String::with_capacity(escaped.len() * 2);
-    let mut in_code_block = false;
-    let mut code_block_content = String::new();
-
-    for line in escaped.split('\n') {
-        if line.starts_with("```") {
-            if in_code_block {
-                // End code block
-                result.push_str("<pre class=\"bg-muted rounded-lg p-3 my-2 overflow-x-auto text-sm\"><code>");
-                result.push_str(&code_block_content);
-                result.push_str("</code></pre>");
-                code_block_content.clear();
-                in_code_block = false;
-            } else {
-                in_code_block = true;
-            }
-            continue;
-        }
-
-        if in_code_block {
-            if !code_block_content.is_empty() {
-                code_block_content.push('\n');
-            }
-            code_block_content.push_str(line);
-            continue;
-        }
-
-        // Process inline formatting
-        let processed = process_inline_markdown(line);
-        result.push_str(&processed);
-        result.push_str("<br>");
-    }
-
-    // Handle unclosed code block
-    if in_code_block && !code_block_content.is_empty() {
-        result.push_str("<pre class=\"bg-muted rounded-lg p-3 my-2 overflow-x-auto text-sm\"><code>");
-        result.push_str(&code_block_content);
-        result.push_str("</code></pre>");
-    }
-
-    // Remove trailing <br>
-    if result.ends_with("<br>") {
-        result.truncate(result.len() - 4);
-    }
-
-    result
-}
-
-/// Process inline markdown formatting for a single line.
-///
-/// Handles: **bold**, *italic*, `inline code`.
-fn process_inline_markdown(line: &str) -> String {
-    let mut result = line.to_string();
-
-    // Inline code: `code` → <code>code</code>
-    // Process from left to right, matching pairs
-    let mut output = String::with_capacity(result.len());
-    let mut chars = result.chars().peekable();
-    let mut in_code = false;
-
-    while let Some(ch) = chars.next() {
-        if ch == '`' && !in_code {
-            output.push_str("<code class=\"bg-muted px-1.5 py-0.5 rounded text-sm\">");
-            in_code = true;
-        } else if ch == '`' && in_code {
-            output.push_str("</code>");
-            in_code = false;
-        } else {
-            output.push(ch);
-        }
-    }
-    // If backtick was never closed, we already pushed the opening tag — just close it
-    if in_code {
-        output.push_str("</code>");
-    }
-    result = output;
-
-    // Bold: **text** → <strong>text</strong>
-    // Use a simple replacement approach (greedy shortest match)
-    while let Some(start) = result.find("**") {
-        if let Some(end) = result[start + 2..].find("**") {
-            let before = &result[..start];
-            let bold_text = &result[start + 2..start + 2 + end];
-            let after = &result[start + 2 + end + 2..];
-            result = format!("{before}<strong>{bold_text}</strong>{after}");
-        } else {
-            break;
-        }
-    }
-
-    // Italic: *text* → <em>text</em> (but not inside <strong> tags)
-    // Only match single * that are not adjacent to another *
-    let mut italic_result = String::with_capacity(result.len());
-    let mut rest = result.as_str();
-    while let Some(pos) = rest.find('*') {
-        // Skip if this is part of a ** sequence or inside a tag
-        if pos + 1 < rest.len() && rest.as_bytes().get(pos + 1) == Some(&b'*') {
-            italic_result.push_str(&rest[..pos + 2]);
-            rest = &rest[pos + 2..];
-            continue;
-        }
-        if pos > 0 && rest.as_bytes().get(pos - 1) == Some(&b'*') {
-            italic_result.push_str(&rest[..pos + 1]);
-            rest = &rest[pos + 1..];
-            continue;
-        }
-
-        // Look for closing *
-        if let Some(end) = rest[pos + 1..].find('*') {
-            // Make sure end * is not part of **
-            let end_abs = pos + 1 + end;
-            if end_abs + 1 < rest.len() && rest.as_bytes().get(end_abs + 1) == Some(&b'*') {
-                italic_result.push_str(&rest[..end_abs + 2]);
-                rest = &rest[end_abs + 2..];
-                continue;
-            }
-            if end > 0 && rest.as_bytes().get(end_abs - 1) == Some(&b'*') {
-                italic_result.push_str(&rest[..end_abs + 1]);
-                rest = &rest[end_abs + 1..];
-                continue;
-            }
-
-            let em_text = &rest[pos + 1..end_abs];
-            italic_result.push_str(&rest[..pos]);
-            italic_result.push_str("<em>");
-            italic_result.push_str(em_text);
-            italic_result.push_str("</em>");
-            rest = &rest[end_abs + 1..];
-        } else {
-            italic_result.push_str(&rest[..pos + 1]);
-            rest = &rest[pos + 1..];
-        }
-    }
-    italic_result.push_str(rest);
-
-    italic_result
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // A2.1–A2.3: Main TrialChatPage component

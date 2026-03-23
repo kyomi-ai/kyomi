@@ -738,8 +738,6 @@ pub fn AlertsHistory(
                                 let _selectable_ids: Vec<i32> = selectable_alerts.iter().map(|a| a.id).collect();
                                 view! {
                                     <div class="pl-4">
-                                        // TODO: Add indeterminate state when Checkbox component
-                                        // supports it (partial selection should show minus icon).
                                         <Checkbox
                                             checked=Signal::derive(move || {
                                                 let sel = selected_alerts.get();
@@ -752,6 +750,17 @@ pub fn AlertsHistory(
                                                     .map(|a| a.id)
                                                     .collect();
                                                 !selectable.is_empty() && sel.len() == selectable.len()
+                                            })
+                                            indeterminate=Signal::derive(move || {
+                                                let sel = selected_alerts.get();
+                                                let selectable_count = alerts_resource.get()
+                                                    .and_then(|r| r.ok())
+                                                    .map(|page| page.alerts)
+                                                    .unwrap_or_default()
+                                                    .iter()
+                                                    .filter(|a| a.deleted_at.is_none())
+                                                    .count();
+                                                !sel.is_empty() && sel.len() < selectable_count
                                             })
                                             on_change=Callback::new(move |_checked: bool| {
                                                 if let Some(Ok(page)) = alerts_resource.get() { let alerts = &page.alerts;
