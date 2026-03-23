@@ -27,6 +27,8 @@ use crate::server_fns::ownership::{
 // State machine
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Variants are constructed in #[cfg(target_arch = "wasm32")] blocks but matched
+// in the view which runs on both targets. allow(dead_code) is correct here.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
 enum PageState {

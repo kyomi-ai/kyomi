@@ -48,6 +48,7 @@ pub async fn migrate_learnings_to_knowledge_files(
     }
 
     // Fetch all learnings for this workspace
+    // id is selected by the SQL query for FromRow but not accessed in code.
     #[derive(sqlx::FromRow)]
     #[allow(dead_code)]
     struct LearningRow {

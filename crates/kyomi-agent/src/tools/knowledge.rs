@@ -296,6 +296,7 @@ impl AgentTool for SearchKnowledgeTool {
 // Knowledge chunk search helper
 // ---------------------------------------------------------------------------
 
+// file_path is selected by the SQL query for FromRow but not accessed in code.
 #[derive(sqlx::FromRow)]
 struct KnowledgeChunkRow {
     file_id: String,
