@@ -12,9 +12,12 @@
 //! (provided at router setup). This avoids a circular dependency with the
 //! server crate's `AppState`.
 
+pub mod ai_provider;
 pub mod analytics;
 pub mod auth;
 pub mod billing;
+#[cfg(feature = "ssr")]
+pub mod catalog_refresh;
 pub mod chat;
 pub mod collections;
 pub mod connect;

@@ -14,7 +14,8 @@ use crate::components::{
     Alert, AlertDescription, Button, ButtonVariant, Card, CardContent, CardDescription,
     CardHeader, CardTitle, Label, INPUT_CLASS,
 };
-use crate::components::toast::{toast_error, toast_info, toast_success};
+use crate::components::toast::{toast_error, toast_success};
+use crate::server_fns::ai_provider::test_ai_provider;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Provider definitions — mirrors the React `PROVIDERS` object
@@ -197,7 +198,7 @@ pub fn AiProviderCard() -> impl IntoView {
         }
     };
 
-    let (testing, _set_testing) = signal(false);
+    let (testing, set_testing) = signal(false);
 
     let handle_test = move |_| {
         let key = api_key.get();
@@ -205,8 +206,27 @@ pub fn AiProviderCard() -> impl IntoView {
             toast_error("Please enter an API key first.");
             return;
         }
-        // TODO: implement real async test connection
-        toast_info("Connection test is not yet available. Save your config and it will be validated when first used.");
+
+        let prov = provider.get();
+        let model = model_override.get();
+        let url = base_url_override.get();
+
+        set_testing.set(true);
+        leptos::task::spawn_local(async move {
+            match test_ai_provider(prov, key, url, model).await {
+                Ok(result) => {
+                    if result.success {
+                        toast_success(&result.message);
+                    } else {
+                        toast_error(&result.message);
+                    }
+                }
+                Err(e) => {
+                    toast_error(&format!("Connection test failed: {e}"));
+                }
+            }
+            set_testing.set(false);
+        });
     };
 
     view! {
@@ -309,7 +329,7 @@ pub fn AiProviderCard() -> impl IntoView {
                         <Button on:click=handle_save>
                             "Save"
                         </Button>
-                        <Button variant=ButtonVariant::Outline on:click=handle_test disabled=testing.get_untracked()>
+                        <Button variant=ButtonVariant::Outline on:click=handle_test disabled=testing>
                             <Icon icon=icondata_lu::LuZap width="16" height="16"/>
                             {move || if testing.get() { "Testing..." } else { "Test Connection" }}
                         </Button>

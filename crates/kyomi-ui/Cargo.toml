@@ -33,6 +33,7 @@ ssr = [
     "dep:arrow-array",
     "dep:arrow-ipc",
     "dep:futures-util",
+    "dep:reqwest",
 ]
 # Client-side hydration — compiles to WASM, no server deps
 hydrate = [
@@ -115,6 +116,7 @@ tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 
 # Knowledge graph + embedding (server-only — gated behind ssr feature)
 kyomi-embed = { workspace = true, optional = true }

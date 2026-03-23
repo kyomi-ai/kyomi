@@ -13,12 +13,15 @@ use leptos_icons::Icon;
 
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
-    Label, Modal, ModalSize, Spinner, Switch,
+    DynSelect, Label, Modal, ModalSize, Spinner, Switch,
     INPUT_CLASS,
 };
 use crate::types::WatchListItem;
 
 use super::ScheduleSelector;
+
+#[cfg(feature = "slack")]
+use crate::server_fns::slack::SlackChannel;
 
 // ---------------------------------------------------------------------------
 // Button CSS constants (from button.rs / schedule_selector.rs) for raw
@@ -70,7 +73,7 @@ pub fn WatchModal(
     let (prompt, set_prompt) = signal(watch.prompt.clone());
     let (schedule, set_schedule) = signal(watch.schedule.clone());
     let (mode, set_mode) = signal(watch.mode.clone());
-    let (slack_channel_id, _set_slack_channel_id) =
+    let (slack_channel_id, set_slack_channel_id) =
         signal(watch.slack_channel_id.clone().unwrap_or_default());
     let (alert_emails, set_alert_emails) =
         signal(watch.alert_emails.clone().unwrap_or_default());
@@ -114,10 +117,18 @@ pub fn WatchModal(
     // Watch ID for the update call
     let watch_id = watch.watch_id.clone();
 
-    // TODO: Fetch Slack status and channels when Slack server functions are available.
-    // For now, the Slack section will show that Slack is not installed.
-    // TODO: Fetch datasources list for query editor datasource selector.
-    // For now, datasource selectors will be omitted in the query edit form.
+    // ── Datasources resource ─────────────────────────────────────────────
+    let datasources_resource = Resource::new(
+        move || open.get(),
+        move |is_open| async move {
+            if !is_open {
+                return Vec::new();
+            }
+            crate::server_fns::datasources::list_datasources()
+                .await
+                .unwrap_or_default()
+        },
+    );
 
     // ── Schedule change callback ────────────────────────────────────────
     let on_schedule_change = Callback::new(move |new_schedule: String| {
@@ -472,9 +483,35 @@ pub fn WatchModal(
                                             </div>
 
                                             // Datasource selector
-                                            // TODO: Wire up datasource list from server function
-                                            // when datasource server functions are available in
-                                            // the Leptos codebase.
+                                            <div class="space-y-2">
+                                                <label class="text-sm font-medium leading-none text-xs">"Datasource (Optional)"</label>
+                                                <DynSelect
+                                                    value=Signal::derive(move || {
+                                                        queries.with(|qs| {
+                                                            qs.get(idx)
+                                                                .and_then(|q| q.datasource.clone())
+                                                                .unwrap_or_else(|| "none".to_string())
+                                                        })
+                                                    })
+                                                    options=Signal::derive(move || {
+                                                        let mut opts = vec![("none".to_string(), "None".to_string())];
+                                                        if let Some(ds_list) = datasources_resource.get() {
+                                                            for ds in ds_list {
+                                                                opts.push((ds.slug.clone(), ds.name.clone()));
+                                                            }
+                                                        }
+                                                        opts
+                                                    })
+                                                    on_change=move |val: String| {
+                                                        set_queries.update(|qs| {
+                                                            if let Some(q) = qs.get_mut(idx) {
+                                                                q.datasource = if val == "none" { None } else { Some(val) };
+                                                            }
+                                                        });
+                                                    }
+                                                    placeholder="Select a datasource"
+                                                />
+                                            </div>
 
                                             <div class="flex gap-2 pt-2 border-t border-border">
                                                 <button
@@ -556,23 +593,12 @@ pub fn WatchModal(
                 />
 
                 // ── Slack Notifications ─────────────────────────────────
-                // TODO: Implement Slack section when Slack server functions
-                // (get_slack_status, get_slack_channels) are available in
-                // the Leptos codebase. For now, show a not-installed message.
-                <div class="space-y-2">
-                    <Label>
-                        <span class="flex items-center gap-2">
-                            <Icon icon=icondata_lu::LuMessageSquare attr:class="h-4 w-4"/>
-                            "Slack Notifications"
-                        </span>
-                    </Label>
-                    <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                        <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
-                        <span>
-                            "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
-                        </span>
-                    </div>
-                </div>
+                <SlackNotificationsSection
+                    open=open
+                    mode=Signal::derive(move || mode.get())
+                    slack_channel_id=Signal::derive(move || slack_channel_id.get())
+                    set_slack_channel_id=set_slack_channel_id
+                />
 
                 // ── Email Notifications ─────────────────────────────────
                 <div class="space-y-3">
@@ -648,5 +674,200 @@ pub fn WatchModal(
                 </div>
             </form>
         </Modal>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slack Notifications sub-component — feature-gated
+// ---------------------------------------------------------------------------
+
+/// Slack notifications section when the `slack` feature is enabled.
+///
+/// Fetches Slack status and channel list, then renders the appropriate UI
+/// state: not installed, user not connected, loading, no channels, or the
+/// channel selector dropdown. Matches the React WatchModal.jsx Slack section.
+#[cfg(feature = "slack")]
+#[component]
+fn SlackNotificationsSection(
+    /// Whether the parent modal is open (drives resource fetches).
+    #[prop(into)]
+    open: Signal<bool>,
+    /// Current watch mode ("alert" or "report").
+    #[prop(into)]
+    mode: Signal<String>,
+    /// Currently selected Slack channel ID.
+    #[prop(into)]
+    slack_channel_id: Signal<String>,
+    /// Setter for the selected Slack channel ID.
+    set_slack_channel_id: WriteSignal<String>,
+) -> impl IntoView {
+    let slack_status_resource = Resource::new(
+        move || open.get(),
+        move |is_open| async move {
+            if !is_open {
+                return None;
+            }
+            crate::server_fns::slack::get_slack_status().await.ok()
+        },
+    );
+
+    let slack_channels_resource = Resource::new(
+        move || {
+            let status = slack_status_resource.get().flatten();
+            match status {
+                Some(ref s) if s.workspace_connected && s.user_connected => true,
+                _ => false,
+            }
+        },
+        move |should_fetch| async move {
+            if !should_fetch {
+                return Vec::<SlackChannel>::new();
+            }
+            crate::server_fns::slack::get_slack_channels()
+                .await
+                .unwrap_or_default()
+        },
+    );
+
+    view! {
+        <div class="space-y-2">
+            <Label>
+                <span class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuMessageSquare attr:class="h-4 w-4"/>
+                    "Slack Notifications"
+                </span>
+            </Label>
+
+            {move || {
+                let status = slack_status_resource.get().flatten();
+                match status {
+                    // Still loading status
+                    None => view! {
+                        <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Spinner />
+                            <span>"Checking Slack status..."</span>
+                        </div>
+                    }.into_any(),
+
+                    Some(ref status) if !status.workspace_connected => view! {
+                        // Slack app not installed in workspace
+                        <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
+                            <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                            <span>
+                                "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
+                            </span>
+                        </div>
+                    }.into_any(),
+
+                    Some(ref status) if !status.user_connected => {
+                        let label = if mode.get() == "report" { "reports" } else { "alerts" };
+                        view! {
+                            // User not connected to Slack
+                            <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
+                                <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                                <span>
+                                    {format!("Connect your Slack account in Profile Settings to send {label} to Slack.")}
+                                </span>
+                            </div>
+                        }.into_any()
+                    },
+
+                    Some(_) => {
+                        // User is connected — show channel selector or loading/empty state
+                        let channels = slack_channels_resource.get();
+                        match channels {
+                            None => view! {
+                                <div class="flex items-center gap-2 text-sm text-muted-foreground">
+                                    <Spinner />
+                                    <span>"Loading channels..."</span>
+                                </div>
+                            }.into_any(),
+
+                            Some(ref ch) if ch.is_empty() => view! {
+                                <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
+                                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                                    <span>
+                                        "Invite the Kyomi app to a Slack channel first. Then refresh this page to see available channels."
+                                    </span>
+                                </div>
+                            }.into_any(),
+
+                            Some(ref channels) => {
+                                let channel_options: Vec<(String, String)> = {
+                                    let mut opts = vec![("none".to_string(), "None (no Slack notifications)".to_string())];
+                                    for ch in channels {
+                                        opts.push((
+                                            ch.channel_id.clone(),
+                                            format!("#{}", ch.channel_name),
+                                        ));
+                                    }
+                                    opts
+                                };
+                                let current_val = slack_channel_id.get();
+                                let select_val = if current_val.is_empty() {
+                                    "none".to_string()
+                                } else {
+                                    current_val
+                                };
+                                let (channel_opts_sig, _) = signal(channel_options);
+                                let (select_val_sig, _) = signal(select_val);
+                                let mode_label = if mode.get() == "report" { "Reports" } else { "Alerts" };
+                                view! {
+                                    <DynSelect
+                                        value=Signal::derive(move || select_val_sig.get())
+                                        options=Signal::derive(move || channel_opts_sig.get())
+                                        on_change=move |val: String| {
+                                            if val == "none" {
+                                                set_slack_channel_id.set(String::new());
+                                            } else {
+                                                set_slack_channel_id.set(val);
+                                            }
+                                        }
+                                        placeholder="Select a channel"
+                                    />
+                                    <p class="text-xs text-muted-foreground">
+                                        {format!("{mode_label} will be posted to this channel as Kyomi.")}
+                                    </p>
+                                }.into_any()
+                            }
+                        }
+                    }
+                }
+            }}
+        </div>
+    }
+}
+
+/// Slack notifications section when the `slack` feature is NOT enabled.
+///
+/// Shows the static "not installed" message since Slack functions are
+/// unavailable without the feature flag.
+#[cfg(not(feature = "slack"))]
+#[component]
+fn SlackNotificationsSection(
+    #[prop(into)]
+    open: Signal<bool>,
+    #[prop(into)]
+    mode: Signal<String>,
+    #[prop(into)]
+    slack_channel_id: Signal<String>,
+    set_slack_channel_id: WriteSignal<String>,
+) -> impl IntoView {
+    let _ = (open, mode, slack_channel_id, set_slack_channel_id);
+    view! {
+        <div class="space-y-2">
+            <Label>
+                <span class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuMessageSquare attr:class="h-4 w-4"/>
+                    "Slack Notifications"
+                </span>
+            </Label>
+            <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
+                <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                <span>
+                    "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
+                </span>
+            </div>
+        </div>
     }
 }
