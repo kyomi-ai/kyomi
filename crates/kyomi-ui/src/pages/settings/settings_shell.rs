@@ -51,6 +51,7 @@ const TABS: &[SettingsTab] = &[
 fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
     let is_admin = ctx.workspace_roles.iter().any(|r| r == "workspace_admin");
     let multi_user = ctx.capabilities.get("multi_user_enabled").copied().unwrap_or(false);
+    let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise");
 
     let mut tabs = Vec::new();
 
@@ -85,8 +86,8 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("billing");
     }
 
-    // team: admin, not personal mode, multi_user_enabled capability
-    if is_admin && !ctx.is_personal_mode && multi_user {
+    // team: admin, not personal mode, multi_user_enabled capability, team/enterprise tier
+    if is_admin && !ctx.is_personal_mode && multi_user && is_team_tier {
         tabs.push("team");
     }
 

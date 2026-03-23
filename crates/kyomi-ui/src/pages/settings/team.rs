@@ -24,8 +24,8 @@ use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 
 #[component]
 pub fn TeamPage() -> impl IntoView {
-    // Load user context for current user ID
-    let user_ctx = Resource::new(|| (), |_| get_user_context());
+    // Load user context for current user ID — blocking so SSR resolves before render
+    let user_ctx = Resource::new_blocking(|| (), |_| get_user_context());
 
     // Resources for members, invitations, transfers
     let (members_version, set_members_version) = signal(0u32);
