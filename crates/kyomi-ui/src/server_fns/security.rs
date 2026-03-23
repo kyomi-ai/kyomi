@@ -386,6 +386,59 @@ pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
     Ok("Session revoked successfully".to_string())
 }
 
+/// Log out the current session.
+///
+/// Mirrors `POST /auth/logout` in `apps/server/src/routes/auth.rs`:
+/// 1. Reads the refresh token cookie.
+/// 2. Revokes the entire token family so rotated tokens are also invalidated.
+/// 3. Clears both auth cookies (access_token + refresh_token) via `ResponseOptions`.
+///
+/// Does NOT require `extract_auth()` — the token may already be invalid
+/// (e.g. if the access token expired) but we still want to clear cookies.
+#[server(prefix = "/leptos-api")]
+pub async fn logout() -> Result<(), ServerFnError> {
+    let ctx = extract_context()?;
+
+    // Extract the raw request headers to read the refresh token cookie.
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    let refresh_token_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+
+    // Revoke the token family if we can find a valid refresh token.
+    if let Some(raw_token) =
+        kyomi_auth::cookies::get_cookie_value(&headers, refresh_token_name)
+    {
+        match kyomi_auth::token_service::verify_refresh_token(&ctx.db, raw_token).await {
+            Ok(
+                kyomi_auth::token_service::RefreshTokenVerifyResult::Valid(data)
+                | kyomi_auth::token_service::RefreshTokenVerifyResult::GracePeriod(data),
+            ) => {
+                let _ =
+                    kyomi_auth::token_service::revoke_token_family(&ctx.db, &data.family_id)
+                        .await;
+            }
+            _ => {
+                // Token invalid or theft-detected — already revoked, nothing to do.
+            }
+        }
+    }
+
+    // Clear both HTTPOnly cookies so the browser forgets the session.
+    let response_options =
+        leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    let mut cookie_headers = axum::http::HeaderMap::new();
+    kyomi_auth::cookies::clear_token_cookies(&mut cookie_headers);
+    for (name, value) in cookie_headers.iter() {
+        if name == axum::http::header::SET_COOKIE {
+            response_options.append_header(name.clone(), value.clone());
+        }
+    }
+
+    Ok(())
+}
+
 /// Log out from all devices by revoking every refresh token for the user.
 ///
 /// Mirrors `POST /auth/logout-all` in `apps/server/src/routes/auth.rs`.

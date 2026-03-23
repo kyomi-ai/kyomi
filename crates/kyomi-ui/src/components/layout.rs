@@ -13,8 +13,11 @@
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
+use leptos_router::hooks::use_navigate;
+use leptos_router::NavigateOptions;
 
 use crate::components::chat::WebSocketProvider;
+use crate::server_fns::security::logout;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 
 /// Main layout shell wrapping all Leptos pages.
@@ -179,6 +182,19 @@ fn Sidebar(
     let sessions = Resource::new(|| (), |_| get_recent_sessions());
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
     let (user_menu_open, set_user_menu_open) = signal(false);
+
+    // Logout action — calls POST /leptos-api/logout to revoke the current session
+    // and clear HTTPOnly cookies, then navigates to /login.
+    // Matches React: AuthContext.jsx `logout()` + Sidebar.jsx `handleLogout()`.
+    let navigate = use_navigate();
+    let logout_action = Action::new(move |_: &()| {
+        let nav = navigate.clone();
+        async move {
+            // Best-effort: clear the session server-side even if the call fails.
+            let _ = logout().await;
+            nav("/login", NavigateOptions { replace: true, ..Default::default() });
+        }
+    });
 
     // Listen for 'sessions-deleted' custom events to refresh the recent sessions list.
     // Matches React: Sidebar.jsx lines 171-173
@@ -420,13 +436,16 @@ fn Sidebar(
                                         </a>
                                         {if !is_personal {
                                             Some(view! {
-                                                <a
-                                                    href="/login"
+                                                <button
+                                                    on:click=move |_| {
+                                                        set_user_menu_open.set(false);
+                                                        logout_action.dispatch(());
+                                                    }
                                                     class="w-full text-left px-4 py-2 text-sm text-error-foreground hover:bg-error/10 flex items-center space-x-3"
                                                 >
                                                     <Icon icon=icondata_lu::LuLogOut width="16" height="16"/>
                                                     <span>"Logout"</span>
-                                                </a>
+                                                </button>
                                             })
                                         } else {
                                             None
