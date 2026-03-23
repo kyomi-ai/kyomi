@@ -14,7 +14,7 @@ use crate::components::{
     ButtonVariant, ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
 };
 use crate::components::select::SELECT_CLASS;
-use crate::server_fns::context::get_user_context;
+use crate::server_fns::context::{get_user_context, UserContext};
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 
@@ -25,7 +25,8 @@ use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 
 #[component]
 pub fn TeamPage() -> impl IntoView {
-    let user_ctx = Resource::new_blocking(|| (), |_| get_user_context());
+    // Use the UserContext resource provided by SettingsShell — already resolved, no extra fetch.
+    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
 
     view! {
         <Suspense>
@@ -65,8 +66,8 @@ pub fn TeamPage() -> impl IntoView {
 
 #[component]
 fn TeamPageInner() -> impl IntoView {
-    // User context needed for owner/role checks within the UI
-    let user_ctx = Resource::new(|| (), |_| get_user_context());
+    // Use the UserContext resource provided by SettingsShell — same resource, no extra fetch.
+    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
 
     // Resources for members, invitations, transfers
     let (members_version, set_members_version) = signal(0u32);
