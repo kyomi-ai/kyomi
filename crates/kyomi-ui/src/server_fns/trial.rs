@@ -489,7 +489,7 @@ pub async fn send_trial_message(
 
     // Validate the HMAC-signed token (checks signature, expiry, IP binding).
     // Session token is derived from the signed access token — no separate wire parameter needed.
-    let validated_session_token = validate_trial_token(secret, &trial_access_token, &ip)?;
+    let _validated_session_token = validate_trial_token(secret, &trial_access_token, &ip)?;
 
     // Validate message content.
     let message = message.trim().to_string();
