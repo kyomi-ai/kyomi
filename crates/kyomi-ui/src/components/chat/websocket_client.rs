@@ -124,6 +124,7 @@ mod wasm {
     use web_sys::{CloseEvent, MessageEvent, WebSocket};
 
     use crate::server_fns::chat::get_websocket_config;
+    use crate::utils::websocket::build_ws_url;
 
     /// Maximum reconnect attempts before giving up — matches React.
     const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -308,7 +309,7 @@ mod wasm {
 
         // Build WebSocket URL — matches React: `${protocol}//${host}/ws/${workspaceId}_${userId}?token={wsToken}`
         // JWT uses Base64url alphabet which is safe for URL query parameters — no encoding needed.
-        let url = match build_ws_url(&config.workspace_id, &config.user_id, &config.token) {
+        let url = match build_ws_url(&config.user_id, &config.workspace_id, &config.token) {
             Ok(u) => u,
             Err(e) => {
                 tracing::error!("Failed to build WebSocket URL: {e}");
@@ -503,25 +504,6 @@ mod wasm {
         });
 
         state.borrow_mut().reconnect_timeout = Some(SendWrapper::new(timeout));
-    }
-
-    /// Build the WebSocket URL — matches React:
-    /// `${protocol}//${host}/ws/${workspaceId}_${userId}?token=${wsToken}`
-    fn build_ws_url(
-        workspace_id: &str,
-        user_id: &str,
-        token: &str,
-    ) -> Result<String, String> {
-        let window = web_sys::window().ok_or("No window object")?;
-        let location = window.location();
-        let protocol = location.protocol().map_err(|_| "no protocol")?;
-        let host = location.host().map_err(|_| "no host")?;
-
-        let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
-
-        Ok(format!(
-            "{ws_protocol}//{host}/ws/{workspace_id}_{user_id}?token={token}"
-        ))
     }
 }
 

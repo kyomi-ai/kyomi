@@ -87,7 +87,10 @@ mod inner {
     }
 
     /// Fetch a one-time WebSocket authentication token from the server.
-    async fn fetch_ws_token() -> Result<String, String> {
+    ///
+    /// Calls `/api/v1/auth/websocket-token` and returns the token string.
+    /// Used by both dashboard updates and SQL editor query streaming.
+    pub async fn fetch_ws_token() -> Result<String, String> {
         let window = web_sys::window().ok_or("No window object")?;
         let resp_value =
             wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("/api/v1/auth/websocket-token"))
@@ -118,7 +121,14 @@ mod inner {
     }
 
     /// Build the WebSocket URL with the correct protocol, path, and token.
-    fn build_ws_url(
+    ///
+    /// Derives the WebSocket protocol (`ws:` / `wss:`) from the current page's
+    /// `location.protocol` and constructs the standard path:
+    /// `{ws_protocol}//{host}/ws/{workspace_id}_{user_id}?token={token}`
+    ///
+    /// Used by dashboard updates, SQL editor query streaming, and the chat
+    /// WebSocket client.
+    pub fn build_ws_url(
         user_id: &str,
         workspace_id: &str,
         token: &str,
@@ -343,3 +353,9 @@ mod inner {
 
 // Re-export the platform-appropriate implementation.
 pub use inner::use_dashboard_updates;
+
+// Re-export shared WebSocket helpers (WASM-only) so other modules
+// (sql_editor::streaming, components::chat::websocket_client) can use them
+// without duplicating the logic.
+#[cfg(target_arch = "wasm32")]
+pub use inner::{build_ws_url, fetch_ws_token};

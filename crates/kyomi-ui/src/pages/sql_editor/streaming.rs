@@ -22,6 +22,8 @@ use super::types::{ColumnMetadata, QueryError, QueryResult, QueryStatus};
 mod inner {
     use super::*;
 
+    use crate::utils::websocket::{build_ws_url, fetch_ws_token};
+
     use leptos::prelude::*;
     use send_wrapper::SendWrapper;
     use wasm_bindgen::prelude::*;
@@ -71,52 +73,6 @@ mod inner {
                 }
             });
         });
-    }
-
-    // TODO: `fetch_ws_token` and `build_ws_url` duplicate logic from
-    // `crates/kyomi-ui/src/utils/websocket.rs`. Consolidate into a shared
-    // `utils/ws.rs` helper in a future cleanup pass.
-
-    /// Fetch a one-time WebSocket authentication token.
-    async fn fetch_ws_token() -> Result<String, String> {
-        let window = web_sys::window().ok_or("No window object")?;
-        let resp_value =
-            wasm_bindgen_futures::JsFuture::from(window.fetch_with_str("/api/v1/auth/websocket-token"))
-                .await
-                .map_err(|e| format!("fetch failed: {e:?}"))?;
-
-        let resp: web_sys::Response = resp_value
-            .dyn_into()
-            .map_err(|_| "response is not a Response object")?;
-
-        if !resp.ok() {
-            return Err(format!("WS token request failed with status {}", resp.status()));
-        }
-
-        let json = wasm_bindgen_futures::JsFuture::from(
-            resp.json().map_err(|e| format!("json() failed: {e:?}"))?,
-        )
-        .await
-        .map_err(|e| format!("json parse failed: {e:?}"))?;
-
-        let token = js_sys::Reflect::get(&json, &JsValue::from_str("token"))
-            .map_err(|_| "no 'token' field in response")?
-            .as_string()
-            .ok_or_else(|| "token is not a string".to_string())?;
-
-        Ok(token)
-    }
-
-    /// Build the WebSocket URL.
-    fn build_ws_url(user_id: &str, workspace_id: &str, token: &str) -> Result<String, String> {
-        let window = web_sys::window().ok_or("No window object")?;
-        let location = window.location();
-        let protocol = location.protocol().map_err(|_| "no protocol")?;
-        let host = location.host().map_err(|_| "no host")?;
-        let ws_protocol = if protocol == "https:" { "wss:" } else { "ws:" };
-        Ok(format!(
-            "{ws_protocol}//{host}/ws/{workspace_id}_{user_id}?token={token}"
-        ))
     }
 
     /// Open a WebSocket connection and wire up event handlers for query
