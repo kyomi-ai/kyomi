@@ -256,9 +256,7 @@ fn generate_request_id() -> String {
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(crypto) = web_sys::window().and_then(|w| w.crypto().ok()) {
-            if let Ok(uuid) = crypto.random_uuid() {
-                return uuid;
-            }
+            return crypto.random_uuid();
         }
         // Fallback: timestamp + random suffix (matches React fallback).
         let now = js_sys::Date::now() as u64;

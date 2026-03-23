@@ -27,7 +27,8 @@ use super::types::{ColumnMetadata, QueryResult};
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const _MIN_COL_WIDTH: f64 = 50.0;
+#[cfg(feature = "hydrate")]
+const MIN_COL_WIDTH: f64 = 50.0;
 const DEFAULT_COL_WIDTH: f64 = 150.0;
 
 const PAGE_SIZE_OPTIONS: [u32; 5] = [10, 25, 50, 100, 200];
@@ -148,7 +149,6 @@ pub fn ResultsTable(
 
     // ── Mousedown on resize handle ───────────────────────────────────────
 
-    #[allow(unused_variables)]
     let on_resize_start = move |col_idx: usize, ev: web_sys::MouseEvent| {
         ev.prevent_default();
         ev.stop_propagation();

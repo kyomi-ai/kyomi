@@ -24,8 +24,9 @@ pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
 /// Used by `history_panel`, `copilot_sidebar`, and any future panel that
 /// needs responsive desktop/mobile layout switching.
 pub(crate) fn use_is_mobile() -> Signal<bool> {
-    #[allow(unused_variables)]
     let (is_mobile, set_is_mobile) = signal(false);
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_is_mobile;
 
     Effect::new(move || {
         #[cfg(feature = "hydrate")]
@@ -58,12 +59,15 @@ pub(crate) fn use_is_mobile() -> Signal<bool> {
         if let Some(window) = web_sys::window() {
             let _ = window
                 .add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
-            let handler_ref: js_sys::Function =
-                handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let handler_ref = SendWrapper::new(
+                handler.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+            );
+            let window = SendWrapper::new(window);
             let handler_wrapper = SendWrapper::new(handler);
             on_cleanup(move || {
                 let _ = window
-                    .remove_event_listener_with_callback("resize", &handler_ref);
+                    .take()
+                    .remove_event_listener_with_callback("resize", &handler_ref.take());
                 drop(handler_wrapper);
             });
         }

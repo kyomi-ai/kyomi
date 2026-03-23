@@ -320,14 +320,17 @@ pub fn SqlEditorPage() -> impl IntoView {
         }
 
         // Store the closure in an Owner-scoped cleanup via on_cleanup.
+        // Wrap in SendWrapper because Closure is !Send but on_cleanup requires Send+Sync.
+        let keydown_handler = send_wrapper::SendWrapper::new(keydown_handler);
         on_cleanup(move || {
+            let handler = keydown_handler.take();
             if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
                 let _ = doc.remove_event_listener_with_callback(
                     "keydown",
-                    keydown_handler.as_ref().unchecked_ref(),
+                    handler.as_ref().unchecked_ref(),
                 );
             }
-            drop(keydown_handler);
+            drop(handler);
         });
     }
 

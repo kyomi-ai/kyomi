@@ -178,14 +178,6 @@ async fn browser_create_credential(options_json: &str) -> Result<String, String>
 
     let options = &server_response["options"];
 
-    // We need to work with the publicKey options.
-    // The options come from webauthn-rs as CreationChallengeResponse which has a `publicKey` field.
-    let pub_key = if options.get("publicKey").is_some() {
-        &options["publicKey"]
-    } else {
-        options
-    };
-
     // Convert to JS and fix up the binary fields (challenge, user.id, excludeCredentials[].id)
     // that need to be ArrayBuffer, not base64url strings.
     let js_options = js_value_from_json(options)

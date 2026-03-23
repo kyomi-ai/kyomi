@@ -36,10 +36,12 @@ const PRESET_COLORS: &[(&str, &str)] = &[
 const DEFAULT_WIDTH: f64 = 320.0;
 
 /// Minimum sidebar width in pixels.
-const _MIN_WIDTH: f64 = 280.0;
+#[cfg(feature = "hydrate")]
+const MIN_WIDTH: f64 = 280.0;
 
 /// Maximum sidebar width in pixels.
-const _MAX_WIDTH: f64 = 480.0;
+#[cfg(feature = "hydrate")]
+const MAX_WIDTH: f64 = 480.0;
 
 /// Mobile breakpoint (matches React `window.innerWidth < 768`).
 const MOBILE_BREAKPOINT: f64 = 768.0;
@@ -169,12 +171,14 @@ fn use_is_mobile() -> Signal<bool> {
                 "resize",
                 handler.as_ref().unchecked_ref(),
             );
-            let handler_ref: js_sys::Function =
-                handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let handler_ref = SendWrapper::new(
+                handler.as_ref().unchecked_ref::<js_sys::Function>().clone(),
+            );
+            let window = SendWrapper::new(window);
             let handler_wrapper = SendWrapper::new(handler);
             on_cleanup(move || {
                 let _ =
-                    window.remove_event_listener_with_callback("resize", &handler_ref);
+                    window.take().remove_event_listener_with_callback("resize", &handler_ref.take());
                 drop(handler_wrapper);
             });
         }
@@ -694,8 +698,9 @@ pub fn CollectionsSidebar(
     let is_mobile = use_is_mobile();
 
     // Sidebar width for desktop resize — set_sidebar_width used in hydrate feature only
-    #[allow(unused_variables)]
     let (sidebar_width, set_sidebar_width) = signal(DEFAULT_WIDTH);
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_sidebar_width;
 
     // Collection data
     let collections_resource = Resource::new(
@@ -817,8 +822,6 @@ pub fn CollectionsSidebar(
 
         #[cfg(feature = "hydrate")]
         {
-            use wasm_bindgen::closure::Closure;
-
             let Some(window) = web_sys::window() else { return };
             let Some(document) = window.document() else { return };
             let body = document.body();
@@ -845,11 +848,8 @@ pub fn CollectionsSidebar(
     let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
         StoredValue::new(None);
 
-    #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
-        let start_x = ev.client_x() as f64;
-        let start_w = sidebar_width.get_untracked();
         set_is_resizing.set(true);
 
         #[cfg(feature = "hydrate")]
@@ -857,6 +857,9 @@ pub fn CollectionsSidebar(
             use std::cell::RefCell;
             use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
+
+            let start_x = ev.client_x() as f64;
+            let start_w = sidebar_width.get_untracked();
 
             let Some(window) = web_sys::window() else { return };
             let Some(document) = window.document() else { return };

@@ -14,13 +14,13 @@
 //! - Debounced dry run validation (1 second after typing stops)
 //! - WASM-only rendering with SSR placeholder
 
-#[allow(unused_imports)]
+#[cfg(target_arch = "wasm32")]
 use std::sync::Arc;
 
 use leptos::prelude::*;
 
 use crate::server_fns::sql_editor::DryRunResult;
-#[allow(unused_imports)]
+#[cfg(target_arch = "wasm32")]
 use crate::server_fns::sql_editor::dry_run_sql;
 
 use super::status_bar::{DryRunStatus, StatusBar};

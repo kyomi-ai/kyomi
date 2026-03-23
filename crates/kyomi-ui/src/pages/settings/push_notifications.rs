@@ -59,8 +59,6 @@ fn is_secure_context() -> bool {
 /// Check whether we might be on iOS outside a PWA.
 #[cfg(target_arch = "wasm32")]
 fn is_ios_non_pwa() -> bool {
-    use wasm_bindgen::JsCast;
-
     let Some(window) = web_sys::window() else {
         return false;
     };

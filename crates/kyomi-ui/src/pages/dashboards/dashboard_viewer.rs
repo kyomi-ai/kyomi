@@ -183,8 +183,9 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let (overflow_open, set_overflow_open) = signal(false);
 
     // ── PDF export loading state ────────────────────────────────────────
-    #[allow(unused_variables)]
     let (is_exporting, set_is_exporting) = signal(false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_is_exporting;
 
     // ── Title editing state (for optimistic update) ─────────────────────
     let (title_override, set_title_override) = signal(Option::<String>::None);
@@ -334,8 +335,9 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         };
 
                         // ── PDF export handler ─────────────────────────
-                        #[allow(unused_variables)]
                         let did_for_pdf = StoredValue::new(did_for_pdf);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let _ = did_for_pdf;
                         let on_download_pdf = move |_: leptos::ev::MouseEvent| {
                             #[cfg(target_arch = "wasm32")]
                             {

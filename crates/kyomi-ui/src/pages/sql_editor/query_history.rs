@@ -144,8 +144,8 @@ pub fn QueryHistory(
                 }
             });
 
-            let mut options = web_sys::IntersectionObserverInit::new();
-            options.threshold(&wasm_bindgen::JsValue::from_f64(0.1));
+            let options = web_sys::IntersectionObserverInit::new();
+            options.set_threshold(&wasm_bindgen::JsValue::from_f64(0.1));
 
             let observer =
                 web_sys::IntersectionObserver::new_with_options(

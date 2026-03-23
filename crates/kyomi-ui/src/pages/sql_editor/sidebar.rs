@@ -20,8 +20,10 @@ use crate::components::dashboard::shared::use_is_mobile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const _MIN_WIDTH: f64 = 280.0;
-const _MAX_WIDTH: f64 = 480.0;
+#[cfg(feature = "hydrate")]
+const MIN_WIDTH: f64 = 280.0;
+#[cfg(feature = "hydrate")]
+const MAX_WIDTH: f64 = 480.0;
 const DEFAULT_WIDTH: f64 = 320.0;
 
 // ─── Main component ────────────────────────────────────────────────────────
@@ -86,11 +88,8 @@ pub fn SqlEditorSidebar(
     let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
         StoredValue::new(None);
 
-    #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
-        let start_x = ev.client_x() as f64;
-        let start_w = sidebar_width.get_untracked();
         set_is_resizing.set(true);
 
         #[cfg(feature = "hydrate")]
@@ -98,6 +97,9 @@ pub fn SqlEditorSidebar(
             use std::cell::RefCell;
             use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
+
+            let start_x = ev.client_x() as f64;
+            let start_w = sidebar_width.get_untracked();
 
             let Some(window) = web_sys::window() else {
                 return;

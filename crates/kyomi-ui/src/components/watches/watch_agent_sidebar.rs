@@ -20,8 +20,10 @@ use crate::types::WatchListItem;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const _MIN_WIDTH: f64 = 320.0;
-const _MAX_WIDTH: f64 = 600.0;
+#[cfg(feature = "hydrate")]
+const MIN_WIDTH: f64 = 320.0;
+#[cfg(feature = "hydrate")]
+const MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 420.0;
 
 // ─── SVG Icons ──────────────────────────────────────────────────────────────
@@ -80,7 +82,9 @@ pub fn WatchAgentSidebar(
     let _ = on_watch_changed;
 
     // ── Resize state (desktop only) ──────────────────────────────────────
-    let (panel_width, _set_panel_width) = signal(DEFAULT_WIDTH);
+    let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_panel_width;
     let (is_resizing, set_is_resizing) = signal(false);
 
     // ── Chat placeholder state ───────────────────────────────────────────
@@ -138,11 +142,8 @@ pub fn WatchAgentSidebar(
     let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
         StoredValue::new(None);
 
-    #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
-        let start_x = ev.client_x() as f64;
-        let start_w = panel_width.get_untracked();
         set_is_resizing.set(true);
 
         #[cfg(feature = "hydrate")]
@@ -151,6 +152,9 @@ pub fn WatchAgentSidebar(
             use std::rc::Rc;
             use wasm_bindgen::prelude::*;
             use wasm_bindgen::closure::Closure;
+
+            let start_x = ev.client_x() as f64;
+            let start_w = panel_width.get_untracked();
 
             let Some(window) = web_sys::window() else {
                 return;

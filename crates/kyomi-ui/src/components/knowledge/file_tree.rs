@@ -18,6 +18,8 @@ use leptos::prelude::*;
 use crate::components::knowledge::tree_types::{
     build_tree, flatten_tree, get_descendant_ids, get_folder_targets,
 };
+#[cfg(feature = "hydrate")]
+use crate::server_fns::knowledge::search_knowledge_files;
 use crate::types::{KnowledgeSearchResult, KnowledgeTreeEntry};
 
 // ─── SVG Icons ──────────────────────────────────────────────────────────────
@@ -418,8 +420,10 @@ pub fn KnowledgeFileTree(
     let expanded_folders: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
     let context_menu: RwSignal<Option<ContextMenuState>> = RwSignal::new(None);
     let (search_filter, set_search_filter) = signal(String::new());
-    let (search_results, _set_search_results) =
+    let (search_results, set_search_results) =
         signal::<Option<Vec<KnowledgeSearchResult>>>(None);
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_search_results;
     let dragged_id: RwSignal<Option<String>> = RwSignal::new(None);
     let drag_over_id: RwSignal<Option<String>> = RwSignal::new(None);
 

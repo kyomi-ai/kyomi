@@ -134,38 +134,41 @@ pub fn ResultsContainer(
 
     let handle_page_change = {
         let _state = state;
-        #[allow(unused_variables)]
         Callback::new(move |page: u32| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };
             let Some(ref handle) = result.query_handle else { return };
 
-            let datasource_slug = handle.datasource_slug.clone();
-            let sql = handle.sql.clone();
-            let job_id = handle.job_id.clone();
-            let page_size = active_table_ui.get().page_size;
-            let tab_id = tab.id.clone();
-
-            // Preserve fields from the existing result for the update.
-            let prev_columns = result.columns.clone();
-            let prev_total_rows = result.total_rows;
-            let prev_execution_time = result.execution_time;
-            let prev_bytes_processed = result.bytes_processed;
-            let prev_query_handle = result.query_handle.clone();
-
             set_is_paginating.set(true);
 
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = (page, handle);
+
             #[cfg(target_arch = "wasm32")]
-            leptos::task::spawn_local(async move {
-                let result = fetch_query_page(
-                    datasource_slug,
-                    sql,
-                    page,
-                    page_size,
-                    job_id,
-                    Some(false),
-                )
-                .await;
+            {
+                let datasource_slug = handle.datasource_slug.clone();
+                let sql = handle.sql.clone();
+                let job_id = handle.job_id.clone();
+                let page_size = active_table_ui.get().page_size;
+                let tab_id = tab.id.clone();
+
+                // Preserve fields from the existing result for the update.
+                let prev_columns = result.columns.clone();
+                let prev_total_rows = result.total_rows;
+                let prev_execution_time = result.execution_time;
+                let prev_bytes_processed = result.bytes_processed;
+                let prev_query_handle = result.query_handle.clone();
+
+                leptos::task::spawn_local(async move {
+                    let result = fetch_query_page(
+                        datasource_slug,
+                        sql,
+                        page,
+                        page_size,
+                        job_id,
+                        Some(false),
+                    )
+                    .await;
 
                 match result {
                     Ok(new_result) => {
@@ -216,8 +219,9 @@ pub fn ResultsContainer(
                         });
                     }
                 }
-                set_is_paginating.set(false);
-            });
+                    set_is_paginating.set(false);
+                });
+            }
         })
     };
 
@@ -225,59 +229,63 @@ pub fn ResultsContainer(
 
     let handle_page_size_change = {
         let _state = state;
-        #[allow(unused_variables)]
         Callback::new(move |new_page_size: u32| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };
             let Some(ref handle) = result.query_handle else { return };
-
-            let datasource_slug = handle.datasource_slug.clone();
-            let sql = handle.sql.clone();
-            let tab_id = tab.id.clone();
 
             // Save as user's default preference.
             state.set_default_page_size(new_page_size);
 
             set_is_paginating.set(true);
 
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = handle;
+
             #[cfg(target_arch = "wasm32")]
-            leptos::task::spawn_local(async move {
-                use crate::server_fns::sql_editor::execute_sql_query;
+            {
+                let datasource_slug = handle.datasource_slug.clone();
+                let sql = handle.sql.clone();
+                let tab_id = tab.id.clone();
 
-                let result = execute_sql_query(
-                    datasource_slug,
-                    sql,
-                    new_page_size,
-                    1, // Reset to page 1
-                )
-                .await;
+                leptos::task::spawn_local(async move {
+                    use crate::server_fns::sql_editor::execute_sql_query;
 
-                match result {
-                    Ok(new_result) => {
-                        state.update_tab(&tab_id, |tab| {
-                            tab.status = QueryStatus::Success;
-                            tab.error = None;
-                            tab.result = Some(new_result);
-                        });
-                        state.set_table_ui_state(&tab_id, |ui| {
-                            ui.page_size = new_page_size;
-                            ui.current_page = 1;
-                        });
-                    }
-                    Err(err) => {
-                        state.update_tab(&tab_id, |tab| {
-                            tab.status = QueryStatus::Error;
-                            tab.error = Some(super::types::QueryError {
-                                message: format!("{err}"),
-                                code: None,
-                                line: None,
-                                column: None,
+                    let result = execute_sql_query(
+                        datasource_slug,
+                        sql,
+                        new_page_size,
+                        1, // Reset to page 1
+                    )
+                    .await;
+
+                    match result {
+                        Ok(new_result) => {
+                            state.update_tab(&tab_id, |tab| {
+                                tab.status = QueryStatus::Success;
+                                tab.error = None;
+                                tab.result = Some(new_result);
                             });
-                        });
+                            state.set_table_ui_state(&tab_id, |ui| {
+                                ui.page_size = new_page_size;
+                                ui.current_page = 1;
+                            });
+                        }
+                        Err(err) => {
+                            state.update_tab(&tab_id, |tab| {
+                                tab.status = QueryStatus::Error;
+                                tab.error = Some(super::types::QueryError {
+                                    message: format!("{err}"),
+                                    code: None,
+                                    line: None,
+                                    column: None,
+                                });
+                            });
+                        }
                     }
-                }
-                set_is_paginating.set(false);
-            });
+                    set_is_paginating.set(false);
+                });
+            }
         })
     };
 
@@ -322,14 +330,17 @@ pub fn ResultsContainer(
 
     // ── Chart generation state ───────────────────────────────────────────
     let (chart_generating, set_chart_generating) = signal(false);
-    let (chart_yaml, _set_chart_yaml) = signal(None::<String>);
+    let (chart_yaml, set_chart_yaml) = signal(None::<String>);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_chart_yaml;
     let (chart_error, set_chart_error) = signal(None::<String>);
     let (show_chart_modal, set_show_chart_modal) = signal(false);
     // Track clipboard feedback.
-    let (copied, _set_copied) = signal(false);
+    let (copied, set_copied) = signal(false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_copied;
 
     let handle_create_chart = {
-        #[allow(unused_variables)]
         Callback::new(move |_: ()| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };
@@ -337,32 +348,34 @@ pub fn ResultsContainer(
                 return;
             }
 
-            let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
-            // Take first 100 rows as sample.
-            let sample_rows: Vec<Vec<serde_json::Value>> = result
-                .rows
-                .iter()
-                .take(100)
-                .cloned()
-                .collect();
-            let sql = tab.query.clone();
-
             set_chart_generating.set(true);
             set_chart_error.set(None);
 
             #[cfg(target_arch = "wasm32")]
-            leptos::task::spawn_local(async move {
-                match generate_chart_from_results(columns, sample_rows, sql).await {
-                    Ok(chart) => {
-                        set_chart_yaml.set(Some(chart.chartml_yaml));
-                        set_show_chart_modal.set(true);
+            {
+                let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+                // Take first 100 rows as sample.
+                let sample_rows: Vec<Vec<serde_json::Value>> = result
+                    .rows
+                    .iter()
+                    .take(100)
+                    .cloned()
+                    .collect();
+                let sql = tab.query.clone();
+
+                leptos::task::spawn_local(async move {
+                    match generate_chart_from_results(columns, sample_rows, sql).await {
+                        Ok(chart) => {
+                            set_chart_yaml.set(Some(chart.chartml_yaml));
+                            set_show_chart_modal.set(true);
+                        }
+                        Err(err) => {
+                            set_chart_error.set(Some(format!("{err}")));
+                        }
                     }
-                    Err(err) => {
-                        set_chart_error.set(Some(format!("{err}")));
-                    }
-                }
-                set_chart_generating.set(false);
-            });
+                    set_chart_generating.set(false);
+                });
+            }
         })
     };
 
@@ -371,15 +384,14 @@ pub fn ResultsContainer(
         {
             if let Some(yaml) = chart_yaml.get_untracked() {
                 if let Some(window) = web_sys::window() {
-                    if let Some(clipboard) = window.navigator().clipboard() {
-                        let _ = clipboard.write_text(&yaml);
-                        set_copied.set(true);
-                        // Reset after 2 seconds.
-                        leptos::task::spawn_local(async move {
-                            gloo_timers::future::TimeoutFuture::new(2000).await;
-                            set_copied.set(false);
-                        });
-                    }
+                    let clipboard = window.navigator().clipboard();
+                    let _ = clipboard.write_text(&yaml);
+                    set_copied.set(true);
+                    // Reset after 2 seconds.
+                    leptos::task::spawn_local(async move {
+                        gloo_timers::future::TimeoutFuture::new(2000).await;
+                        set_copied.set(false);
+                    });
                 }
             }
         }

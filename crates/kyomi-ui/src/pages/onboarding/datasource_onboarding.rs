@@ -615,12 +615,13 @@ fn CredentialRow(
 ///
 /// Polls every 10 seconds to check if an admin has added datasources.
 /// When datasources appear, redirects to the credential setup flow or `/chat`.
-#[allow(unused_variables)]
 #[component]
 fn WaitingForSetup(
     state_resource: Resource<Result<OnboardingState, ServerFnError>>,
 ) -> impl IntoView {
     let navigate = use_navigate();
+    #[cfg(not(feature = "hydrate"))]
+    let _ = &state_resource;
 
     // Poll every 10 seconds for datasource availability
     #[cfg(feature = "hydrate")]
@@ -731,9 +732,9 @@ fn open_oauth_popup(
         // Calculate centered popup position
         let width = 500;
         let height = 600;
-        let screen_x = window.screen_x().unwrap_or(0);
+        let screen_x = window.screen_x().ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
         let outer_width = window.outer_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0) as i32;
-        let screen_y = window.screen_y().unwrap_or(0);
+        let screen_y = window.screen_y().ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
         let outer_height = window.outer_height().ok().and_then(|v| v.as_f64()).unwrap_or(768.0) as i32;
         let left = screen_x + (outer_width - width) / 2;
         let top = screen_y + (outer_height - height) / 2;

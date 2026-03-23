@@ -12,17 +12,24 @@ use leptos::prelude::*;
 
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::toast::toast_error;
-use crate::server_fns::knowledge::{get_knowledge_file, update_knowledge_file};
+use crate::server_fns::knowledge::get_knowledge_file;
+#[cfg(target_arch = "wasm32")]
+use crate::server_fns::knowledge::update_knowledge_file;
 use crate::types::KnowledgeTreeEntry;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enums
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Save state machine for the file editor. `Saving` and `Saved` are only
+/// constructed on the WASM target (via the debounced auto-save), but the
+/// view matches all variants on both targets for exhaustiveness.
 #[derive(Clone, Copy, PartialEq)]
 enum SaveStatus {
     Idle,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Saving,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Saved,
     Conflict,
 }
@@ -90,9 +97,13 @@ pub fn KnowledgeFileEditor(
     #[prop(into)] file_path: Signal<String>,
     on_saved: Callback<()>,
 ) -> impl IntoView {
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = &on_saved;
     // ── State signals ─────────────────────────────────────────────────────
     let (content, set_content) = signal(String::new());
-    let (_content_hash, set_content_hash) = signal(Option::<String>::None);
+    let (content_hash, set_content_hash) = signal(Option::<String>::None);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = content_hash;
     let (save_status, set_save_status) = signal(SaveStatus::Idle);
     let (updated_at, set_updated_at) = signal(Option::<String>::None);
     let (updated_by, set_updated_by) = signal(Option::<String>::None);
@@ -182,8 +193,9 @@ pub fn KnowledgeFileEditor(
         }
     });
 
-    // ── Save function ─────────────────────────────────────────────────────
-    let _do_save = move |content_to_save: String, hash_to_send: Option<String>| {
+    // ── Save function (WASM only — called from debounced auto-save) ─────
+    #[cfg(target_arch = "wasm32")]
+    let do_save = move |content_to_save: String, hash_to_send: Option<String>| {
         let file = selected_file.get_untracked();
         let file_id = match file {
             Some(ref f) if !f.is_folder => f.id.clone(),

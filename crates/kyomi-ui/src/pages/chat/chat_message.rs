@@ -33,7 +33,6 @@ use super::format_relative_time;
 // Props current_session_id, session_metadata, and on_message_update are part
 // of the component API but will be wired in Phases 9-10 (session header,
 // markdown renderer chat extensions). Suppress warnings until then.
-#[allow(unused_variables)]
 #[component]
 pub fn ChatMessage(
     /// The message data to render.
@@ -57,6 +56,8 @@ pub fn ChatMessage(
     /// Callback when message content is updated — receives (message_id, new_content).
     on_message_update: Callback<(String, String)>,
 ) -> impl IntoView {
+    // These props are part of the API but will be wired in Phases 9-10.
+    let _ = (&current_session_id, &session_metadata, &on_message_update);
     // ── Determine alignment and sender ──────────────────────────────────
 
     // In shared conversations, check sent_by.user_id.

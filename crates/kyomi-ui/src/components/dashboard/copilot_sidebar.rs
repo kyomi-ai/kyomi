@@ -23,6 +23,8 @@ use crate::components::chat::websocket_client::WebSocketContext;
 use crate::components::chat::{
     AgentThinking, ThinkingState,
 };
+#[cfg(feature = "hydrate")]
+use crate::components::chat::{ThinkingEvent, TokenUsage, process_thinking_event};
 use crate::components::Spinner;
 use crate::server_fns::copilot::{
     create_copilot_session, delete_copilot_session, send_copilot_message,
@@ -32,8 +34,10 @@ use super::shared::use_is_mobile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const _MIN_WIDTH: f64 = 320.0;
-const _MAX_WIDTH: f64 = 600.0;
+#[cfg(feature = "hydrate")]
+const MIN_WIDTH: f64 = 320.0;
+#[cfg(feature = "hydrate")]
+const MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 384.0;
 
 // ─── SVG Icons ──────────────────────────────────────────────────────────────
@@ -112,7 +116,9 @@ pub fn CopilotSidebar(
     let is_mobile = use_is_mobile();
 
     // ── Panel width (desktop resize) ────────────────────────────────────
-    let (panel_width, _set_panel_width) = signal(DEFAULT_WIDTH);
+    let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
+    #[cfg(not(feature = "hydrate"))]
+    let _ = set_panel_width;
     let (is_resizing, set_is_resizing) = signal(false);
 
     // ── Session state ───────────────────────────────────────────────────
@@ -526,14 +532,23 @@ pub fn CopilotSidebar(
             });
 
             // ── Cleanup: unsubscribe all on component unmount ───────────
+            // Wrap in SendWrapper because Box<dyn FnOnce()> is !Send but
+            // on_cleanup requires Send+Sync.
+            let unsub_agent_thinking = send_wrapper::SendWrapper::new(unsub_agent_thinking);
+            let unsub_chat_stream = send_wrapper::SendWrapper::new(unsub_chat_stream);
+            let unsub_chat_complete = send_wrapper::SendWrapper::new(unsub_chat_complete);
+            let unsub_token_usage = send_wrapper::SendWrapper::new(unsub_token_usage);
+            let unsub_error = send_wrapper::SendWrapper::new(unsub_error);
+            let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
+            let unsub_dashboard_update = send_wrapper::SendWrapper::new(unsub_dashboard_update);
             on_cleanup(move || {
-                unsub_agent_thinking();
-                unsub_chat_stream();
-                unsub_chat_complete();
-                unsub_token_usage();
-                unsub_error();
-                unsub_request_cancelled();
-                unsub_dashboard_update();
+                unsub_agent_thinking.take()();
+                unsub_chat_stream.take()();
+                unsub_chat_complete.take()();
+                unsub_token_usage.take()();
+                unsub_error.take()();
+                unsub_request_cancelled.take()();
+                unsub_dashboard_update.take()();
             });
         });
     }
@@ -620,11 +635,8 @@ pub fn CopilotSidebar(
     let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
         StoredValue::new(None);
 
-    #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
-        let start_x = ev.client_x() as f64;
-        let start_w = panel_width.get_untracked();
         set_is_resizing.set(true);
 
         #[cfg(feature = "hydrate")]
@@ -632,6 +644,9 @@ pub fn CopilotSidebar(
             use std::cell::RefCell;
             use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
+
+            let start_x = ev.client_x() as f64;
+            let start_w = panel_width.get_untracked();
 
             let Some(window) = web_sys::window() else {
                 return;

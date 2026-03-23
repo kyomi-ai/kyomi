@@ -247,9 +247,11 @@ mod wasm {
         });
 
         // -- cleanup on owner drop -------------------------------------------
-        let cleanup_state = state.clone();
+        // Wrap in SendWrapper because Rc<RefCell<WsState>> is !Send but on_cleanup
+        // requires Send+Sync.
+        let cleanup_state = SendWrapper::new(state.clone());
         on_cleanup(move || {
-            disconnect(cleanup_state, set_connection_state);
+            disconnect(cleanup_state.take(), set_connection_state);
         });
 
         WebSocketContext {

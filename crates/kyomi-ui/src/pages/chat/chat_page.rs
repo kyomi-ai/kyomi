@@ -473,8 +473,9 @@ pub fn ChatPage() -> impl IntoView {
         let thinking_manager_ws = _thinking_manager.clone();
         let navigate_ws = navigate.clone();
 
+        let ws_ctx_for_effect = ws_ctx.clone();
         Effect::new(move |_| {
-            let Some(ws) = ws_ctx.as_ref().cloned() else {
+            let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
                 return;
             };
 
@@ -1008,16 +1009,27 @@ pub fn ChatPage() -> impl IntoView {
             });
 
             // ── Cleanup: unsubscribe all on component unmount ───────────
+            // Wrap in SendWrapper because Box<dyn FnOnce()> is !Send but
+            // on_cleanup requires Send+Sync.
+            let unsub_session_created = send_wrapper::SendWrapper::new(unsub_session_created);
+            let unsub_title_update = send_wrapper::SendWrapper::new(unsub_title_update);
+            let unsub_agent_thinking = send_wrapper::SendWrapper::new(unsub_agent_thinking);
+            let unsub_token_usage = send_wrapper::SendWrapper::new(unsub_token_usage);
+            let unsub_chat_stream = send_wrapper::SendWrapper::new(unsub_chat_stream);
+            let unsub_chat_complete = send_wrapper::SendWrapper::new(unsub_chat_complete);
+            let unsub_error = send_wrapper::SendWrapper::new(unsub_error);
+            let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
+            let unsub_shared_chat_message = send_wrapper::SendWrapper::new(unsub_shared_chat_message);
             on_cleanup(move || {
-                unsub_session_created();
-                unsub_title_update();
-                unsub_agent_thinking();
-                unsub_token_usage();
-                unsub_chat_stream();
-                unsub_chat_complete();
-                unsub_error();
-                unsub_request_cancelled();
-                unsub_shared_chat_message();
+                unsub_session_created.take()();
+                unsub_title_update.take()();
+                unsub_agent_thinking.take()();
+                unsub_token_usage.take()();
+                unsub_chat_stream.take()();
+                unsub_chat_complete.take()();
+                unsub_error.take()();
+                unsub_request_cancelled.take()();
+                unsub_shared_chat_message.take()();
             });
         });
     }

@@ -79,7 +79,7 @@ web-sys = { version = "0.3", features = [
     "AuthenticatorAssertionResponse",
     "CredentialCreationOptions", "CredentialRequestOptions",
     # PDF export (fetch → blob → download)
-    "Response", "Blob", "Url", "CustomEvent",
+    "Response", "Blob", "Url", "CustomEvent", "CustomEventInit",
     # IntersectionObserver (infinite scroll in query history)
     "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
     # SQL Editor: crypto.randomUUID() and performance.now()

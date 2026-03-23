@@ -232,8 +232,9 @@ pub fn ChatsListPage() -> impl IntoView {
                 });
             });
 
+            let unsub = send_wrapper::SendWrapper::new(unsub);
             on_cleanup(move || {
-                unsub();
+                unsub.take()();
             });
         }
     }
@@ -315,8 +316,8 @@ pub fn ChatsListPage() -> impl IntoView {
                 &wasm_bindgen::JsValue::from_str("chatsList"),
             );
 
-            let mut init = web_sys::CustomEventInit::new();
-            init.detail(&detail);
+            let init = web_sys::CustomEventInit::new();
+            init.set_detail(&detail);
 
             if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict("sessions-deleted", &init)
             {

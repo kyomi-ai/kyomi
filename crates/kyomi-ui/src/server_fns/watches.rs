@@ -8,8 +8,9 @@
 
 use leptos::prelude::*;
 
-#[allow(unused_imports)]
-use crate::types::{AlertItem, AlertsPage, WatchExecutionItem, WatchListItem};
+use crate::types::{AlertsPage, WatchExecutionItem, WatchListItem};
+#[cfg(feature = "ssr")]
+use crate::types::AlertItem;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers (server-only)

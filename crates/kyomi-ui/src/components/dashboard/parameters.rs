@@ -227,9 +227,8 @@ fn MultiSelectDropdown(
         });
     }
 
-    // Suppress unused variable warning on non-wasm targets
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = (container_ref, &param_id);
+    // param_id is part of the component API but not yet used in the view.
+    let _ = &param_id;
 
     let on_trigger_click = move |_| {
         set_is_open.update(|open| *open = !*open);
