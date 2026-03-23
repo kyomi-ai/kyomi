@@ -9,21 +9,107 @@
 
 use leptos::prelude::*;
 
-#[cfg(target_arch = "wasm32")]
-use crate::server_fns::auth::{google_oauth_callback, GoogleCallbackResult};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Page state
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Variants are constructed in #[cfg(target_arch = "wasm32")] blocks but matched
-// in the view which runs on both targets. allow(dead_code) is correct here.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 enum CallbackStatus {
     Processing,
     Success,
     Error,
+}
+
+/// Outcome of processing the Google OAuth callback. The redirect URL (if any)
+/// is returned separately so the caller can handle browser navigation.
+struct CallbackOutcome {
+    status: CallbackStatus,
+    message: String,
+    /// Where to redirect after a short delay, if applicable.
+    redirect_url: Option<String>,
+}
+
+/// Process the OAuth callback result and produce the next page state.
+/// Not cfg-gated so the compiler sees all `CallbackStatus` variants constructed.
+async fn process_google_callback(
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+) -> CallbackOutcome {
+    use crate::server_fns::auth::{google_oauth_callback, GoogleCallbackResult};
+
+    // Check for error param (Google returns this on denial)
+    if let Some(err) = error {
+        return CallbackOutcome {
+            status: CallbackStatus::Error,
+            message: format!("Google OAuth error: {err}"),
+            redirect_url: None,
+        };
+    }
+
+    // Validate required params
+    let (Some(code), Some(state)) = (code, state) else {
+        return CallbackOutcome {
+            status: CallbackStatus::Error,
+            message: "Missing authorization code or state parameter".to_string(),
+            redirect_url: None,
+        };
+    };
+
+    // Call the server function
+    match google_oauth_callback(code, Some(state)).await {
+        Ok(GoogleCallbackResult::Success { oauth_continue }) => {
+            if let Some(oauth_state) = oauth_continue {
+                CallbackOutcome {
+                    status: CallbackStatus::Success,
+                    message: String::new(),
+                    redirect_url: Some(format!(
+                        "/api/v1/oauth/authorize/continue?state={oauth_state}"
+                    )),
+                }
+            } else {
+                CallbackOutcome {
+                    status: CallbackStatus::Success,
+                    message: String::new(),
+                    redirect_url: Some("/".to_string()),
+                }
+            }
+        }
+        Ok(GoogleCallbackResult::PendingTerms { redirect_url }) => {
+            let url = if redirect_url.is_empty() {
+                "/welcome".to_string()
+            } else {
+                redirect_url
+            };
+            CallbackOutcome {
+                status: CallbackStatus::Success,
+                message: "Please accept our Terms of Service to continue".to_string(),
+                redirect_url: Some(url),
+            }
+        }
+        Ok(GoogleCallbackResult::Error { message: msg }) => CallbackOutcome {
+            status: CallbackStatus::Error,
+            message: msg,
+            redirect_url: None,
+        },
+        Ok(GoogleCallbackResult::RateLimited { retry_after_secs }) => CallbackOutcome {
+            status: CallbackStatus::Error,
+            message: format!(
+                "Too many attempts. Please try again in {retry_after_secs} seconds."
+            ),
+            redirect_url: None,
+        },
+        Err(e) => CallbackOutcome {
+            status: CallbackStatus::Error,
+            message: e
+                .to_string()
+                .strip_prefix("error running server function: ")
+                .unwrap_or(&e.to_string())
+                .to_string(),
+            redirect_url: None,
+        },
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -104,100 +190,52 @@ pub fn GoogleCallbackPage() -> impl IntoView {
         timeout.forget();
     }
 
-    // Process the OAuth callback on mount
+    // Process the OAuth callback on mount (browser-only: read URL params)
     #[cfg(target_arch = "wasm32")]
-    {
-        leptos::task::spawn_local(async move {
-            let (code, state, error) = {
-                let search = web_sys::window()
-                    .and_then(|w| w.location().search().ok())
-                    .unwrap_or_default();
-                (
-                    get_query_param(&search, "code"),
-                    get_query_param(&search, "state"),
-                    get_query_param(&search, "error"),
-                )
-            };
-
-            // Check for error param (Google returns this on denial)
-            if let Some(err) = error {
-                set_status.set(CallbackStatus::Error);
-                set_message.set(format!("Google OAuth error: {err}"));
-                return;
-            }
-
-            // Validate required params
-            let (Some(code), Some(state)) = (code, state) else {
-                set_status.set(CallbackStatus::Error);
-                set_message.set("Missing authorization code or state parameter".to_string());
-                return;
-            };
-
-            // Call the server function
-            match google_oauth_callback(code, Some(state)).await {
-                Ok(GoogleCallbackResult::Success { oauth_continue }) => {
-                    set_status.set(CallbackStatus::Success);
-
-                    if let Some(oauth_state) = oauth_continue {
-                        // Continue MCP OAuth flow
-                        let url = format!(
-                            "/api/v1/oauth/authorize/continue?state={oauth_state}"
-                        );
-                        gloo_timers::future::TimeoutFuture::new(500).await;
-                        if let Some(window) = web_sys::window() {
-                            let _ = window.location().set_href(&url);
-                        }
-                    } else {
-                        // Existing user with terms accepted — go straight to home
-                        gloo_timers::future::TimeoutFuture::new(1500).await;
-                        if let Some(window) = web_sys::window() {
-                            let _ = window.location().set_href("/");
-                        }
-                    }
-                }
-                Ok(GoogleCallbackResult::PendingTerms { redirect_url }) => {
-                    set_status.set(CallbackStatus::Success);
-                    set_message
-                        .set("Please accept our Terms of Service to continue".to_string());
-
-                    gloo_timers::future::TimeoutFuture::new(1500).await;
-                    if let Some(window) = web_sys::window() {
-                        let url = if redirect_url.is_empty() {
-                            "/welcome".to_string()
-                        } else {
-                            redirect_url
-                        };
-                        let _ = window.location().set_href(&url);
-                    }
-                }
-                Ok(GoogleCallbackResult::Error { message: msg }) => {
-                    set_status.set(CallbackStatus::Error);
-                    set_message.set(msg);
-                }
-                Ok(GoogleCallbackResult::RateLimited { retry_after_secs }) => {
-                    set_status.set(CallbackStatus::Error);
-                    set_message.set(format!(
-                        "Too many attempts. Please try again in {retry_after_secs} seconds."
-                    ));
-                }
-                Err(e) => {
-                    set_status.set(CallbackStatus::Error);
-                    set_message.set(
-                        e.to_string()
-                            .strip_prefix("error running server function: ")
-                            .unwrap_or(&e.to_string())
-                            .to_string(),
-                    );
-                }
-            }
-        });
-    }
-
-    // ── SSR fallback (should never be seen in practice) ──────────────────
+    let (code, state_param, error) = {
+        let search = web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .unwrap_or_default();
+        (
+            get_query_param(&search, "code"),
+            get_query_param(&search, "state"),
+            get_query_param(&search, "error"),
+        )
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = (&set_status, &set_message, &set_show_help_text);
-    }
+    let (code, state_param, error): (Option<String>, Option<String>, Option<String>) =
+        (None, None, None);
+
+    // spawn_local works on both targets; on SSR the future runs but the
+    // page is never actually displayed, so the result is harmless.
+    leptos::task::spawn_local(async move {
+        let outcome = process_google_callback(code, state_param, error).await;
+        set_status.set(outcome.status);
+        if !outcome.message.is_empty() {
+            set_message.set(outcome.message);
+        }
+
+        // Redirect handling — gloo_timers and web_sys are browser-only,
+        // but reading redirect_url must happen on both targets.
+        if let Some(_url) = outcome.redirect_url {
+            #[cfg(target_arch = "wasm32")]
+            {
+                let delay = if _url.contains("/oauth/authorize/continue") {
+                    500
+                } else {
+                    1500
+                };
+                gloo_timers::future::TimeoutFuture::new(delay).await;
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_href(&_url);
+                }
+            }
+        }
+    });
+
+    // Suppress unused warnings for SSR-only signals
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = &set_show_help_text;
 
     view! {
         <div class="min-h-screen bg-background flex items-center justify-center px-4">

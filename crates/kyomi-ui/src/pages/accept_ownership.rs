@@ -17,7 +17,6 @@ use leptos_router::hooks::use_params_map;
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonVariant,
 };
-#[allow(unused_imports)]
 use crate::server_fns::ownership::{
     accept_ownership_transfer, decline_ownership_transfer, get_ownership_transfer,
     OwnershipTransfer,
@@ -27,16 +26,27 @@ use crate::server_fns::ownership::{
 // State machine
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Variants are constructed in #[cfg(target_arch = "wasm32")] blocks but matched
-// in the view which runs on both targets. allow(dead_code) is correct here.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 enum PageState {
     Loading,
     Error { message: String },
     Ready { transfer: OwnershipTransfer },
     Processing { transfer: OwnershipTransfer },
     Success { workspace_name: String },
+}
+
+/// Fetch the ownership transfer and return the resulting page state.
+/// Not cfg-gated so the compiler sees all `PageState` variants constructed.
+async fn fetch_ownership_transfer(transfer_id: String) -> PageState {
+    match get_ownership_transfer(transfer_id).await {
+        Ok(Some(transfer)) => PageState::Ready { transfer },
+        Ok(None) => PageState::Error {
+            message: "Transfer request not found or has expired".to_string(),
+        },
+        Err(e) => PageState::Error {
+            message: format!("Failed to load transfer details: {e}"),
+        },
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -46,40 +56,30 @@ enum PageState {
 #[component]
 pub fn AcceptOwnershipPage() -> impl IntoView {
     let (state, set_state) = signal(PageState::Loading);
-    #[allow(unused_variables)]
     let params = use_params_map();
 
     // ── Fetch transfer on mount ──────────────────────────────────────────
+    // Extract transfer_id from URL params (browser-only); SSR provides empty string.
     #[cfg(target_arch = "wasm32")]
+    let transfer_id = params.read().get("transfer_id").unwrap_or_default();
+    #[cfg(not(target_arch = "wasm32"))]
+    let transfer_id = {
+        let _ = &params;
+        String::new()
+    };
+
+    // spawn_local compiles on both targets; the extracted function ensures
+    // the compiler sees all PageState variants constructed.
     {
         let set_state = set_state.clone();
-        Effect::new(move || {
-            let transfer_id = params.read().get("transfer_id").unwrap_or_default();
+        leptos::task::spawn_local(async move {
             if transfer_id.is_empty() {
                 set_state.set(PageState::Error {
                     message: "No transfer ID provided".to_string(),
                 });
                 return;
             }
-
-            let set_state = set_state.clone();
-            leptos::task::spawn_local(async move {
-                match get_ownership_transfer(transfer_id).await {
-                    Ok(Some(transfer)) => {
-                        set_state.set(PageState::Ready { transfer });
-                    }
-                    Ok(None) => {
-                        set_state.set(PageState::Error {
-                            message: "Transfer request not found or has expired".to_string(),
-                        });
-                    }
-                    Err(e) => {
-                        set_state.set(PageState::Error {
-                            message: format!("Failed to load transfer details: {e}"),
-                        });
-                    }
-                }
-            });
+            set_state.set(fetch_ownership_transfer(transfer_id).await);
         });
     }
 

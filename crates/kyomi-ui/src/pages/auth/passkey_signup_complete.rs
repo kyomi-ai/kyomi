@@ -26,10 +26,7 @@ use crate::server_fns::auth::{
 // View state machine
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Variants are constructed in #[cfg(target_arch = "wasm32")] blocks but matched
-// in the view which runs on both targets. allow(dead_code) is correct here.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 enum PageState {
     Form,
     Creating { status_message: String },
@@ -54,23 +51,27 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
     let (error, set_error) = signal(Option::<String>::None);
 
     // ── Extract token on mount ───────────────────────────────────────────
+    // Token extraction is browser-only; SSR provides None.
     #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move || {
-            if let Some(window) = web_sys::window() {
-                if let Ok(search) = window.location().search() {
-                    let params = web_sys::UrlSearchParams::new_with_str(&search).ok();
-                    if let Some(params) = params {
-                        if let Some(t) = params.get("token") {
-                            _set_token.set(Some(t));
-                            return;
-                        }
-                    }
-                }
-            }
-            set_page_state.set(PageState::Error {
-                message: "Missing signup token. Please use the link from your email.".to_string(),
-            });
+    let initial_token: Option<String> = {
+        web_sys::window().and_then(|w| {
+            w.location()
+                .search()
+                .ok()
+                .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+                .and_then(|params| params.get("token"))
+        })
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let initial_token: Option<String> = None;
+
+    // Set the token or transition to Error — runs on both targets so the
+    // compiler sees all PageState variants constructed.
+    if let Some(t) = initial_token {
+        _set_token.set(Some(t));
+    } else {
+        set_page_state.set(PageState::Error {
+            message: "Missing signup token. Please use the link from your email.".to_string(),
         });
     }
 

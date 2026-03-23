@@ -19,7 +19,6 @@ use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Card,
     CardContent, CardDescription, CardHeader, CardTitle,
 };
-#[allow(unused_imports)] // Used in wasm32-only blocks
 use crate::server_fns::auth::{
     passkey_recovery_verify, passkey_register_complete, LoginResult, PasskeyRecoveryVerifyResult,
 };
@@ -28,10 +27,7 @@ use crate::server_fns::auth::{
 // View state machine
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Variants are constructed in #[cfg(target_arch = "wasm32")] blocks but matched
-// in the view which runs on both targets. allow(dead_code) is correct here.
 #[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
 enum PageState {
     Verifying,
     Ready {
@@ -46,6 +42,34 @@ enum PageState {
     },
 }
 
+/// Verify the recovery token and return the resulting page state.
+/// Not cfg-gated so the compiler sees all `PageState` variants constructed.
+async fn verify_passkey_recovery_token(token: Option<String>) -> PageState {
+    let Some(token) = token else {
+        return PageState::Error {
+            message: "Missing recovery token. Please use the link from your email.".to_string(),
+        };
+    };
+    match passkey_recovery_verify(token).await {
+        Ok(PasskeyRecoveryVerifyResult::Success {
+            challenge_id,
+            creation_challenge,
+            email,
+        }) => PageState::Ready {
+            challenge_id,
+            creation_challenge,
+            email,
+        },
+        Ok(PasskeyRecoveryVerifyResult::Error { message }) => PageState::Error { message },
+        Err(e) => PageState::Error {
+            message: format!(
+                "Invalid or expired recovery link. Please request a new one. ({})",
+                e
+            ),
+        },
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -56,56 +80,26 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
     let (error, set_error) = signal(Option::<String>::None);
 
     // ── Extract token on mount and verify ────────────────────────────────
+    // Token extraction is browser-only; SSR provides None (page won't be displayed).
     #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move || {
-            let token = {
-                let window = web_sys::window();
-                window.and_then(|w| {
-                    w.location()
-                        .search()
-                        .ok()
-                        .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
-                        .and_then(|params| params.get("token"))
-                })
-            };
+    let initial_token: Option<String> = {
+        let window = web_sys::window();
+        window.and_then(|w| {
+            w.location()
+                .search()
+                .ok()
+                .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+                .and_then(|params| params.get("token"))
+        })
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let initial_token: Option<String> = None;
 
-            let Some(token) = token else {
-                set_page_state.set(PageState::Error {
-                    message: "Missing recovery token. Please use the link from your email."
-                        .to_string(),
-                });
-                return;
-            };
-
-            leptos::task::spawn_local(async move {
-                match passkey_recovery_verify(token).await {
-                    Ok(PasskeyRecoveryVerifyResult::Success {
-                        challenge_id,
-                        creation_challenge,
-                        email,
-                    }) => {
-                        set_page_state.set(PageState::Ready {
-                            challenge_id,
-                            creation_challenge,
-                            email,
-                        });
-                    }
-                    Ok(PasskeyRecoveryVerifyResult::Error { message }) => {
-                        set_page_state.set(PageState::Error { message });
-                    }
-                    Err(e) => {
-                        set_page_state.set(PageState::Error {
-                            message: format!(
-                                "Invalid or expired recovery link. Please request a new one. ({})",
-                                e
-                            ),
-                        });
-                    }
-                }
-            });
-        });
-    }
+    // spawn_local compiles on both targets; the extracted function ensures
+    // the compiler sees all PageState variants constructed.
+    leptos::task::spawn_local(async move {
+        set_page_state.set(verify_passkey_recovery_token(initial_token).await);
+    });
 
     // ── Create passkey handler ────────────────────────────────────────────
     let on_create_passkey = move |_: leptos::ev::MouseEvent| {

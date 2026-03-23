@@ -296,13 +296,10 @@ impl AgentTool for SearchKnowledgeTool {
 // Knowledge chunk search helper
 // ---------------------------------------------------------------------------
 
-// file_path is selected by the SQL query for FromRow but not accessed in code.
 #[derive(sqlx::FromRow)]
 struct KnowledgeChunkRow {
     file_id: String,
     file_name: String,
-    #[allow(dead_code)]
-    file_path: Option<String>,
     chunk_content: String,
     embedding: Vec<u8>,
 }
@@ -326,7 +323,7 @@ async fn search_knowledge_chunks(
                     .join(",")
             );
             sqlx::query_as::<_, KnowledgeChunkRow>(
-                "SELECT kc.file_id, kf.name AS file_name, NULL AS file_path, \
+                "SELECT kc.file_id, kf.name AS file_name, \
                         kc.content AS chunk_content, ''::bytea AS embedding \
                  FROM knowledge_chunks kc \
                  JOIN knowledge_files kf ON kf.id = kc.file_id \
@@ -343,7 +340,7 @@ async fn search_knowledge_chunks(
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             sqlx::query_as::<_, KnowledgeChunkRow>(
-                "SELECT kc.file_id, kf.name AS file_name, NULL AS file_path, \
+                "SELECT kc.file_id, kf.name AS file_name, \
                         kc.content AS chunk_content, kc.embedding \
                  FROM knowledge_chunks kc \
                  JOIN knowledge_files kf ON kf.id = kc.file_id \

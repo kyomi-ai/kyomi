@@ -48,23 +48,17 @@ pub async fn migrate_learnings_to_knowledge_files(
     }
 
     // Fetch all learnings for this workspace
-    // id is selected by the SQL query for FromRow but not accessed in code.
     #[derive(sqlx::FromRow)]
-    #[allow(dead_code)]
     struct LearningRow {
-        id: String,
         content: String,
     }
 
-    let is_pg = db.is_postgres();
-    let id_col = kyomi_core::sql_compat::cast_to_text(is_pg, "id");
-    let sql = format!(
-        "SELECT {id_col} AS id, content FROM agent_learnings \
+    let sql =
+        "SELECT content FROM agent_learnings \
          WHERE workspace_id = $1 AND content IS NOT NULL AND content != '' \
-         ORDER BY created_at"
-    );
+         ORDER BY created_at";
     let learnings: Vec<LearningRow> =
-        kyomi_core::db_fetch_all!(db, LearningRow, &sql, &workspace_id)?;
+        kyomi_core::db_fetch_all!(db, LearningRow, sql, &workspace_id)?;
 
     if learnings.is_empty() {
         return Ok(MigrationResult {
