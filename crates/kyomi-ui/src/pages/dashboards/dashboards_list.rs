@@ -649,8 +649,8 @@ fn DashboardCard(
                         &cb_ref,
                         true,
                     );
+                    drop(cb);
                 });
-                cb.forget();
                 cleanup.set_value(Some(SendWrapper::new(teardown)));
             }
         });

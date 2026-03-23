@@ -41,6 +41,7 @@ pub(crate) fn use_is_mobile() -> Signal<bool> {
 
     #[cfg(feature = "hydrate")]
     {
+        use send_wrapper::SendWrapper;
         use wasm_bindgen::closure::Closure;
 
         let handler = Closure::<dyn Fn()>::new(move || {
@@ -57,9 +58,15 @@ pub(crate) fn use_is_mobile() -> Signal<bool> {
         if let Some(window) = web_sys::window() {
             let _ = window
                 .add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+            let handler_ref: js_sys::Function =
+                handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let handler_wrapper = SendWrapper::new(handler);
+            on_cleanup(move || {
+                let _ = window
+                    .remove_event_listener_with_callback("resize", &handler_ref);
+                drop(handler_wrapper);
+            });
         }
-
-        handler.forget();
     }
 
     is_mobile.into()

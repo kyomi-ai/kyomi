@@ -51,19 +51,31 @@ pub fn Layout(children: Children) -> impl IntoView {
         use send_wrapper::SendWrapper;
         use wasm_bindgen::prelude::*;
 
+        // Check initial viewport width on mount
         Effect::new(move |_| {
             let window = web_sys::window().expect("window");
-            let width = window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
+            let width = window
+                .inner_width()
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1024.0);
             let mobile = width < 768.0;
             set_is_mobile.set(mobile);
             if mobile {
                 set_collapsed.set(true);
             }
+        });
 
-            // Listen for resize
+        // Listen for resize — attached once, cleaned up on unmount
+        {
+            let window = web_sys::window().expect("window");
             let cb = Closure::<dyn Fn()>::new(move || {
                 let w = web_sys::window().unwrap();
-                let width = w.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
+                let width = w
+                    .inner_width()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1024.0);
                 let mobile = width < 768.0;
                 set_is_mobile.set(mobile);
                 if mobile {
@@ -75,9 +87,16 @@ pub fn Layout(children: Children) -> impl IntoView {
                 "resize",
                 cb.as_ref().unchecked_ref(),
             );
-            // Leak the closure — it lives for the app lifetime
-            cb.forget();
-        });
+            let cb_ref: js_sys::Function =
+                cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let cb_wrapper = SendWrapper::new(cb);
+            let window_clone = window;
+            on_cleanup(move || {
+                let _ =
+                    window_clone.remove_event_listener_with_callback("resize", &cb_ref);
+                drop(cb_wrapper);
+            });
+        }
     }
 
     // Close mobile sidebar on navigation
@@ -164,19 +183,25 @@ fn Sidebar(
     // Matches React: Sidebar.jsx lines 171-173
     #[cfg(target_arch = "wasm32")]
     {
+        use send_wrapper::SendWrapper;
         use wasm_bindgen::prelude::*;
 
-        Effect::new(move |_| {
-            let window = web_sys::window().expect("window");
-            let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
-                sessions.refetch();
-            });
-            let _ = window.add_event_listener_with_callback(
-                "sessions-deleted",
-                cb.as_ref().unchecked_ref(),
-            );
-            // Leak the closure — it lives for the app lifetime
-            cb.forget();
+        let window = web_sys::window().expect("window");
+        let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
+            sessions.refetch();
+        });
+        let _ = window.add_event_listener_with_callback(
+            "sessions-deleted",
+            cb.as_ref().unchecked_ref(),
+        );
+        let cb_ref: js_sys::Function =
+            cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        let cb_wrapper = SendWrapper::new(cb);
+        let window_clone = window;
+        on_cleanup(move || {
+            let _ =
+                window_clone.remove_event_listener_with_callback("sessions-deleted", &cb_ref);
+            drop(cb_wrapper);
         });
     }
 

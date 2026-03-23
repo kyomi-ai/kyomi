@@ -613,7 +613,12 @@ pub fn CopilotSidebar(
     });
 
     // ── Resize drag handling (desktop) ──────────────────────────────────
-    // Pattern copied from `history_panel.rs`.
+    // Stores active drag cleanup so on_cleanup can remove listeners if the
+    // component unmounts mid-drag.
+
+    #[cfg(feature = "hydrate")]
+    let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
+        StoredValue::new(None);
 
     #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
@@ -624,6 +629,8 @@ pub fn CopilotSidebar(
 
         #[cfg(feature = "hydrate")]
         {
+            use std::cell::RefCell;
+            use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
 
             let Some(window) = web_sys::window() else {
@@ -635,7 +642,6 @@ pub fn CopilotSidebar(
 
             let move_handler =
                 Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-                    // Moving left increases width (panel is on the right).
                     let diff = start_x - ev.client_x() as f64;
                     let new_width = (start_w + diff).clamp(MIN_WIDTH, MAX_WIDTH);
                     set_panel_width.set(new_width);
@@ -645,17 +651,32 @@ pub fn CopilotSidebar(
                 .as_ref()
                 .unchecked_ref::<js_sys::Function>()
                 .clone();
-            let document_clone = document.clone();
-            let move_fn_clone = move_ref.clone();
+            let document_for_up = document.clone();
+            let move_fn_for_up = move_ref.clone();
 
-            let up_handler = Closure::<dyn FnMut()>::once(move || {
+            // Shared state: holds both closures so mouseup or on_cleanup can drop them.
+            let closures: Rc<RefCell<Option<(
+                Closure<dyn FnMut(web_sys::MouseEvent)>,
+                Closure<dyn FnMut()>,
+            )>>> = Rc::new(RefCell::new(None));
+            let closures_for_up = closures.clone();
+
+            let up_handler = Closure::<dyn FnMut()>::new(move || {
                 set_is_resizing.set(false);
-                let _ = document_clone
-                    .remove_event_listener_with_callback("mousemove", &move_fn_clone);
-                if let Some(body) = document_clone.body() {
+                let _ = document_for_up
+                    .remove_event_listener_with_callback("mousemove", &move_fn_for_up);
+                if let Some((_, ref up_cb)) = *closures_for_up.borrow() {
+                    let _ = document_for_up.remove_event_listener_with_callback(
+                        "mouseup",
+                        up_cb.as_ref().unchecked_ref(),
+                    );
+                }
+                if let Some(body) = document_for_up.body() {
                     let _ = body.style().set_property("cursor", "");
                     let _ = body.style().set_property("user-select", "");
                 }
+                closures_for_up.borrow_mut().take();
+                drag_cleanup.set_value(None);
             });
 
             let _ = document
@@ -663,8 +684,25 @@ pub fn CopilotSidebar(
             let _ = document
                 .add_event_listener_with_callback("mouseup", up_handler.as_ref().unchecked_ref());
 
-            move_handler.forget();
-            up_handler.forget();
+            // Store closures so they stay alive (not leaked via forget).
+            *closures.borrow_mut() = Some((move_handler, up_handler));
+
+            // Store cleanup for on_cleanup in case component unmounts mid-drag.
+            let closures_for_teardown = closures;
+            let document_for_teardown = document.clone();
+            let move_ref_for_teardown = move_ref.clone();
+            let teardown: Box<dyn FnOnce()> = Box::new(move || {
+                if let Some((_, ref up_cb)) = *closures_for_teardown.borrow() {
+                    let _ = document_for_teardown
+                        .remove_event_listener_with_callback("mousemove", &move_ref_for_teardown);
+                    let _ = document_for_teardown.remove_event_listener_with_callback(
+                        "mouseup",
+                        up_cb.as_ref().unchecked_ref(),
+                    );
+                }
+                closures_for_teardown.borrow_mut().take();
+            });
+            drag_cleanup.set_value(Some(send_wrapper::SendWrapper::new(teardown)));
 
             if let Some(body) = document.body() {
                 let _ = body.style().set_property("cursor", "col-resize");
@@ -672,6 +710,13 @@ pub fn CopilotSidebar(
             }
         }
     };
+
+    #[cfg(feature = "hydrate")]
+    on_cleanup(move || {
+        if let Some(teardown) = drag_cleanup.try_update_value(|v| v.take()).flatten() {
+            teardown.take()();
+        }
+    });
 
     // ── Panel content builder ───────────────────────────────────────────
     // Both mobile and desktop layouts share this inner content.

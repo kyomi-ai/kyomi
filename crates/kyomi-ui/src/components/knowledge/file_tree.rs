@@ -281,14 +281,18 @@ fn TreeContextMenu(
                 click_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
             let keydown_ref: js_sys::Function =
                 keydown_cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-            click_cb.forget();
-            keydown_cb.forget();
+            // Keep closures alive (not leaked via forget) — they are dropped
+            // when the teardown runs, which also removes the event listeners.
+            let click_cb_guard = click_cb;
+            let keydown_cb_guard = keydown_cb;
 
             let teardown: Box<dyn FnOnce()> = Box::new(move || {
                 let _ = window_clone
                     .remove_event_listener_with_callback("mousedown", &click_ref);
                 let _ = window_clone
                     .remove_event_listener_with_callback("keydown", &keydown_ref);
+                drop(click_cb_guard);
+                drop(keydown_cb_guard);
             });
             cleanup.set_value(Some(SendWrapper::new(teardown)));
         });

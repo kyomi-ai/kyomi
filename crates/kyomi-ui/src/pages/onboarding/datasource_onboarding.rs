@@ -755,9 +755,11 @@ fn open_oauth_popup(
                 // connecting state and stop polling.
                 let ds_id = datasource_id.to_string();
 
-                // Use a shared cell so the closure can clear its own interval
-                let interval_id = std::rc::Rc::new(std::cell::Cell::new(0i32));
-                let interval_id_inner = interval_id.clone();
+                // Use shared state so the closure can clear its own interval
+                // and drop itself (no leak via forget).
+                let state: std::rc::Rc<std::cell::RefCell<Option<(i32, Closure<dyn Fn()>)>>> =
+                    std::rc::Rc::new(std::cell::RefCell::new(None));
+                let state_inner = state.clone();
 
                 let closure = Closure::<dyn Fn()>::new(move || {
                     let closed = popup_window.closed().unwrap_or(true);
@@ -768,10 +770,13 @@ fn open_oauth_popup(
                                 *current = None;
                             }
                         });
-                        // Self-clear the interval
-                        if let Some(win) = web_sys::window() {
-                            win.clear_interval_with_handle(interval_id_inner.get());
+                        // Self-clear the interval and drop the closure
+                        if let Some((interval_id, _)) = state_inner.borrow().as_ref() {
+                            if let Some(win) = web_sys::window() {
+                                win.clear_interval_with_handle(*interval_id);
+                            }
                         }
+                        state_inner.borrow_mut().take();
                     }
                 });
 
@@ -781,11 +786,10 @@ fn open_oauth_popup(
                         500, // Check every 500ms
                     )
                     .unwrap_or(0);
-                interval_id.set(id);
 
-                // Leak the closure — it self-clears when the popup closes,
-                // and the interval handle ensures it doesn't run indefinitely.
-                closure.forget();
+                // Store both the interval ID and the closure so the closure stays
+                // alive without forget(). When the popup closes, both are dropped.
+                *state.borrow_mut() = Some((id, closure));
             }
             _ => {
                 set_connecting.set(None);

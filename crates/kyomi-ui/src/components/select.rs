@@ -124,18 +124,17 @@ pub fn StyledSelect(
                 );
 
                 let window_clone = window.clone();
-                let cb_ref: js_sys::Function = cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-                // Store cleanup function
+                let cb_ref: js_sys::Function =
+                    cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
+                // Keep the Closure alive in the teardown (not leaked via forget).
                 let teardown: Box<dyn FnOnce()> = Box::new(move || {
                     let _ = window_clone.remove_event_listener_with_callback_and_bool(
                         "click",
                         &cb_ref,
                         true,
                     );
+                    drop(cb);
                 });
-                // We need to keep the Closure alive; leak it intentionally — it will be
-                // cleaned up by the remove_event_listener above.
-                cb.forget();
 
                 cleanup.set_value(Some(SendWrapper::new(teardown)));
             }
@@ -316,8 +315,8 @@ pub fn DynSelect(
                         &cb_ref,
                         true,
                     );
+                    drop(cb);
                 });
-                cb.forget();
                 cleanup.set_value(Some(SendWrapper::new(teardown)));
             }
         });

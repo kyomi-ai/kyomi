@@ -79,7 +79,13 @@ pub fn SqlEditorSidebar(
     };
 
     // ── Resize drag handling (desktop) ──────────────────────────────────
-    // Pattern from copilot_sidebar.rs.
+    // Stores active drag cleanup so on_cleanup can remove listeners if the
+    // component unmounts mid-drag.
+
+    #[cfg(feature = "hydrate")]
+    let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
+        StoredValue::new(None);
+
     #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -89,8 +95,8 @@ pub fn SqlEditorSidebar(
 
         #[cfg(feature = "hydrate")]
         {
-            use std::rc::Rc;
             use std::cell::RefCell;
+            use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
 
             let Some(window) = web_sys::window() else {
@@ -102,53 +108,64 @@ pub fn SqlEditorSidebar(
 
             let move_handler =
                 Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-                    // Moving left increases width (sidebar is on the right).
                     let diff = start_x - ev.client_x() as f64;
                     let new_width = (start_w + diff).clamp(MIN_WIDTH, MAX_WIDTH);
                     set_sidebar_width.set(new_width);
                 });
 
-            let move_fn: js_sys::Function = move_handler
+            let move_ref = move_handler
                 .as_ref()
                 .unchecked_ref::<js_sys::Function>()
                 .clone();
-
-            // Store the up_handler in an Rc<RefCell> so the closure can remove itself.
-            let up_closure: Rc<RefCell<Option<Closure<dyn FnMut()>>>> =
-                Rc::new(RefCell::new(None));
-            let up_closure_inner = up_closure.clone();
             let document_for_up = document.clone();
-            let move_fn_for_up = move_fn.clone();
+            let move_fn_for_up = move_ref.clone();
+
+            let closures: Rc<RefCell<Option<(
+                Closure<dyn FnMut(web_sys::MouseEvent)>,
+                Closure<dyn FnMut()>,
+            )>>> = Rc::new(RefCell::new(None));
+            let closures_for_up = closures.clone();
 
             let up_handler = Closure::<dyn FnMut()>::new(move || {
                 set_is_resizing.set(false);
-                // Remove the mousemove listener.
                 let _ = document_for_up
                     .remove_event_listener_with_callback("mousemove", &move_fn_for_up);
-                // Remove this mouseup listener from the document.
-                if let Some(ref closure) = *up_closure_inner.borrow() {
+                if let Some((_, ref up_cb)) = *closures_for_up.borrow() {
                     let _ = document_for_up.remove_event_listener_with_callback(
                         "mouseup",
-                        closure.as_ref().unchecked_ref(),
+                        up_cb.as_ref().unchecked_ref(),
                     );
                 }
                 if let Some(body) = document_for_up.body() {
                     let _ = body.style().set_property("cursor", "");
                     let _ = body.style().set_property("user-select", "");
                 }
-                // Drop the closures by taking them out.
-                up_closure_inner.borrow_mut().take();
+                closures_for_up.borrow_mut().take();
+                drag_cleanup.set_value(None);
             });
 
             let _ =
-                document.add_event_listener_with_callback("mousemove", move_fn.unchecked_ref());
+                document.add_event_listener_with_callback("mousemove", move_ref.unchecked_ref());
             let _ = document
                 .add_event_listener_with_callback("mouseup", up_handler.as_ref().unchecked_ref());
 
-            // Store the up_handler so the closure can self-reference.
-            *up_closure.borrow_mut() = Some(up_handler);
-            // Prevent the move_handler from being dropped (its JS function is registered on document).
-            move_handler.forget();
+            *closures.borrow_mut() = Some((move_handler, up_handler));
+
+            let closures_for_teardown = closures;
+            let document_for_teardown = document.clone();
+            let move_ref_for_teardown = move_ref.clone();
+            let teardown: Box<dyn FnOnce()> = Box::new(move || {
+                if let Some((_, ref up_cb)) = *closures_for_teardown.borrow() {
+                    let _ = document_for_teardown
+                        .remove_event_listener_with_callback("mousemove", &move_ref_for_teardown);
+                    let _ = document_for_teardown.remove_event_listener_with_callback(
+                        "mouseup",
+                        up_cb.as_ref().unchecked_ref(),
+                    );
+                }
+                closures_for_teardown.borrow_mut().take();
+            });
+            drag_cleanup.set_value(Some(send_wrapper::SendWrapper::new(teardown)));
 
             if let Some(body) = document.body() {
                 let _ = body.style().set_property("cursor", "col-resize");
@@ -156,6 +173,13 @@ pub fn SqlEditorSidebar(
             }
         }
     };
+
+    #[cfg(feature = "hydrate")]
+    on_cleanup(move || {
+        if let Some(teardown) = drag_cleanup.try_update_value(|v| v.take()).flatten() {
+            teardown.take()();
+        }
+    });
 
     // ── Catalog search state (with 700ms debounce) ─────────────────────
     let (catalog_search_input, set_catalog_search_input) = signal(String::new());

@@ -147,25 +147,37 @@ fn use_is_mobile() -> Signal<bool> {
         }
     });
 
-    // Listen for resize events
+    // Listen for resize events — cleaned up on unmount
     #[cfg(feature = "hydrate")]
     {
+        use send_wrapper::SendWrapper;
         use wasm_bindgen::closure::Closure;
 
         let handler = Closure::<dyn Fn()>::new(move || {
             if let Some(window) = web_sys::window() {
-                let width = window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
+                let width = window
+                    .inner_width()
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1024.0);
                 set_is_mobile.set(width < MOBILE_BREAKPOINT);
             }
         });
 
         if let Some(window) = web_sys::window() {
-            let _ = window.add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+            let _ = window.add_event_listener_with_callback(
+                "resize",
+                handler.as_ref().unchecked_ref(),
+            );
+            let handler_ref: js_sys::Function =
+                handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let handler_wrapper = SendWrapper::new(handler);
+            on_cleanup(move || {
+                let _ =
+                    window.remove_event_listener_with_callback("resize", &handler_ref);
+                drop(handler_wrapper);
+            });
         }
-
-        // Leak the closure so it lives for the lifetime of the page.
-        // This is standard practice for global event listeners in WASM.
-        handler.forget();
     }
 
     is_mobile.into()
@@ -829,6 +841,10 @@ pub fn CollectionsSidebar(
         }
     });
 
+    #[cfg(feature = "hydrate")]
+    let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
+        StoredValue::new(None);
+
     #[allow(unused_variables)]
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -838,50 +854,94 @@ pub fn CollectionsSidebar(
 
         #[cfg(feature = "hydrate")]
         {
+            use std::cell::RefCell;
+            use std::rc::Rc;
             use wasm_bindgen::closure::Closure;
 
             let Some(window) = web_sys::window() else { return };
             let Some(document) = window.document() else { return };
 
-            let move_handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-                // Moving left increases width (sidebar is on the right)
-                let diff = start_x - ev.client_x() as f64;
-                let new_width = (start_w + diff).clamp(MIN_WIDTH, MAX_WIDTH);
-                set_sidebar_width.set(new_width);
-            });
+            let move_handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
+                move |ev: web_sys::MouseEvent| {
+                    let diff = start_x - ev.client_x() as f64;
+                    let new_width = (start_w + diff).clamp(MIN_WIDTH, MAX_WIDTH);
+                    set_sidebar_width.set(new_width);
+                },
+            );
 
-            let move_ref = move_handler.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            let move_ref = move_handler
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone();
+            let document_for_up = document.clone();
+            let move_fn_for_up = move_ref.clone();
 
-            // We need to share document/move_ref with the mouseup closure, so use Rc.
-            let document_clone = document.clone();
-            let move_fn_clone = move_ref.clone();
+            let closures: Rc<RefCell<Option<(
+                Closure<dyn FnMut(web_sys::MouseEvent)>,
+                Closure<dyn FnMut()>,
+            )>>> = Rc::new(RefCell::new(None));
+            let closures_for_up = closures.clone();
 
-            let up_handler = Closure::<dyn FnMut()>::once(move || {
+            let up_handler = Closure::<dyn FnMut()>::new(move || {
                 set_is_resizing.set(false);
-                // Remove move listener
-                let _ = document_clone.remove_event_listener_with_callback("mousemove", &move_fn_clone);
-                // Restore body styles
-                if let Some(body) = document_clone.body() {
+                let _ = document_for_up
+                    .remove_event_listener_with_callback("mousemove", &move_fn_for_up);
+                if let Some((_, ref up_cb)) = *closures_for_up.borrow() {
+                    let _ = document_for_up.remove_event_listener_with_callback(
+                        "mouseup",
+                        up_cb.as_ref().unchecked_ref(),
+                    );
+                }
+                if let Some(body) = document_for_up.body() {
                     let _ = body.style().set_property("cursor", "");
                     let _ = body.style().set_property("user-select", "");
                 }
+                closures_for_up.borrow_mut().take();
+                drag_cleanup.set_value(None);
             });
 
-            let _ = document.add_event_listener_with_callback("mousemove", move_ref.unchecked_ref());
-            let _ = document.add_event_listener_with_callback("mouseup", up_handler.as_ref().unchecked_ref());
+            let _ = document.add_event_listener_with_callback(
+                "mousemove",
+                move_ref.unchecked_ref(),
+            );
+            let _ = document.add_event_listener_with_callback(
+                "mouseup",
+                up_handler.as_ref().unchecked_ref(),
+            );
 
-            // The up_handler removes the mousemove listener and itself is a `once` closure
-            // that will be dropped after firing. The move_handler needs to live until mouseup.
-            move_handler.forget();
-            up_handler.forget();
+            *closures.borrow_mut() = Some((move_handler, up_handler));
 
-            // Set body cursor
+            let closures_for_teardown = closures;
+            let document_for_teardown = document.clone();
+            let move_ref_for_teardown = move_ref.clone();
+            let teardown: Box<dyn FnOnce()> = Box::new(move || {
+                if let Some((_, ref up_cb)) = *closures_for_teardown.borrow() {
+                    let _ = document_for_teardown.remove_event_listener_with_callback(
+                        "mousemove",
+                        &move_ref_for_teardown,
+                    );
+                    let _ = document_for_teardown.remove_event_listener_with_callback(
+                        "mouseup",
+                        up_cb.as_ref().unchecked_ref(),
+                    );
+                }
+                closures_for_teardown.borrow_mut().take();
+            });
+            drag_cleanup.set_value(Some(send_wrapper::SendWrapper::new(teardown)));
+
             if let Some(body) = document.body() {
                 let _ = body.style().set_property("cursor", "col-resize");
                 let _ = body.style().set_property("user-select", "none");
             }
         }
     };
+
+    #[cfg(feature = "hydrate")]
+    on_cleanup(move || {
+        if let Some(teardown) = drag_cleanup.try_update_value(|v| v.take()).flatten() {
+            teardown.take()();
+        }
+    });
 
     // ── Render ───────────────────────────────────────────────────────────
 
