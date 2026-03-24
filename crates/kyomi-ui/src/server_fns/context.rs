@@ -79,7 +79,26 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     };
 
     // Flatten Capabilities struct into a HashMap<String, bool> for the frontend.
-    let caps_map = build_capabilities_map(&capabilities);
+    let mut caps_map = build_capabilities_map(&capabilities);
+
+    // Runtime checks that aren't part of the static Capabilities struct.
+    // These are read by ChatPage to gate the no-datasources empty state
+    // and the personal-mode-no-LLM empty state.
+
+    // has_datasources: check if any active datasources exist in this workspace.
+    // Matches React's useDatasources() hook which calls GET /api/v1/datasources.
+    let has_datasources = if let Some(ws_id) = workspace_id {
+        kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, false)
+            .await
+            .map(|ds| !ds.is_empty())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    caps_map.insert("has_datasources".into(), has_datasources);
+
+    // llm_configured: whether an LLM API key is configured (personal mode).
+    caps_map.insert("llm_configured".into(), ctx.config.llm_configured());
 
     // billing_enabled: true when Stripe is configured AND not self-hosted.
     // Matches the Capabilities struct's billing_enabled field.
