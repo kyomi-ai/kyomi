@@ -105,8 +105,9 @@ mod ssr {
     /// Extract client IP from request headers.
     ///
     /// Mirrors `apps/server/src/helpers.rs::extract_client_ip` — checks
-    /// `X-Real-IP`, then `X-Forwarded-For`, falling back to `"unknown"`.
-    pub fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+    /// `X-Real-IP`, then `X-Forwarded-For`, then falls back to the TCP peer
+    /// address (for local dev without a reverse proxy), and finally `"unknown"`.
+    pub fn extract_client_ip(headers: &axum::http::HeaderMap, peer_addr: Option<std::net::SocketAddr>) -> String {
         use std::net::IpAddr;
 
         if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
@@ -123,6 +124,11 @@ mod ssr {
                     return ip.to_string();
                 }
             }
+        }
+
+        // Fallback: TCP peer address (local dev without reverse proxy)
+        if let Some(addr) = peer_addr {
+            return addr.ip().to_string();
         }
 
         "unknown".to_string()
@@ -381,7 +387,12 @@ pub async fn create_trial_session() -> Result<TrialSessionResponse, ServerFnErro
     let headers: axum::http::HeaderMap = leptos_axum::extract()
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let ip = extract_client_ip(&headers);
+    let peer_addr: Option<std::net::SocketAddr> =
+        leptos_axum::extract::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .await
+            .ok()
+            .map(|ci| ci.0);
+    let ip = extract_client_ip(&headers, peer_addr);
     if ip == "unknown" {
         return Err(ServerFnError::new(
             "Unable to determine client IP address. Please try again.",
@@ -478,7 +489,12 @@ pub async fn send_trial_message(
     let headers: axum::http::HeaderMap = leptos_axum::extract()
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let ip = extract_client_ip(&headers);
+    let peer_addr: Option<std::net::SocketAddr> =
+        leptos_axum::extract::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .await
+            .ok()
+            .map(|ci| ci.0);
+    let ip = extract_client_ip(&headers, peer_addr);
     if ip == "unknown" {
         return Err(ServerFnError::new(
             "Unable to determine client IP address. Please try again.",
@@ -689,7 +705,12 @@ pub async fn execute_trial_query(
     let headers: axum::http::HeaderMap = leptos_axum::extract()
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-    let ip = extract_client_ip(&headers);
+    let peer_addr: Option<std::net::SocketAddr> =
+        leptos_axum::extract::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .await
+            .ok()
+            .map(|ci| ci.0);
+    let ip = extract_client_ip(&headers, peer_addr);
     if ip == "unknown" {
         return Err(ServerFnError::new(
             "Unable to determine client IP address. Please try again.",
