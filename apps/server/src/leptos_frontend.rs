@@ -78,6 +78,14 @@ pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
         return file_response(path, &file, &headers);
     }
 
+    // Trunk's `copy-dir` directive copies `public/` into `dist/public/`,
+    // so assets referenced as `/kyomi_full_logo.svg` are embedded as
+    // `public/kyomi_full_logo.svg`. Try that prefix before falling back.
+    let public_path = format!("public/{path}");
+    if let Some(file) = LeptosAssets::get(&public_path) {
+        return file_response(&public_path, &file, &headers);
+    }
+
     // SPA fallback: serve the Leptos shell for any unmatched page request.
     serve_leptos_shell().await
 }
