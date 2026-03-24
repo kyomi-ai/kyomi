@@ -390,14 +390,21 @@ pub fn SessionManagement() -> impl IntoView {
         </Card>
 
         // Confirm Dialog
-        <ConfirmDialog
-            open=Signal::from(dialog_open)
-            title=dialog_title.get_untracked()
-            message=dialog_message.get_untracked()
-            confirm_text=dialog_confirm_text.get_untracked()
-            on_confirm=on_confirm
-            on_cancel=on_cancel
-        />
+        {move || {
+            let title = dialog_title.get();
+            let message = dialog_message.get();
+            let confirm_text = dialog_confirm_text.get();
+            view! {
+                <ConfirmDialog
+                    open=Signal::from(dialog_open)
+                    title=title
+                    message=message
+                    confirm_text=confirm_text
+                    on_confirm=on_confirm
+                    on_cancel=on_cancel
+                />
+            }
+        }}
     }
 }
 
