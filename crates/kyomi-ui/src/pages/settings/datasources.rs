@@ -1228,6 +1228,8 @@ pub fn DatasourceModal(
                                         set_cfg_port=set_cfg_port
                                         cfg_ssl_mode=cfg_ssl_mode
                                         set_cfg_ssl_mode=set_cfg_ssl_mode
+                                        cfg_database=cfg_database
+                                        set_cfg_database=set_cfg_database
                                         cfg_account=cfg_account
                                         set_cfg_account=set_cfg_account
                                         cfg_server_hostname=cfg_server_hostname
@@ -1630,7 +1632,8 @@ fn SnowflakeAuthModeSection(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Renders the connection fields (host/port/ssl_mode/account/etc.) for the active provider.
-/// Does NOT render discovery fields (database/schema/warehouse/catalog) — those are in DiscoveryFields.
+/// Also renders the database text input so users can type a database name before Test & Discover.
+/// After Test & Discover, DiscoveryFields replaces the text input with a dropdown of real db names.
 #[allow(clippy::too_many_arguments)]
 #[component]
 fn ProviderConnectionFields(
@@ -1642,6 +1645,8 @@ fn ProviderConnectionFields(
     set_cfg_port: WriteSignal<String>,
     cfg_ssl_mode: ReadSignal<String>,
     set_cfg_ssl_mode: WriteSignal<String>,
+    cfg_database: ReadSignal<String>,
+    set_cfg_database: WriteSignal<String>,
     cfg_account: ReadSignal<String>,
     set_cfg_account: WriteSignal<String>,
     cfg_server_hostname: ReadSignal<String>,
@@ -1699,6 +1704,14 @@ fn ProviderConnectionFields(
                                 on_change=move |val| set_cfg_ssl_mode.set(val)
                             />
                         </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"Database"</label>
+                            <input type="text" class=MODAL_INPUT_CLASS
+                                placeholder="mydb"
+                                prop:value=move || cfg_database.get()
+                                on:input=move |ev| set_cfg_database.set(event_target_value(&ev))
+                            />
+                        </div>
                     </div>
                 }.into_any(),
 
@@ -1737,6 +1750,14 @@ fn ProviderConnectionFields(
                             />
                             <span class="text-sm">"Secure (HTTPS)"</span>
                         </label>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"Database"</label>
+                            <input type="text" class=MODAL_INPUT_CLASS
+                                placeholder="default"
+                                prop:value=move || cfg_database.get()
+                                on:input=move |ev| set_cfg_database.set(event_target_value(&ev))
+                            />
+                        </div>
                     </div>
                 }.into_any(),
 
@@ -1831,6 +1852,14 @@ fn ProviderConnectionFields(
                                     on:input=move |ev| set_cfg_port.set(event_target_value(&ev))
                                 />
                             </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"Database"</label>
+                            <input type="text" class=MODAL_INPUT_CLASS
+                                placeholder="master"
+                                prop:value=move || cfg_database.get()
+                                on:input=move |ev| set_cfg_database.set(event_target_value(&ev))
+                            />
                         </div>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <label class="flex items-center gap-2 cursor-pointer">
