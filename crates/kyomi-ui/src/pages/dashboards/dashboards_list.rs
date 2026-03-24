@@ -16,6 +16,7 @@ use crate::components::{
     Button, ButtonVariant, Card, CardContent, CardFooter, CardHeader, CardTitle,
     ConfirmDialog, Spinner, StyledSelect,
 };
+use super::collections_sidebar::CollectionsSidebar;
 use crate::server_fns::collections::{
     list_collections, CollectionItem,
 };
@@ -427,9 +428,17 @@ pub fn DashboardsListPage() -> impl IntoView {
                     </div>
                 </div>
 
-                // Right sidebar slot — implemented by Task 8
-                // The `collections_open` and `active_collection_id` signals
-                // are available above for the sidebar component to consume.
+                // Right sidebar — collections
+                <CollectionsSidebar
+                    open=Signal::derive(move || collections_open.get())
+                    set_open=set_collections_open
+                    active_collection_id=Signal::derive(move || active_collection_id.get())
+                    set_active_collection_id=set_active_collection_id
+                    on_collections_changed=Callback::new(move |()| {
+                        collections_resource.refetch();
+                        dashboards_resource.refetch();
+                    })
+                />
             </div>
 
             // Confirm dialog for delete
