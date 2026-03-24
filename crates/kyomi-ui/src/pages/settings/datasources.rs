@@ -251,15 +251,18 @@ fn DatasourcesContent(
             on_saved=on_datasource_saved
         />
 
-        // Delete Confirmation Dialog
-        <ConfirmDialog
-            open=Signal::from(delete_dialog_open)
-            title=delete_title
-            message=delete_message()
-            confirm_text="Delete"
-            on_confirm=on_delete_confirm
-            on_cancel=on_delete_cancel
-        />
+        // Delete Confirmation Dialog — wrapped in reactive closure so
+        // delete_message() is re-evaluated each time datasource_to_delete changes.
+        {move || view! {
+            <ConfirmDialog
+                open=Signal::from(delete_dialog_open)
+                title=delete_title.clone()
+                message=delete_message()
+                confirm_text="Delete"
+                on_confirm=on_delete_confirm
+                on_cancel=on_delete_cancel
+            />
+        }}
     }
 }
 
