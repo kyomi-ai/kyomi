@@ -17,7 +17,7 @@
 //! ```
 //!
 //! - Source mode: left = `CodeEditor`, right = debounced `MarkdownRenderer`
-//! - Visual mode: stub placeholder ("Visual editing coming soon")
+//! - Visual mode: full-width `WysiwygEditor` (rich-text WYSIWYG markdown editing)
 //! - History panel via `HistoryPanel` component
 //! - Cmd/Ctrl+S keyboard shortcut for save
 //! - `beforeunload` warning when unsaved changes exist
@@ -224,7 +224,7 @@ fn DashboardEditorInner(
         signal(dashboard_id.clone());
 
     // ── Editor mode ──────────────────────────────────────────────────────
-    let (mode, set_mode) = signal(EditorMode::Source);
+    let (mode, set_mode) = signal(EditorMode::Visual);
 
     // ── Save state ───────────────────────────────────────────────────────
     let (saving, set_saving) = signal(false);
@@ -745,23 +745,14 @@ fn DashboardEditorInner(
                         }
                         .into_any()
                     } else {
-                        // Visual mode: stub
+                        // Visual mode: WYSIWYG editor (full width, no preview panel)
                         view! {
-                            <div class="flex-1 flex items-center justify-center bg-muted">
-                                <div class="text-center max-w-md px-6">
-                                    <EyeIcon class="w-12 h-12 mx-auto text-muted-foreground mb-4" />
-                                    <h3 class="text-lg font-semibold text-foreground mb-2">
-                                        "Visual editing coming soon"
-                                    </h3>
-                                    <p class="text-sm text-muted-foreground">
-                                        "Use Source mode for now to edit your dashboard with Markdown and ChartML."
-                                    </p>
-                                    <button
-                                        class="mt-4 px-4 py-2 text-sm font-medium text-primary bg-primary/10 hover:bg-primary/20 rounded-lg transition-colors"
-                                        on:click=move |_| set_mode.set(EditorMode::Source)
-                                    >
-                                        "Switch to Source"
-                                    </button>
+                            <div class="flex flex-1 min-h-0 overflow-hidden">
+                                <div class="flex-1 min-h-0 overflow-hidden">
+                                    <DashboardWysiwygEditor
+                                        content=editor_content
+                                        on_change=on_editor_change.clone()
+                                    />
                                 </div>
                             </div>
                         }
@@ -862,6 +853,43 @@ fn DashboardCodeEditor(
         view! {
             <CodeEditor
                 language=Signal::stored(Language::Markdown)
+                content=content
+                on_change=on_change
+            />
+        }
+        .into_any()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = content;
+        let _ = on_change;
+
+        view! {
+            <div class="flex-1 bg-muted p-4 text-muted-foreground">
+                "Loading editor..."
+            </div>
+        }
+        .into_any()
+    }
+}
+
+/// WYSIWYG markdown editor wrapper — used for Visual mode.
+///
+/// On WASM targets, renders the Kode `WysiwygEditor` with rich-text editing.
+/// On server (SSR), renders a placeholder since Kode requires browser DOM APIs.
+#[component]
+fn DashboardWysiwygEditor(
+    #[prop(into)]
+    content: Signal<String>,
+    on_change: Arc<dyn Fn(String) + Send + Sync>,
+) -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use kode_leptos::WysiwygEditor;
+
+        view! {
+            <WysiwygEditor
                 content=content
                 on_change=on_change
             />

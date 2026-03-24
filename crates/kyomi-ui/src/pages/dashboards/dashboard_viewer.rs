@@ -43,7 +43,7 @@ fn format_date(iso: &str) -> String {
     let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else {
         return iso.to_string();
     };
-    dt.format("%b %-d, %Y").to_string()
+    dt.format("%d/%m/%Y").to_string()
 }
 
 // ─── Inline Editable Title ──────────────────────────────────────────────────
@@ -623,7 +623,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 // ─── Header / Toolbar ───────────────────
                                 <div class="h-16 bg-card border-b border-border px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                                     // Left: back button + editable title
-                                    <div class="flex items-center gap-4 flex-1 min-w-0">
+                                    <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
                                         <a
                                             href="/dashboards"
                                             class="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors flex-shrink-0"

@@ -456,6 +456,15 @@ pub fn ChartBuilderModal(
         "Chart Builder"
     };
 
+    // ── Tab state ──────────────────────────────────────────────────────
+    let (active_tab, set_active_tab) = signal("sql".to_string());
+
+    /// CSS classes for tab buttons.
+    const TAB_ACTIVE: &str =
+        "bg-card text-foreground shadow-sm rounded px-4 py-1.5 text-sm font-medium";
+    const TAB_INACTIVE: &str =
+        "text-muted-foreground hover:text-foreground px-4 py-1.5 text-sm font-medium";
+
     view! {
         <Modal
             show=open
@@ -465,154 +474,201 @@ pub fn ChartBuilderModal(
             footer=footer_view
         >
             <div class="space-y-6">
-                // ── Section 1: Title ────────────────────────────────────
-                <div class="space-y-2">
-                    <label class=LABEL_CLASS>"Chart Title"</label>
-                    <input
-                        type="text"
-                        class=INPUT_CLASS
-                        prop:value=move || title.get()
-                        on:input=move |ev| set_title.set(event_target_value(&ev))
-                        placeholder="Enter chart title..."
-                    />
+                // ── Tab bar ─────────────────────────────────────────────
+                <div class="flex items-center bg-accent rounded-md p-0.5">
+                    <button
+                        type="button"
+                        class=move || {
+                            if active_tab.get() == "sql" { TAB_ACTIVE } else { TAB_INACTIVE }
+                        }
+                        on:click=move |_| set_active_tab.set("sql".to_string())
+                    >
+                        "SQL Editor"
+                    </button>
+                    <button
+                        type="button"
+                        class=move || {
+                            if active_tab.get() == "chart" { TAB_ACTIVE } else { TAB_INACTIVE }
+                        }
+                        on:click=move |_| set_active_tab.set("chart".to_string())
+                    >
+                        "Chart Config"
+                    </button>
                 </div>
 
-                // ── Section 2: Datasource ───────────────────────────────
-                <div class="space-y-2">
-                    <label class=LABEL_CLASS>"Datasource"</label>
-                    <Suspense fallback=move || view! {
-                        <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
-                    }>
-                        <DynSelect
-                            value=Signal::derive(move || datasource_slug.get())
-                            options=datasource_options
-                            on_change=move |slug: String| set_datasource_slug.set(slug)
-                            placeholder="Select a datasource..."
-                        />
-                    </Suspense>
-                </div>
-
-                // ── Section 3: SQL Query ────────────────────────────────
-                <div class="space-y-2">
-                    <label class=LABEL_CLASS>"SQL Query"</label>
-                    <SqlEditorSection
-                        content=sql.into()
-                        on_change=sql_on_change.get_value()
-                    />
-                </div>
-
-                // ── Section 4: Chart Type ───────────────────────────────
-                <div class="space-y-2">
-                    <label class=LABEL_CLASS>"Chart Type"</label>
-                    <DynSelect
-                        value=Signal::derive(move || chart_type.get())
-                        options=Signal::stored(
-                            CHART_TYPES
-                                .iter()
-                                .map(|(k, v)| (k.to_string(), v.to_string()))
-                                .collect::<Vec<_>>()
-                        )
-                        on_change=move |ct: String| set_chart_type.set(ct)
-                    />
-                </div>
-
-                // ── Section 5: Axis Configuration ───────────────────────
-                // Only show axes for types that use them
+                // ── SQL Editor tab ──────────────────────────────────────
                 {move || {
-                    let ct = chart_type.get();
-                    let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
-                    needs_axes.then(|| view! {
-                        <div class="space-y-2">
-                            <label class=LABEL_CLASS>"X Axis Field"</label>
-                            <input
-                                type="text"
-                                class=INPUT_CLASS
-                                prop:value=move || x_field.get()
-                                on:input=move |ev| set_x_field.set(event_target_value(&ev))
-                                placeholder="e.g. date, category, name..."
-                            />
+                    (active_tab.get() == "sql").then(|| view! {
+                        <div class="space-y-6">
+                            // Datasource selector
+                            <div class="space-y-2">
+                                <label class=LABEL_CLASS>"Datasource"</label>
+                                <Suspense fallback=move || view! {
+                                    <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
+                                }>
+                                    <DynSelect
+                                        value=Signal::derive(move || datasource_slug.get())
+                                        options=datasource_options
+                                        on_change=move |slug: String| set_datasource_slug.set(slug)
+                                        placeholder="Select a datasource..."
+                                    />
+                                </Suspense>
+                            </div>
+
+                            // SQL query editor (taller in its own tab)
+                            <div class="space-y-2">
+                                <label class=LABEL_CLASS>"SQL Query"</label>
+                                <SqlEditorSection
+                                    content=sql.into()
+                                    on_change=sql_on_change.get_value()
+                                />
+                            </div>
+
+                            // Run Query button (stub — query execution not yet implemented)
+                            <div class="flex justify-end">
+                                <button
+                                    type="button"
+                                    class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
+                                    disabled=true
+                                    title="Query execution coming soon"
+                                >
+                                    "Run Query"
+                                </button>
+                            </div>
                         </div>
                     })
                 }}
 
-                // ── Section 6: Y Axis / Series ──────────────────────────
-                <div class="space-y-3">
-                    <div class="flex items-center justify-between">
-                        <label class=LABEL_CLASS>"Series (Y Axis)"</label>
-                        <button
-                            type="button"
-                            class="text-xs text-primary hover:text-primary/80 font-medium transition-colors"
-                            on:click=add_series
-                        >
-                            "+ Add Series"
-                        </button>
-                    </div>
+                // ── Chart Config tab ────────────────────────────────────
+                {move || {
+                    (active_tab.get() == "chart").then(|| view! {
+                        <div class="space-y-6">
+                            // Chart Title
+                            <div class="space-y-2">
+                                <label class=LABEL_CLASS>"Chart Title"</label>
+                                <input
+                                    type="text"
+                                    class=INPUT_CLASS
+                                    prop:value=move || title.get()
+                                    on:input=move |ev| set_title.set(event_target_value(&ev))
+                                    placeholder="Enter chart title..."
+                                />
+                            </div>
 
-                    <For
-                        each=move || {
-                            let s = series.get();
-                            s.into_iter().enumerate().collect::<Vec<_>>()
-                        }
-                        key=|(_, entry)| entry.id
-                        let:item
-                    >
-                        {
-                            let (idx, entry) = item;
-                            let y_val = entry.y_field.clone();
-                            let label_val = entry.label.clone();
-                            let show_remove = move || series.get().len() > 1;
+                            // Chart Type
+                            <div class="space-y-2">
+                                <label class=LABEL_CLASS>"Chart Type"</label>
+                                <DynSelect
+                                    value=Signal::derive(move || chart_type.get())
+                                    options=Signal::stored(
+                                        CHART_TYPES
+                                            .iter()
+                                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                                            .collect::<Vec<_>>()
+                                    )
+                                    on_change=move |ct: String| set_chart_type.set(ct)
+                                />
+                            </div>
 
-                            view! {
-                                <div class="flex items-start gap-2">
-                                    <div class="flex-1 space-y-1">
+                            // X Axis Field — hidden for pie/doughnut/metric
+                            {move || {
+                                let ct = chart_type.get();
+                                let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
+                                needs_axes.then(|| view! {
+                                    <div class="space-y-2">
+                                        <label class=LABEL_CLASS>"X Axis Field"</label>
                                         <input
                                             type="text"
                                             class=INPUT_CLASS
-                                            prop:value=y_val.clone()
-                                            on:input=move |ev| {
-                                                let val = event_target_value(&ev);
-                                                set_series.update(|s| {
-                                                    if let Some(entry) = s.get_mut(idx) {
-                                                        entry.y_field = val;
-                                                    }
-                                                });
-                                            }
-                                            placeholder="Y field name (e.g. revenue, count)"
-                                        />
-                                        <input
-                                            type="text"
-                                            class=INPUT_CLASS
-                                            prop:value=label_val.clone()
-                                            on:input=move |ev| {
-                                                let val = event_target_value(&ev);
-                                                set_series.update(|s| {
-                                                    if let Some(entry) = s.get_mut(idx) {
-                                                        entry.label = val;
-                                                    }
-                                                });
-                                            }
-                                            placeholder="Label (optional)"
+                                            prop:value=move || x_field.get()
+                                            on:input=move |ev| set_x_field.set(event_target_value(&ev))
+                                            placeholder="e.g. date, category, name..."
                                         />
                                     </div>
-                                    {move || show_remove().then(|| {
-                                        view! {
-                                            <button
-                                                type="button"
-                                                class="mt-1.5 p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                                                on:click=move |_| remove_series(idx)
-                                                title="Remove series"
-                                            >
-                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                                </svg>
-                                            </button>
-                                        }
-                                    })}
+                                })
+                            }}
+
+                            // Series (Y Axis)
+                            <div class="space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <label class=LABEL_CLASS>"Series (Y Axis)"</label>
+                                    <button
+                                        type="button"
+                                        class="text-xs text-primary hover:text-primary/80 font-medium transition-colors"
+                                        on:click=add_series
+                                    >
+                                        "+ Add Series"
+                                    </button>
                                 </div>
-                            }
-                        }
-                    </For>
-                </div>
+
+                                <For
+                                    each=move || {
+                                        let s = series.get();
+                                        s.into_iter().enumerate().collect::<Vec<_>>()
+                                    }
+                                    key=|(_, entry)| entry.id
+                                    let:item
+                                >
+                                    {
+                                        let (idx, entry) = item;
+                                        let y_val = entry.y_field.clone();
+                                        let label_val = entry.label.clone();
+                                        let show_remove = move || series.get().len() > 1;
+
+                                        view! {
+                                            <div class="flex items-start gap-2">
+                                                <div class="flex-1 space-y-1">
+                                                    <input
+                                                        type="text"
+                                                        class=INPUT_CLASS
+                                                        prop:value=y_val.clone()
+                                                        on:input=move |ev| {
+                                                            let val = event_target_value(&ev);
+                                                            set_series.update(|s| {
+                                                                if let Some(entry) = s.get_mut(idx) {
+                                                                    entry.y_field = val;
+                                                                }
+                                                            });
+                                                        }
+                                                        placeholder="Y field name (e.g. revenue, count)"
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        class=INPUT_CLASS
+                                                        prop:value=label_val.clone()
+                                                        on:input=move |ev| {
+                                                            let val = event_target_value(&ev);
+                                                            set_series.update(|s| {
+                                                                if let Some(entry) = s.get_mut(idx) {
+                                                                    entry.label = val;
+                                                                }
+                                                            });
+                                                        }
+                                                        placeholder="Label (optional)"
+                                                    />
+                                                </div>
+                                                {move || show_remove().then(|| {
+                                                    view! {
+                                                        <button
+                                                            type="button"
+                                                            class="mt-1.5 p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                            on:click=move |_| remove_series(idx)
+                                                            title="Remove series"
+                                                        >
+                                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                                            </svg>
+                                                        </button>
+                                                    }
+                                                })}
+                                            </div>
+                                        }
+                                    }
+                                </For>
+                            </div>
+                        </div>
+                    })
+                }}
             </div>
         </Modal>
     }
@@ -635,7 +691,7 @@ fn SqlEditorSection(
         use kode_leptos::{CodeEditor, Language};
 
         view! {
-            <div class="h-48 border border-input rounded-md overflow-hidden">
+            <div class="h-80 border border-input rounded-md overflow-hidden">
                 <CodeEditor
                     language=Signal::stored(Language::Sql)
                     content=content
@@ -652,7 +708,7 @@ fn SqlEditorSection(
         let _ = on_change;
 
         view! {
-            <div class="h-48 bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
+            <div class="h-80 bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
                 "Loading SQL editor..."
             </div>
         }
