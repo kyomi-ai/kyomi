@@ -417,11 +417,28 @@ pub fn ChatPage() -> impl IntoView {
 
     // ── Generate greeting on mount if no messages ───────────────────────
     // Matches React's useEffect for greeting (Chat.jsx lines 760-765)
+    //
+    // This effect is reactive to `user_display_name`, which starts as "there"
+    // (before user_ctx_resource resolves) then updates to the real name.
+    // We regenerate the greeting when the name changes from the placeholder
+    // so the user sees their actual name, not "there".
+    let (greeting_was_placeholder, set_greeting_was_placeholder) = signal(false);
     Effect::new(move |_| {
         let msgs = messages.get();
         let greeting = current_greeting.get();
-        if msgs.is_empty() && greeting.is_empty() && url_session_id.get().is_none() {
-            set_current_greeting.set(generate_greeting(&user_display_name.get()));
+        let name = user_display_name.get();
+        let is_placeholder = name == "there";
+
+        if msgs.is_empty() && url_session_id.get().is_none() {
+            if greeting.is_empty() {
+                // First render — generate greeting (may use placeholder name)
+                set_current_greeting.set(generate_greeting(&name));
+                set_greeting_was_placeholder.set(is_placeholder);
+            } else if greeting_was_placeholder.get_untracked() && !is_placeholder {
+                // User context resolved — regenerate with real name
+                set_current_greeting.set(generate_greeting(&name));
+                set_greeting_was_placeholder.set(false);
+            }
         }
     });
 
