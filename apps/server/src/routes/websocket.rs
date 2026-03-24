@@ -213,12 +213,20 @@ async fn handle_authenticated_ws(
 /// Extract the actual user_id from a path that may be "{workspace_id}_{user_id}".
 ///
 /// The frontend sends `{workspace_id}_{user_id}` as the path parameter.
-/// Workspace IDs use hyphens (not underscores) and come in two formats:
+/// User IDs in this system always start with `usr_`, so we search for the
+/// `_usr_` boundary first — this handles any workspace ID format regardless
+/// of prefix (including E2E test workspaces like `e2e-test-workspace-0001`).
+///
+/// Legacy fallback: check for known workspace_id prefix formats:
 /// - `ws-{uuid}` (e.g. `ws-550e8400-e29b-41d4-a716-446655440000`)
 /// - `workspace-{short_id}` (e.g. `workspace-99f24d05-673d25b8`)
-///
-/// Splitting on the first `_` and checking the prefix safely separates them.
 fn extract_user_id_from_path(path: &str) -> &str {
+    // User IDs in this system always start with `usr_`.
+    // Search for `_usr_` to find the workspace/user boundary, regardless of workspace ID format.
+    if let Some(idx) = path.find("_usr_") {
+        return &path[idx + 1..];
+    }
+    // Legacy fallback: check for known workspace_id prefix formats.
     if let Some(idx) = path.find('_') {
         let prefix = &path[..idx];
         if prefix.starts_with("ws-") || prefix.starts_with("workspace-") {
@@ -563,6 +571,14 @@ mod tests {
     #[test]
     fn extract_user_id_no_workspace_prefix_with_underscore() {
         assert_eq!(extract_user_id_from_path("user-abc_123"), "user-abc_123");
+    }
+
+    #[test]
+    fn extract_user_id_with_non_standard_workspace_prefix() {
+        assert_eq!(
+            extract_user_id_from_path("e2e-test-workspace-0001_usr_a0bda4c2e7af4be3a29d"),
+            "usr_a0bda4c2e7af4be3a29d"
+        );
     }
 
     #[test]
