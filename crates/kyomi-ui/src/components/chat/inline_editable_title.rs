@@ -54,9 +54,11 @@ pub fn InlineEditableTitle(
                 let input_ref = input_ref;
                 // Small delay to ensure DOM is updated
                 gloo_timers::callback::Timeout::new(10, move || {
-                    if let Some(el) = input_ref.get() {
-                        el.focus().ok();
-                        el.select();
+                    if let Some(guard) = input_ref.try_read_untracked() {
+                        if let Some(el) = guard.as_ref() {
+                            el.focus().ok();
+                            el.select();
+                        }
                     }
                 })
                 .forget();

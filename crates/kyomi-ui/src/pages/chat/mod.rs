@@ -19,6 +19,7 @@ pub use chat_page::ChatPage;
 ///
 /// Used by both `ChatMessage` and `ChatsListPage`.
 pub(crate) fn format_relative_time(rfc3339: &str) -> String {
+    use chrono::Datelike as _;
     let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
         return rfc3339.to_string();
     };
@@ -46,11 +47,15 @@ pub(crate) fn format_relative_time(rfc3339: &str) -> String {
         return format!("{days}d ago");
     }
 
-    // For older dates, show "Mar 15" or "Mar 15, 2025"
+    // For older dates, show "Mar 15" or "Mar 15, 2025".
+    // Use numeric day (u32) to avoid %-d (no-pad) which is a GNU extension that
+    // can produce Err(fmt::Error) via chrono in some build targets.
     let parsed_utc = parsed.with_timezone(&chrono::Utc);
-    if parsed_utc.format("%Y").to_string() == now.format("%Y").to_string() {
-        parsed_utc.format("%b %-d").to_string()
+    let month = parsed_utc.format("%b").to_string();
+    let day = parsed_utc.day();
+    if parsed_utc.year() == now.year() {
+        format!("{month} {day}")
     } else {
-        parsed_utc.format("%b %-d, %Y").to_string()
+        format!("{month} {day}, {}", parsed_utc.year())
     }
 }

@@ -619,11 +619,12 @@ pub fn CopilotSidebar(
         let _ = messages.get();
 
         #[cfg(feature = "hydrate")]
-        if let Some(el) = message_list_ref.get() {
-            // Use requestAnimationFrame to scroll after DOM updates.
-            let el: web_sys::HtmlElement = el.into();
-            let scroll_height = el.scroll_height();
-            el.set_scroll_top(scroll_height);
+        if let Some(guard) = message_list_ref.try_read_untracked() {
+            if let Some(el) = guard.as_ref() {
+                // Use requestAnimationFrame to scroll after DOM updates.
+                let scroll_height = el.scroll_height();
+                el.set_scroll_top(scroll_height);
+            }
         }
     });
 

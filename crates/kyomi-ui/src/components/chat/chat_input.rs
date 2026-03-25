@@ -76,16 +76,22 @@ pub fn ChatInput(
         // Reset textarea height and refocus
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(el) = textarea_ref.get() {
-                use wasm_bindgen::JsCast;
-                if let Some(textarea) = el.dyn_ref::<web_sys::HtmlTextAreaElement>() {
-                    web_sys::HtmlElement::style(textarea).set_property("height", "auto").ok();
+            if let Some(guard) = textarea_ref.try_read_untracked() {
+                if let Some(el) = guard.as_ref() {
+                    use wasm_bindgen::JsCast;
+                    if let Some(textarea) = el.dyn_ref::<web_sys::HtmlTextAreaElement>() {
+                        web_sys::HtmlElement::style(textarea).set_property("height", "auto").ok();
+                    }
                 }
             }
-            // Refocus after clearing
+            // Refocus after clearing — use try_read_untracked so we don't panic if
+            // ChatInput was unmounted (e.g., Show condition changed) before the
+            // animation frame fires.
             request_animation_frame(move || {
-                if let Some(el) = textarea_ref.get() {
-                    el.focus().ok();
+                if let Some(guard) = textarea_ref.try_read_untracked() {
+                    if let Some(el) = guard.as_ref() {
+                        el.focus().ok();
+                    }
                 }
             });
         }
@@ -124,15 +130,20 @@ pub fn ChatInput(
         }
     };
 
-    // Auto-focus textarea on mount (100ms delay)
+    // Auto-focus textarea on mount (100ms delay).
+    // Uses try_read_untracked (safe, returns None when disposed) instead of .get()
+    // (panics when disposed) to handle the case where ChatInput is unmounted before
+    // the timeout fires — e.g., when a Show condition changes within 100ms of mount.
     #[cfg(target_arch = "wasm32")]
     {
         let textarea_ref = textarea_ref;
         Effect::new(move |_| {
             let textarea_ref = textarea_ref;
             gloo_timers::callback::Timeout::new(100, move || {
-                if let Some(el) = textarea_ref.get() {
-                    el.focus().ok();
+                if let Some(guard) = textarea_ref.try_read_untracked() {
+                    if let Some(el) = guard.as_ref() {
+                        el.focus().ok();
+                    }
                 }
             })
             .forget();
