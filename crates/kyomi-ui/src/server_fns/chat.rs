@@ -891,12 +891,11 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
     }
 
     let now = chrono::Utc::now();
-    let now_str = now.to_rfc3339();
 
     kyomi_core::db_execute!(
         &ctx.db,
         "UPDATE chat_sessions SET shared = true, shared_at = $1 WHERE session_id = $2",
-        &now_str,
+        &now,
         &session_id
     )
     .map_err(|e| ServerFnError::new(e.to_string()))?;

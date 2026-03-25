@@ -1598,6 +1598,17 @@ pub fn ChatPage() -> impl IntoView {
     let can_send_signal = chat_state.can_send;
     let show_stop_button_signal = chat_state.show_stop_button;
 
+    // Credits exhausted — disable chat input when workspace has no AI budget.
+    // Matches React: Chat.jsx uses `creditsExhausted` from useCapabilities() to
+    // disable the textarea and send button (Chat.jsx lines 1668-1677).
+    let credits_exhausted = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.capabilities.get("credits_exhausted").copied())
+            .unwrap_or(false)
+    });
+
     // ── Derived: user context fields ──────────────────────────────────────
     let is_personal_mode = Signal::derive(move || {
         user_ctx_resource
@@ -2038,6 +2049,7 @@ pub fn ChatPage() -> impl IntoView {
                             can_send=can_send_signal
                             show_stop_button=show_stop_button_signal
                             connection_state=connection_state_signal
+                            credits_exhausted=credits_exhausted.get()
                         />
                     </div>
                 </div>

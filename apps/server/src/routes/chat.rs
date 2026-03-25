@@ -870,12 +870,11 @@ async fn share_session(
     }
 
     let now = Utc::now();
-    let now_str = now.to_rfc3339();
 
     kyomi_core::db_execute!(
         &state.db,
         "UPDATE chat_sessions SET shared = true, shared_at = $1 WHERE session_id = $2",
-        &now_str,
+        &now,
         &session_id
     )?;
 
