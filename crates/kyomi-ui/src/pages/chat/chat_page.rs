@@ -362,7 +362,11 @@ pub fn ChatPage() -> impl IntoView {
             // URL has a session ID and it's different from current — prepare for load
             (Some(sid), _) if Some(sid) != current.as_ref() => {
                 // M8 — just_created_session skip is handled in session_id_to_load Memo
-                set_messages.set(Vec::new());
+                // Do NOT clear messages here — clearing causes <For> to dispose item scopes
+                // while ChatMessage's reactive effects are still pending, causing WASM panic:
+                // "Tried to access a reactive value that has already been disposed."
+                // The spinner is shown based on is_loading=true (checked first in the render logic),
+                // and messages are replaced atomically when the new session's data loads.
                 set_current_greeting.set(String::new());
                 set_is_loading.set(true);
                 set_current_session_id.set(Some(sid.clone()));
@@ -1960,48 +1964,49 @@ pub fn ChatPage() -> impl IntoView {
                                 let session = current_session_id.get();
                                 let greeting = current_greeting.get();
 
-                                if msgs.is_empty() {
-                                    if loading && session.is_some() {
-                                        // Loading existing session — spinner
-                                        // Matches React: isLoadingSession && currentSessionId (Chat.jsx line 1618)
-                                        view! {
-                                            <div class="h-full flex items-center justify-center">
-                                                <Spinner class="text-muted-foreground" />
-                                            </div>
-                                        }.into_any()
-                                    } else {
-                                        // New chat — greeting (vertically centered)
-                                        // Matches React: new chat greeting (Chat.jsx lines 1624-1689)
-                                        view! {
-                                            <div class="h-full flex items-center justify-center px-4">
-                                                <div class="text-center w-full max-w-2xl -mt-24">
-                                                    <div class="mb-12">
-                                                        <div class="mb-6">
-                                                            // Kyomi sparkle logo (matches React's inline SVG)
-                                                            <svg class="w-16 h-16 mx-auto" viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg">
-                                                                <g transform="translate(40, 40)">
-                                                                    <g fill="#d97706">
-                                                                        <polygon points="0,-20 3,-8 0,-5 -3,-8"/>
-                                                                        <polygon points="14,-14 8,-3 5,-5 8,-8"/>
-                                                                        <polygon points="20,0 8,3 5,0 8,-3"/>
-                                                                        <polygon points="14,14 3,8 0,5 3,8"/>
-                                                                        <polygon points="0,20 -3,8 0,5 3,8"/>
-                                                                        <polygon points="-14,14 -8,3 -5,5 -8,8"/>
-                                                                        <polygon points="-20,0 -8,-3 -5,0 -8,3"/>
-                                                                        <polygon points="-14,-14 -3,-8 0,-5 -3,-8"/>
-                                                                    </g>
-                                                                    <circle cx="0" cy="0" r="4" fill="#d97706"/>
+                                if loading && session.is_some() {
+                                    // Loading existing session — spinner shown immediately on navigation.
+                                    // Checked FIRST (before msgs.is_empty()) to prevent reactive scope
+                                    // disposal panic: old messages stay in the signal while loading,
+                                    // so we must not let the <For> render while is_loading=true.
+                                    // Matches React: isLoadingSession && currentSessionId (Chat.jsx line 1618)
+                                    view! {
+                                        <div class="h-full flex items-center justify-center">
+                                            <Spinner class="text-muted-foreground" />
+                                        </div>
+                                    }.into_any()
+                                } else if msgs.is_empty() {
+                                    // New chat — greeting (vertically centered)
+                                    // Matches React: new chat greeting (Chat.jsx lines 1624-1689)
+                                    view! {
+                                        <div class="h-full flex items-center justify-center px-4">
+                                            <div class="text-center w-full max-w-2xl -mt-24">
+                                                <div class="mb-12">
+                                                    <div class="mb-6">
+                                                        // Kyomi sparkle logo (matches React's inline SVG)
+                                                        <svg class="w-16 h-16 mx-auto" viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg">
+                                                            <g transform="translate(40, 40)">
+                                                                <g fill="#d97706">
+                                                                    <polygon points="0,-20 3,-8 0,-5 -3,-8"/>
+                                                                    <polygon points="14,-14 8,-3 5,-5 8,-8"/>
+                                                                    <polygon points="20,0 8,3 5,0 8,-3"/>
+                                                                    <polygon points="14,14 3,8 0,5 3,8"/>
+                                                                    <polygon points="0,20 -3,8 0,5 3,8"/>
+                                                                    <polygon points="-14,14 -8,3 -5,5 -8,8"/>
+                                                                    <polygon points="-20,0 -8,-3 -5,0 -8,3"/>
+                                                                    <polygon points="-14,-14 -3,-8 0,-5 -3,-8"/>
                                                                 </g>
-                                                            </svg>
-                                                        </div>
-                                                        <h1 class="text-3xl md:text-4xl font-normal text-foreground mb-8">
-                                                            {greeting}
-                                                        </h1>
+                                                                <circle cx="0" cy="0" r="4" fill="#d97706"/>
+                                                            </g>
+                                                        </svg>
                                                     </div>
+                                                    <h1 class="text-3xl md:text-4xl font-normal text-foreground mb-8">
+                                                        {greeting}
+                                                    </h1>
                                                 </div>
                                             </div>
-                                        }.into_any()
-                                    }
+                                        </div>
+                                    }.into_any()
                                 } else {
                                     // Messages list
                                     // Matches React: <div className="w-full max-w-full space-y-6"> (Chat.jsx line 1692)
