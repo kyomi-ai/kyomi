@@ -13,6 +13,8 @@
 use leptos::prelude::*;
 
 use crate::components::chat::{AgentThinking, ThinkingState};
+use crate::components::dashboard::MarkdownRenderer;
+use crate::components::Tooltip;
 use crate::server_fns::chat::{ChatMessageItem, SessionDetail};
 
 use super::format_relative_time;
@@ -52,8 +54,10 @@ pub fn ChatMessage(
     on_open_dashboard_modal: Callback<String>,
     /// Callback when message content is updated — receives (message_id, new_content).
     on_message_update: Callback<(String, String)>,
+    /// Reactive pin state — derived from the messages signal so updates propagate.
+    is_pinned: Signal<bool>,
 ) -> impl IntoView {
-    // These props are part of the API but will be wired in Phases 9-10.
+    // These props are part of the API but will be wired in later phases.
     let _ = (&current_session_id, &session_metadata, &on_message_update);
     // ── Determine alignment and sender ──────────────────────────────────
 
@@ -87,7 +91,6 @@ pub fn ChatMessage(
     let message_content_for_save = message.content.clone();
     let message_timestamp = message.timestamp.clone();
     let message_timestamp_user = message.timestamp.clone();
-    let message_pinned = message.pinned;
     let sender_name_footer = sender_name.clone();
     let sender_name_user = sender_name.clone();
 
@@ -194,13 +197,27 @@ pub fn ChatMessage(
             }
         };
 
-        // Content signal for MarkdownRenderer (Phases 9-10).
+        // Content signal for MarkdownRenderer.
         let content_signal = Signal::derive({
             let content = message_content.clone();
             move || content.clone()
         });
 
-        let ts_display_assistant = format_relative_time(&message_timestamp);
+        // Streaming signal for this specific message.
+        let msg_id_for_streaming = message.message_id.clone();
+        let is_streaming_this_msg = Signal::derive(move || {
+            is_streaming.get() && active_message_id.get().as_deref() == Some(&msg_id_for_streaming)
+        });
+
+        let ts_display_assistant = StoredValue::new(format_relative_time(&message_timestamp));
+        let sender_name_footer = StoredValue::new(sender_name_footer);
+        // Store String values so they can be accessed by Fn closures (not FnOnce).
+        let message_id_for_pin = StoredValue::new(message_id_for_pin);
+        let message_content_for_save = StoredValue::new(message_content_for_save);
+
+        // Clones needed inside closures.
+        let message_content_for_footer = message_content.clone();
+        let message_content_for_show = message_content.clone();
 
         view! {
             <div class="flex flex-col items-start">
@@ -232,26 +249,55 @@ pub fn ChatMessage(
                         }
                     </Show>
 
-                    // MarkdownRenderer wired in Phase 9-10 (markdown renderer chat extensions).
-                    // <Show when={
-                    //     let content = message_content.clone();
-                    //     move || !content.is_empty()
-                    // }>
-                    //     <MarkdownRenderer content=content_signal parameters=... />
-                    // </Show>
+                    <Show when=move || !message_content_for_show.is_empty()>
+                        <MarkdownRenderer
+                            content=content_signal
+                            is_streaming=is_streaming_this_msg
+                        />
+                    </Show>
                 </div>
 
-                // Footer (sender + timestamp + pin/save actions) — Phase 9-10.
-                // <Show when={
-                //     let content = message.content.clone();
-                //     move || !content.is_empty()
-                // }>
-                //     <div class="flex items-center justify-between w-full mt-2 px-1">
-                //         <span class="text-xs text-muted-foreground">
-                //             {sender_name_footer}" \u{00B7} "{ts_display_assistant}
-                //         </span>
-                //     </div>
-                // </Show>
+                // Footer: sender · timestamp on left, pin + save-to-dashboard on right.
+                // Only shown when message has content. Matches React Chat.jsx lines 119-161.
+                <Show when=move || !message_content_for_footer.is_empty()>
+                    <div class="w-full flex items-center justify-between gap-2 mt-1 px-1">
+                        <div class="text-xs text-muted-foreground">
+                            {sender_name_footer.get_value()}" \u{00B7} "{ts_display_assistant.get_value()}
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <Tooltip content="Pin / Unpin message">
+                                <button
+                                    class=move || {
+                                        let base = "text-xs transition-colors flex items-center gap-1";
+                                        if is_pinned.get() {
+                                            format!("{base} text-primary hover:text-primary/80")
+                                        } else {
+                                            format!("{base} text-muted-foreground hover:text-foreground")
+                                        }
+                                    }
+                                    aria-label=move || if is_pinned.get() { "Unpin message" } else { "Pin message" }
+                                    on:click=move |_| on_toggle_pin.run(message_id_for_pin.get_value())
+                                >
+                                    <svg class="w-4 h-4" fill=move || if is_pinned.get() { "currentColor" } else { "none" } stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+                                    </svg>
+                                </button>
+                            </Tooltip>
+                            <Tooltip content="Save to Dashboard">
+                                <button
+                                    class="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1"
+                                    aria-label="Save to Dashboard"
+                                    on:click=move |_| on_open_dashboard_modal.run(message_content_for_save.get_value())
+                                >
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                                    </svg>
+                                    <span>"Save to Dashboard"</span>
+                                </button>
+                            </Tooltip>
+                        </div>
+                    </div>
+                </Show>
             </div>
         }
         .into_any()

@@ -2046,6 +2046,19 @@ pub fn ChatPage() -> impl IntoView {
                                                                 .unwrap_or_default()
                                                         }
                                                     });
+                                                    // Reactive pin state — derived from the messages signal
+                                                    // so that on_toggle_pin updates propagate without
+                                                    // re-running the <For> children closure.
+                                                    let is_pinned = Signal::derive({
+                                                        let msg_id = msg_id.clone();
+                                                        move || {
+                                                            messages.get()
+                                                                .iter()
+                                                                .find(|m| m.message_id == msg_id)
+                                                                .map(|m| m.pinned)
+                                                                .unwrap_or(false)
+                                                        }
+                                                    });
                                                     view! {
                                                         <ChatMessage
                                                             message=message
@@ -2058,6 +2071,7 @@ pub fn ChatPage() -> impl IntoView {
                                                             on_toggle_pin=on_toggle_pin
                                                             on_open_dashboard_modal=on_open_dashboard_modal
                                                             on_message_update=on_message_update
+                                                            is_pinned=is_pinned
                                                         />
                                                     }
                                                 }
