@@ -47,7 +47,8 @@ use crate::components::chat::{
     ChatStateMachine, InlineEditableTitle, ThinkingEvent, ThinkingManager, ThinkingState,
     TokenUsage,
 };
-use crate::components::Spinner;
+use crate::components::dashboard::SaveDashboardModal;
+use crate::components::{ConfirmDialog, Spinner};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::chat::get_chart_context;
 use crate::server_fns::chat::{
@@ -254,10 +255,9 @@ pub fn ChatPage() -> impl IntoView {
     // the session loading effect. This signal lets us skip that redundant load.
     let just_created_session: RwSignal<Option<String>> = RwSignal::new(None);
 
-    // Phase 9 — dashboard modal state (read signals used when SaveDashboardModal
-    // is wired in Phase 13)
-    let (_dashboard_modal_open, set_dashboard_modal_open) = signal(false);
-    let (_dashboard_modal_content, set_dashboard_modal_content) = signal(String::new());
+    // Phase 9 — dashboard modal state
+    let (dashboard_modal_open, set_dashboard_modal_open) = signal(false);
+    let (dashboard_modal_content, set_dashboard_modal_content) = signal(String::new());
     let (_dashboard_modal_message_id, set_dashboard_modal_message_id) =
         signal(Option::<String>::None);
 
@@ -265,6 +265,10 @@ pub fn ChatPage() -> impl IntoView {
     // is wired in Phase 13)
     let (_chart_info_modal_open, _set_chart_info_modal_open) = signal(false);
     let (_chart_info_spec, _set_chart_info_spec) = signal(Option::<String>::None);
+
+    // Confirmation dialog for unshare action
+    // Matches React: Chat.jsx lines 1405-1428 (confirm before unsharing)
+    let (confirm_unshare_open, set_confirm_unshare_open) = signal(false);
 
     // Phase 11 — chart exploration context
     // Stores chart markdown to prepend to the first user message.
@@ -1348,8 +1352,14 @@ pub fn ChatPage() -> impl IntoView {
     };
 
     // Phase 9 — Unshare session handler
-    // Matches React: Chat.jsx lines 1405-1428
+    // Matches React: Chat.jsx lines 1405-1428 — opens confirmation dialog first
     let handle_unshare = move |_| {
+        set_confirm_unshare_open.set(true);
+    };
+
+    // Called when user confirms the "Make Private?" dialog
+    let on_confirm_unshare = Callback::new(move |()| {
+        set_confirm_unshare_open.set(false);
         let sid = current_session_id.get_untracked();
         if let Some(session_id) = sid {
             leptos::task::spawn_local(async move {
@@ -1363,7 +1373,11 @@ pub fn ChatPage() -> impl IntoView {
                 }
             });
         }
-    };
+    });
+
+    let on_cancel_unshare = Callback::new(move |()| {
+        set_confirm_unshare_open.set(false);
+    });
 
     // Phase 9 — Update session title handler
     // Matches React: Chat.jsx lines 1293-1303
@@ -1652,6 +1666,7 @@ pub fn ChatPage() -> impl IntoView {
     let no_datasources = move || !has_datasources.get();
 
     view! {
+        <>
         <Show
             when=move || !personal_no_llm()
             fallback=move || {
@@ -2028,5 +2043,34 @@ pub fn ChatPage() -> impl IntoView {
                 </div>
             </Show>
         </Show>
+
+        // Unshare confirmation dialog
+        // Matches React: Chat.jsx lines 1405-1428 (confirm before making private)
+        <ConfirmDialog
+            open=Signal::derive(move || confirm_unshare_open.get())
+            title="Make Private?"
+            message="Are you sure you want to make this conversation private? Other workspace members will lose access to it."
+            confirm_text="Make Private"
+            destructive=false
+            on_confirm=on_confirm_unshare
+            on_cancel=on_cancel_unshare
+        />
+
+        // Save to Dashboard modal
+        // Matches React: Chat.jsx lines 1803-1809
+        {move || {
+            let content = dashboard_modal_content.get();
+            view! {
+                <SaveDashboardModal
+                    open=Signal::derive(move || dashboard_modal_open.get())
+                    chart_yaml=content
+                    on_close=Callback::new(move |()| set_dashboard_modal_open.set(false))
+                    on_saved=Callback::new(move |_dashboard_id: String| {
+                        set_dashboard_modal_open.set(false);
+                    })
+                />
+            }
+        }}
+        </>
     }
 }
