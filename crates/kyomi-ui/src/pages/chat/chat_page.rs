@@ -331,8 +331,7 @@ pub fn ChatPage() -> impl IntoView {
         let just_created = just_created_session.get_untracked(); // untracked — no extra rerun
         if just_created.is_some() && just_created.as_deref() == session_id.as_deref() {
             // This session was just created by on_send; data arrives via WebSocket.
-            // Clear the flag (untracked write) and return None to skip the fetch.
-            just_created_session.set(None);
+            // Return None to skip the fetch — clearing the flag is done in the Effect below.
             None
         } else {
             session_id
@@ -361,7 +360,13 @@ pub fn ChatPage() -> impl IntoView {
         match (&new_session_id, &current) {
             // URL has a session ID and it's different from current — prepare for load
             (Some(sid), _) if Some(sid) != current.as_ref() => {
-                // M8 — just_created_session skip is handled in session_id_to_load Memo
+                // Clear just_created_session if we're navigating to a different session.
+                // This must happen here (Effect) not in the Memo — writing to signals
+                // inside Memo::new is illegal in Leptos 0.8 and causes WASM panics.
+                let just_created = just_created_session.get_untracked();
+                if just_created.as_deref() != Some(sid.as_str()) {
+                    just_created_session.set(None);
+                }
                 // Do NOT clear messages here — clearing causes <For> to dispose item scopes
                 // while ChatMessage's reactive effects are still pending, causing WASM panic:
                 // "Tried to access a reactive value that has already been disposed."
@@ -374,6 +379,7 @@ pub fn ChatPage() -> impl IntoView {
             }
             // URL has no session ID but we have a current session — clear state (new chat)
             (None, Some(_)) => {
+                just_created_session.set(None);
                 set_current_session_id.set(None);
                 set_messages.set(Vec::new());
                 set_session_title.set(String::new());
@@ -494,25 +500,34 @@ pub fn ChatPage() -> impl IntoView {
             // Track messages to trigger on change
             let _ = messages.get();
 
-            let container = messages_container_ref.get();
-            let end_el = messages_end_ref.get();
+            // Use try_read_untracked to avoid panicking if NodeRefs are disposed
+            // (e.g., when the chat component unmounts while this Effect is pending).
+            let container_guard = messages_container_ref.try_read_untracked();
+            let end_guard = messages_end_ref.try_read_untracked();
 
-            if let (Some(container), Some(end_el)) = (container, end_el) {
-                let scroll_top = container.scroll_top();
-                let scroll_height = container.scroll_height();
-                let client_height = container.client_height();
-                let distance_from_bottom = scroll_height - scroll_top - client_height;
+            let (Some(container_guard), Some(end_guard)) = (container_guard, end_guard) else {
+                return;
+            };
+            let (Some(container), Some(end_el)) = (container_guard.as_ref(), end_guard.as_ref())
+            else {
+                return;
+            };
 
-                // Only auto-scroll if within 100px of bottom.
-                // MINOR: 50ms debounce matches React's scrollToBottom behavior.
-                if distance_from_bottom < 100 {
-                    gloo_timers::callback::Timeout::new(50, move || {
-                        let opts = web_sys::ScrollIntoViewOptions::new();
-                        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                        end_el.scroll_into_view_with_scroll_into_view_options(&opts);
-                    })
-                    .forget();
-                }
+            let scroll_top = container.scroll_top();
+            let scroll_height = container.scroll_height();
+            let client_height = container.client_height();
+            let distance_from_bottom = scroll_height - scroll_top - client_height;
+
+            // Only auto-scroll if within 100px of bottom.
+            // MINOR: 50ms debounce matches React's scrollToBottom behavior.
+            if distance_from_bottom < 100 {
+                let end_el = end_el.clone();
+                gloo_timers::callback::Timeout::new(50, move || {
+                    let opts = web_sys::ScrollIntoViewOptions::new();
+                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                    end_el.scroll_into_view_with_scroll_into_view_options(&opts);
+                })
+                .forget();
             }
         });
     }

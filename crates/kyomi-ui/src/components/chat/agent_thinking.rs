@@ -74,18 +74,23 @@ fn format_duration(duration_ms: u64) -> String {
     }
 }
 
-/// Format a timestamp string to HH:MM:SS.f (24-hour).
+/// Format a timestamp string to HH:MM:SS.sss (24-hour, milliseconds).
 ///
 /// Matches React's `formatTimestamp()` — parses ISO 8601 and formats
-/// with 24-hour clock and fractional seconds.
+/// with 24-hour clock and millisecond precision.
+///
+/// Note: chrono only supports %.3f (ms), %.6f (us), %.9f (ns) — NOT %.1f.
+/// Using %.1f causes DelayedFormat::fmt to return Err(fmt::Error), which
+/// makes .to_string() panic with "a Display implementation returned an error
+/// unexpectedly". Always use a supported precision.
 fn format_timestamp(timestamp: &str) -> String {
     // Parse ISO 8601 timestamp using chrono
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-        // Format as HH:MM:SS.f (1 fractional digit)
-        dt.format("%H:%M:%S%.1f").to_string()
+        // Format as HH:MM:SS.sss (milliseconds precision)
+        dt.format("%H:%M:%S%.3f").to_string()
     } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.f")
     {
-        dt.format("%H:%M:%S%.1f").to_string()
+        dt.format("%H:%M:%S%.3f").to_string()
     } else {
         // Fallback: return the raw timestamp if we can't parse it
         timestamp.to_string()
@@ -213,10 +218,14 @@ pub fn AgentThinking(
 
         Effect::new(move |_| {
             if is_expanded.get() && events_len > 0 {
-                if let Some(el) = thinking_end_ref.get() {
-                    let opts = web_sys::ScrollIntoViewOptions::new();
-                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                    el.scroll_into_view_with_scroll_into_view_options(&opts);
+                // Use try_read_untracked to avoid panicking if AgentThinking is
+                // unmounted before this Effect's microtask runs.
+                if let Some(guard) = thinking_end_ref.try_read_untracked() {
+                    if let Some(el) = guard.as_ref() {
+                        let opts = web_sys::ScrollIntoViewOptions::new();
+                        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                        el.scroll_into_view_with_scroll_into_view_options(&opts);
+                    }
                 }
             }
         });
@@ -324,6 +333,7 @@ pub fn AgentThinking(
                     let title = event.title.clone();
                     let description = event.description.clone();
                     let duration_ms = event.duration_ms;
+                    // PANIC-HUNT: restoring format_timestamp call to test if it's the panic source
                     let timestamp = format_timestamp(&event.timestamp);
 
                     view! {
