@@ -318,92 +318,55 @@ pub fn ChatPage() -> impl IntoView {
     // ── Navigation ──────────────────────────────────────────────────────
     let navigate = use_navigate();
 
-    // ── Session loading effect ──────────────────────────────────────────
+    // ── Session loading resource ────────────────────────────────────────
     // When url_session_id changes, load the session from the server.
     // Matches React's useEffect for urlSessionId (Chat.jsx lines 782-804).
+    //
+    // Uses Resource::new (the correct Leptos 0.8 pattern for async data
+    // fetching) rather than Effect::new + spawn_local. The key Memo filters
+    // out just-created sessions so we don't reload data that already arrived
+    // via WebSocket.
+    let session_id_to_load = Memo::new(move |_| {
+        let session_id = url_session_id.get(); // tracked — triggers reload
+        let just_created = just_created_session.get_untracked(); // untracked — no extra rerun
+        if just_created.is_some() && just_created.as_deref() == session_id.as_deref() {
+            // This session was just created by on_send; data arrives via WebSocket.
+            // Clear the flag (untracked write) and return None to skip the fetch.
+            just_created_session.set(None);
+            None
+        } else {
+            session_id
+        }
+    });
+
+    let session_messages_resource = Resource::new(
+        move || session_id_to_load.get(),
+        move |session_id| async move {
+            match session_id {
+                Some(sid) => Some((sid.clone(), get_session_messages(sid).await)),
+                None => None,
+            }
+        },
+    );
+
+    // ── State management effect: clear / reset on URL change ────────────
+    // Handles the two navigation cases:
+    //   1. Navigating TO a session — set is_loading, clear messages
+    //   2. Navigating AWAY from all sessions — clear all state (new chat)
     let chat_state_for_load = chat_state.clone();
     Effect::new(move |_| {
         let new_session_id = url_session_id.get();
         let current = current_session_id.get_untracked();
 
         match (&new_session_id, &current) {
-            // URL has a session ID and it's different from current — load it
+            // URL has a session ID and it's different from current — prepare for load
             (Some(sid), _) if Some(sid) != current.as_ref() => {
-                // M8 — Skip reload for sessions we just created (data is already loaded)
-                if just_created_session.get_untracked().as_deref() == Some(sid.as_str()) {
-                    just_created_session.set(None);
-                    set_current_session_id.set(Some(sid.clone()));
-                    return;
-                }
-
-                let sid = sid.clone();
+                // M8 — just_created_session skip is handled in session_id_to_load Memo
                 set_messages.set(Vec::new());
                 set_current_greeting.set(String::new());
                 set_is_loading.set(true);
                 set_current_session_id.set(Some(sid.clone()));
-                // Reset chat state when switching sessions
                 chat_state_for_load.reset();
-
-                leptos::task::spawn_local(async move {
-                    match get_session_messages(sid.clone()).await {
-                        Ok(response) => {
-                            // Set session metadata
-                            if let Some(ref title) = response.session.title {
-                                set_session_title.set(title.clone());
-                            }
-                            let is_shared = response.session.shared;
-                            set_session_metadata.set(response.session);
-
-                            // Build thinking state from stored events
-                            let mut thinking = HashMap::new();
-                            for msg in &response.messages {
-                                let events: Vec<ThinkingEvent> =
-                                    msg.thinking_events
-                                        .iter()
-                                        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-                                        .collect();
-
-                                let token_usage: Option<TokenUsage> =
-                                    msg.token_usage
-                                        .as_ref()
-                                        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                                if !events.is_empty() || token_usage.is_some() {
-                                    thinking.insert(
-                                        msg.message_id.clone(),
-                                        ThinkingState {
-                                            events,
-                                            is_active: false,
-                                            cancelled: false,
-                                            token_usage,
-                                        },
-                                    );
-                                }
-                            }
-                            set_thinking_map.set(thinking);
-
-                            // M16 — Capture last message ID before the move
-                            let last_msg_id = response.messages.last().map(|m| m.message_id.clone());
-                            set_messages.set(response.messages);
-
-                            // M16 — Mark session read for shared conversations
-                            // immediately after loading, instead of in a separate
-                            // Effect that over-fires on metadata changes.
-                            if is_shared {
-                                let read_sid = sid.clone();
-                                leptos::task::spawn_local(async move {
-                                    let _ = mark_session_read(read_sid, last_msg_id).await;
-                                });
-                            }
-                        }
-                        Err(_e) => {
-                            // Gracefully handle by setting empty messages
-                            // (matches React's catch block in loadSessionMessages)
-                            set_messages.set(Vec::new());
-                        }
-                    }
-                    set_is_loading.set(false);
-                });
             }
             // URL has no session ID but we have a current session — clear state (new chat)
             (None, Some(_)) => {
@@ -416,6 +379,77 @@ pub fn ChatPage() -> impl IntoView {
                 set_current_greeting.set(generate_greeting(&user_display_name.get()));
             }
             _ => {}
+        }
+    });
+
+    // ── Resource sync effect: apply loaded session data to signals ───────
+    // Fires when session_messages_resource resolves. Populates messages,
+    // session metadata, thinking state, and clears is_loading.
+    Effect::new(move |_| {
+        match session_messages_resource.get() {
+            Some(Some((sid, Ok(response)))) => {
+                // Set session metadata
+                if let Some(ref title) = response.session.title {
+                    set_session_title.set(title.clone());
+                }
+                let is_shared = response.session.shared;
+                set_session_metadata.set(response.session);
+
+                // Build thinking state from stored events
+                let mut thinking = HashMap::new();
+                for msg in &response.messages {
+                    let events: Vec<ThinkingEvent> =
+                        msg.thinking_events
+                            .iter()
+                            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                            .collect();
+
+                    let token_usage: Option<TokenUsage> =
+                        msg.token_usage
+                            .as_ref()
+                            .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                    if !events.is_empty() || token_usage.is_some() {
+                        thinking.insert(
+                            msg.message_id.clone(),
+                            ThinkingState {
+                                events,
+                                is_active: false,
+                                cancelled: false,
+                                token_usage,
+                            },
+                        );
+                    }
+                }
+                set_thinking_map.set(thinking);
+
+                // M16 — Capture last message ID before the move
+                let last_msg_id = response.messages.last().map(|m| m.message_id.clone());
+                set_messages.set(response.messages);
+                set_is_loading.set(false);
+
+                // M16 — Mark session read for shared conversations
+                if is_shared {
+                    let read_sid = sid.clone();
+                    leptos::task::spawn_local(async move {
+                        let _ = mark_session_read(read_sid, last_msg_id).await;
+                    });
+                }
+            }
+            Some(Some((_, Err(_e)))) => {
+                // Gracefully handle by setting empty messages
+                // (matches React's catch block in loadSessionMessages)
+                set_messages.set(Vec::new());
+                set_is_loading.set(false);
+            }
+            Some(None) => {
+                // session_id_to_load returned None — just_created_session skip path.
+                // State is already set by the URL change effect; nothing to do here.
+                set_is_loading.set(false);
+            }
+            None => {
+                // Resource not yet resolved — is_loading was set by the URL change effect.
+            }
         }
     });
 
