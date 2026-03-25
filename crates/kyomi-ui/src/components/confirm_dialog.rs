@@ -71,12 +71,22 @@ pub fn ConfirmDialog(
                 // Dialog
                 <div
                     class="bg-card border border-border rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+                    role="alertdialog"
+                    aria-modal="true"
+                    aria-labelledby="confirm-dialog-title"
+                    aria-describedby="confirm-dialog-message"
                     on:click=|ev| ev.stop_propagation()
                 >
-                    <h3 class="text-lg font-semibold text-foreground mb-2">
+                    <h3
+                        id="confirm-dialog-title"
+                        class="text-lg font-semibold text-foreground mb-2"
+                    >
                         {title.clone()}
                     </h3>
-                    <p class="text-sm text-muted-foreground mb-6">
+                    <p
+                        id="confirm-dialog-message"
+                        class="text-sm text-muted-foreground mb-6"
+                    >
                         {message.clone()}
                     </p>
                     <div class="flex justify-end gap-3">
