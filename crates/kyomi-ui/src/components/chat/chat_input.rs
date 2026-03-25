@@ -10,6 +10,7 @@
 
 use leptos::prelude::*;
 
+use crate::components::alert::{Alert, AlertDescription, AlertVariant};
 use crate::components::checkbox::Checkbox;
 
 /// Chat input component with auto-expanding textarea, send/stop buttons, and
@@ -148,103 +149,117 @@ pub fn ChatInput(
         }
     };
 
+    // Effective placeholder: different when credits are exhausted.
+    // Matches React: Chat.jsx line 1668 — placeholder changes when creditsExhausted.
+    let effective_placeholder = if credits_exhausted {
+        "AI features disabled - upgrade to continue"
+    } else {
+        placeholder
+    };
+
     view! {
         <div class="border-t border-border flex-shrink-0 p-4 bg-card">
+            // Credits exhausted warning banner — shown above the (disabled) textarea.
+            // Matches React: Chat.jsx lines 1651-1657 and 1721-1727.
             {if credits_exhausted {
                 view! {
-                    <div class="text-center text-sm text-muted-foreground py-2">
-                        "AI budget exhausted for this month. Upgrade for more capacity."
-                    </div>
+                    <Alert variant=AlertVariant::Warning class="mb-4">
+                        <AlertDescription class="text-center">
+                            "AI budget exhausted for this month. Upgrade for more capacity."
+                        </AlertDescription>
+                    </Alert>
                 }.into_any()
             } else {
-                view! {
-                    <>
-                        // Connection status indicator
-                        <Show when=move || !is_connected()>
-                            <div class="mb-2 text-sm text-muted-foreground flex items-center gap-2">
-                                <div class="w-2 h-2 bg-warning-foreground rounded-full animate-pulse"></div>
-                                <span>{connection_status_text}</span>
+                view! { <></> }.into_any()
+            }}
+
+            // Connection status indicator (only when not credits-exhausted and not connected)
+            <Show when=move || !credits_exhausted && !is_connected()>
+                <div class="mb-2 text-sm text-muted-foreground flex items-center gap-2">
+                    <div class="w-2 h-2 bg-warning-foreground rounded-full animate-pulse"></div>
+                    <span>{connection_status_text}</span>
+                </div>
+            </Show>
+
+            // Skip AI checkbox (optional, hidden when credits exhausted)
+            <Show when=move || show_skip_ai && !credits_exhausted>
+                {move || {
+                    skip_ai.map(|skip_signal| {
+                        let checked = Signal::derive(move || skip_signal.get());
+                        view! {
+                            <div class="mb-2 flex items-center gap-2">
+                                <Checkbox
+                                    checked=checked
+                                    on_change=Callback::new(move |v: bool| skip_signal.set(v))
+                                />
+                                <label class="text-sm text-muted-foreground cursor-pointer">
+                                    "Skip AI response"
+                                </label>
                             </div>
-                        </Show>
+                        }
+                    })
+                }}
+            </Show>
 
-                        // Skip AI checkbox (optional)
-                        <Show when=move || show_skip_ai>
-                            {move || {
-                                skip_ai.map(|skip_signal| {
-                                    let checked = Signal::derive(move || skip_signal.get());
-                                    view! {
-                                        <div class="mb-2 flex items-center gap-2">
-                                            <Checkbox
-                                                checked=checked
-                                                on_change=Callback::new(move |v: bool| skip_signal.set(v))
-                                            />
-                                            <label class="text-sm text-muted-foreground cursor-pointer">
-                                                "Skip AI response"
-                                            </label>
-                                        </div>
-                                    }
-                                })
-                            }}
-                        </Show>
-
-                        // Input area with textarea and send/stop button
-                        <div class="relative flex items-center">
-                            <textarea
-                                node_ref=textarea_ref
-                                prop:value=move || input_value.get()
-                                on:input=on_input
-                                on:keydown=on_keydown
-                                placeholder=placeholder
-                                class="w-full pr-12 resize-none border border-input focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px]"
-                                style=format!("max-height: {}px", max_height)
-                                rows="1"
-                                disabled=move || !can_send.get()
-                            />
-                            <Show
-                                when=move || show_stop_button.get()
-                                fallback=move || {
-                                    view! {
-                                        // Send button
-                                        <button
-                                            on:click=move |_| do_send()
-                                            disabled=move || !send_enabled()
-                                            class="absolute right-2 top-2 bottom-2 my-auto p-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:bg-muted disabled:cursor-not-allowed transition-opacity flex items-center justify-center"
-                                            aria-label="Send message"
-                                            title=move || {
-                                                if !is_connected() {
-                                                    "Waiting for connection..."
-                                                } else {
-                                                    "Send message"
-                                                }
-                                            }
-                                        >
-                                            // Paper airplane SVG
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                                            </svg>
-                                        </button>
+            // Input area with textarea and send/stop button.
+            // The textarea is always rendered — disabled when credits_exhausted.
+            // Matches React: Chat.jsx lines 1658-1686 (textarea always present, just disabled).
+            <div class="relative flex items-center">
+                <textarea
+                    node_ref=textarea_ref
+                    prop:value=move || input_value.get()
+                    on:input=on_input
+                    on:keydown=on_keydown
+                    placeholder=effective_placeholder
+                    class="w-full pr-12 resize-none border border-input focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px]"
+                    style=format!("max-height: {}px", max_height)
+                    rows="1"
+                    disabled=move || credits_exhausted || !can_send.get()
+                />
+                <Show
+                    when=move || show_stop_button.get()
+                    fallback=move || {
+                        view! {
+                            // Send button — disabled when credits exhausted
+                            <button
+                                on:click=move |_| do_send()
+                                disabled=move || credits_exhausted || !send_enabled()
+                                class="absolute right-2 top-2 bottom-2 my-auto p-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:bg-muted disabled:cursor-not-allowed transition-opacity flex items-center justify-center"
+                                aria-label="Send message"
+                                title=move || {
+                                    if credits_exhausted {
+                                        "AI budget exhausted"
+                                    } else if !is_connected() {
+                                        "Waiting for connection..."
+                                    } else {
+                                        "Send message"
                                     }
                                 }
                             >
-                                // Stop button
-                                <button
-                                    on:click=move |_| on_cancel.run(())
-                                    disabled=move || !can_cancel.get()
-                                    class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-1.5"
-                                    aria-label="Stop generating"
-                                    title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
-                                >
-                                    // X/stop SVG
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                    </svg>
-                                    <span class="text-sm font-medium">"Stop"</span>
-                                </button>
-                            </Show>
-                        </div>
-                    </>
-                }.into_any()
-            }}
+                                // Paper airplane SVG
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                                </svg>
+                            </button>
+                        }
+                    }
+                >
+                    // Stop button
+                    <button
+                        on:click=move |_| on_cancel.run(())
+                        disabled=move || !can_cancel.get()
+                        class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-1.5"
+                        aria-label="Stop generating"
+                        title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
+                    >
+                        // X/stop SVG
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        <span class="text-sm font-medium">"Stop"</span>
+                    </button>
+                </Show>
+            </div>
         </div>
     }
 }
