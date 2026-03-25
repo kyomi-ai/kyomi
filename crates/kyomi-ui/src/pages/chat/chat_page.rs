@@ -2005,37 +2005,43 @@ pub fn ChatPage() -> impl IntoView {
                                 } else {
                                     // Messages list
                                     // Matches React: <div className="w-full max-w-full space-y-6"> (Chat.jsx line 1692)
+                                    // Use <For> keyed list so Leptos can reconcile items without
+                                    // creating reactive signals inside a non-reactive closure,
+                                    // which caused "disposed reactive value" WASM panics.
                                     view! {
                                         <div class="w-full max-w-full space-y-6" style="display: block;">
-                                            {msgs.into_iter().map(|message| {
-                                                let msg_id = message.message_id.clone();
-
-                                                // Create a derived signal for this message's thinking state
-                                                let thinking_signal = Signal::derive({
-                                                    let msg_id = msg_id.clone();
-                                                    move || {
-                                                        thinking_map.get()
-                                                            .get(&msg_id)
-                                                            .cloned()
-                                                            .unwrap_or_default()
+                                            <For
+                                                each=move || filtered_messages.get()
+                                                key=|msg| msg.message_id.clone()
+                                                children=move |message| {
+                                                    let msg_id = message.message_id.clone();
+                                                    // Signal::derive inside <For> children is correct —
+                                                    // each child has its own reactive scope.
+                                                    let thinking_signal = Signal::derive({
+                                                        let msg_id = msg_id.clone();
+                                                        move || {
+                                                            thinking_map.get()
+                                                                .get(&msg_id)
+                                                                .cloned()
+                                                                .unwrap_or_default()
+                                                        }
+                                                    });
+                                                    view! {
+                                                        <ChatMessage
+                                                            message=message
+                                                            thinking_state=thinking_signal
+                                                            is_streaming=is_streaming
+                                                            active_message_id=active_message_id
+                                                            current_session_id=current_session_id.into()
+                                                            session_metadata=session_metadata.into()
+                                                            current_user_id=current_user_id.get_untracked()
+                                                            on_toggle_pin=on_toggle_pin
+                                                            on_open_dashboard_modal=on_open_dashboard_modal
+                                                            on_message_update=on_message_update
+                                                        />
                                                     }
-                                                });
-
-                                                view! {
-                                                    <ChatMessage
-                                                        message=message
-                                                        thinking_state=thinking_signal
-                                                        is_streaming=is_streaming
-                                                        active_message_id=active_message_id
-                                                        current_session_id=Signal::derive(move || current_session_id.get())
-                                                        session_metadata=Signal::derive(move || session_metadata.get())
-                                                        current_user_id=current_user_id.get_untracked()
-                                                        on_toggle_pin=on_toggle_pin
-                                                        on_open_dashboard_modal=on_open_dashboard_modal
-                                                        on_message_update=on_message_update
-                                                    />
                                                 }
-                                            }).collect_view()}
+                                            />
                                         </div>
                                     }.into_any()
                                 }
