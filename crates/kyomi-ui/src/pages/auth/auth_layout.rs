@@ -75,8 +75,8 @@ pub fn AuthLayout(
                             <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-12 mx-auto dark:hidden"/>
                             <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-12 mx-auto hidden dark:block"/>
                         </div>
-                        // Title — React: className="text-3xl font-semibold text-foreground mb-2"
-                        <h2 class="text-3xl font-semibold text-foreground mb-2">
+                        // Title — React: className="text-xl font-semibold text-foreground mb-2"
+                        <h2 class="text-xl font-semibold text-foreground mb-2">
                             {title}
                         </h2>
                         // Subtitle — React: className="text-muted-foreground mb-4"

@@ -77,7 +77,7 @@ fn ConnectDataStep() -> impl IntoView {
         <div class="min-h-screen flex items-center justify-center bg-background p-4">
             <Card class="max-w-xl w-full">
                 <CardHeader class="text-center">
-                    <CardTitle class="text-2xl">"Connect Your Data"</CardTitle>
+                    <CardTitle class="text-xl">"Connect Your Data"</CardTitle>
                     <CardDescription>
                         "Kyomi works best when it can query your data directly. Choose how to get started."
                     </CardDescription>
@@ -178,7 +178,7 @@ fn ConnectAiToolStep() -> impl IntoView {
         <div class="min-h-screen flex items-center justify-center bg-background p-4">
             <Card class="max-w-2xl w-full">
                 <CardHeader class="text-center">
-                    <CardTitle class="text-2xl">"Connect Kyomi to Your AI Tool"</CardTitle>
+                    <CardTitle class="text-xl">"Connect Kyomi to Your AI Tool"</CardTitle>
                     <CardDescription>
                         "Add Kyomi as an MCP server so your AI assistant can query your data."
                     </CardDescription>

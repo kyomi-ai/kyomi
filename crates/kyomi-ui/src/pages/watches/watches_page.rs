@@ -34,8 +34,8 @@ use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
 // From button.rs — used for raw <button> elements that need click handlers.
 
 const BTN_BASE: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";
-const BTN_DEFAULT: &str = "bg-primary text-primary-foreground shadow hover:bg-primary/90";
-const BTN_GHOST: &str = "text-foreground hover:bg-accent hover:text-accent-foreground";
+const BTN_DEFAULT: &str = "bg-primary text-primary-foreground shadow hover:bg-primary/90 transition-colors";
+const BTN_GHOST: &str = "text-foreground hover:bg-accent hover:text-accent-foreground transition-colors";
 const BTN_DEFAULT_SIZE: &str = "h-9 px-4 py-2";
 const BTN_SM: &str = "h-8 rounded-md px-3 text-xs";
 
@@ -695,7 +695,7 @@ pub fn WatchesPage() -> impl IntoView {
                                     <div class="mx-auto mb-4 h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center">
                                         <EyeIcon class="h-8 w-8 text-primary".to_string() />
                                     </div>
-                                    <CardTitle class="text-2xl".to_string()>"Proactive Data Monitoring"</CardTitle>
+                                    <CardTitle class="text-xl".to_string()>"Proactive Data Monitoring"</CardTitle>
                                     <p class="text-base text-muted-foreground">
                                         "Let Kyomi watch your data and alert you when something noteworthy happens."
                                     </p>

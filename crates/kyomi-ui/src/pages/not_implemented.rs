@@ -30,7 +30,7 @@ pub fn NotImplementedPage(
                 </svg>
             </div>
             <div class="space-y-2">
-                <h1 class="text-2xl font-semibold text-foreground">{name}</h1>
+                <h1 class="text-xl font-semibold text-foreground">{name}</h1>
                 <p class="text-muted-foreground max-w-md">
                     "This page hasn't been migrated to the new frontend yet."
                 </p>

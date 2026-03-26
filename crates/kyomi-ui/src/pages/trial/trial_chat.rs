@@ -150,7 +150,7 @@ fn WelcomeState(
         <div class="space-y-6">
             // Heading
             <div class="text-center">
-                <h2 class="text-2xl font-semibold text-foreground mb-2">
+                <h2 class="text-xl font-semibold text-foreground mb-2">
                     "Welcome to Kyomi"
                 </h2>
                 <p class="text-muted-foreground max-w-md mx-auto">

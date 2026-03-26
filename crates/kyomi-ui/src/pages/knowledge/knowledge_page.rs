@@ -343,7 +343,7 @@ pub fn KnowledgePage() -> impl IntoView {
                 <div class="flex items-center gap-3">
                     // Mobile sidebar toggle button
                     <button
-                        class="md:hidden inline-flex items-center justify-center rounded-md text-sm font-medium h-8 w-8 border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground"
+                        class="md:hidden inline-flex items-center justify-center rounded-md text-sm font-medium h-8 w-8 border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                         on:click=move |_| set_sidebar_open.update(|v| *v = !*v)
                     >
                         <Show
@@ -353,7 +353,7 @@ pub fn KnowledgePage() -> impl IntoView {
                             <XIcon class="h-4 w-4"/>
                         </Show>
                     </button>
-                    <h1 class="text-lg md:text-2xl font-semibold text-foreground">"Knowledge"</h1>
+                    <h1 class="text-lg md:text-xl font-semibold text-foreground">"Knowledge"</h1>
                 </div>
                 <div class="flex items-center gap-2">
                     <Button

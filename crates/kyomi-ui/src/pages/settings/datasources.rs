@@ -339,7 +339,7 @@ fn DatasourceRow(
     };
 
     view! {
-        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 gap-3 hover:bg-muted/50">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 gap-3 hover:bg-muted/50 transition-colors">
             // Left side: name, type badge, status badges
             <div class="flex items-center gap-3 min-w-0">
                 <span class="h-6 w-6 shrink-0 text-muted-foreground inline-flex items-center justify-center">

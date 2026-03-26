@@ -217,7 +217,7 @@ fn CollectionRow(
         if active {
             "group relative bg-primary/10"
         } else {
-            "group relative hover:bg-accent"
+            "group relative hover:bg-accent transition-colors"
         }
     };
 
@@ -252,7 +252,7 @@ fn CollectionRow(
             // React: `absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1`
             <div class="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
                 <button
-                    class="p-1 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded"
+                    class="p-1 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded transition-colors"
                     aria-label="Edit collection"
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();
@@ -262,7 +262,7 @@ fn CollectionRow(
                     {icon_edit_4()}
                 </button>
                 <button
-                    class="p-1 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded"
+                    class="p-1 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded transition-colors"
                     aria-label="Delete collection"
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();

@@ -63,7 +63,7 @@ fn PasswordField(
                 />
                 <button
                     type="button"
-                    class="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 inline-flex items-center justify-center rounded-md text-foreground hover:bg-accent hover:text-accent-foreground"
+                    class="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7 inline-flex items-center justify-center rounded-md text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
                     on:click=move |_| visible.update(|v| *v = !*v)
                 >
                     <Show
