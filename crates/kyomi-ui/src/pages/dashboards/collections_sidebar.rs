@@ -476,7 +476,7 @@ fn ColorPicker(
                 <input
                     type="text"
                     prop:value=move || value.get()
-                    class="flex-1 px-4 py-2 border border-input rounded-lg bg-card text-foreground focus:ring-2 focus:ring-primary focus:border-transparent font-mono text-sm"
+                    class="flex-1 px-4 py-2 border border-input rounded-lg bg-card text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono text-sm"
                     placeholder="#d97706"
                     on:input=move |ev| {
                         on_change.run(event_target_value(&ev));
@@ -601,7 +601,7 @@ fn CollectionModal(
                 type="submit"
                 form="collection-form"
                 disabled=move || saving.get()
-                class="flex-1 px-4 py-2 text-sm font-medium text-white bg-primary hover:bg-primary/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                class="flex-1 inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
             >
                 {move || if saving.get() { "Saving..." } else { submit_text }}
             </button>
@@ -636,7 +636,7 @@ fn CollectionModal(
                     <Label html_for="coll-desc">"Description"</Label>
                     <textarea
                         id="coll-desc"
-                        class="w-full px-4 py-2 border border-input rounded-lg bg-card text-foreground focus:ring-2 focus:ring-primary focus:border-transparent resize-none"
+                        class="w-full px-4 py-2 border border-input rounded-lg bg-card text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
                         placeholder="Dashboards for marketing team analytics"
                         rows="3"
                         prop:value=move || description.get()
@@ -966,13 +966,13 @@ pub fn CollectionsSidebar(
 
                 if is_mobile.get() {
                     // Mobile: Fixed overlay with backdrop
-                    // React: `fixed top-32 left-0 right-0 bottom-0 bg-black/50 z-40`
+                    // React: `fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
                     // React: `fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl`
                     view! {
                         <div>
                             // Backdrop
                             <div
-                                class="fixed top-32 left-0 right-0 bottom-0 bg-black/50 z-40"
+                                class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| set_open.set(false)
                             />
                             // Sidebar panel

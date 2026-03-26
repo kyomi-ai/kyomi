@@ -34,7 +34,7 @@ pub fn PasskeySignInButton(
             type="button"
             on:click=handle_click
             disabled=is_disabled
-            class="w-full py-3.5 px-4 bg-primary text-white font-semibold rounded-xl shadow-lg hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="w-full py-3.5 px-4 bg-primary text-white font-semibold rounded-lg shadow hover:shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
         >
             {move || {
                 if loading.get() {

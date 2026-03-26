@@ -198,7 +198,7 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
                     <div class="space-y-4">
                         // Option 1: Explore with sample data
                         {sample_available.then(|| view! {
-                            <div class="border border-border rounded-xl p-5">
+                            <div class="border border-border rounded-lg p-5">
                                 <div class="flex items-start gap-4">
                                     <Icon
                                         icon=icondata_lu::LuDatabase
@@ -225,7 +225,7 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
                         })}
 
                         // Option 2: Connect own database
-                        <div class="border border-border rounded-xl p-5">
+                        <div class="border border-border rounded-lg p-5">
                             <div class="flex items-start gap-4">
                                 <Icon
                                     icon=icondata_lu::LuDatabase
@@ -586,7 +586,7 @@ fn CredentialRow(
     };
 
     view! {
-        <div class="flex items-center justify-between p-4 border border-border rounded-xl bg-card">
+        <div class="flex items-center justify-between p-4 border border-border rounded-lg bg-card">
             <div class="flex items-center gap-3">
                 <Icon
                     icon=icondata_lu::LuDatabase

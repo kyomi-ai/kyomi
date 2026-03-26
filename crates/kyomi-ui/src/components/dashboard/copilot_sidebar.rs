@@ -927,13 +927,13 @@ pub fn CopilotSidebar(
             {move || {
                 if is_mobile.get() {
                     // Mobile: Slide-in panel with backdrop
-                    // React: `fixed top-32 left-0 right-0 bottom-0 bg-black/50 z-40`
+                    // React: `fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
                     // React: `fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl`
                     let handle_close_backdrop = handle_close.clone();
                     view! {
                         <div>
                             <div
-                                class="fixed top-32 left-0 right-0 bottom-0 bg-black/50 z-40"
+                                class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| handle_close_backdrop()
                             />
                             <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl">

@@ -102,7 +102,7 @@ pub fn UnsubscribePage() -> impl IntoView {
                                             name="email"
                                             type="email"
                                             autocomplete="email"
-                                            class="w-full px-4 py-3.5 bg-muted border border-border rounded-xl text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all duration-200 hover:bg-background"
+                                            class="w-full px-4 py-3.5 bg-muted border border-border rounded-lg text-foreground placeholder-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 hover:bg-background"
                                             prop:value=move || email.get()
                                             on:input=move |ev| {
                                                 set_email

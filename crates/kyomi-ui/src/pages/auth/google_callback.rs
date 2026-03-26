@@ -291,7 +291,7 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                                     <div class="space-y-3">
                                         <a
                                             href="/login"
-                                            class="block w-full px-4 py-2 bg-muted-foreground text-primary-foreground rounded-xl hover:bg-foreground transition-colors"
+                                            class="block w-full px-4 py-2 bg-muted-foreground text-primary-foreground rounded-lg hover:bg-foreground transition-colors"
                                         >
                                             "Return to Login"
                                         </a>
@@ -304,7 +304,7 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                                                     }
                                                 }
                                             }
-                                            class="w-full px-4 py-2 bg-primary text-white rounded-xl hover:bg-primary/90 transition-colors"
+                                            class="w-full px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 transition-colors"
                                         >
                                             "Try Again"
                                         </button>

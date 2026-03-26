@@ -56,10 +56,10 @@ fn ExclamationTriangleIcon(#[prop(into, optional)] class: String) -> impl IntoVi
 
 // ─── Status Bar component ────────────────────────────────────────────────────
 
-/// Status bar displaying dry run validation status and cursor position.
+/// Status bar displaying dry run validation status, cursor position, and Run Query button.
 ///
-/// Matches the React status bar styling: `px-4 py-2 border-t border-border
-/// bg-muted flex-shrink-0 overflow-hidden flex items-center justify-between`.
+/// Matches the React status bar layout: `[dry run status] ... [Run Query button]`.
+/// React reference: `apps/frontend/src/components/SQLEditor.jsx` (lines 709-766).
 #[component]
 pub fn StatusBar(
     /// Current dry run status — drives the left side of the status bar.
@@ -71,6 +71,14 @@ pub fn StatusBar(
     /// Cursor column number (1-indexed).
     #[prop(into)]
     cursor_col: Signal<usize>,
+    /// Whether a query is currently running.
+    #[prop(into)]
+    query_running: Signal<bool>,
+    /// Whether the Run Query button should be disabled (e.g. no datasource selected).
+    #[prop(into)]
+    run_disabled: Signal<bool>,
+    /// Called when the user clicks "Run Query".
+    on_run_query: Callback<()>,
 ) -> impl IntoView {
     view! {
         <div class="px-4 py-2 border-t border-border bg-muted flex-shrink-0 overflow-hidden flex items-center justify-between" role="status" aria-live="polite">
@@ -137,9 +145,18 @@ pub fn StatusBar(
                 }}
             </div>
 
-            // Right side: cursor position
-            <div class="text-xs text-muted-foreground font-mono flex-shrink-0 ml-4">
-                {move || format!("Ln {}, Col {}", cursor_line.get(), cursor_col.get())}
+            // Right side: cursor position + Run Query button
+            <div class="flex items-center gap-3 flex-shrink-0 ml-4">
+                <div class="text-xs text-muted-foreground font-mono">
+                    {move || format!("Ln {}, Col {}", cursor_line.get(), cursor_col.get())}
+                </div>
+                <button
+                    on:click=move |_| on_run_query.run(())
+                    disabled=move || query_running.get() || run_disabled.get()
+                    class="px-3 py-1.5 text-xs font-medium bg-primary text-white hover:bg-primary/90 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                >
+                    {move || if query_running.get() { "Running..." } else { "Run Query" }}
+                </button>
             </div>
         </div>
     }

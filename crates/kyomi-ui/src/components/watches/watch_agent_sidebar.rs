@@ -319,13 +319,13 @@ pub fn WatchAgentSidebar(
             {move || {
                 if is_mobile.get() {
                     // Mobile: Slide-in panel with backdrop
-                    // React: `fixed top-16 left-0 right-0 bottom-0 bg-black/50 z-40`
+                    // React: `fixed top-16 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
                     // React: `fixed top-16 right-0 bottom-0 w-full max-w-[92vw] z-50 bg-background flex flex-col shadow-xl`
                     let handle_close_backdrop = handle_close.clone();
                     view! {
                         <div>
                             <div
-                                class="fixed top-16 left-0 right-0 bottom-0 bg-black/50 z-40"
+                                class="fixed top-16 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| handle_close_backdrop()
                             />
                             <div class="fixed top-16 right-0 bottom-0 w-full max-w-[92vw] z-50 bg-background flex flex-col shadow-xl">

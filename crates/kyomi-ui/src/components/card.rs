@@ -5,7 +5,7 @@
 use leptos::prelude::*;
 
 /// Card container.
-/// React: `rounded-xl border border-border bg-card text-card-foreground shadow`
+/// React: `rounded-lg border border-border bg-card text-card-foreground shadow`
 #[component]
 pub fn Card(
     #[prop(optional, into)]
@@ -13,7 +13,7 @@ pub fn Card(
     children: Children,
 ) -> impl IntoView {
     let classes = format!(
-        "rounded-xl border border-border bg-card text-card-foreground shadow {}",
+        "rounded-lg border border-border bg-card text-card-foreground shadow {}",
         class
     );
     view! {

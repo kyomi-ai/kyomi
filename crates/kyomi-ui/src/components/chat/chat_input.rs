@@ -222,54 +222,50 @@ pub fn ChatInput(
                     on:input=on_input
                     on:keydown=on_keydown
                     placeholder=effective_placeholder
-                    class="w-full pr-12 resize-none border border-input focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px]"
+                    class="w-full pr-12 resize-none border border-input focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px]"
                     style=format!("max-height: {}px", max_height)
                     rows="1"
                     disabled=move || credits_exhausted || !can_send.get()
                 />
-                <Show
-                    when=move || show_stop_button.get()
-                    fallback=move || {
-                        view! {
-                            // Send button — disabled when credits exhausted
-                            <button
-                                on:click=move |_| do_send()
-                                disabled=move || credits_exhausted || !send_enabled()
-                                class="absolute right-2 top-2 bottom-2 my-auto p-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:bg-muted disabled:cursor-not-allowed transition-opacity flex items-center justify-center"
-                                aria-label="Send message"
-                                title=move || {
-                                    if credits_exhausted {
-                                        "AI budget exhausted"
-                                    } else if !is_connected() {
-                                        "Waiting for connection..."
-                                    } else {
-                                        "Send message"
-                                    }
-                                }
-                            >
-                                // Paper airplane SVG
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                                </svg>
-                            </button>
+                // Send/Stop buttons — use CSS display instead of <Show> to avoid
+                // DOM unmount/remount issues during URL transitions. Both buttons
+                // stay in the DOM; only one is visible at a time.
+                <button
+                    on:click=move |_| do_send()
+                    disabled=move || credits_exhausted || !send_enabled()
+                    class="absolute right-2 top-2 bottom-2 my-auto p-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:bg-muted disabled:cursor-not-allowed transition-opacity flex items-center justify-center"
+                    style=move || if show_stop_button.get() { "display: none" } else { "" }
+                    aria-label="Send message"
+                    title=move || {
+                        if credits_exhausted {
+                            "AI budget exhausted"
+                        } else if !is_connected() {
+                            "Waiting for connection..."
+                        } else {
+                            "Send message"
                         }
                     }
                 >
-                    // Stop button
-                    <button
-                        on:click=move |_| on_cancel.run(())
-                        disabled=move || !can_cancel.get()
-                        class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-1.5"
-                        aria-label="Stop generating"
-                        title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
-                    >
-                        // X/stop SVG
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                        <span class="text-sm font-medium">"Stop"</span>
-                    </button>
-                </Show>
+                    // Paper airplane SVG
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                    </svg>
+                </button>
+                // Stop button
+                <button
+                    on:click=move |_| on_cancel.run(())
+                    disabled=move || !can_cancel.get()
+                    class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-1.5"
+                    style=move || if show_stop_button.get() { "" } else { "display: none" }
+                    aria-label="Stop generating"
+                    title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
+                >
+                    // X/stop SVG
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                    <span class="text-sm font-medium">"Stop"</span>
+                </button>
             </div>
         </div>
     }

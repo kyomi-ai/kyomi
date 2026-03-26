@@ -25,6 +25,81 @@ use crate::server_fns::sql_editor::dry_run_sql;
 
 use super::status_bar::{DryRunStatus, StatusBar};
 
+// ─── Kyomi editor themes ────────────────────────────────────────────────────
+
+/// Build a kode-leptos Theme matching Kyomi's design system colors.
+///
+/// React reference: `MonacoSQLEditor.jsx` defines `kyomi-light` and `kyomi-dark`
+/// themes with colors derived from Kyomi CSS variables.
+#[cfg(target_arch = "wasm32")]
+fn kyomi_dark_theme() -> kode_leptos::Theme {
+    kode_leptos::Theme {
+        bg: "#262626",            // --color-card (dark)
+        fg: "#f1f5f9",           // --color-foreground (dark)
+        fg_bright: "#ffffff",
+        fg_dim: "#94a3b8",       // --color-muted-foreground (dark)
+        cursor: "#f1f5f9",
+        selection: "rgba(59, 89, 152, 0.6)", // #3b5998 with alpha
+        current_line: "rgba(56, 56, 56, 0.5)", // --color-border (dark) with alpha — text shows through
+        gutter_fg: "#94a3b8",    // --color-muted-foreground (dark)
+        gutter_border: "#383838", // --color-border (dark)
+        border: "#383838",       // --color-border (dark)
+        accent: "#d97706",       // --color-primary
+        bg_highlight: "#383838",
+        bg_hover: "#404040",
+        marker_error: "#ef4444", // --color-error-foreground (dark)
+        marker_warning: "#f59e0b", // --color-warning-foreground (dark)
+        marker_info: "#3b82f6",  // --color-info-foreground (dark)
+        marker_hint: "#94a3b8",
+        code_fg: "#f1f5f9",
+        link: "#d97706",
+        syntax: kode_leptos::SyntaxTheme::OneDark, // closest match to React's vs-dark based kyomi-dark
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn kyomi_light_theme() -> kode_leptos::Theme {
+    kode_leptos::Theme {
+        bg: "#ffffff",            // --color-card (light)
+        fg: "#333333",           // React kyomi-light editor.foreground
+        fg_bright: "#0f172a",    // --color-foreground (light)
+        fg_dim: "#64748b",       // --color-muted-foreground (light)
+        cursor: "#0f172a",
+        selection: "rgba(201, 214, 232, 0.6)", // #c9d6e8 with alpha
+        current_line: "rgba(245, 245, 245, 0.5)", // React kyomi-light editor.lineHighlightBackground
+        gutter_fg: "#64748b",    // --color-muted-foreground (light)
+        gutter_border: "#e2e8f0", // --color-border (light)
+        border: "#e2e8f0",       // --color-border (light)
+        accent: "#d97706",       // --color-primary
+        bg_highlight: "#f9fafb", // --color-muted (light)
+        bg_hover: "#f1f5f9",     // --color-accent (light)
+        marker_error: "#cd2b31", // --color-error-foreground (light)
+        marker_warning: "#947600", // --color-warning-foreground (light)
+        marker_info: "#0073e6",  // --color-info-foreground (light)
+        marker_hint: "#64748b",
+        code_fg: "#333333",
+        link: "#d97706",
+        syntax: kode_leptos::SyntaxTheme::GithubLight,
+    }
+}
+
+/// Returns a reactive Signal that switches between kyomi dark/light themes
+/// based on the current effective theme from ThemeState context.
+#[cfg(target_arch = "wasm32")]
+pub fn use_editor_theme() -> Signal<kode_leptos::Theme> {
+    let theme_state = crate::components::theme::use_theme();
+    Signal::derive(move || {
+        let is_dark = theme_state
+            .map(|s| s.effective.get() == "dark")
+            .unwrap_or(true);
+        if is_dark {
+            kyomi_dark_theme()
+        } else {
+            kyomi_light_theme()
+        }
+    })
+}
+
 // ─── Debounced dry run hook ──────────────────────────────────────────────────
 
 /// Creates debounced dry run validation that watches query text changes.
@@ -313,6 +388,15 @@ pub fn SqlCodeEditor(
     /// Required when `dry_run_result` is not provided.
     #[prop(optional, into)]
     datasource_slug: Option<Signal<Option<String>>>,
+    /// Whether a query is currently running (for the Run Query button).
+    #[prop(optional, into)]
+    query_running: Signal<bool>,
+    /// Whether the Run Query button should be disabled (e.g. no datasource).
+    #[prop(optional, into)]
+    run_disabled: Signal<bool>,
+    /// Called when the user clicks "Run Query" in the status bar.
+    #[prop(optional)]
+    on_run_query: Option<Callback<()>>,
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
@@ -343,6 +427,9 @@ pub fn SqlCodeEditor(
         // Set up cursor position tracking via EditorHandle.
         let (cursor_line, cursor_col) = use_cursor_position(editor_handle);
 
+        // Reactive theme that follows Kyomi's light/dark mode.
+        let editor_theme = use_editor_theme();
+
         // Set up dry run status — either from external prop or internal debounce.
         let ds_slug = datasource_slug.unwrap_or_else(|| Signal::stored(None));
 
@@ -365,16 +452,20 @@ pub fn SqlCodeEditor(
                     <CodeEditor
                         language=Signal::stored(Language::Sql)
                         content=content_signal
+                        theme=editor_theme
                         on_change=on_change
                         on_ready=on_ready
                     />
                 </div>
 
-                // Status bar (dry run + cursor position)
+                // Status bar (dry run + cursor position + Run Query button)
                 <StatusBar
                     dry_run_status=dry_run_status
                     cursor_line=Signal::derive(move || cursor_line.get())
                     cursor_col=Signal::derive(move || cursor_col.get())
+                    query_running=query_running
+                    run_disabled=run_disabled
+                    on_run_query=on_run_query.unwrap_or_else(|| Callback::new(|_| {}))
                 />
             </div>
         }
@@ -395,6 +486,9 @@ pub fn SqlCodeEditor(
                     dry_run_status=Signal::stored(DryRunStatus::Idle)
                     cursor_line=Signal::stored(1usize)
                     cursor_col=Signal::stored(1usize)
+                    query_running=query_running
+                    run_disabled=run_disabled
+                    on_run_query=on_run_query.unwrap_or_else(|| Callback::new(|_| {}))
                 />
             </div>
         }

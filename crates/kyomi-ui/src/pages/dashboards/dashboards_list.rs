@@ -914,8 +914,8 @@ fn AddToCollectionModal(
                 let avail = available_collections();
 
                 view! {
-                    <div class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                        <div class="bg-card rounded-2xl shadow-2xl max-w-md w-full">
+                    <div class="fixed inset-0 bg-[var(--color-overlay)] flex items-center justify-center z-50 p-4">
+                        <div class="bg-card rounded-lg shadow-xl max-w-md w-full">
                             // Header
                             <div class="flex justify-between items-center p-6 border-b border-border">
                                 <h2 class="text-lg font-semibold text-foreground">"Add to Collection"</h2>

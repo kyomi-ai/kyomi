@@ -1805,7 +1805,7 @@ pub fn ChatPage() -> impl IntoView {
                 // Phase 12.2 — Personal mode without LLM configured
                 view! {
                     <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
-                        <div class="max-w-md w-full bg-card border border-border rounded-xl p-8 shadow-sm text-center">
+                        <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
                                 // Chat bubble icon (matches React's Heroicons outline)
                                 <svg class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
@@ -1844,7 +1844,7 @@ pub fn ChatPage() -> impl IntoView {
                     // Matches React: NoDatasourcesEmptyState for context="chat"
                     view! {
                         <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
-                            <div class="max-w-md w-full bg-card border border-border rounded-xl p-8 shadow-sm text-center">
+                            <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
                                     // Database icon
                                     <svg class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">

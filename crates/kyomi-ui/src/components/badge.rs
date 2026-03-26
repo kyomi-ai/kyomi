@@ -19,7 +19,7 @@ pub enum BadgeVariant {
 
 /// Base classes shared by all badge variants.
 /// From React: `badgeVariants` base string.
-const BASE: &str = "inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2";
+const BASE: &str = "inline-flex items-center rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 fn variant_classes(variant: BadgeVariant) -> &'static str {
     match variant {

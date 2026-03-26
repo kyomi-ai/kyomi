@@ -127,14 +127,6 @@ pub fn SqlEditorPage() -> impl IntoView {
         }
     };
 
-    // ── Run query handler ────────────────────────────────────────────────
-    let handle_run_query = move |_| {
-        let sql = state.query_text.get_untracked();
-        let slug = ds_selection.slug.get_untracked().unwrap_or_default();
-        let ds_type = ds_selection.datasource_type.get_untracked().unwrap_or_default();
-        run_query(state, sql, slug, ds_type, set_query_running);
-    };
-
     // ── Callbacks for sidebar → editor insertion ─────────────────────────
     // Insert at cursor position via EditorHandle when available, otherwise
     // fall back to appending to the query text.
@@ -351,18 +343,8 @@ pub fn SqlEditorPage() -> impl IntoView {
                     <DatasourceSelector/>
                 </div>
 
-                // Right: run button + sidebar toggle
+                // Right: sidebar toggle
                 <div class="flex items-center gap-2">
-                    // Run button
-                    <button
-                        on:click=handle_run_query
-                        disabled=move || query_running.get() || !has_datasource.get()
-                        class="px-3 py-1.5 text-xs font-medium bg-primary text-white hover:bg-primary/90 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
-                        aria-label=move || if query_running.get() { "Query running" } else { "Run query" }
-                    >
-                        {move || if query_running.get() { "Running..." } else { "Run Query" }}
-                    </button>
-
                     // Sidebar toggle button
                     <button
                         on:click=toggle_sidebar
@@ -429,6 +411,14 @@ pub fn SqlEditorPage() -> impl IntoView {
                                 content=state.query_text
                                 on_run=on_editor_run
                                 datasource_slug=ds_slug_signal
+                                query_running=Signal::derive(move || query_running.get())
+                                run_disabled=Signal::derive(move || !has_datasource.get())
+                                on_run_query=Callback::new(move |()| {
+                                    let sql = state.query_text.get_untracked();
+                                    let slug = ds_selection.slug.get_untracked().unwrap_or_default();
+                                    let ds_type = ds_selection.datasource_type.get_untracked().unwrap_or_default();
+                                    run_query(state, sql, slug, ds_type, set_query_running);
+                                })
                             />
                         </div>
                     </div>

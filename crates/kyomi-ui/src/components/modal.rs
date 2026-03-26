@@ -5,7 +5,7 @@
 //! A center-overlay modal with backdrop, configurable sizes, close button,
 //! and optional header/content/footer structure.
 //!
-//! Backdrop: `bg-black/50`, no blur. Shadow: `shadow-xl`.
+//! Backdrop: `bg-[var(--color-overlay)]`, no blur. Shadow: `shadow-xl`.
 //! Sizes: sm (384px), md (448px), lg (896px), xl (1152px), full (95vw).
 //!
 //! Usage:
@@ -69,7 +69,7 @@ impl ModalSize {
 /// React reference: `apps/frontend/src/components/Modal.jsx`
 ///
 /// Structure:
-/// - Backdrop overlay: `fixed inset-0 flex items-center justify-center z-[1000]` + `bg-black/50`
+/// - Backdrop overlay: `fixed inset-0 flex items-center justify-center z-[1000]` + `bg-[var(--color-overlay)]`
 /// - Modal container: `bg-background text-foreground rounded-lg shadow-xl` + size class
 /// - Header: title + close button, separated by `border-b border-border`
 /// - Content: scrollable area
@@ -114,9 +114,9 @@ pub fn Modal(
         <Show when=move || show.get()>
             // Backdrop overlay
             // React: className="modal-overlay" → `fixed inset-0 flex items-center justify-center z-[1000] font-sans`
-            //   + `background-color: var(--color-overlay)` which is `rgba(0,0,0,0.5)` → `bg-black/50`
+            //   + `background-color: var(--color-overlay)` which is `rgba(0,0,0,0.5)` → `bg-[var(--color-overlay)]`
             <div
-                class="fixed inset-0 flex items-center justify-center z-[1000] font-sans bg-black/50"
+                class="fixed inset-0 flex items-center justify-center z-[1000] font-sans bg-[var(--color-overlay)]"
                 on:click=move |ev: web_sys::MouseEvent| {
                     // Only close if click is directly on the backdrop, not bubbled from modal content.
                     // React uses mousedown tracking; here we rely on stopPropagation on the content div.

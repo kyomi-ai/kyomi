@@ -52,6 +52,8 @@ pub fn ChatMessage(
     on_toggle_pin: Callback<String>,
     /// Callback to open save-to-dashboard modal — receives message content.
     on_open_dashboard_modal: Callback<String>,
+    /// Callback to show chart info modal — receives the chart YAML spec.
+    on_show_chart_info: Callback<String>,
     /// Callback when message content is updated — receives (message_id, new_content).
     on_message_update: Callback<(String, String)>,
     /// Reactive pin state — derived from the messages signal so updates propagate.
@@ -253,6 +255,7 @@ pub fn ChatMessage(
                         <MarkdownRenderer
                             content=content_signal
                             is_streaming=is_streaming_this_msg
+                            on_chart_info=on_show_chart_info
                         />
                     </Show>
                 </div>

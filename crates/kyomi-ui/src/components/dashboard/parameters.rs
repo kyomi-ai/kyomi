@@ -29,7 +29,7 @@ const GRID_CLASS: &str = "grid grid-cols-12 gap-4";
 const PARAM_LABEL_CLASS: &str = "block text-xs font-medium text-muted-foreground mb-1";
 
 /// Multiselect trigger button — from React `MultiSelectDropdown`.
-const MULTISELECT_TRIGGER_CLASS: &str = "w-full px-3 py-2 text-left bg-background border border-border rounded-md text-sm hover:border-ring/50 focus:outline-none focus:ring-2 focus:ring-ring flex items-center justify-between";
+const MULTISELECT_TRIGGER_CLASS: &str = "w-full px-3 py-2 text-left bg-background border border-border rounded-md text-sm hover:border-ring/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring flex items-center justify-between";
 
 /// Multiselect dropdown panel — from React `MultiSelectDropdown`.
 const MULTISELECT_DROPDOWN_CLASS: &str = "absolute z-10 mt-1 w-full bg-popover border border-border rounded-md shadow-lg max-h-60 overflow-auto";
@@ -46,10 +46,10 @@ const MULTISELECT_CHEVRON_CLASS: &str = "w-4 h-4 ml-2 text-muted-foreground";
 
 /// Date / number / text input class — from React DashboardParameters (daterange, number, text).
 /// Note: React uses slightly different classes from INPUT_CLASS for these controls.
-const PARAM_INPUT_CLASS: &str = "w-full px-3 py-2 bg-background border border-input rounded-md text-sm hover:border-ring/50 focus:outline-none focus:ring-2 focus:ring-ring";
+const PARAM_INPUT_CLASS: &str = "w-full px-3 py-2 bg-background border border-input rounded-md text-sm hover:border-ring/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 /// Date input inside daterange (uses flex-1 instead of w-full).
-const DATE_INPUT_CLASS: &str = "flex-1 px-3 py-2 bg-background border border-input rounded-md text-sm hover:border-ring/50 focus:outline-none focus:ring-2 focus:ring-ring";
+const DATE_INPUT_CLASS: &str = "flex-1 px-3 py-2 bg-background border border-input rounded-md text-sm hover:border-ring/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 // ---------------------------------------------------------------------------
 // Helper: extract string options from Vec<serde_json::Value>

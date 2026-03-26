@@ -241,7 +241,7 @@ pub fn SqlEditorSidebar(
     let tab_class = move |tab: SidebarTab| {
         let base = "px-3 py-1.5 text-sm font-medium rounded-md transition-colors";
         if active_tab.get() == tab {
-            format!("{base} bg-card text-foreground shadow-sm")
+            format!("{base} bg-card text-foreground shadow")
         } else {
             format!("{base} text-muted-foreground hover:text-foreground")
         }
@@ -359,7 +359,7 @@ pub fn SqlEditorSidebar(
                                         on:input=move |ev| {
                                             set_catalog_search_input.set(event_target_value(&ev));
                                         }
-                                        class="w-full px-3 py-2 pr-8 text-sm border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-ring bg-background text-foreground"
+                                        class="w-full px-3 py-2 pr-8 text-sm border border-border rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-background text-foreground"
                                     />
                                     <Show when=move || !catalog_search_input.get().is_empty()>
                                         <button
@@ -402,7 +402,7 @@ pub fn SqlEditorSidebar(
                                         on:input=move |ev| {
                                             set_history_search_input.set(event_target_value(&ev));
                                         }
-                                        class="w-full px-3 py-2 pr-8 text-sm border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-ring bg-background text-foreground"
+                                        class="w-full px-3 py-2 pr-8 text-sm border border-border rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-background text-foreground"
                                     />
                                     <Show when=move || !history_search_input.get().is_empty()>
                                         <button
@@ -446,7 +446,7 @@ pub fn SqlEditorSidebar(
                     view! {
                         <div>
                             <div
-                                class="fixed top-[7.5rem] sm:top-[8rem] left-0 right-0 bottom-0 bg-black/50 z-40"
+                                class="fixed top-[7.5rem] sm:top-[8rem] left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=close_sidebar_backdrop
                             />
                             <div class="fixed top-[7.5rem] sm:top-[8rem] right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl">

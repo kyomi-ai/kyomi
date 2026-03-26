@@ -170,7 +170,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
                                                     <p class="text-muted-foreground mb-6">{e.to_string()}</p>
                                                     <a
                                                         href="/dashboards"
-                                                        class="px-6 py-3 text-white bg-primary hover:bg-primary/90 rounded-lg transition-colors inline-block"
+                                                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
                                                     >
                                                         "Back to Dashboards"
                                                     </a>
@@ -544,7 +544,7 @@ fn DashboardEditorInner(
                         class=move || {
                             let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
                             if mode.get() == EditorMode::Source {
-                                format!("{base} bg-card text-foreground shadow-sm")
+                                format!("{base} bg-card text-foreground shadow")
                             } else {
                                 format!("{base} text-muted-foreground hover:text-foreground")
                             }
@@ -559,7 +559,7 @@ fn DashboardEditorInner(
                         class=move || {
                             let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
                             if mode.get() == EditorMode::Visual {
-                                format!("{base} bg-card text-foreground shadow-sm")
+                                format!("{base} bg-card text-foreground shadow")
                             } else {
                                 format!("{base} text-muted-foreground hover:text-foreground")
                             }
@@ -681,7 +681,7 @@ fn DashboardEditorInner(
 
                 // Save button
                 <button
-                    class="flex items-center gap-2 px-2 md:px-4 py-1.5 text-sm font-medium text-white bg-primary hover:bg-primary/90 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
                     on:click=save_on_click
                     disabled=move || saving.get() || !has_unsaved_changes.get()
                 >

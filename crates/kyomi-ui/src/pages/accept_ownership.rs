@@ -176,10 +176,10 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
     view! {
         <div class="min-h-screen bg-gradient-to-br from-background via-muted/30 to-muted/50 flex items-center justify-center p-4">
             <div class="w-full max-w-2xl">
-                <div class="bg-card/80 backdrop-blur-sm rounded-2xl shadow-xl border border-border overflow-hidden">
+                <div class="bg-card/80 backdrop-blur-sm rounded-lg shadow border border-border overflow-hidden">
                     // Header
                     <div class="p-8 text-center">
-                        <div class="w-20 h-20 bg-primary/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                        <div class="w-20 h-20 bg-primary/10 rounded-lg flex items-center justify-center mx-auto mb-6">
                             {move || {
                                 let s = state.get();
                                 match &s {
@@ -304,7 +304,7 @@ fn ready_view(
     view! {
         <div class="space-y-6">
             // Transfer info card
-            <div class="bg-muted/50 rounded-xl p-6 border border-border">
+            <div class="bg-muted/50 rounded-lg p-6 border border-border">
                 <div class="space-y-4">
                     // Workspace
                     <div class="flex items-start gap-3">
@@ -352,7 +352,7 @@ fn ready_view(
             </Alert>
 
             // Capabilities list
-            <div class="bg-muted/50 rounded-xl p-6 border border-border">
+            <div class="bg-muted/50 rounded-lg p-6 border border-border">
                 <h3 class="font-semibold text-foreground mb-3">
                     "As the workspace owner, you will be able to:"
                 </h3>

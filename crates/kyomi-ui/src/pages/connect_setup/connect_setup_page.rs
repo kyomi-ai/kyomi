@@ -443,7 +443,7 @@ fn SelectStep(
                                         on_select.with_value(|f| f(ds_id_click.clone()));
                                     }
                                     disabled=move || generating_token_for.get().as_deref() == Some(&ds_id_check)
-                                    class="w-full flex items-center gap-3 p-4 border border-border rounded-xl bg-card hover:border-primary/40 hover:bg-primary/5 transition-colors text-left group disabled:opacity-60"
+                                    class="w-full flex items-center gap-3 p-4 border border-border rounded-lg bg-card hover:border-primary/40 hover:bg-primary/5 transition-colors text-left group disabled:opacity-60"
                                 >
                                     <DatasourceIconInline ds_type=ds_type.clone()/>
                                     <div class="flex-1 min-w-0">
@@ -603,9 +603,9 @@ fn CreateStep(
                                 class=move || {
                                     let selected = new_type.get() == value;
                                     if selected {
-                                        "flex items-center gap-2 p-3 rounded-xl border text-left text-sm transition-colors border-primary bg-primary/5 text-foreground"
+                                        "flex items-center gap-2 p-3 rounded-lg border text-left text-sm transition-colors border-primary bg-primary/5 text-foreground"
                                     } else {
-                                        "flex items-center gap-2 p-3 rounded-xl border text-left text-sm transition-colors border-border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground"
+                                        "flex items-center gap-2 p-3 rounded-lg border text-left text-sm transition-colors border-border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground"
                                     }
                                 }
                             >
@@ -709,7 +709,7 @@ fn SuccessStep(
             // Token display
             <div>
                 <label class="block text-sm font-semibold mb-2">"Connect token"</label>
-                <div class="flex items-center gap-2 p-3 rounded-xl border border-border bg-muted/30">
+                <div class="flex items-center gap-2 p-3 rounded-lg border border-border bg-muted/30">
                     <code class="flex-1 text-xs text-foreground font-mono break-all select-all line-clamp-3">
                         {move || token.get()}
                     </code>
@@ -724,7 +724,7 @@ fn SuccessStep(
                     <p class="text-sm text-muted-foreground">
                         "Install and configure Kyomi Connect in one command:"
                     </p>
-                    <div class="flex items-center gap-2 px-3 py-2 rounded-xl bg-muted/30 border border-border">
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-muted/30 border border-border">
                         <code class="text-xs text-foreground font-mono flex-1 break-all">
                             "curl -fsSL https://connect.kyomi.ai/install.sh | sh -s -- --token \""
                             {move || token.get()}

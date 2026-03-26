@@ -418,7 +418,7 @@ pub fn KnowledgePage() -> impl IntoView {
                 // Mobile backdrop — shown when sidebar is open on mobile
                 <Show when=move || sidebar_open.get()>
                     <div
-                        class="fixed inset-0 z-30 bg-black/50 md:hidden"
+                        class="fixed inset-0 z-30 bg-[var(--color-overlay)] md:hidden"
                         on:click=move |_| set_sidebar_open.set(false)
                     />
                 </Show>

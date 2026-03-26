@@ -65,12 +65,12 @@ pub fn ConfirmDialog(
         <Show when=move || open.get()>
             // Backdrop
             <div
-                class="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"
+                class="fixed inset-0 z-50 bg-[var(--color-overlay)] flex items-center justify-center"
                 on:click=move |_| on_cancel.run(())
             >
                 // Dialog
                 <div
-                    class="bg-card border border-border rounded-xl shadow-xl max-w-md w-full mx-4 p-6"
+                    class="bg-card border border-border rounded-lg shadow max-w-md w-full mx-4 p-6"
                     role="alertdialog"
                     aria-modal="true"
                     aria-labelledby="confirm-dialog-title"

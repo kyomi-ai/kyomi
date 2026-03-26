@@ -81,10 +81,10 @@ fn SignupPromptModal(
         <Show when=move || show.get()>
             <div class="fixed inset-0 z-50 flex items-center justify-center">
                 // Backdrop — not dismissible (no click handler)
-                <div class="absolute inset-0 bg-black/50"></div>
+                <div class="absolute inset-0 bg-[var(--color-overlay)]"></div>
 
                 // Modal content
-                <div class="relative z-10 w-full max-w-md p-6 mx-4 bg-card rounded-xl shadow-xl border border-border">
+                <div class="relative z-10 w-full max-w-md p-6 mx-4 bg-card rounded-lg shadow border border-border">
                     <h2 class="text-xl font-semibold text-foreground mb-2">
                         "You've reached your trial limit"
                     </h2>
@@ -160,7 +160,7 @@ fn WelcomeState(
             </div>
 
             // Data availability grid — matches React exactly
-            <div class="bg-card border border-border rounded-xl p-4">
+            <div class="bg-card border border-border rounded-lg p-4">
                 <h3 class="font-medium text-foreground mb-3">"Available Data"</h3>
                 <div class="grid grid-cols-2 gap-3 text-sm">
                     <DataItem
@@ -683,7 +683,7 @@ pub fn TrialChatPage() -> impl IntoView {
                     <form on:submit=on_submit class="flex gap-2">
                         <input
                             type="text"
-                            class="flex-1 px-4 py-2 border border-input rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent disabled:opacity-50 bg-background text-foreground"
+                            class="flex-1 px-4 py-2 border border-input rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 bg-background text-foreground"
                             placeholder=input_placeholder
                             disabled=input_disabled
                             prop:value=move || input_value.get()

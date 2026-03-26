@@ -337,16 +337,7 @@ impl SqlEditorState {
         };
 
         let Some(json) = storage.get_item(STORAGE_KEY).ok().flatten() else {
-            // No saved state — check window width for default sidebar.
-            if let Some(window) = web_sys::window() {
-                if let Ok(width) = window.inner_width() {
-                    if let Some(w) = width.as_f64() {
-                        if w >= 1024.0 {
-                            self.active_right_tab.set(Some(SidebarTab::Catalog));
-                        }
-                    }
-                }
-            }
+            // No saved state — sidebar stays closed (matches React default).
             return;
         };
 

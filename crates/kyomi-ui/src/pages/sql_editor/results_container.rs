@@ -733,7 +733,7 @@ fn ChartYamlModal(
     view! {
         // Backdrop
         <div
-            class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+            class="fixed inset-0 bg-[var(--color-overlay)] z-50 flex items-center justify-center p-4"
             on:click=move |ev: web_sys::MouseEvent| {
                 // Only close on direct backdrop click, not bubbled clicks.
                 if ev.target() == ev.current_target() {
