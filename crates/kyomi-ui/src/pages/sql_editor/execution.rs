@@ -98,6 +98,8 @@ fn run_streaming_query(
     // async HTTP call) so the WebSocket handler can correlate events the
     // instant they arrive.
     let rid = request_id.clone();
+    let handle_slug = datasource_slug.clone();
+    let handle_sql = query_text.clone();
     state.update_tab(&tab_id, move |tab| {
         tab.status = QueryStatus::Streaming;
         tab.result = Some(QueryResult {
@@ -107,8 +109,8 @@ fn run_streaming_query(
             total_rows: None,
             query_handle: Some(super::types::QueryHandle {
                 datasource_type: String::new(),
-                datasource_slug: String::new(),
-                sql: String::new(),
+                datasource_slug: handle_slug,
+                sql: handle_sql,
                 job_id: Some(rid),
             }),
             execution_time: None,

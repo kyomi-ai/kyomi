@@ -332,7 +332,7 @@ pub fn QueryHistory(
 
                                     let preview = get_query_preview(&query_text);
                                     let timestamp = format_relative_time(&created_at);
-                                    let exec_time_str = exec_time.and_then(|ms| format_execution_time(ms));
+                                    let exec_time_str = exec_time.and_then(format_execution_time);
                                     let is_error = status == "error";
 
                                     // Read is_saved reactively from the entries signal so optimistic

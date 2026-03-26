@@ -474,7 +474,7 @@ pub fn SqlEditorSidebar(
                             // Resize handle
                             <div
                                 class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                on:mousedown=handle_resize_start.clone()
+                                on:mousedown=handle_resize_start
                                 role="separator"
                                 aria-orientation="vertical"
                                 aria-label="Drag to resize sidebar"

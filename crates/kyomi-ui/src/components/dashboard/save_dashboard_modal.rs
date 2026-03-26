@@ -305,7 +305,7 @@ pub fn SaveDashboardModal(
                                         <DashboardListEntry
                                             dashboard=dashboard
                                             selected_dashboard_id=selected_dashboard_id
-                                            on_select=handle_select_existing.clone()
+                                            on_select=handle_select_existing
                                         />
                                     </For>
 

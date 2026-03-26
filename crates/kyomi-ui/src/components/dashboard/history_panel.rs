@@ -239,8 +239,8 @@ pub fn HistoryPanel(
 
     // ── Notify parent when panel closes (exit preview) ──────────────────
     Effect::new(move || {
-        if !open.get() {
-            if let Some(cb) = on_preview { cb.run(None); }
+        if !open.get() && let Some(cb) = on_preview {
+            cb.run(None);
         }
     });
 
@@ -579,7 +579,7 @@ pub fn HistoryPanel(
                                                                 let cv_created_at = cv.created_at.clone();
                                                                 let cv_change_summary = cv.change_summary.clone();
                                                                 let first_historical = historical_versions.first().map(|h| h.version_number);
-                                                                let handle_preview_version_clone = handle_preview_version.clone();
+                                                                let handle_preview_version_clone = handle_preview_version;
 
                                                                 view! {
                                                                     <div
@@ -634,7 +634,7 @@ pub fn HistoryPanel(
 
                                                                         // Actions for current version — only diff with previous if there are historical versions
                                                                         {first_historical.map(|prev_ver| {
-                                                                            let handle_view_diff_clone = handle_view_diff.clone();
+                                                                            let handle_view_diff_clone = handle_view_diff;
                                                                             view! {
                                                                                 <div
                                                                                     class="flex items-center gap-2 mt-2"
@@ -664,9 +664,9 @@ pub fn HistoryPanel(
                                                                 let ver_created_by = version.created_by_name.clone();
                                                                 let prev_ver_num = historical_versions.get(index + 1).map(|v| v.version_number);
                                                                 let current_ver_num = current_version.as_ref().map(|cv| cv.version_number);
-                                                                let handle_preview_version_clone = handle_preview_version.clone();
-                                                                let handle_view_diff_clone = handle_view_diff.clone();
-                                                                let handle_view_diff_clone2 = handle_view_diff.clone();
+                                                                let handle_preview_version_clone = handle_preview_version;
+                                                                let handle_view_diff_clone = handle_view_diff;
+                                                                let handle_view_diff_clone2 = handle_view_diff;
 
                                                                 view! {
                                                                     <div
@@ -789,7 +789,7 @@ pub fn HistoryPanel(
         <Show when=move || open.get()>
             {move || {
                 let confirm_msg = confirm_message();
-                let confirm_open_sig: Signal<bool> = confirm_open.into();
+                let confirm_open_sig: Signal<bool> = confirm_open;
 
                 if is_mobile.get() {
                     // Mobile: Slide-in panel with backdrop
@@ -830,7 +830,7 @@ pub fn HistoryPanel(
                                 // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
                                 <div
                                     class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                    on:mousedown=handle_resize_start.clone()
+                                    on:mousedown=handle_resize_start
                                     aria-label="Drag to resize"
                                 >
                                     // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`

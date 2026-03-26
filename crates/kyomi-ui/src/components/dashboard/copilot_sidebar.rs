@@ -738,8 +738,8 @@ pub fn CopilotSidebar(
     // Both mobile and desktop layouts share this inner content.
     let panel_content = move || {
         let current_error = error.get();
-        let handle_send_clone = handle_send.clone();
-        let handle_close_clone = handle_close.clone();
+        let handle_send_clone = handle_send;
+        let handle_close_clone = handle_close;
 
         view! {
             <div class="flex flex-col flex-1 min-w-0 h-full">
@@ -804,9 +804,9 @@ pub fn CopilotSidebar(
                             } else {
                                 None
                             };
-                            let has_thinking = thinking_state.as_ref().map_or(false, |t| !t.events.is_empty());
+                            let has_thinking = thinking_state.as_ref().is_some_and(|t| !t.events.is_empty());
                             let thinking_events = thinking_state.as_ref().map(|t| t.events.clone()).unwrap_or_default();
-                            let thinking_active = thinking_state.as_ref().map_or(false, |t| t.is_active);
+                            let thinking_active = thinking_state.as_ref().is_some_and(|t| t.is_active);
                             let thinking_token_usage = thinking_state.as_ref().and_then(|t| t.token_usage.clone());
 
                             view! {
@@ -929,7 +929,7 @@ pub fn CopilotSidebar(
                     // Mobile: Slide-in panel with backdrop
                     // React: `fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
                     // React: `fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl`
-                    let handle_close_backdrop = handle_close.clone();
+                    let handle_close_backdrop = handle_close;
                     view! {
                         <div>
                             <div
@@ -964,7 +964,7 @@ pub fn CopilotSidebar(
                             // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
                             <div
                                 class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                on:mousedown=handle_resize_start.clone()
+                                on:mousedown=handle_resize_start
                                 aria-label="Drag to resize"
                             >
                                 // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`

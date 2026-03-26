@@ -120,7 +120,7 @@ pub fn ChatsListPage() -> impl IntoView {
     // We use a Resource for the initial load, then manage state reactively.
     let sessions_resource = Resource::new(
         move || show_pinned_only.get(),
-        move |pinned_only| list_chat_sessions(pinned_only),
+        list_chat_sessions,
     );
 
     // Sync resource results into the sessions signal
@@ -754,8 +754,8 @@ pub fn ChatsListPage() -> impl IntoView {
                                     selected_chats.get().contains(&session_id_check2)
                                 };
 
-                                let handle_delete = handle_delete_click.clone();
-                                let toggle_select = toggle_chat_selection.clone();
+                                let handle_delete = handle_delete_click;
+                                let toggle_select = toggle_chat_selection;
 
                                 view! {
                                     <div class=move || {

@@ -582,7 +582,7 @@ fn CredentialRow(
         .into_any()
     } else {
         // No action needed (shared/connect datasources shouldn't appear here)
-        view! {}.into_any()
+        ().into_any()
     };
 
     view! {

@@ -111,10 +111,23 @@ pub fn ResultsTable(
         (total_rows as f64 / page_size as f64).ceil() as u32
     };
 
-    // Server-side pagination: rows already represent the current page.
-    // Display indices use the page offset.
+    // Detect whether rows are already server-side paginated or contain the
+    // full result set (streaming). When all rows are present locally, slice
+    // to the current page client-side (matches React's ResizableTable).
+    let all_rows_local = result.rows.len() == total_rows;
+    let page_start = if all_rows_local {
+        ((current_page - 1) * page_size) as usize
+    } else {
+        0
+    };
+    let page_end = if all_rows_local {
+        (page_start + page_size as usize).min(result.rows.len())
+    } else {
+        result.rows.len()
+    };
+
     let display_start = ((current_page - 1) * page_size) as usize;
-    let display_end = display_start + result.rows.len();
+    let display_end = display_start + (page_end - page_start);
     let num_columns = result.columns.len();
 
     // ── Column widths (resizable) ────────────────────────────────────────
@@ -137,12 +150,12 @@ pub fn ResultsTable(
     // Uses reactive `.get()` so Leptos can track dependencies when called
     // inside a reactive closure (e.g. `style=move || col_style(idx)`).
     let col_style = move |idx: usize| -> String {
-        if user_resized.get() {
-            if let Some(w) = column_widths.get().get(&idx).copied() {
-                return format!(
-                    "flex: 0 0 {w}px; width: {w}px; min-width: {w}px; max-width: {w}px;"
-                );
-            }
+        if user_resized.get()
+            && let Some(w) = column_widths.get().get(&idx).copied()
+        {
+            return format!(
+                "flex: 0 0 {w}px; width: {w}px; min-width: {w}px; max-width: {w}px;"
+            );
         }
         "flex: 1 1 0; min-width: 100px;".to_string()
     };
@@ -170,23 +183,23 @@ pub fn ResultsTable(
         resize_start_width.set(current_width);
 
         // If this is the first-ever resize, capture all column widths from DOM.
-        if !user_resized.get_untracked() {
-            if let Some(table) = table_ref.get() {
-                let el: &web_sys::HtmlElement = &table;
-                if let Ok(ths) = el.query_selector_all("thead th") {
-                    let mut widths = HashMap::new();
-                    // Skip index 0 (row number column)
-                    for i in 1..ths.length() {
-                        if let Some(th) = ths.item(i) {
-                            let rect = th
-                                .unchecked_ref::<web_sys::Element>()
-                                .get_bounding_client_rect();
-                            widths.insert((i - 1) as usize, rect.width());
-                        }
+        if !user_resized.get_untracked()
+            && let Some(table) = table_ref.get()
+        {
+            let el: &web_sys::HtmlElement = &table;
+            if let Ok(ths) = el.query_selector_all("thead th") {
+                let mut widths = HashMap::new();
+                // Skip index 0 (row number column)
+                for i in 1..ths.length() {
+                    if let Some(th) = ths.item(i) {
+                        let rect = th
+                            .unchecked_ref::<web_sys::Element>()
+                            .get_bounding_client_rect();
+                        widths.insert((i - 1) as usize, rect.width());
                     }
-                    column_widths.set(widths);
-                    user_resized.set(true);
                 }
+                column_widths.set(widths);
+                user_resized.set(true);
             }
         }
 
@@ -271,7 +284,7 @@ pub fn ResultsTable(
     // ── Render ───────────────────────────────────────────────────────────
 
     let columns = result.columns.clone();
-    let rows = result.rows.clone();
+    let rows: Vec<Vec<serde_json::Value>> = result.rows[page_start..page_end].to_vec();
     let columns_for_header = columns.clone();
     let columns_for_body = columns.clone();
 
@@ -337,11 +350,8 @@ pub fn ResultsTable(
                                                 role="separator"
                                                 aria-orientation="vertical"
                                                 tabindex="0"
-                                                on:mousedown={
-                                                    let on_resize_start = on_resize_start.clone();
-                                                    move |ev: web_sys::MouseEvent| {
-                                                        on_resize_start(idx, ev);
-                                                    }
+                                                on:mousedown=move |ev: web_sys::MouseEvent| {
+                                                    on_resize_start(idx, ev);
                                                 }
                                             >
                                                 <div

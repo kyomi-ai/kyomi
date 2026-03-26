@@ -228,7 +228,7 @@ pub fn parse_markdown_chartml(content: &str) -> ParsedDashboard {
                         let options = p_obj
                             .get("options")
                             .and_then(|v| v.as_array())
-                            .map(|a| a.clone());
+                            .cloned();
                         let placeholder =
                             p_obj.get("placeholder").and_then(|v| v.as_str()).map(String::from);
                         let layout = p_obj.get("layout").and_then(|v| {

@@ -531,7 +531,7 @@ pub fn WatchesPage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match toggle_watch(watch_id).await {
                 Ok(()) => set_refetch_counter.update(|c| *c += 1),
-                Err(e) => toast_error(&format!("Failed to toggle watch: {e}")),
+                Err(e) => toast_error(format!("Failed to toggle watch: {e}")),
             }
             set_toggling.set(false);
         });
@@ -545,7 +545,7 @@ pub fn WatchesPage() -> impl IntoView {
                     toast_success("Watch execution started");
                     set_refetch_counter.update(|c| *c += 1);
                 }
-                Err(e) => toast_error(&format!("Failed to run watch: {e}")),
+                Err(e) => toast_error(format!("Failed to run watch: {e}")),
             }
             set_running.set(false);
         });
@@ -583,7 +583,7 @@ pub fn WatchesPage() -> impl IntoView {
                         toast_success("Watch deleted");
                         set_refetch_counter.update(|c| *c += 1);
                     }
-                    Err(e) => toast_error(&format!("Failed to delete watch: {e}")),
+                    Err(e) => toast_error(format!("Failed to delete watch: {e}")),
                 }
             });
         }

@@ -299,7 +299,7 @@ fn FeatureBreakdownCard(by_feature: std::collections::HashMap<String, f64>) -> i
                                 />
                             }.into_any()
                         } else {
-                            view! { <></> }.into_any()
+                            ().into_any()
                         }
                     }).collect_view()}
                 </div>

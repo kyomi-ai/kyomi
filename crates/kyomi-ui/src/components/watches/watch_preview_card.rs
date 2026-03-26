@@ -113,7 +113,7 @@ pub fn WatchPreviewCard(
         set_error.set(None);
 
         let cfg = config.get_value();
-        let on_approve = on_approve.clone();
+        let on_approve = on_approve;
 
         leptos::task::spawn_local(async move {
             let queries_json = cfg.queries.as_ref().map(|q| {
@@ -219,7 +219,7 @@ pub fn WatchPreviewCard(
             let qs = queries.clone();
             qs.filter(|q| !q.is_empty()).map(|qs| {
                 let count = qs.len();
-                let items = qs.into_iter().enumerate().map(|(_idx, q)| {
+                let items = qs.into_iter().map(|q| {
                     let comment = q.comment.clone().unwrap_or_default();
                     let sql = q.sql.clone();
                     let datasource = q.datasource.clone();

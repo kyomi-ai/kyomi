@@ -344,7 +344,7 @@ pub fn SessionManagement() -> impl IntoView {
                                             <SessionRow
                                                 session=session
                                                 revoking_id=revoking_id
-                                                on_revoke=Callback::new(open_revoke_dialog.clone())
+                                                on_revoke=Callback::new(open_revoke_dialog)
                                             />
                                         </For>
                                     </tbody>

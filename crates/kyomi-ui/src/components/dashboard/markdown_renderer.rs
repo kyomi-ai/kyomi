@@ -787,8 +787,7 @@ fn WatchPreviewCardView(
 
     let queries_views: Vec<AnyView> = queries
         .iter()
-        .enumerate()
-        .map(|(_idx, q)| {
+        .map(|q| {
             let comment = q
                 .get("comment")
                 .and_then(|v| v.as_str())

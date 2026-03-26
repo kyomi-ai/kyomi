@@ -175,45 +175,45 @@ fn TeamPageInner() -> impl IntoView {
 
     // React to action completions — refresh relevant data
     Effect::new(move || {
-        if let Some(result) = invite_action.value().get() {
-            if result.is_ok() {
-                set_show_invite_modal.set(false);
-                set_invite_email.set(String::new());
-                set_invite_role.set("user".to_string());
-                set_invitations_version.update(|v| *v += 1);
-            }
+        if let Some(result) = invite_action.value().get()
+            && result.is_ok()
+        {
+            set_show_invite_modal.set(false);
+            set_invite_email.set(String::new());
+            set_invite_role.set("user".to_string());
+            set_invitations_version.update(|v| *v += 1);
         }
     });
 
     Effect::new(move || {
-        if let Some(result) = cancel_invite_action.value().get() {
-            if result.is_ok() {
-                set_invitations_version.update(|v| *v += 1);
-            }
+        if let Some(result) = cancel_invite_action.value().get()
+            && result.is_ok()
+        {
+            set_invitations_version.update(|v| *v += 1);
         }
     });
 
     Effect::new(move || {
-        if let Some(result) = update_role_action.value().get() {
-            if result.is_ok() {
-                set_members_version.update(|v| *v += 1);
-            }
+        if let Some(result) = update_role_action.value().get()
+            && result.is_ok()
+        {
+            set_members_version.update(|v| *v += 1);
         }
     });
 
     Effect::new(move || {
-        if let Some(result) = remove_action.value().get() {
-            if result.is_ok() {
-                set_members_version.update(|v| *v += 1);
-            }
+        if let Some(result) = remove_action.value().get()
+            && result.is_ok()
+        {
+            set_members_version.update(|v| *v += 1);
         }
     });
 
     Effect::new(move || {
-        if let Some(result) = cancel_transfer_action.value().get() {
-            if result.is_ok() {
-                set_transfers_version.update(|v| *v += 1);
-            }
+        if let Some(result) = cancel_transfer_action.value().get()
+            && result.is_ok()
+        {
+            set_transfers_version.update(|v| *v += 1);
         }
     });
 
@@ -401,7 +401,6 @@ fn TeamPageInner() -> impl IntoView {
                     </div>
                 }>
                     {move || {
-                        let request_cancel = request_cancel_invitation.clone();
                         invitations.get().map(|result| match result {
                             Ok(invs) if invs.is_empty() => {
                                 view! {
@@ -414,8 +413,7 @@ fn TeamPageInner() -> impl IntoView {
                                 view! {
                                     <div class="space-y-3">
                                         {invs.into_iter().map(|inv| {
-                                            let cancel = request_cancel.clone();
-                                            view! { <InvitationRow invitation=inv on_cancel=cancel/> }
+                                            view! { <InvitationRow invitation=inv on_cancel=request_cancel_invitation/> }
                                         }).collect_view()}
                                     </div>
                                 }.into_any()
@@ -445,7 +443,6 @@ fn TeamPageInner() -> impl IntoView {
 
                     transfers.get().map(|result| match result {
                         Ok(t) if !t.is_empty() => {
-                            let cancel_fn = request_cancel_transfer.clone();
                             let title = if is_owner {
                                 "Pending Ownership Transfers"
                             } else {
@@ -456,8 +453,7 @@ fn TeamPageInner() -> impl IntoView {
                                     <h3 class="text-lg font-semibold text-foreground mb-4">{title}</h3>
                                     <div class="space-y-4">
                                         {t.into_iter().map(|transfer| {
-                                            let cancel = cancel_fn.clone();
-                                            view! { <TransferRow transfer=transfer on_cancel=cancel/> }
+                                            view! { <TransferRow transfer=transfer on_cancel=request_cancel_transfer/> }
                                         }).collect_view()}
                                     </div>
                                 </div>
@@ -484,8 +480,6 @@ fn TeamPageInner() -> impl IntoView {
                             .and_then(|r| r.ok())
                             .map(|u| u.user_id.clone())
                             .unwrap_or_default();
-                        let remove_fn = request_remove_member.clone();
-
                         members.get().map(|result| match result {
                             Ok(m) if m.is_empty() => {
                                 view! {
@@ -499,13 +493,12 @@ fn TeamPageInner() -> impl IntoView {
                                     <div class="space-y-3">
                                         {m.into_iter().map(|member| {
                                             let uid = current_user_id.clone();
-                                            let remove = remove_fn.clone();
                                             let role_action = update_role_action;
                                             view! {
                                                 <MemberRow
                                                     member=member
                                                     current_user_id=uid
-                                                    on_remove=remove
+                                                    on_remove=request_remove_member
                                                     update_role_action=role_action
                                                 />
                                             }

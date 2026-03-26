@@ -205,10 +205,8 @@ pub fn BillingPage() -> impl IntoView {
 
     // Sync desired team size when subscription loads
     Effect::new(move || {
-        if let Some(Ok(info)) = subscription.get() {
-            if let Some(limit) = info.user_limit {
-                set_desired_team_size.set(limit);
-            }
+        if let Some(Ok(info)) = subscription.get() && let Some(limit) = info.user_limit {
+            set_desired_team_size.set(limit);
         }
     });
 
@@ -256,8 +254,6 @@ pub fn BillingPage() -> impl IntoView {
     // ── Actions ──────────────────────────────────────────────────────────
 
     let handle_upgrade = Action::new({
-        let set_error = set_error;
-        let set_checkout_loading = set_checkout_loading;
         move |(tier, cycle): &(String, String)| {
             let tier = tier.clone();
             let cycle = cycle.clone();
@@ -284,9 +280,6 @@ pub fn BillingPage() -> impl IntoView {
     });
 
     let handle_cancel = Action::new({
-        let set_error = set_error;
-        let set_success = set_success;
-        let set_sub_version = set_sub_version;
         move |(): &()| async move {
             match cancel_subscription().await {
                 Ok(result) => {
@@ -301,9 +294,6 @@ pub fn BillingPage() -> impl IntoView {
     });
 
     let handle_reactivate = Action::new({
-        let set_error = set_error;
-        let set_success = set_success;
-        let set_sub_version = set_sub_version;
         move |(): &()| async move {
             match reactivate_subscription().await {
                 Ok(result) => {
@@ -318,10 +308,6 @@ pub fn BillingPage() -> impl IntoView {
     });
 
     let handle_team_size_update = Action::new({
-        let set_error = set_error;
-        let set_success = set_success;
-        let set_team_size_loading = set_team_size_loading;
-        let set_sub_version = set_sub_version;
         move |size: &i32| {
             let size = *size;
             async move {
@@ -343,8 +329,6 @@ pub fn BillingPage() -> impl IntoView {
     });
 
     let handle_manage_billing = Action::new({
-        let set_error = set_error;
-        let set_checkout_loading = set_checkout_loading;
         move |(): &()| async move {
             set_checkout_loading.set(true);
             set_error.set(None);
@@ -393,18 +377,16 @@ pub fn BillingPage() -> impl IntoView {
         // If the user context indicates self-hosted mode, show an informational
         // message instead of loading Stripe-backed billing data.
         {move || {
-            if let Some(Ok(ctx)) = user_ctx.get() {
-                if ctx.is_self_hosted {
-                    return view! {
-                        <Card>
-                            <CardContent>
-                                <p class="text-muted-foreground py-6">
-                                    "Billing is not available in self-hosted mode."
-                                </p>
-                            </CardContent>
-                        </Card>
-                    }.into_any();
-                }
+            if let Some(Ok(ctx)) = user_ctx.get() && ctx.is_self_hosted {
+                return view! {
+                    <Card>
+                        <CardContent>
+                            <p class="text-muted-foreground py-6">
+                                "Billing is not available in self-hosted mode."
+                            </p>
+                        </CardContent>
+                    </Card>
+                }.into_any();
             }
             view! {
                 <div class="space-y-6" style:display="block">
@@ -719,7 +701,6 @@ fn BillingContent(
 
             // Available Plans (free tier only)
             {(tier_for_plans == "free").then(|| {
-                let handle_upgrade_cl = handle_upgrade.clone();
                 view! {
                     <div style:display="block">
                         <h3 class="text-lg font-semibold mb-4 text-foreground">"Available Plans"</h3>
@@ -734,7 +715,7 @@ fn BillingContent(
                                 current_tier="free".to_string()
                                 current_billing_cycle=None
                                 checkout_loading=checkout_loading
-                                handle_upgrade=handle_upgrade_cl.clone()
+                                handle_upgrade=handle_upgrade
                             />
                             <PlanCard
                                 name="Pro"
@@ -746,7 +727,7 @@ fn BillingContent(
                                 current_tier="free".to_string()
                                 current_billing_cycle=None
                                 checkout_loading=checkout_loading
-                                handle_upgrade=handle_upgrade_cl.clone()
+                                handle_upgrade=handle_upgrade
                             />
                             <PlanCard
                                 name="Team"
@@ -758,7 +739,7 @@ fn BillingContent(
                                 current_tier="free".to_string()
                                 current_billing_cycle=None
                                 checkout_loading=checkout_loading
-                                handle_upgrade=handle_upgrade_cl
+                                handle_upgrade=handle_upgrade
                             />
                         </div>
                     </div>
@@ -802,7 +783,7 @@ fn BillingContent(
                             current_tier=tier_for_modal.clone()
                             current_billing_cycle=billing_cycle_for_modal.clone()
                             checkout_loading=checkout_loading
-                            handle_upgrade=handle_upgrade.clone()
+                            handle_upgrade=handle_upgrade
                         />
                         <PlanCard
                             name="Pro"
@@ -814,7 +795,7 @@ fn BillingContent(
                             current_tier=tier_for_modal.clone()
                             current_billing_cycle=billing_cycle_for_modal.clone()
                             checkout_loading=checkout_loading
-                            handle_upgrade=handle_upgrade.clone()
+                            handle_upgrade=handle_upgrade
                         />
                         <PlanCard
                             name="Team"
@@ -826,7 +807,7 @@ fn BillingContent(
                             current_tier=tier_for_modal.clone()
                             current_billing_cycle=billing_cycle_for_modal.clone()
                             checkout_loading=checkout_loading
-                            handle_upgrade=handle_upgrade.clone()
+                            handle_upgrade=handle_upgrade
                         />
                     </div>
                     <Card class="bg-muted/50">
@@ -1215,7 +1196,7 @@ fn InvoicesSection(
                                                                 let description = invoice.description.clone()
                                                                     .unwrap_or_else(|| "Subscription".to_string());
                                                                 let date = invoice.created
-                                                                    .map(|c| format_epoch_date(c))
+                                                                    .map(format_epoch_date)
                                                                     .unwrap_or_else(|| "\u{2014}".to_string());
                                                                 let amount = format!("${:.2}", invoice.amount_paid);
                                                                 let status = invoice.status.clone().unwrap_or_default();

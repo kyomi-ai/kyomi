@@ -23,8 +23,7 @@ use crate::types::WatchExecutionItem;
 /// The Leptos Badge component has: Default, Secondary, Destructive, Warning, Outline.
 /// It does not have "success" or "info" variants. We map:
 /// - success -> Default (primary/amber — the closest active variant)
-
-
+///
 /// Map execution status to a human-readable label (matching React exactly).
 fn get_status_label(status: &str) -> &'static str {
     match status {
@@ -115,7 +114,7 @@ pub fn ExecutionSelector(
     on_select: Callback<i32>,
 ) -> impl IntoView {
     if executions.is_empty() {
-        return view! {}.into_any();
+        return ().into_any();
     }
 
     // Default to first execution if none selected

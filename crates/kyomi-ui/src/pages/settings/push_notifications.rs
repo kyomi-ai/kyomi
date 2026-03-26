@@ -273,8 +273,8 @@ pub fn PushNotificationsCard() -> impl IntoView {
                         }.into_any()
                     } else {
                         // Supported and not denied
-                        let subscribe_clone = subscribe.clone();
-                        let unsubscribe_clone = unsubscribe.clone();
+                        let subscribe_clone = subscribe;
+                        let unsubscribe_clone = unsubscribe;
 
                         view! {
                             <div class="space-y-4">

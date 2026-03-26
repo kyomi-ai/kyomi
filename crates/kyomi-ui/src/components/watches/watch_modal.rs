@@ -187,7 +187,7 @@ pub fn WatchModal(
             Some(slack_val)
         };
 
-        let on_saved = on_saved.clone();
+        let on_saved = on_saved;
 
         leptos::task::spawn_local(async move {
             let result = crate::server_fns::watches::update_watch(

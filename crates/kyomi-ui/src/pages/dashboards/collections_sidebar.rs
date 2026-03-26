@@ -326,9 +326,6 @@ fn CollectionList(
                     <div class="py-2">
                         // Public Collections Section
                         {if has_public {
-                            let on_click = on_collection_click.clone();
-                            let on_e = on_edit.clone();
-                            let on_d = on_delete.clone();
                             Some(view! {
                                 // React: `px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2`
                                 <div class="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
@@ -336,16 +333,13 @@ fn CollectionList(
                                     "Public Collections"
                                 </div>
                                 {public_collections.into_iter().map(|c| {
-                                    let on_click = on_click.clone();
-                                    let on_e = on_e.clone();
-                                    let on_d = on_d.clone();
                                     view! {
                                         <CollectionRow
                                             collection=c
                                             active_collection_id=active_collection_id
-                                            on_click=on_click
-                                            on_edit=on_e
-                                            on_delete=on_d
+                                            on_click=on_collection_click
+                                            on_edit=on_edit
+                                            on_delete=on_delete
                                         />
                                     }
                                 }).collect_view()}
@@ -363,16 +357,13 @@ fn CollectionList(
                                     "Private Collections"
                                 </div>
                                 {private_collections.into_iter().map(|c| {
-                                    let on_click = on_collection_click.clone();
-                                    let on_e = on_edit.clone();
-                                    let on_d = on_delete.clone();
                                     view! {
                                         <CollectionRow
                                             collection=c
                                             active_collection_id=active_collection_id
-                                            on_click=on_click
-                                            on_edit=on_e
-                                            on_delete=on_d
+                                            on_click=on_collection_click
+                                            on_edit=on_edit
+                                            on_delete=on_delete
                                         />
                                     }
                                 }).collect_view()}
@@ -437,7 +428,6 @@ fn ColorPicker(
             <div class="flex flex-wrap gap-2">
                 {PRESET_COLORS.iter().map(|&(label, hex)| {
                     let hex_str = hex.to_string();
-                    let on_change = on_change.clone();
                     let style = format!("background-color: {hex}");
                     view! {
                         <button
@@ -454,7 +444,6 @@ fn ColorPicker(
                             style=style
                             on:click={
                                 let hex_str = hex.to_string();
-                                let on_change = on_change.clone();
                                 move |_| on_change.run(hex_str.clone())
                             }
                         />
@@ -522,8 +511,6 @@ fn CollectionModal(
     let color_signal: Signal<String> = color.into();
     let is_public_signal: Signal<bool> = is_public.into();
 
-    let on_close_inner = on_close.clone();
-
     let handle_submit = move |ev: ev::SubmitEvent| {
         ev.prevent_default();
         set_saving.set(true);
@@ -533,8 +520,6 @@ fn CollectionModal(
         let color_val = color.get_untracked();
         let is_pub_val = is_public.get_untracked();
         let editing_id = editing_id.get_value();
-        let on_saved = on_saved.clone();
-        let on_close = on_close_inner.clone();
 
         leptos::task::spawn_local(async move {
             let desc = if desc_val.is_empty() { None } else { Some(desc_val) };
@@ -586,14 +571,13 @@ fn CollectionModal(
     let submit_text = if is_edit { "Update Collection" } else { "Create Collection" };
 
     // Footer with Cancel + Submit buttons
-    let on_close_footer = on_close.clone();
     let footer: Arc<dyn Fn() -> AnyView + Send + Sync> = Arc::new(move || {
         view! {
             // React: `flex gap-3 pt-4` — but we're inside the modal footer area so just provide the buttons
             <button
                 type="button"
                 class="flex-1 px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-accent/80 rounded-lg transition-colors"
-                on:click=move |_| on_close_footer.run(())
+                on:click=move |_| on_close.run(())
             >
                 "Cancel"
             </button>
@@ -777,7 +761,7 @@ pub fn CollectionsSidebar(
         set_confirm_open.set(false);
         if let Some(id) = deleting_id.get_untracked() {
             let active = active_collection_id.get_untracked();
-            let on_changed = on_collections_changed.clone();
+            let on_changed = on_collections_changed;
             leptos::task::spawn_local(async move {
                 if let Err(e) = delete_collection(id.clone()).await {
                     leptos::logging::error!("Delete collection failed: {e}");
@@ -816,31 +800,29 @@ pub fn CollectionsSidebar(
     // This is the same pattern as the React useEffect in DashboardsList.jsx.
     Effect::new(move || {
         let resizing = is_resizing.get();
-        if !resizing {
-            return;
-        }
+        if resizing {
+            #[cfg(feature = "hydrate")]
+            {
+                let Some(window) = web_sys::window() else { return };
+                let Some(document) = window.document() else { return };
+                let body = document.body();
 
-        #[cfg(feature = "hydrate")]
-        {
-            let Some(window) = web_sys::window() else { return };
-            let Some(document) = window.document() else { return };
-            let body = document.body();
+                // Set cursor
+                if let Some(ref body) = body {
+                    let _ = body.style().set_property("cursor", "col-resize");
+                    let _ = body.style().set_property("user-select", "none");
+                }
 
-            // Set cursor
-            if let Some(ref body) = body {
-                let _ = body.style().set_property("cursor", "col-resize");
-                let _ = body.style().set_property("user-select", "none");
+                // We need start_x captured at mousedown time.
+                // Since Effect re-runs when is_resizing changes, we capture the
+                // current mouse position from a stored signal.
+                // However, a simpler approach: attach listeners directly in the
+                // mousedown handler below. The Effect approach here just sets body cursor.
+                // The actual move/up handlers are set in handle_resize_start.
+
+                // Cleanup body styles when resizing stops
+                // (The mouseup handler does this, but just in case.)
             }
-
-            // We need start_x captured at mousedown time.
-            // Since Effect re-runs when is_resizing changes, we capture the
-            // current mouse position from a stored signal.
-            // However, a simpler approach: attach listeners directly in the
-            // mousedown handler below. The Effect approach here just sets body cursor.
-            // The actual move/up handlers are set in handle_resize_start.
-
-            // Cleanup body styles when resizing stops
-            // (The mouseup handler does this, but just in case.)
         }
     });
 
@@ -1021,7 +1003,7 @@ pub fn CollectionsSidebar(
                                 // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
                                 <div
                                     class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                    on:mousedown=handle_resize_start.clone()
+                                    on:mousedown=handle_resize_start
                                     aria-label="Drag to resize"
                                 >
                                     // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`

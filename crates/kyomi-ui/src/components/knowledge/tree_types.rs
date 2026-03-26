@@ -163,11 +163,11 @@ pub fn get_descendant_ids(entries: &[KnowledgeTreeEntry], node_id: &str) -> Hash
     }
 
     while let Some(current) = queue.pop_front() {
-        if descendants.insert(current.to_string()) {
-            if let Some(kids) = children_of.get(current) {
-                for &kid in kids {
-                    queue.push_back(kid);
-                }
+        if descendants.insert(current.to_string())
+            && let Some(kids) = children_of.get(current)
+        {
+            for &kid in kids {
+                queue.push_back(kid);
             }
         }
     }

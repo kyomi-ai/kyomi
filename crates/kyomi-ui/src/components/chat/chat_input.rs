@@ -181,7 +181,7 @@ pub fn ChatInput(
                     </Alert>
                 }.into_any()
             } else {
-                view! { <></> }.into_any()
+                ().into_any()
             }}
 
             // Connection status indicator (only when not credits-exhausted and not connected)

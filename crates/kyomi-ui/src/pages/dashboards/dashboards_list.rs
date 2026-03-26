@@ -490,7 +490,7 @@ pub fn DashboardsListPage() -> impl IntoView {
             // Add to Collection modal
             <AddToCollectionModal
                 dashboard=Signal::derive(move || add_to_collection_dashboard.get())
-                collections=Signal::derive(move || get_collections())
+                collections=Signal::derive(get_collections)
                 on_close=Callback::new(move |()| {
                     set_add_to_collection_dashboard.set(None);
                 })

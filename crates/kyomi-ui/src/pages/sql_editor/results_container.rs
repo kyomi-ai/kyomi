@@ -523,10 +523,9 @@ fn render_tab_content(
     }
 
     // Success with result → table
-    if (tab.status == QueryStatus::Success || tab.status == QueryStatus::Streaming)
-        && tab.result.is_some()
+    if let Some(result) = tab.result
+        && (tab.status == QueryStatus::Success || tab.status == QueryStatus::Streaming)
     {
-        let result = tab.result.unwrap();
         let is_streaming = tab.status == QueryStatus::Streaming;
         let row_count = result.row_count;
 

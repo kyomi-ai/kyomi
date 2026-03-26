@@ -222,7 +222,7 @@ pub fn AiProviderCard() -> impl IntoView {
                     }
                 }
                 Err(e) => {
-                    toast_error(&format!("Connection test failed: {e}"));
+                    toast_error(format!("Connection test failed: {e}"));
                 }
             }
             set_testing.set(false);

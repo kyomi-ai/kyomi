@@ -1552,14 +1552,14 @@ pub fn ChatPage() -> impl IntoView {
         // Phase 11 — If this is the first message in a chart exploration context,
         // prepend the chart markdown. Matches React: Chat.jsx lines 1121-1126.
         let mut message_to_send = input_text.clone();
-        if let Some(chart_md) = chart_context.get_untracked() {
-            if current_session_id.get_untracked().is_none() {
-                message_to_send = format!(
-                    "Here's a chart I'd like to explore:\n\n{}\n\nMy question: {}",
-                    chart_md, input_text
-                );
-                set_chart_context.set(None); // Clear after first use
-            }
+        if let Some(chart_md) = chart_context.get_untracked()
+            && current_session_id.get_untracked().is_none()
+        {
+            message_to_send = format!(
+                "Here's a chart I'd like to explore:\n\n{}\n\nMy question: {}",
+                chart_md, input_text
+            );
+            set_chart_context.set(None); // Clear after first use
         }
 
         // Phase 9 — Read skip_ai flag for shared conversations

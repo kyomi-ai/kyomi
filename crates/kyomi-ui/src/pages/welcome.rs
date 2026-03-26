@@ -39,10 +39,10 @@ pub fn WelcomePage() -> impl IntoView {
     // ── Redirect if no temp_token ────────────────────────────────────────
     // Runs when temp_token signal changes (effectively once on mount since query params are static).
     Effect::new(move || {
-        if temp_token.get().is_empty() {
-            if let Some(window) = web_sys::window() {
-                let _ = window.location().set_href("/login");
-            }
+        if temp_token.get().is_empty()
+            && let Some(window) = web_sys::window()
+        {
+            let _ = window.location().set_href("/login");
         }
     });
 

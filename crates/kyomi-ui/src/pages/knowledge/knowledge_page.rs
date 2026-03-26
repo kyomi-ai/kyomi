@@ -147,7 +147,7 @@ pub fn KnowledgePage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match list_knowledge_tree().await {
                 Ok(entries) => set_tree_entries.set(entries),
-                Err(e) => toast_error(&format!("Failed to load knowledge files: {e}")),
+                Err(e) => toast_error(format!("Failed to load knowledge files: {e}")),
             }
         });
     };
@@ -157,7 +157,7 @@ pub fn KnowledgePage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match list_knowledge_tree().await {
                 Ok(entries) => set_tree_entries.set(entries),
-                Err(e) => toast_error(&format!("Failed to load knowledge files: {e}")),
+                Err(e) => toast_error(format!("Failed to load knowledge files: {e}")),
             }
             set_is_loading.set(false);
         });
@@ -209,9 +209,9 @@ pub fn KnowledgePage() -> impl IntoView {
                             set_selected_file_path.set(String::new());
                         }
                         refresh_tree();
-                        toast_success(&format!("Deleted {entry_name}"));
+                        toast_success(format!("Deleted {entry_name}"));
                     }
-                    Err(e) => toast_error(&format!("Failed to delete: {e}")),
+                    Err(e) => toast_error(format!("Failed to delete: {e}")),
                 }
             });
         }
@@ -235,7 +235,7 @@ pub fn KnowledgePage() -> impl IntoView {
             .await
             {
                 Ok(_) => refresh_tree(),
-                Err(e) => toast_error(&format!("Failed to move: {e}")),
+                Err(e) => toast_error(format!("Failed to move: {e}")),
             }
         });
     });
@@ -266,9 +266,9 @@ pub fn KnowledgePage() -> impl IntoView {
                     match create_knowledge_file(name.clone(), parent_id, None, false).await {
                         Ok(_) => {
                             refresh_tree();
-                            toast_success(&format!("Created {name}"));
+                            toast_success(format!("Created {name}"));
                         }
-                        Err(e) => toast_error(&format!("Failed to create file: {e}")),
+                        Err(e) => toast_error(format!("Failed to create file: {e}")),
                     }
                 });
             }
@@ -277,9 +277,9 @@ pub fn KnowledgePage() -> impl IntoView {
                     match create_knowledge_file(name.clone(), parent_id, None, true).await {
                         Ok(_) => {
                             refresh_tree();
-                            toast_success(&format!("Created {name}"));
+                            toast_success(format!("Created {name}"));
                         }
-                        Err(e) => toast_error(&format!("Failed to create folder: {e}")),
+                        Err(e) => toast_error(format!("Failed to create folder: {e}")),
                     }
                 });
             }
@@ -311,9 +311,9 @@ pub fn KnowledgePage() -> impl IntoView {
                                     }
                                 });
                             }
-                            toast_success(&format!("Renamed to {name}"));
+                            toast_success(format!("Renamed to {name}"));
                         }
-                        Err(e) => toast_error(&format!("Failed to rename: {e}")),
+                        Err(e) => toast_error(format!("Failed to rename: {e}")),
                     }
                 });
             }

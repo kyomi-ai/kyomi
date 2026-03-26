@@ -32,7 +32,7 @@ pub enum ThinkingVariant {
 
 impl ThinkingVariant {
     /// Parse from a string prop value — matches React's string variant prop.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "inset" => Self::Inset,
             "header-bar" => Self::HeaderBar,
@@ -159,7 +159,7 @@ pub fn AgentThinking(
     #[prop(optional)]
     start_time_ms: Option<f64>,
 ) -> impl IntoView {
-    let variant = ThinkingVariant::from_str(variant);
+    let variant = ThinkingVariant::parse(variant);
 
     // -- State --
     let (is_expanded, set_is_expanded) = signal(false);

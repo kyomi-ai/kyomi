@@ -403,10 +403,10 @@ fn node_matches_search(node: &CatalogNode, query: &str) -> bool {
     if node.name.to_lowercase().contains(query) {
         return true;
     }
-    if let Some(ref full_name) = node.full_name {
-        if full_name.to_lowercase().contains(query) {
-            return true;
-        }
+    if let Some(ref full_name) = node.full_name
+        && full_name.to_lowercase().contains(query)
+    {
+        return true;
     }
     node.children
         .iter()

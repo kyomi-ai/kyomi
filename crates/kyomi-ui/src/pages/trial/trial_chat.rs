@@ -188,7 +188,6 @@ fn WelcomeState(
                 <div class="flex flex-wrap gap-2 justify-center">
                     {SUGGESTED_QUESTIONS.iter().map(|&question| {
                         let q = question.to_string();
-                        let on_suggest = on_suggest.clone();
                         view! {
                             <button
                                 class="px-3 py-2 text-sm bg-card border border-border rounded-lg hover:border-primary hover:text-primary transition-colors disabled:opacity-50"
@@ -414,7 +413,7 @@ pub fn TrialChatPage() -> impl IntoView {
                 Ok(response) => {
                     // Update query state
                     set_query_count.set(response.query_count);
-                    set_queries_remaining.set(response.queries_remaining.max(0) as u64);
+                    set_queries_remaining.set(response.queries_remaining);
 
                     // Replace placeholder with real response
                     set_messages.update(|msgs| {
@@ -509,9 +508,7 @@ pub fn TrialChatPage() -> impl IntoView {
     // On mount, call `create_trial_session()` to get tokens and query state.
     // After initialization, auto-submit the `?q=` question if present.
     {
-        let send_message = send_message.clone();
         Effect::new(move |_| {
-            let send_message = send_message.clone();
             leptos::task::spawn_local(async move {
                 match create_trial_session().await {
                     Ok(session) => {
@@ -553,22 +550,16 @@ pub fn TrialChatPage() -> impl IntoView {
     };
 
     // ── Form submit handler ─────────────────────────────────────────────
-    let on_submit = {
-        let send_message = send_message.clone();
-        move |ev: leptos::ev::SubmitEvent| {
-            ev.prevent_default();
-            let val = input_value.get_untracked();
-            send_message.run(val);
-        }
+    let on_submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let val = input_value.get_untracked();
+        send_message.run(val);
     };
 
     // ── Suggested question handler ──────────────────────────────────────
-    let on_suggest = {
-        let send_message = send_message.clone();
-        Callback::new(move |question: String| {
-            send_message.run(question);
-        })
-    };
+    let on_suggest = Callback::new(move |question: String| {
+        send_message.run(question);
+    });
 
     // ── Derived signals ─────────────────────────────────────────────────
     let has_messages = Signal::derive(move || !messages.get().is_empty());
@@ -645,7 +636,7 @@ pub fn TrialChatPage() -> impl IntoView {
                             <WelcomeState
                                 is_initializing=is_initializing
                                 is_loading=is_loading
-                                on_suggest=on_suggest.clone()
+                                on_suggest=on_suggest
                             />
                         }
                     >

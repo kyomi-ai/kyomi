@@ -161,19 +161,18 @@ impl SqlEditorState {
         self.tabs.update(|tabs| {
             // Enforce 5-unpinned limit: if >= 5 unpinned, remove oldest.
             let unpinned_count = tabs.iter().filter(|t| !t.pinned).count();
-            if unpinned_count >= MAX_UNPINNED_TABS {
-                if let Some(oldest_id) = tabs
+            if unpinned_count >= MAX_UNPINNED_TABS
+                && let Some(oldest_id) = tabs
                     .iter()
                     .filter(|t| !t.pinned)
                     .min_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|t| t.id.clone())
-                {
-                    // Clean up UI state for the evicted tab.
-                    self.table_ui_state.update(|ui| {
-                        ui.remove(&oldest_id);
-                    });
-                    tabs.retain(|t| t.id != oldest_id);
-                }
+            {
+                // Clean up UI state for the evicted tab.
+                self.table_ui_state.update(|ui| {
+                    ui.remove(&oldest_id);
+                });
+                tabs.retain(|t| t.id != oldest_id);
             }
 
             tabs.push(new_tab);
@@ -223,11 +222,11 @@ impl SqlEditorState {
                 let removed_index = tabs.iter().position(|t| t.id == tab_id);
                 // Build new list without the removed tab.
                 let new_tabs: Vec<ResultTab> = tabs.iter().filter(|t| t.id != tab_id).cloned().collect();
-                if let Some(idx) = removed_index {
-                    if !new_tabs.is_empty() {
-                        let new_index = idx.min(new_tabs.len() - 1);
-                        new_active_id = Some(new_tabs[new_index].id.clone());
-                    }
+                if let Some(idx) = removed_index
+                    && !new_tabs.is_empty()
+                {
+                    let new_index = idx.min(new_tabs.len() - 1);
+                    new_active_id = Some(new_tabs[new_index].id.clone());
                 }
                 *tabs = new_tabs;
             } else {

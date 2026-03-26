@@ -228,12 +228,10 @@ fn describe_cron_inner(
         && day_of_month == "*"
         && _month == "*"
         && day_of_week == "*"
+        && let (Ok(m), Some(step_str)) = (minute.parse::<u32>(), hour.strip_prefix("*/"))
+        && let Ok(step) = step_str.parse::<u32>()
     {
-        if let (Ok(m), Some(step_str)) = (minute.parse::<u32>(), hour.strip_prefix("*/")) {
-            if let Ok(step) = step_str.parse::<u32>() {
-                return format!("Every {step} hours at :{m:02}");
-            }
-        }
+        return format!("Every {step} hours at :{m:02}");
     }
 
     // Specific hours (hourly with selected hours, e.g., "0 9,17 * * *")
@@ -243,30 +241,29 @@ fn describe_cron_inner(
         && day_of_month == "*"
         && _month == "*"
         && day_of_week == "*"
+        && let Ok(m) = minute.parse::<u32>()
     {
-        if let Ok(m) = minute.parse::<u32>() {
-            let hours: Vec<u32> = hour
-                .split(',')
-                .filter_map(|h| h.trim().parse::<u32>().ok())
-                .collect();
-            let times: Vec<String> = hours
-                .iter()
-                .map(|&h| {
-                    let local = utc_to_local_hour(h, tz_offset_minutes);
-                    format_time(local.hour, m)
-                })
-                .collect();
-            if times.len() <= 3 {
-                return format!("Daily at {}", times.join(", "));
-            } else {
-                return format!(
-                    "Daily at {} times: {}, {}, ... {}",
-                    times.len(),
-                    times[0],
-                    times[1],
-                    times[times.len() - 1]
-                );
-            }
+        let hours: Vec<u32> = hour
+            .split(',')
+            .filter_map(|h| h.trim().parse::<u32>().ok())
+            .collect();
+        let times: Vec<String> = hours
+            .iter()
+            .map(|&h| {
+                let local = utc_to_local_hour(h, tz_offset_minutes);
+                format_time(local.hour, m)
+            })
+            .collect();
+        if times.len() <= 3 {
+            return format!("Daily at {}", times.join(", "));
+        } else {
+            return format!(
+                "Daily at {} times: {}, {}, ... {}",
+                times.len(),
+                times[0],
+                times[1],
+                times[times.len() - 1]
+            );
         }
     }
 
@@ -278,11 +275,10 @@ fn describe_cron_inner(
         && day_of_month == "*"
         && _month == "*"
         && day_of_week == "*"
+        && let (Ok(h), Ok(m)) = (hour.parse::<u32>(), minute.parse::<u32>())
     {
-        if let (Ok(h), Ok(m)) = (hour.parse::<u32>(), minute.parse::<u32>()) {
-            let local = utc_to_local_hour(h, tz_offset_minutes);
-            return format!("Daily at {}", format_time(local.hour, m));
-        }
+        let local = utc_to_local_hour(h, tz_offset_minutes);
+        return format!("Daily at {}", format_time(local.hour, m));
     }
 
     // Weekly on specific days
@@ -293,30 +289,29 @@ fn describe_cron_inner(
         && day_of_month == "*"
         && _month == "*"
         && day_of_week != "*"
+        && let (Ok(h), Ok(m)) = (hour.parse::<u32>(), minute.parse::<u32>())
     {
-        if let (Ok(h), Ok(m)) = (hour.parse::<u32>(), minute.parse::<u32>()) {
-            let local = utc_to_local_hour(h, tz_offset_minutes);
-            let time_str = format_time(local.hour, m);
+        let local = utc_to_local_hour(h, tz_offset_minutes);
+        let time_str = format_time(local.hour, m);
 
-            if let Some(days) = parse_weekdays(day_of_week, h, tz_offset_minutes) {
-                if !days.is_empty() {
-                    // Check for weekdays (5 days, no Saturday or Sunday)
-                    if days.len() == 5
-                        && !days.contains(&"Saturday".to_string())
-                        && !days.contains(&"Sunday".to_string())
-                    {
-                        return format!("Weekdays at {time_str}");
-                    }
-                    // Check for weekends
-                    if days.len() == 2
-                        && days.contains(&"Saturday".to_string())
-                        && days.contains(&"Sunday".to_string())
-                    {
-                        return format!("Weekends at {time_str}");
-                    }
-                    return format!("{} at {time_str}", days.join(", "));
-                }
+        if let Some(days) = parse_weekdays(day_of_week, h, tz_offset_minutes)
+            && !days.is_empty()
+        {
+            // Check for weekdays (5 days, no Saturday or Sunday)
+            if days.len() == 5
+                && !days.contains(&"Saturday".to_string())
+                && !days.contains(&"Sunday".to_string())
+            {
+                return format!("Weekdays at {time_str}");
             }
+            // Check for weekends
+            if days.len() == 2
+                && days.contains(&"Saturday".to_string())
+                && days.contains(&"Sunday".to_string())
+            {
+                return format!("Weekends at {time_str}");
+            }
+            return format!("{} at {time_str}", days.join(", "));
         }
     }
 
@@ -328,28 +323,27 @@ fn describe_cron_inner(
         && day_of_month != "*"
         && _month == "*"
         && day_of_week == "*"
-    {
-        if let (Ok(h), Ok(m), Ok(dom)) = (
+        && let (Ok(h), Ok(m), Ok(dom)) = (
             hour.parse::<u32>(),
             minute.parse::<u32>(),
             day_of_month.parse::<i32>(),
-        ) {
-            let local = utc_to_local_hour(h, tz_offset_minutes);
-            let time_str = format_time(local.hour, m);
+        )
+    {
+        let local = utc_to_local_hour(h, tz_offset_minutes);
+        let time_str = format_time(local.hour, m);
 
-            // Adjust day for timezone crossing
-            let mut day = dom - local.day_offset;
-            day = day.clamp(1, 28);
+        // Adjust day for timezone crossing
+        let mut day = dom - local.day_offset;
+        day = day.clamp(1, 28);
 
-            let suffix = match (day % 10, day % 100) {
-                (_, 11..=13) => "th",
-                (1, _) => "st",
-                (2, _) => "nd",
-                (3, _) => "rd",
-                _ => "th",
-            };
-            return format!("Monthly on the {day}{suffix} at {time_str}");
-        }
+        let suffix = match (day % 10, day % 100) {
+            (_, 11..=13) => "th",
+            (1, _) => "st",
+            (2, _) => "nd",
+            (3, _) => "rd",
+            _ => "th",
+        };
+        return format!("Monthly on the {day}{suffix} at {time_str}");
     }
 
     // Complex expression - show raw breakdown

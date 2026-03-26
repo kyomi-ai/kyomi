@@ -81,7 +81,7 @@ pub fn CreateKnowledgeItemModal(
     });
 
     // Submit handler — trim, validate, call callbacks.
-    let on_close_submit = on_close.clone();
+    let on_close_submit = on_close;
     let handle_submit = move || {
         let trimmed = name.get_untracked().trim().to_string();
         if trimmed.is_empty() {
@@ -92,11 +92,10 @@ pub fn CreateKnowledgeItemModal(
     };
 
     // Enter key submits.
-    let handle_submit_key = handle_submit.clone();
     let handle_keydown = move |ev: ev::KeyboardEvent| {
         if ev.key() == "Enter" {
             ev.prevent_default();
-            (handle_submit_key.clone())();
+            (handle_submit)();
         }
     };
 
@@ -104,8 +103,8 @@ pub fn CreateKnowledgeItemModal(
     let is_disabled = Memo::new(move |_| name.get().trim().is_empty());
 
     let submit_label_footer = submit_label.clone();
-    let handle_submit_btn = handle_submit.clone();
-    let on_close_cancel = on_close.clone();
+    let handle_submit_btn = handle_submit;
+    let on_close_cancel = on_close;
 
     view! {
         <Modal
@@ -115,15 +114,15 @@ pub fn CreateKnowledgeItemModal(
             size=ModalSize::Sm
             footer=ChildrenFn::to_children(move || {
                 let submit_label = submit_label_footer.clone();
-                let handle_submit_btn = handle_submit_btn.clone();
-                let on_close_cancel = on_close_cancel.clone();
+                let handle_submit_btn = handle_submit_btn;
+                let on_close_cancel = on_close_cancel;
                 let disabled = is_disabled.get();
 
                 view! {
                     <Button variant=ButtonVariant::Outline on:click=move |_| on_close_cancel.run(())>
                         "Cancel"
                     </Button>
-                    <Button disabled=disabled on:click=move |_| (handle_submit_btn.clone())()>
+                    <Button disabled=disabled on:click=move |_| (handle_submit_btn)()>
                         {submit_label.clone()}
                     </Button>
                 }

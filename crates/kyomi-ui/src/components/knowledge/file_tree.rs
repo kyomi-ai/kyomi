@@ -308,8 +308,8 @@ fn TreeContextMenu(
 
     let style = format!("left: {}px; top: {}px;", state.x, state.y);
 
-    let on_close_rename = on_close.clone();
-    let on_close_delete = on_close.clone();
+    let on_close_rename = on_close;
+    let on_close_delete = on_close;
 
     view! {
         <div
@@ -356,13 +356,13 @@ fn TreeContextMenu(
                                 }.into_any()
                             } else {
                                 let entry_id = entry_id_for_move.get_value();
-                                let on_move = on_move.clone();
-                                let on_close = on_close.clone();
+                                let on_move = on_move;
+                                let on_close = on_close;
                                 targets.into_iter().map(move |(folder_id, name)| {
                                     let entry_id = entry_id.clone();
                                     let folder_id = folder_id.clone();
-                                    let on_move = on_move.clone();
-                                    let on_close = on_close.clone();
+                                    let on_move = on_move;
+                                    let on_close = on_close;
                                     view! {
                                         <button
                                             class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
@@ -570,10 +570,10 @@ pub fn KnowledgeFileTree(
 
         // Don't move if already in that folder
         let source_entry = all.iter().find(|e| &e.id == source_id);
-        if let Some(src) = source_entry {
-            if src.parent_id.as_deref() == Some(&target_entry.id) {
-                return;
-            }
+        if let Some(src) = source_entry
+            && src.parent_id.as_deref() == Some(&target_entry.id)
+        {
+            return;
         }
 
         on_move.run((
@@ -602,11 +602,11 @@ pub fn KnowledgeFileTree(
         // Don't move if already at root
         let all = entries.get_untracked();
         let source_entry = all.iter().find(|e| &e.id == source_id);
-        if let Some(src) = source_entry {
-            if src.parent_id.is_none() {
-                dragged_id.set(None);
-                return;
-            }
+        if let Some(src) = source_entry
+            && src.parent_id.is_none()
+        {
+            dragged_id.set(None);
+            return;
         }
 
         on_move.run((source_id.clone(), None, 0));

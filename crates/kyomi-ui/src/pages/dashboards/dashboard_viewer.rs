@@ -156,7 +156,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // ── Fetch dashboard detail ──────────────────────────────────────────
     let dashboard_resource = Resource::new(
         move || dashboard_id.get(),
-        move |id| get_dashboard(id),
+        get_dashboard,
     );
 
     // ── Default dashboard state ─────────────────────────────────────────
@@ -717,7 +717,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                                         // Download PDF — desktop only
                                         {pdf_export_enabled.then(|| {
-                                            let on_download = on_download_pdf.clone();
+                                            let on_download = on_download_pdf;
                                             view! {
                                                 <button
                                                     class=move || format!(
@@ -835,7 +835,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             </button>
 
                                             {move || overflow_open.get().then(|| {
-                                                let on_download_pdf_m = on_download_pdf_mobile.clone();
+                                                let on_download_pdf_m = on_download_pdf_mobile;
                                                 let toggle_user_m = toggle_user_default_mobile.clone();
                                                 let toggle_ws_m = toggle_ws_default_mobile.clone();
 

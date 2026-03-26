@@ -103,6 +103,12 @@ pub struct ChatStateMachine {
     pub has_error: Signal<bool>,
 }
 
+impl Default for ChatStateMachine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChatStateMachine {
     /// Create a new chat state machine with all reactive signals.
     pub fn new() -> Self {

@@ -71,7 +71,6 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
     // spawn_local compiles on both targets; the extracted function ensures
     // the compiler sees all PageState variants constructed.
     {
-        let set_state = set_state.clone();
         leptos::task::spawn_local(async move {
             if transfer_id.is_empty() {
                 set_state.set(PageState::Error {

@@ -433,15 +433,15 @@ fn format_date(date_str: &str) -> String {
 
 /// Get the display name for a watch from an alert, looking up in the watches list if needed.
 fn get_watch_name(alert: &AlertItem, watches: &[WatchListItem]) -> String {
-    if let Some(ref name) = alert.watch_name {
-        if !name.is_empty() {
-            return name.clone();
-        }
+    if let Some(ref name) = alert.watch_name
+        && !name.is_empty()
+    {
+        return name.clone();
     }
-    if let Some(ref watch_id) = alert.watch_id {
-        if let Some(watch) = watches.iter().find(|w| &w.watch_id == watch_id) {
-            return watch.name.clone();
-        }
+    if let Some(ref watch_id) = alert.watch_id
+        && let Some(watch) = watches.iter().find(|w| &w.watch_id == watch_id)
+    {
+        return watch.name.clone();
     }
     "Deleted Watch".to_string()
 }
@@ -519,14 +519,14 @@ pub fn AlertsHistory(
                 expanded_alerts.set(new_set);
 
                 // Auto-mark as read
-                if let Some(alert) = alerts.iter().find(|a| a.id == target_id) {
-                    if alert.read_at.is_none() && alert.deleted_at.is_none() {
-                        let trigger = refetch_trigger;
-                        leptos::task::spawn_local(async move {
-                            let _ = mark_alert_read(target_id).await;
-                            trigger.update(|v| *v += 1);
-                        });
-                    }
+                if let Some(alert) = alerts.iter().find(|a| a.id == target_id)
+                    && alert.read_at.is_none() && alert.deleted_at.is_none()
+                {
+                    let trigger = refetch_trigger;
+                    leptos::task::spawn_local(async move {
+                        let _ = mark_alert_read(target_id).await;
+                        trigger.update(|v| *v += 1);
+                    });
                 }
             }
         });
@@ -541,14 +541,14 @@ pub fn AlertsHistory(
                 set.insert(alert_id);
                 // Auto-mark as read when expanding an unread alert
                 if let Some(Ok(page)) = alerts_resource.get() { let alerts = &page.alerts;
-                    if let Some(alert) = alerts.iter().find(|a| a.id == alert_id) {
-                        if alert.read_at.is_none() && alert.deleted_at.is_none() {
-                            let trigger = refetch_trigger;
-                            leptos::task::spawn_local(async move {
-                                let _ = mark_alert_read(alert_id).await;
-                                trigger.update(|v| *v += 1);
-                            });
-                        }
+                    if let Some(alert) = alerts.iter().find(|a| a.id == alert_id)
+                        && alert.read_at.is_none() && alert.deleted_at.is_none()
+                    {
+                        let trigger = refetch_trigger;
+                        leptos::task::spawn_local(async move {
+                            let _ = mark_alert_read(alert_id).await;
+                            trigger.update(|v| *v += 1);
+                        });
                     }
                 }
             }
@@ -764,7 +764,7 @@ pub fn AlertsHistory(
                                             })
                                             on_change=Callback::new(move |_checked: bool| {
                                                 if let Some(Ok(page)) = alerts_resource.get() { let alerts = &page.alerts;
-                                                    toggle_select_all(&alerts);
+                                                    toggle_select_all(alerts);
                                                 }
                                             })
                                         />

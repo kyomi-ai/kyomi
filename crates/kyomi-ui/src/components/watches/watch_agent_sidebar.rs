@@ -241,7 +241,7 @@ pub fn WatchAgentSidebar(
     // ── Panel content builder ───────────────────────────────────────────
     // Shared between mobile and desktop layouts.
     let panel_content = move || {
-        let handle_close_clone = handle_close.clone();
+        let handle_close_clone = handle_close;
         let empty_state_message = empty_state_message.get_value();
 
         view! {
@@ -321,7 +321,7 @@ pub fn WatchAgentSidebar(
                     // Mobile: Slide-in panel with backdrop
                     // React: `fixed top-16 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
                     // React: `fixed top-16 right-0 bottom-0 w-full max-w-[92vw] z-50 bg-background flex flex-col shadow-xl`
-                    let handle_close_backdrop = handle_close.clone();
+                    let handle_close_backdrop = handle_close;
                     view! {
                         <div>
                             <div
@@ -355,7 +355,7 @@ pub fn WatchAgentSidebar(
                             // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
                             <div
                                 class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                on:mousedown=handle_resize_start.clone()
+                                on:mousedown=handle_resize_start
                                 aria-label="Drag to resize"
                             >
                                 // React: `w-1 h-12 bg-border hover:bg-muted-foreground rounded transition-colors`

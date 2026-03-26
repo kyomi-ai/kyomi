@@ -107,6 +107,12 @@ pub struct ThinkingManager {
     state: RwSignal<HashMap<String, ThinkingState>>,
 }
 
+impl Default for ThinkingManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThinkingManager {
     /// Create a new thinking manager with empty state.
     pub fn new() -> Self {

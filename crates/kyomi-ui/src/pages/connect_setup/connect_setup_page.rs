@@ -204,7 +204,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
         set_generating_token_for.set(Some(ds_id.clone()));
         set_error.set(None);
 
-        let deliver = deliver_token.clone();
+        let deliver = deliver_token;
         leptos::task::spawn_local(async move {
             match rotate_connect_token(ds_id.clone()).await {
                 Ok(new_token) => {
@@ -238,7 +238,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
             None
         };
         let ds_type = new_type.get_untracked();
-        let deliver = deliver_token.clone();
+        let deliver = deliver_token;
 
         leptos::task::spawn_local(async move {
             match create_connect_datasource(name.clone(), slug, ds_type).await {
@@ -331,7 +331,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
                                 <SelectStep
                                     datasources=datasources
                                     generating_token_for=generating_token_for
-                                    on_select=on_select_datasource.clone()
+                                    on_select=on_select_datasource
                                     on_create_new=move || {
                                         set_error.set(None);
                                         set_step.set(SetupStep::Create);
@@ -350,7 +350,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
                                     new_type=new_type
                                     set_new_type=set_new_type
                                     creating=creating
-                                    on_submit=on_create_submit.clone()
+                                    on_submit=on_create_submit
                                     on_back=move || {
                                         set_error.set(None);
                                         set_show_slug.set(false);
@@ -436,7 +436,7 @@ fn SelectStep(
                             let ds_name = ds.name.clone();
                             let ds_type = ds.datasource_type.clone();
                             let label = get_datasource_label(&ds.datasource_type);
-                            let on_select = on_select.clone();
+                            let on_select = on_select;
                             view! {
                                 <button
                                     on:click=move |_| {
@@ -488,7 +488,7 @@ fn SelectStep(
             {move || {
                 let has_ds = !datasources.get().is_empty();
                 let variant = if has_ds { ButtonVariant::Outline } else { ButtonVariant::Default };
-                let on_create_new = on_create_new.clone();
+                let on_create_new = on_create_new;
                 view! {
                     <Button
                         variant=variant

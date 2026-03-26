@@ -993,15 +993,15 @@ pub fn DatasourceModal(
     });
 
     // Footer must be Arc<dyn Fn() -> AnyView + Send + Sync> (Leptos ChildrenFn).
-    let do_save_for_footer = do_save.clone();
+    let do_save_for_footer = do_save;
     let footer: std::sync::Arc<dyn Fn() -> leptos::prelude::AnyView + Send + Sync> =
         std::sync::Arc::new(move || {
-            let do_save = do_save_for_footer.clone();
+            let do_save = do_save_for_footer;
             view! {
                 <Show
                     when=move || is_create_mode.get()
                     fallback=move || {
-                        let do_save = do_save.clone();
+                        let do_save = do_save;
                         let is_saving = saving.get();
                         view! {
                             // Edit mode footer
@@ -1022,7 +1022,7 @@ pub fn DatasourceModal(
                 >
                     // Create mode footer
                     {move || {
-                        let do_save = do_save.clone();
+                        let do_save = do_save;
                         let is_connection_tab = active_tab.get() == "connection";
                         let can_next = test_result.get().map(|r| r.success).unwrap_or(false) && !name.get().is_empty();
                         let is_saving = saving.get();
@@ -1072,7 +1072,7 @@ pub fn DatasourceModal(
                 >
 
             {move || {
-                let do_test_and_discover = do_test_and_discover.clone();
+                let do_test_and_discover = do_test_and_discover;
                 view! {
                     // Error message
                     {move || error_msg.get().map(|msg| view! {

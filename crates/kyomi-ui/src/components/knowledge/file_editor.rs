@@ -184,7 +184,7 @@ pub fn KnowledgeFileEditor(
                             if current_id.as_deref() != Some(&fid) {
                                 return;
                             }
-                            toast_error(&format!("Failed to load file: {e}"));
+                            toast_error(format!("Failed to load file: {e}"));
                             set_is_loading.set(false);
                         }
                     }
@@ -240,7 +240,7 @@ pub fn KnowledgeFileEditor(
                         set_save_status.set(SaveStatus::Conflict);
                     } else {
                         set_save_status.set(SaveStatus::Idle);
-                        toast_error(&format!("Failed to save file: {msg}"));
+                        toast_error(format!("Failed to save file: {msg}"));
                     }
                 }
             }
@@ -269,7 +269,7 @@ pub fn KnowledgeFileEditor(
                     set_save_status.set(SaveStatus::Idle);
                 }
                 Err(e) => {
-                    toast_error(&format!("Failed to reload file: {e}"));
+                    toast_error(format!("Failed to reload file: {e}"));
                 }
             }
         });

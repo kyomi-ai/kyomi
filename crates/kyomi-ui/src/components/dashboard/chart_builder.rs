@@ -80,8 +80,7 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
         .iter()
         .find(|d| {
             d.get("type")
-                .and_then(|t| t.as_str())
-                .map_or(false, |t| t == "chart")
+                .and_then(|t| t.as_str()) == Some("chart")
         })
         .or(docs.first());
 
@@ -112,10 +111,10 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
         }
 
         // Title lives under visualize.style.title
-        if let Some(style) = vis.get("style") {
-            if let Some(title) = style.get("title").and_then(|v| v.as_str()) {
-                chart.title = title.to_string();
-            }
+        if let Some(style) = vis.get("style")
+            && let Some(title) = style.get("title").and_then(|v| v.as_str())
+        {
+            chart.title = title.to_string();
         }
 
         // Parse rows — can be a bare string or a sequence of {field, label} objects

@@ -131,7 +131,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
     // Resource created at component level, keyed on dashboard_id
     let dashboard_resource = Resource::new(
         move || dashboard_id.get(),
-        move |id| get_dashboard(id),
+        get_dashboard,
     );
 
     view! {
@@ -369,7 +369,6 @@ fn DashboardEditorInner(
 
     // Clone for button handler
     let save_on_click = {
-        let trigger_save = trigger_save.clone();
         move |_: leptos::ev::MouseEvent| {
             trigger_save();
         }

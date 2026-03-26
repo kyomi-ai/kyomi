@@ -94,24 +94,24 @@ fn default_as_string(param: &ParamDef) -> String {
 /// - Otherwise auto-calculate: 1 param → 12, 2 → 6, 3 → 4, 4+ → 3.
 /// - Mobile is always `col-span-12`.
 fn get_col_span_class(param: &ParamDef, total_params: usize) -> &'static str {
-    if let Some(ref layout) = param.layout {
-        if let Some(cs) = layout.col_span {
-            return match cs {
-                1 => "col-span-12 md:col-span-1",
-                2 => "col-span-12 md:col-span-2",
-                3 => "col-span-12 md:col-span-3",
-                4 => "col-span-12 md:col-span-4",
-                5 => "col-span-12 md:col-span-5",
-                6 => "col-span-12 md:col-span-6",
-                7 => "col-span-12 md:col-span-7",
-                8 => "col-span-12 md:col-span-8",
-                9 => "col-span-12 md:col-span-9",
-                10 => "col-span-12 md:col-span-10",
-                11 => "col-span-12 md:col-span-11",
-                12 => "col-span-12",
-                _ => "col-span-12 md:col-span-3",
-            };
-        }
+    if let Some(ref layout) = param.layout
+        && let Some(cs) = layout.col_span
+    {
+        return match cs {
+            1 => "col-span-12 md:col-span-1",
+            2 => "col-span-12 md:col-span-2",
+            3 => "col-span-12 md:col-span-3",
+            4 => "col-span-12 md:col-span-4",
+            5 => "col-span-12 md:col-span-5",
+            6 => "col-span-12 md:col-span-6",
+            7 => "col-span-12 md:col-span-7",
+            8 => "col-span-12 md:col-span-8",
+            9 => "col-span-12 md:col-span-9",
+            10 => "col-span-12 md:col-span-10",
+            11 => "col-span-12 md:col-span-11",
+            12 => "col-span-12",
+            _ => "col-span-12 md:col-span-3",
+        };
     }
 
     let auto = match total_params {
@@ -345,42 +345,42 @@ pub fn DashboardParameters(
             let mut has_new = false;
 
             for param in &params_for_init {
-                if !updated.contains_key(&param.id) {
-                    if let Some(ref default) = param.default {
-                        // For daterange, store as {id}_start and {id}_end
-                        if param.param_type == "daterange" {
-                            if let Some(arr) = default.as_array() {
-                                if arr.len() >= 2 {
-                                    let start_key = format!("{}_start", param.id);
-                                    let end_key = format!("{}_end", param.id);
-                                    if !updated.contains_key(&start_key) {
-                                        updated.insert(start_key, value_to_string(&arr[0]));
-                                        has_new = true;
-                                    }
-                                    if !updated.contains_key(&end_key) {
-                                        updated.insert(end_key, value_to_string(&arr[1]));
-                                        has_new = true;
-                                    }
+                if !updated.contains_key(&param.id)
+                    && let Some(ref default) = param.default
+                {
+                    // For daterange, store as {id}_start and {id}_end
+                    if param.param_type == "daterange" {
+                        if let Some(arr) = default.as_array() {
+                            if arr.len() >= 2 {
+                                let start_key = format!("{}_start", param.id);
+                                let end_key = format!("{}_end", param.id);
+                                if let std::collections::hash_map::Entry::Vacant(e) = updated.entry(start_key) {
+                                    e.insert(value_to_string(&arr[0]));
+                                    has_new = true;
                                 }
-                            } else {
-                                // Single default for daterange — store as the param id
-                                updated.insert(param.id.clone(), value_to_string(default));
-                                has_new = true;
+                                if let std::collections::hash_map::Entry::Vacant(e) = updated.entry(end_key) {
+                                    e.insert(value_to_string(&arr[1]));
+                                    has_new = true;
+                                }
                             }
-                        } else if param.param_type == "multiselect" {
-                            // Multiselect default is an array → join as comma-separated
-                            if let Some(arr) = default.as_array() {
-                                let csv = arr.iter().map(value_to_string).collect::<Vec<_>>().join(",");
-                                updated.insert(param.id.clone(), csv);
-                                has_new = true;
-                            } else {
-                                updated.insert(param.id.clone(), value_to_string(default));
-                                has_new = true;
-                            }
+                        } else {
+                            // Single default for daterange — store as the param id
+                            updated.insert(param.id.clone(), value_to_string(default));
+                            has_new = true;
+                        }
+                    } else if param.param_type == "multiselect" {
+                        // Multiselect default is an array → join as comma-separated
+                        if let Some(arr) = default.as_array() {
+                            let csv = arr.iter().map(value_to_string).collect::<Vec<_>>().join(",");
+                            updated.insert(param.id.clone(), csv);
+                            has_new = true;
                         } else {
                             updated.insert(param.id.clone(), value_to_string(default));
                             has_new = true;
                         }
+                    } else {
+                        updated.insert(param.id.clone(), value_to_string(default));
+                        has_new = true;
                     }
                 }
             }

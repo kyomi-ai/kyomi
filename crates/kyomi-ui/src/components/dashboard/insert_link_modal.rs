@@ -203,7 +203,7 @@ pub fn InsertDashboardLinkModal(
                                                 <DashboardListEntry
                                                     dashboard=dashboard
                                                     selected_dashboard_id=selected_dashboard_id
-                                                    on_select=handle_select.clone()
+                                                    on_select=handle_select
                                                 />
                                             </For>
                                         </div>

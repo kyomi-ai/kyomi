@@ -119,7 +119,7 @@ struct ParsedCron {
 /// Parse a cron expression back to UI selections.
 /// Converts UTC times in cron to local time for display.
 fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
-    let parts: Vec<&str> = cron.trim().split_whitespace().collect();
+    let parts: Vec<&str> = cron.split_whitespace().collect();
     if parts.len() != 5 {
         return None;
     }
@@ -145,25 +145,24 @@ fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
     // Hourly patterns with specific hours
     if hour_str != "*" && day_of_month_str == "*" && day_of_week_str == "*" {
         // Step syntax (e.g., */2)
-        if let Some(step_str) = hour_str.strip_prefix("*/") {
-            if let Ok(step) = step_str.parse::<u32>() {
-                if step > 0 && step <= 12 {
-                    let utc_hours: Vec<u32> = (0..24).step_by(step as usize).collect();
-                    let mut local_hours: Vec<u32> = utc_hours
-                        .iter()
-                        .map(|&h| utc_to_local_hour(h, tz).hour)
-                        .collect();
-                    local_hours.sort();
-                    return Some(ParsedCron {
-                        schedule_type: "hourly".into(),
-                        minute: parsed_minute,
-                        hour: 0,
-                        weekdays: vec![],
-                        day_of_month: 1,
-                        selected_hours: local_hours,
-                    });
-                }
-            }
+        if let Some(step_str) = hour_str.strip_prefix("*/")
+            && let Ok(step) = step_str.parse::<u32>()
+            && step > 0 && step <= 12
+        {
+            let utc_hours: Vec<u32> = (0..24).step_by(step as usize).collect();
+            let mut local_hours: Vec<u32> = utc_hours
+                .iter()
+                .map(|&h| utc_to_local_hour(h, tz).hour)
+                .collect();
+            local_hours.sort();
+            return Some(ParsedCron {
+                schedule_type: "hourly".into(),
+                minute: parsed_minute,
+                hour: 0,
+                weekdays: vec![],
+                day_of_month: 1,
+                selected_hours: local_hours,
+            });
         }
 
         // Comma-separated hours (multiple hours = hourly mode)

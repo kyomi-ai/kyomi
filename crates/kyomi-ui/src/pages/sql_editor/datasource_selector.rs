@@ -92,14 +92,14 @@ pub fn DatasourceSelector() -> impl IntoView {
         let current_slug = selection.slug.get_untracked();
 
         // Check if the current slug is still valid.
-        if let Some(ref slug) = current_slug {
-            if let Some(found) = ds.iter().find(|d| &d.slug == slug) {
-                // Current selection is valid — just ensure type is set.
-                selection
-                    .datasource_type
-                    .set(Some(found.datasource_type.clone()));
-                return;
-            }
+        if let Some(ref slug) = current_slug
+            && let Some(found) = ds.iter().find(|d| &d.slug == slug)
+        {
+            // Current selection is valid — just ensure type is set.
+            selection
+                .datasource_type
+                .set(Some(found.datasource_type.clone()));
+            return;
         }
 
         // No valid selection — auto-select first.

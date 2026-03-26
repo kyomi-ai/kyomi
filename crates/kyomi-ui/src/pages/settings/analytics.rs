@@ -65,19 +65,19 @@ pub fn AnalyticsPage() -> impl IntoView {
             // If the user context indicates self-hosted mode, show an informational
             // message instead of making ClickHouse-backed server calls.
             {move || {
-                if let Some(Ok(ctx)) = user_ctx.get() {
-                    if ctx.is_self_hosted {
-                        return view! {
-                            <Card>
-                                <CardContent>
-                                    <p class="text-muted-foreground py-6">
-                                        "Analytics requires a Postgres and ClickHouse configuration. \
-                                         Not available in self-hosted mode with SQLite."
-                                    </p>
-                                </CardContent>
-                            </Card>
-                        }.into_any();
-                    }
+                if let Some(Ok(ctx)) = user_ctx.get()
+                    && ctx.is_self_hosted
+                {
+                    return view! {
+                        <Card>
+                            <CardContent>
+                                <p class="text-muted-foreground py-6">
+                                    "Analytics requires a Postgres and ClickHouse configuration. \
+                                     Not available in self-hosted mode with SQLite."
+                                </p>
+                            </CardContent>
+                        </Card>
+                    }.into_any();
                 }
                 view! {
                     <Transition fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
@@ -211,12 +211,9 @@ fn AnalyticsContent(
     Effect::new(move || {
         if let Some(result) = create_action.value().get() {
             set_saving.set(false);
-            match result {
-                Ok(_) => {
-                    reset_form();
-                    sites_resource.refetch();
-                }
-                Err(_) => {} // Error is shown via toast-like mechanism
+            if result.is_ok() {
+                reset_form();
+                sites_resource.refetch();
             }
         }
     });
@@ -232,22 +229,19 @@ fn AnalyticsContent(
     Effect::new(move || {
         if let Some(result) = update_action.value().get() {
             set_saving.set(false);
-            match result {
-                Ok(_) => {
-                    reset_form();
-                    sites_resource.refetch();
-                }
-                Err(_) => {}
+            if result.is_ok() {
+                reset_form();
+                sites_resource.refetch();
             }
         }
     });
 
     // Effect: handle delete result
     Effect::new(move || {
-        if let Some(result) = delete_action.value().get() {
-            if result.is_ok() {
-                sites_resource.refetch();
-            }
+        if let Some(result) = delete_action.value().get()
+            && result.is_ok()
+        {
+            sites_resource.refetch();
         }
     });
 
@@ -427,7 +421,7 @@ fn AnalyticsContent(
                 each=move || {
                     let editing_id = editing_site_id.get();
                     sites.get().into_iter().filter(move |s| {
-                        editing_id.as_ref().map_or(true, |eid| eid != &s.id)
+                        editing_id.as_ref().is_none_or(|eid| eid != &s.id)
                     }).collect::<Vec<_>>()
                 }
                 key=|site| site.id.clone()
