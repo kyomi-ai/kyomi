@@ -152,7 +152,8 @@ pub fn Layout(children: Children) -> impl IntoView {
                 // ── Mobile overlay (matches React line 283) ─────────────────
                 <Show when=move || is_mobile.get() && mobile_open.get()>
                     <div
-                        class="fixed inset-0 bg-black/50 z-20 md:hidden"
+                        class="fixed inset-0 z-20 md:hidden"
+                        style="background-color: var(--color-overlay)"
                         on:click=move |_| set_mobile_open.set(false)
                     />
                 </Show>

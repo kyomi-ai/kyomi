@@ -23,7 +23,7 @@ pub fn WorkspacePage() -> impl IntoView {
     let settings = Resource::new(|| (), |_| get_workspace_settings());
 
     view! {
-        <div class="p-6">
+        <div class="p-4 sm:p-6">
             <h2 class="text-xl font-semibold text-foreground mb-4">"Workspace Settings"</h2>
             <p class="text-muted-foreground mb-6">
                 "Configure workspace-wide preferences (admin only)."

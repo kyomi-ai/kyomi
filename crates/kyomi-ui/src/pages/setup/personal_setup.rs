@@ -84,7 +84,7 @@ fn ConnectDataStep() -> impl IntoView {
                 </CardHeader>
                 <CardContent class="space-y-4">
                     // Option 1: Connect a Database
-                    <div class="border border-border rounded-xl p-5">
+                    <div class="border border-border rounded-lg p-5">
                         <div class="flex items-start gap-4">
                             <Icon
                                 icon=icondata_lu::LuDatabase
@@ -103,7 +103,7 @@ fn ConnectDataStep() -> impl IntoView {
                     </div>
 
                     // Option 2: Explore with Sample Data
-                    <div class="border border-border rounded-xl p-5">
+                    <div class="border border-border rounded-lg p-5">
                         <div class="flex items-start gap-4">
                             <Icon
                                 icon=icondata_lu::LuDatabase

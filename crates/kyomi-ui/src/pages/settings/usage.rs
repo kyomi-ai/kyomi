@@ -88,7 +88,7 @@ pub fn UsagePage() -> impl IntoView {
     let usage_resource = Resource::new(|| (), |_| get_ai_usage_status());
 
     view! {
-        <div class="p-6">
+        <div class="p-4 sm:p-6">
             <h2 class="text-xl font-semibold text-foreground mb-6">"Usage"</h2>
             <Transition fallback=move || view! { <UsageLoadingSkeleton/> }>
                 {move || Suspend::new(async move {

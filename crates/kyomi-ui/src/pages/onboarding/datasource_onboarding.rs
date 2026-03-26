@@ -189,7 +189,7 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
             <Card>
                 <div class="max-w-xl w-full p-8">
                     <div class="text-center mb-8">
-                        <h1 class="text-3xl font-bold mb-2">"Welcome to Kyomi!"</h1>
+                        <h1 class="text-xl font-semibold mb-2">"Welcome to Kyomi!"</h1>
                         <p class="text-muted-foreground">
                             "Choose how you'd like to get started"
                         </p>
@@ -412,7 +412,7 @@ fn CredentialSetup(
             <Card>
                 <div class="max-w-2xl w-full p-8">
                     <div class="text-center mb-6">
-                        <h1 class="text-3xl font-bold mb-2">"Set Up Your Credentials"</h1>
+                        <h1 class="text-xl font-semibold mb-2">"Set Up Your Credentials"</h1>
                         <p class="text-muted-foreground">
                             {move || {
                                 let t = total;
@@ -682,7 +682,7 @@ fn WaitingForSetup(
             <Card>
                 <div class="max-w-lg w-full p-8">
                     <div class="text-center mb-6">
-                        <h1 class="text-3xl font-bold mb-2">"Waiting for Setup"</h1>
+                        <h1 class="text-xl font-semibold mb-2">"Waiting for Setup"</h1>
                         <p class="text-muted-foreground">
                             "Your workspace administrator needs to configure datasources before you can start."
                         </p>

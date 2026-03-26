@@ -1093,7 +1093,7 @@ fn PlanCard(
                 <CardTitle class="text-xl">{name}</CardTitle>
                 <CardDescription>
                     <div class="mt-2">
-                        <div class="text-2xl font-bold text-foreground">
+                        <div class="text-xl font-semibold text-foreground">
                             {annual_price}<span class="text-sm font-normal text-muted-foreground">"/month*"</span>
                         </div>
                         <div class="text-xs text-muted-foreground">{annual_total}</div>

@@ -164,7 +164,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
                                         view! {
                                             <div class="flex h-full items-center justify-center bg-muted">
                                                 <div class="text-center">
-                                                    <h2 class="text-2xl font-bold text-foreground mb-4">
+                                                    <h2 class="text-lg font-semibold text-foreground mb-4">
                                                         "Dashboard Not Found"
                                                     </h2>
                                                     <p class="text-muted-foreground mb-6">{e.to_string()}</p>

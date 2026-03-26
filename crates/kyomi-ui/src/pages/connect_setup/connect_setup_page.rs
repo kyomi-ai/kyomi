@@ -300,7 +300,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
                                     <img src="/kyomi_full_logo_white.svg" alt="Kyomi"
                                         class="h-10 mx-auto hidden dark:block"/>
                                 </div>
-                                <h2 class="text-3xl font-bold mb-2">"Connect Setup"</h2>
+                                <h2 class="text-xl font-semibold mb-2">"Connect Setup"</h2>
                                 <p class="text-muted-foreground">
                                     {move || match step.get() {
                                         SetupStep::Select => "Select or create a datasource for your agent",
@@ -393,7 +393,7 @@ fn AdminRequired() -> impl IntoView {
                         <img src="/kyomi_full_logo_white.svg" alt="Kyomi"
                             class="h-10 mx-auto hidden dark:block"/>
                     </div>
-                    <h2 class="text-3xl font-bold mb-2">"Admin Access Required"</h2>
+                    <h2 class="text-xl font-semibold mb-2">"Admin Access Required"</h2>
                     <p class="text-muted-foreground">
                         "Only workspace admins can set up Kyomi Connect datasources. "
                         "Contact your workspace admin to get a Connect token."
@@ -719,7 +719,7 @@ fn SuccessStep(
 
             // Manual instructions (shown when no callback or delivery failed)
             <Show when=move || !has_callback.get() || delivery_status.get() == Some(DeliveryStatus::Failed)>
-                <div class="border border-border rounded-xl p-5 space-y-2">
+                <div class="border border-border rounded-lg p-5 space-y-2">
                     <p class="font-semibold">"Next steps"</p>
                     <p class="text-sm text-muted-foreground">
                         "Install and configure Kyomi Connect in one command:"

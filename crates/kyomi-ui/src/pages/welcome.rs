@@ -89,7 +89,7 @@ pub fn WelcomePage() -> impl IntoView {
             <Card class="max-w-2xl w-full p-8">
                 // ── Heading ──────────────────────────────────────────
                 <div class="text-center mb-6">
-                    <h1 class="text-3xl font-bold mb-2">
+                    <h1 class="text-xl font-semibold mb-2">
                         {move || {
                             if is_existing_user.get() {
                                 "Welcome Back!"

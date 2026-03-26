@@ -38,7 +38,8 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
-use leptos_router::hooks::{use_location, use_navigate, use_params_map};
+use leptos_router::components::Outlet;
+use leptos_router::hooks::{use_location, use_navigate};
 
 use super::chat_message::ChatMessage;
 use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
@@ -47,7 +48,7 @@ use crate::components::chat::{
     ChatStateMachine, InlineEditableTitle, ThinkingEvent, ThinkingManager, ThinkingState,
     TokenUsage,
 };
-use crate::components::dashboard::SaveDashboardModal;
+use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
 use crate::components::{ConfirmDialog, Spinner};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::chat::get_chart_context;
@@ -202,12 +203,27 @@ fn generate_user_message_id() -> String {
 /// messages, streams AI responses via WebSocket, and supports cancellation.
 #[component]
 pub fn ChatPage() -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::log_1(&"[DEBUG] ChatPage: component function called (mount/remount)".into());
+
     // ── URL parameter parsing ───────────────────────────────────────────
-    let params = use_params_map();
+    // NOTE: ChatPage is mounted as a ParentRoute view (path="/chat"). In Leptos
+    // router, use_params_map() in a ParentRoute component only sees the PARENT
+    // route's params — NOT the child routes' params. Since /chat has no params,
+    // use_params_map().get("session_id") always returns empty string.
+    //
+    // Fix: parse session_id directly from use_location().pathname, which always
+    // reflects the actual browser URL regardless of route nesting depth.
+    let location = use_location();
     let url_session_id = Memo::new(move |_| {
-        let p = params.get();
-        let id = p.get("session_id").unwrap_or_default();
-        if id.is_empty() { None } else { Some(id) }
+        let pathname = location.pathname.get();
+        // pathname is "/chat" or "/chat/:session_id"
+        // Strip the "/chat/" prefix and treat the remainder as session_id.
+        pathname
+            .strip_prefix("/chat/")
+            .map(|s| s.trim_matches('/'))
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
     });
 
     // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
@@ -261,10 +277,9 @@ pub fn ChatPage() -> impl IntoView {
     let (_dashboard_modal_message_id, set_dashboard_modal_message_id) =
         signal(Option::<String>::None);
 
-    // Phase 9 — chart info modal state (read signals used when ChartInfoModal
-    // is wired in Phase 13)
-    let (_chart_info_modal_open, _set_chart_info_modal_open) = signal(false);
-    let (_chart_info_spec, _set_chart_info_spec) = signal(Option::<String>::None);
+    // Phase 9 — chart info modal state
+    let (chart_info_modal_open, set_chart_info_modal_open) = signal(false);
+    let (chart_info_spec, set_chart_info_spec) = signal(Option::<String>::None);
 
     // Confirmation dialog for unshare action
     // Matches React: Chat.jsx lines 1405-1428 (confirm before unsharing)
@@ -360,11 +375,14 @@ pub fn ChatPage() -> impl IntoView {
         match (&new_session_id, &current) {
             // URL has a session ID and it's different from current — prepare for load
             (Some(sid), _) if Some(sid) != current.as_ref() => {
+                // Check if this is a session we just created in on_send.
+                // If so, streaming is already in progress via WebSocket — don't reset chat_state.
+                let just_created = just_created_session.get_untracked();
+                let is_just_created = just_created.as_deref() == Some(sid.as_str());
                 // Clear just_created_session if we're navigating to a different session.
                 // This must happen here (Effect) not in the Memo — writing to signals
                 // inside Memo::new is illegal in Leptos 0.8 and causes WASM panics.
-                let just_created = just_created_session.get_untracked();
-                if just_created.as_deref() != Some(sid.as_str()) {
+                if !is_just_created {
                     just_created_session.set(None);
                 }
                 // Do NOT clear messages here — clearing causes <For> to dispose item scopes
@@ -373,9 +391,24 @@ pub fn ChatPage() -> impl IntoView {
                 // The spinner is shown based on is_loading=true (checked first in the render logic),
                 // and messages are replaced atomically when the new session's data loads.
                 set_current_greeting.set(String::new());
-                set_is_loading.set(true);
+                if !is_just_created {
+                    set_is_loading.set(true);
+                }
                 set_current_session_id.set(Some(sid.clone()));
-                chat_state_for_load.reset();
+                // Only reset streaming state when navigating to a DIFFERENT session
+                // AND we're not actively chatting. The WS `session_created` event often
+                // arrives before the HTTP response, so `just_created_session` might not
+                // be set yet when this Effect first fires. The state check provides a
+                // second safety net: never reset if we're mid-conversation.
+                let actively_chatting = matches!(
+                    chat_state_for_load.state().get_untracked(),
+                    crate::components::chat::ChatState::Sending
+                    | crate::components::chat::ChatState::Streaming
+                    | crate::components::chat::ChatState::Cancelling
+                );
+                if !is_just_created && !actively_chatting {
+                    chat_state_for_load.reset();
+                }
             }
             // URL has no session ID but we have a current session — clear state (new chat)
             (None, Some(_)) => {
@@ -579,6 +612,14 @@ pub fn ChatPage() -> impl IntoView {
                 {
                     let session_id = msg.session_id.as_ref().unwrap().clone();
                     let data = msg.data.as_ref().unwrap();
+
+                    // Mark as just-created BEFORE navigating so the URL change Effect
+                    // sees is_just_created=true and does NOT reset chat_state.
+                    // The WS session_created event can arrive BEFORE the HTTP response
+                    // (the backend sends WS events then returns the HTTP response), so
+                    // just_created_session may still be None here. Setting it now prevents
+                    // the URL change Effect from calling chat_state_for_load.reset().
+                    just_created_session.set(Some(session_id.clone()));
 
                     // Navigate to the new session URL (replace: true for new chat)
                     let path = format!("/chat/{}", session_id);
@@ -832,6 +873,7 @@ pub fn ChatPage() -> impl IntoView {
 
             // ── chat_stream ─────────────────────────────────────────────
             // Matches React: Chat.jsx lines 530-568 and ChatInterface.jsx lines 275-288
+            let chat_state_stream = chat_state_ws.clone();
             let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
                 let content = msg
                     .data
@@ -857,6 +899,17 @@ pub fn ChatPage() -> impl IntoView {
                 let current_sid = current_session_id.get_untracked();
                 if current_sid.is_some() && current_sid.as_deref() != Some(msg_session_id) {
                     return;
+                }
+
+                // Recover streaming state if it was lost during URL change.
+                // During new chat creation, the URL transitions from /chat to
+                // /chat/:session_id. Reactive effects may reset the chat state
+                // to Idle before all WS events are processed. If we're receiving
+                // stream data but the state isn't Streaming, restore it.
+                // Only transition Idle→Streaming (Sending is fine, Cancelling should not be overridden).
+                let stream_state = chat_state_stream.state().get_untracked();
+                if stream_state == crate::components::chat::ChatState::Idle {
+                    chat_state_stream.start_streaming(&msg_message_id);
                 }
 
                 set_messages.update(|msgs| {
@@ -1357,6 +1410,13 @@ pub fn ChatPage() -> impl IntoView {
         }
     });
 
+    // Phase 9 — Show chart info modal with the chart's YAML spec
+    // Matches React: handleShowChartInfo (Chat.jsx line 1324)
+    let on_show_chart_info = Callback::new(move |spec: String| {
+        set_chart_info_spec.set(Some(spec));
+        set_chart_info_modal_open.set(true);
+    });
+
     // Phase 9 — Open dashboard modal with message content
     // Matches React: Chat.jsx lines 1305-1311
     let on_open_dashboard_modal = Callback::new(move |content: String| {
@@ -1557,9 +1617,13 @@ pub fn ChatPage() -> impl IntoView {
                         set_skip_ai_response.set(false);
                         // Still need to update session_id if new
                         if session_id.is_none() {
-                            // M8 — Mark as just-created to skip redundant reload
+                            // M8 — Mark as just-created to skip redundant reload.
+                            // Do NOT set current_session_id here — setting it before navigate
+                            // causes a race: effects flush with url_session_id=None but
+                            // current_session_id=Some(sid), triggering the (None, Some(_)) branch
+                            // which resets chat_state and hides the stop button.
+                            // The URL change Effect sets current_session_id after navigate completes.
                             just_created_session.set(Some(response.session_id.clone()));
-                            set_current_session_id.set(Some(response.session_id.clone()));
                             let path = format!("/chat/{}", response.session_id);
                             navigate_inner(&path, leptos_router::NavigateOptions {
                                 replace: true,
@@ -1571,9 +1635,13 @@ pub fn ChatPage() -> impl IntoView {
 
                     // Update current_session_id from response (for new chats)
                     if session_id.is_none() {
-                        // M8 — Mark as just-created to skip redundant reload
+                        // M8 — Mark as just-created to skip redundant reload.
+                        // Do NOT set current_session_id here — setting it before navigate
+                        // causes a race: effects flush with url_session_id=None but
+                        // current_session_id=Some(sid), triggering the (None, Some(_)) branch
+                        // which resets chat_state and hides the stop button.
+                        // The URL change Effect sets current_session_id after navigate completes.
                         just_created_session.set(Some(response.session_id.clone()));
-                        set_current_session_id.set(Some(response.session_id.clone()));
 
                         // Navigate to the new session URL
                         let path = format!("/chat/{}", response.session_id);
@@ -1806,7 +1874,7 @@ pub fn ChatPage() -> impl IntoView {
                         // Matches React: Chat.jsx lines 1467-1613
                         <Show when=move || !messages.get().is_empty()>
                             <div class="flex-shrink-0 z-20 bg-card border-b border-border">
-                                <div class="flex justify-between items-center px-4 md:px-12 py-4 gap-4">
+                                <div class="flex justify-between items-center px-4 md:px-6 py-4 gap-4">
                                     // Left side: title + badges
                                     <div class="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
                                         <Show
@@ -2070,6 +2138,7 @@ pub fn ChatPage() -> impl IntoView {
                                                             current_user_id=current_user_id.get_untracked()
                                                             on_toggle_pin=on_toggle_pin
                                                             on_open_dashboard_modal=on_open_dashboard_modal
+                                                            on_show_chart_info=on_show_chart_info
                                                             on_message_update=on_message_update
                                                             is_pinned=is_pinned
                                                         />
@@ -2157,6 +2226,23 @@ pub fn ChatPage() -> impl IntoView {
                 />
             }
         }}
+
+        // Chart info modal — shown when user clicks chart info button in MarkdownRenderer.
+        // Matches React: <ChartInfoModal open={chartInfoModal.isOpen} spec={chartInfoModal.spec} onClose={...} />
+        {move || chart_info_spec.get().map(|spec| {
+            view! {
+                <ChartInfoModal
+                    open=Signal::derive(move || chart_info_modal_open.get())
+                    yaml=spec
+                    on_close=Callback::new(move |()| set_chart_info_modal_open.set(false))
+                />
+            }
+        })}
+
+        // Required by ParentRoute — renders the matched child route's view.
+        // Child routes (/chat and /chat/:session_id) have empty views, so this
+        // renders nothing but must be present for the router to function.
+        <Outlet/>
         </>
     }
 }

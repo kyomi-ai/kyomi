@@ -118,17 +118,17 @@ pub fn SettingsShell() -> impl IntoView {
         <div class="w-full space-y-8" style:display="block">
             // Settings Header — matches React SettingsContent.jsx
             <div class="mb-8">
-                <h1 class="text-3xl font-bold text-foreground">"Settings"</h1>
+                <h1 class="text-xl font-semibold text-foreground">"Settings"</h1>
                 <p class="text-muted-foreground mt-2">"Manage your workspace configuration and billing settings"</p>
             </div>
 
             // Settings Navigation Tabs
-            // React: "w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden"
+            // React: "w-full bg-card rounded-xl shadow border border-border mb-6 overflow-hidden"
             //
             // The tab structure is rendered once when user_ctx loads. Each tab's
             // active class is an independent reactive signal so clicking a tab
             // only updates CSS classes — no DOM teardown/rebuild, no flicker.
-            <div class="w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden">
+            <div class="w-full bg-card rounded-xl shadow border border-border mb-6 overflow-hidden">
                 <div class="border-b border-border overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent">
                     <div class="flex space-x-4 md:space-x-8 px-4 md:px-6 min-w-max">
                         <Transition fallback=move || {
@@ -187,8 +187,8 @@ pub fn SettingsShell() -> impl IntoView {
             </div>
 
             // Settings Content — child route renders here via <Outlet/>
-            // React: "w-full bg-card rounded-xl shadow-sm border border-border"
-            <div class="w-full bg-card rounded-xl shadow-sm border border-border">
+            // React: "w-full bg-card rounded-xl shadow border border-border"
+            <div class="w-full bg-card rounded-xl shadow border border-border">
                 <Outlet/>
             </div>
         </div>

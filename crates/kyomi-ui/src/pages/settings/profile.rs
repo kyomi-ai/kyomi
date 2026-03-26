@@ -65,7 +65,7 @@ pub fn ProfilePage() -> impl IntoView {
     let invitations = Resource::new(|| (), |_| get_pending_invitations());
 
     view! {
-        <div class="p-6">
+        <div class="p-4 sm:p-6">
             <h2 class="text-xl font-semibold text-foreground mb-6">"Profile Settings"</h2>
 
             <Transition fallback=move || view! {

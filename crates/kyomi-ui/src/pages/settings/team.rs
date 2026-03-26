@@ -42,7 +42,7 @@ pub fn TeamPage() -> impl IntoView {
                                 "You must be a workspace administrator to manage team members."
                             };
                             view! {
-                                <div class="p-6">
+                                <div class="p-4 sm:p-6">
                                     <Alert variant=AlertVariant::Error>
                                         <AlertTitle>"Access Denied"</AlertTitle>
                                         <AlertDescription>{msg}</AlertDescription>
@@ -326,7 +326,7 @@ fn TeamPageInner() -> impl IntoView {
     });
 
     view! {
-        <div class="p-6" style="display: block; padding: 1.5rem;">
+        <div class="p-4 sm:p-6">
             // Header
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-6">
                 <div class="min-w-0">

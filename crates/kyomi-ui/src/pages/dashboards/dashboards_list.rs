@@ -290,8 +290,8 @@ pub fn DashboardsListPage() -> impl IntoView {
     view! {
         <div class="flex flex-col h-full bg-muted">
             // Header
-            <div class="min-h-16 border-b border-border bg-card px-6 py-3 flex-shrink-0 flex flex-col sm:flex-row sm:items-center gap-3">
-                <h1 class="text-2xl font-semibold text-foreground flex-shrink-0">
+            <div class="h-16 border-b border-border bg-card px-6 py-4 flex-shrink-0 flex flex-col sm:flex-row sm:items-center gap-3">
+                <h1 class="text-xl font-semibold text-foreground flex-shrink-0">
                     {move || {
                         if let Some(ref coll_id) = active_collection_id.get() {
                             // Find collection name
@@ -330,7 +330,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                         <input
                             type="text"
                             placeholder="Search dashboards..."
-                            class="w-full pl-10 pr-4 py-2 text-sm border border-input rounded-lg focus:ring-2 focus:ring-primary/20 focus:border-primary bg-card text-foreground transition-colors"
+                            class="w-full pl-10 pr-4 py-2 text-sm border border-input rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-card text-foreground transition-colors"
                             prop:value=move || search_input.get()
                             on:input=move |ev| {
                                 set_search_input.set(event_target_value(&ev));
@@ -385,10 +385,9 @@ pub fn DashboardsListPage() -> impl IntoView {
                     </button>
 
                     // Create Dashboard button
-                    <button
-                        class="flex items-center gap-2 px-3 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors text-white bg-primary hover:bg-primary/90"
+                    <Button
                         on:click=handle_create
-                        disabled=move || creating.get()
+                        disabled=Signal::derive(move || creating.get())
                     >
                         <Show
                             when=move || !creating.get()
@@ -399,7 +398,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                             </svg>
                         </Show>
                         <span class="hidden sm:inline whitespace-nowrap">"Create Dashboard"</span>
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -521,7 +520,7 @@ fn EmptyState(
     on_create: Callback<leptos::ev::MouseEvent>,
 ) -> impl IntoView {
     view! {
-        <div class="text-center py-16 bg-card rounded-2xl shadow-sm border border-border">
+        <div class="text-center py-16 bg-card rounded-lg shadow border border-border">
             <div class="max-w-md mx-auto">
                 <svg
                     class="w-24 h-24 mx-auto text-muted-foreground/50 mb-6"
@@ -559,15 +558,12 @@ fn EmptyState(
                     }}
                 </p>
                 <Show when=move || !has_search.get() && !has_active_collection>
-                    <button
-                        class="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors text-white bg-primary hover:bg-primary/90"
-                        on:click=move |ev| on_create.run(ev)
-                    >
+                    <Button on:click=move |ev| on_create.run(ev)>
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
                         </svg>
                         "Create Your First Dashboard"
-                    </button>
+                    </Button>
                 </Show>
             </div>
         </div>
@@ -922,7 +918,7 @@ fn AddToCollectionModal(
                         <div class="bg-card rounded-2xl shadow-2xl max-w-md w-full">
                             // Header
                             <div class="flex justify-between items-center p-6 border-b border-border">
-                                <h2 class="text-2xl font-bold text-foreground">"Add to Collection"</h2>
+                                <h2 class="text-lg font-semibold text-foreground">"Add to Collection"</h2>
                                 <button
                                     class="text-muted-foreground hover:text-foreground transition-colors"
                                     on:click=move |_| on_close.run(())

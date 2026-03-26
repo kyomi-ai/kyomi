@@ -282,7 +282,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         view! {
                             <div class="flex h-full items-center justify-center bg-muted">
                                 <div class="text-center">
-                                    <h2 class="text-2xl font-bold text-foreground mb-4">
+                                    <h2 class="text-lg font-semibold text-foreground mb-4">
                                         "Dashboard Not Found"
                                     </h2>
                                     <p class="text-muted-foreground mb-6">
@@ -290,7 +290,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     </p>
                                     <a
                                         href="/dashboards"
-                                        class="px-6 py-3 text-white bg-primary hover:bg-primary/90 rounded-lg transition-colors inline-block"
+                                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
                                     >
                                         "Back to Dashboards"
                                     </a>
@@ -922,7 +922,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         // Edit Dashboard — always visible (primary action)
                                         <a
                                             href=edit_href
-                                            class="flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium text-white bg-primary hover:bg-primary/90 rounded-lg transition-colors"
+                                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
                                         >
                                             <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -947,7 +947,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             }
                                         })}
 
-                                        <div class="bg-card rounded-lg border border-border shadow-sm min-h-full">
+                                        <div class="bg-card rounded-lg border border-border shadow min-h-full">
                                             // Preview banner
                                             {move || preview_content.get().is_some().then(|| {
                                                 view! {
@@ -986,7 +986,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                 </p>
                                                                 <a
                                                                     href=edit_href_empty.clone()
-                                                                    class="inline-flex items-center gap-2 px-6 py-3 text-white bg-primary hover:bg-primary/90 rounded-lg transition-colors"
+                                                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
                                                                 >
                                                                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />

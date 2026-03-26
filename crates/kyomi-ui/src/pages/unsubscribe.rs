@@ -75,7 +75,7 @@ pub fn UnsubscribePage() -> impl IntoView {
                         alt="Kyomi"
                         class="h-12 mx-auto mb-6 hidden dark:block"
                     />
-                    <h1 class="text-3xl font-bold text-foreground mb-2">
+                    <h1 class="text-xl font-semibold text-foreground mb-2">
                         "Unsubscribe from Updates"
                     </h1>
                     <p class="text-muted-foreground">

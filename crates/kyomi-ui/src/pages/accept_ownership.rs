@@ -189,7 +189,7 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
                                 }
                             }}
                         </div>
-                        <h1 class="text-2xl font-bold text-foreground mb-2">
+                        <h1 class="text-xl font-semibold text-foreground mb-2">
                             "Workspace Ownership Transfer"
                         </h1>
                         <p class="text-muted-foreground">

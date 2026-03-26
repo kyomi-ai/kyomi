@@ -59,7 +59,7 @@ pub fn AnalyticsPage() -> impl IntoView {
     let usage_resource = Resource::new(|| (), |_| get_analytics_usage());
 
     view! {
-        <div class="p-6">
+        <div class="p-4 sm:p-6">
             <h2 class="text-xl font-semibold text-foreground mb-6">"Analytics"</h2>
 
             // If the user context indicates self-hosted mode, show an informational
