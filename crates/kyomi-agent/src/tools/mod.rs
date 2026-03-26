@@ -150,6 +150,9 @@ pub struct ToolContext {
     pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
     /// Messaging platform registry for alert delivery and platform interactions.
     pub platforms: Arc<kyomi_core::platform::PlatformRegistry>,
+    /// Display name for the current user (name or email fallback).
+    /// Used for WebSocket event attribution (e.g., "changed_by_name" in dashboard updates).
+    pub user_display_name: String,
 }
 
 impl ToolContext {

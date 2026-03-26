@@ -1967,6 +1967,7 @@ async fn run_slack_query(
         user_message_id: None,
         assistant_message_id: None,
         conversation_history: None,
+        user_display_name: "Kyomi Slack".to_string(),
     };
 
     let result = kyomi_agent::execution::execute_agent_chat(

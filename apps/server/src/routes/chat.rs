@@ -689,6 +689,7 @@ async fn send_message(
         user_message_id: Some(user_message_id.clone()),
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
+        user_display_name: user.name.as_deref().unwrap_or(&user.email).to_string(),
     };
 
     // Register cancel token so WebSocket cancel_request can stop this task.

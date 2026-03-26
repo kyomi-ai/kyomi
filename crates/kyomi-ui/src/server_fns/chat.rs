@@ -678,6 +678,7 @@ pub async fn send_chat_message(
         user_message_id: Some(user_message_id.clone()),
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
+        user_display_name: auth.name.clone().unwrap_or_else(|| auth.email.clone()),
     };
 
     // Register cancel token so WebSocket cancel_request can stop this task.

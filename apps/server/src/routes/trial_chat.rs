@@ -744,6 +744,7 @@ async fn trial_chat(
         user_message_id: None,
         assistant_message_id: None,
         conversation_history,
+        user_display_name: "Trial User".to_string(),
     };
 
     // Generate a refreshed trial access token for the response

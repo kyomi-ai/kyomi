@@ -613,6 +613,7 @@ async fn send_copilot_message(
         user_message_id: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
+        user_display_name: user.name.as_deref().unwrap_or(&user.email).to_string(),
     };
 
     // Register cancel token so WebSocket cancel_request can stop this task.
