@@ -27,9 +27,7 @@ use crate::types::KnowledgeTreeEntry;
 #[derive(Clone, Copy, PartialEq)]
 enum SaveStatus {
     Idle,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Saving,
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     Saved,
     Conflict,
 }
@@ -360,26 +358,32 @@ pub fn KnowledgeFileEditor(
                                     }}
                                 </span>
                                 // Save status indicator
-                                {move || match save_status.get() {
-                                    SaveStatus::Saving => Some(view! {
-                                        <span class="flex items-center gap-1 text-xs text-muted-foreground">
-                                            <Loader2Icon class="w-3 h-3 animate-spin" />
-                                            "Saving..."
-                                        </span>
-                                    }.into_any()),
-                                    SaveStatus::Saved => Some(view! {
-                                        <span class="flex items-center gap-1 text-xs text-success-foreground">
-                                            <CheckIcon class="w-3 h-3" />
-                                            "Saved"
-                                        </span>
-                                    }.into_any()),
-                                    SaveStatus::Conflict => Some(view! {
-                                        <span class="flex items-center gap-1 text-xs text-destructive">
-                                            <AlertTriangleIcon class="w-3 h-3" />
-                                            "Conflict!"
-                                        </span>
-                                    }.into_any()),
-                                    SaveStatus::Idle => None,
+                                {move || {
+                                    let status = save_status.get();
+                                    if status == SaveStatus::Saving {
+                                        Some(view! {
+                                            <span class="flex items-center gap-1 text-xs text-muted-foreground">
+                                                <Loader2Icon class="w-3 h-3 animate-spin" />
+                                                "Saving..."
+                                            </span>
+                                        }.into_any())
+                                    } else if status == SaveStatus::Saved {
+                                        Some(view! {
+                                            <span class="flex items-center gap-1 text-xs text-success-foreground">
+                                                <CheckIcon class="w-3 h-3" />
+                                                "Saved"
+                                            </span>
+                                        }.into_any())
+                                    } else if status == SaveStatus::Conflict {
+                                        Some(view! {
+                                            <span class="flex items-center gap-1 text-xs text-destructive">
+                                                <AlertTriangleIcon class="w-3 h-3" />
+                                                "Conflict!"
+                                            </span>
+                                        }.into_any())
+                                    } else {
+                                        None
+                                    }
                                 }}
                             </div>
                             // Right: metadata + mode toggle

@@ -588,6 +588,7 @@ async fn fetch_bq_job_page(
 /// - `schema.fields[].name` for column names
 /// - `rows[].f[].v` for cell values
 /// - `totalRows` (string or number) for the total row count
+#[cfg(feature = "ssr")]
 type BqQueryResult = (Vec<String>, Vec<Vec<serde_json::Value>>, usize);
 
 #[cfg(feature = "ssr")]
