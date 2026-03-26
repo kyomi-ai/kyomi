@@ -160,11 +160,10 @@ impl KVStore for InMemoryKVStore {
 
     async fn expire(&self, key: &str, ttl_secs: u64) -> crate::Result<()> {
         let mut data = self.data.write().await;
-        if let Some(entry) = data.get_mut(key) {
-            if !entry.is_expired() {
+        if let Some(entry) = data.get_mut(key)
+            && !entry.is_expired() {
                 entry.expires_at = Some(Instant::now() + Duration::from_secs(ttl_secs));
             }
-        }
         Ok(())
     }
 

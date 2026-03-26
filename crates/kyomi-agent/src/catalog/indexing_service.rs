@@ -203,7 +203,7 @@ impl CatalogIndexingService {
                 encryption_key.clone(),
                 embedding,
                 workspace_id,
-                &config_id,
+                config_id,
                 user_email,
                 credentials,
                 max_tables_per_dataset,
@@ -246,16 +246,15 @@ impl CatalogIndexingService {
             // 1. Sync analytics quota to Redis (requires raw Redis connection)
             if let Some(mut redis_conn) = redis {
                 let configs = kyomi_auth::analytics_quota::default_tier_configs();
-                if let Some(config) = configs.get(&subscription_tier) {
-                    if let Err(e) = kyomi_auth::analytics_quota::sync_quota_to_redis(
+                if let Some(config) = configs.get(&subscription_tier)
+                    && let Err(e) = kyomi_auth::analytics_quota::sync_quota_to_redis(
                         &mut redis_conn,
                         &workspace_id,
                         config,
                     )
                     .await
-                    {
-                        warn!(error = %e, "Failed to sync analytics quota to Redis");
-                    }
+                {
+                    warn!(error = %e, "Failed to sync analytics quota to Redis");
                 }
             } else {
                 tracing::debug!("Skipping analytics quota sync — Redis not available");
@@ -273,7 +272,7 @@ impl CatalogIndexingService {
             let result = Self::index_datasource(
                 &db,
                 encryption_key,
-                &embed,
+                embed,
                 &workspace_id,
                 &datasource_id,
                 None, // no user email — shared credentials

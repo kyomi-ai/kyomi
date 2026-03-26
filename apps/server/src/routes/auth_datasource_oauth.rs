@@ -53,7 +53,7 @@ pub fn routes() -> Router<AppState> {
 
 /// Parse and validate the provider path parameter.
 fn parse_provider(provider: &str) -> Result<OAuthProvider, kyomi_core::Error> {
-    OAuthProvider::from_str(provider).ok_or_else(|| {
+    OAuthProvider::parse(provider).ok_or_else(|| {
         let available: Vec<&str> = OAuthProvider::all().iter().map(|p| p.as_str()).collect();
         kyomi_core::Error::NotFound(format!(
             "Unknown OAuth provider: {provider}. Available providers: {available:?}"

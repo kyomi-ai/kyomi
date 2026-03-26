@@ -172,14 +172,13 @@ impl MCPSessionManager {
             Err(_) => return,
         };
 
-        if let Some(json) = value {
-            if let Ok(mut data) = serde_json::from_str::<SessionData>(&json) {
+        if let Some(json) = value
+            && let Ok(mut data) = serde_json::from_str::<SessionData>(&json) {
                 data.supports_mcp_apps = supports;
                 if let Ok(updated) = serde_json::to_string(&data) {
                     let _ = self.kv.set(&key, &updated, Some(SESSION_TTL_SECS)).await;
                 }
             }
-        }
     }
 
     /// Check if a session's client supports MCP Apps.
@@ -209,11 +208,10 @@ impl MCPSessionManager {
         for entry in self.local_sse_senders.iter() {
             let session_id = entry.key().clone();
             // Check if this session belongs to the workspace
-            if let Some(ws_id) = self.validate_session(&session_id).await {
-                if ws_id == workspace_id {
+            if let Some(ws_id) = self.validate_session(&session_id).await
+                && ws_id == workspace_id {
                     senders.push((session_id, entry.value().clone()));
                 }
-            }
         }
 
         if senders.is_empty() {

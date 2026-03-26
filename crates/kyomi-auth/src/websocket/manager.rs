@@ -112,17 +112,17 @@ impl WebSocketManager {
     /// items from the receiver to the actual WebSocket sink.
     ///
     /// Starts a Redis subscriber if this is the first connection for the user.
-    pub fn connect(&self, user_id: &str) -> Result<(u64, mpsc::Receiver<String>), ()> {
+    pub fn connect(&self, user_id: &str) -> Result<(u64, mpsc::Receiver<String>), String> {
         // Enforce per-user connection limit.
-        if let Some(conns) = self.inner.connections.get(user_id) {
-            if conns.len() >= MAX_CONNECTIONS_PER_USER {
-                tracing::warn!(
-                    user_id,
-                    limit = MAX_CONNECTIONS_PER_USER,
-                    "WebSocket connection rejected: per-user limit reached"
-                );
-                return Err(());
-            }
+        if let Some(conns) = self.inner.connections.get(user_id)
+            && conns.len() >= MAX_CONNECTIONS_PER_USER
+        {
+            tracing::warn!(
+                user_id,
+                limit = MAX_CONNECTIONS_PER_USER,
+                "WebSocket connection rejected: per-user limit reached"
+            );
+            return Err("per-user connection limit reached".into());
         }
 
         let conn_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
@@ -177,10 +177,10 @@ impl WebSocketManager {
             .remove_if(user_id, |_, conns| conns.is_empty())
             .is_some();
 
-        if removed_last && self.inner.redis.is_some() {
-            if let Some((_, handle)) = self.inner.subscribers.remove(user_id) {
-                handle.abort();
-            }
+        if removed_last && self.inner.redis.is_some()
+            && let Some((_, handle)) = self.inner.subscribers.remove(user_id)
+        {
+            handle.abort();
         }
     }
 
@@ -344,10 +344,10 @@ impl WebSocketManager {
         }
 
         // Clean up stale connections.
-        if !stale_ids.is_empty() {
-            if let Some(mut conns) = self.inner.connections.get_mut(user_id) {
-                conns.retain(|c| !stale_ids.contains(&c.id));
-            }
+        if !stale_ids.is_empty()
+            && let Some(mut conns) = self.inner.connections.get_mut(user_id)
+        {
+            conns.retain(|c| !stale_ids.contains(&c.id));
         }
     }
 }

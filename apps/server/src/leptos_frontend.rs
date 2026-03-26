@@ -129,23 +129,21 @@ fn file_response(
     let etag = format!("\"{hex}\"");
 
     // Check If-None-Match — return 304 if the client already has this version.
-    if let Some(if_none_match) = request_headers.get(header::IF_NONE_MATCH) {
-        if let Ok(client_etag) = if_none_match.to_str() {
-            if client_etag == etag {
-                return (
-                    StatusCode::NOT_MODIFIED,
-                    [
-                        (header::ETAG, HeaderValue::from_str(&etag).unwrap()),
-                        (
-                            header::CACHE_CONTROL,
-                            HeaderValue::from_static("public, no-cache"),
-                        ),
-                    ],
-                )
-                    .into_response();
-            }
+    if let Some(if_none_match) = request_headers.get(header::IF_NONE_MATCH)
+        && let Ok(client_etag) = if_none_match.to_str()
+        && client_etag == etag {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, HeaderValue::from_str(&etag).unwrap()),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, no-cache"),
+                    ),
+                ],
+            )
+                .into_response();
         }
-    }
 
     let etag_header = HeaderValue::from_str(&etag).unwrap();
     (

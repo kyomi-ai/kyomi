@@ -201,7 +201,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
     let queries_value: Option<serde_json::Value> = queries
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|s| serde_json::from_str(s))
+        .map(serde_json::from_str)
         .transpose()
         .map_err(|e| ServerFnError::new(format!("Invalid queries JSON: {e}")))?;
 
@@ -222,24 +222,24 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Set the Slack alert channel if provided
-    if let Some(ref channel_id) = slack_channel_id {
-        if !channel_id.is_empty() {
-            kyomi_core::platform::set_watch_alert_channel(
-                &ctx.db,
-                &watch.watch_id,
-                "slack",
-                channel_id,
-                slack_channel_name.as_deref(),
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    watch_id = %watch.watch_id,
-                    "Failed to set alert channel: {e}"
-                );
-                ServerFnError::new("Failed to set alert channel")
-            })?;
-        }
+    if let Some(ref channel_id) = slack_channel_id
+        && !channel_id.is_empty()
+    {
+        kyomi_core::platform::set_watch_alert_channel(
+            &ctx.db,
+            &watch.watch_id,
+            "slack",
+            channel_id,
+            slack_channel_name.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                watch_id = %watch.watch_id,
+                "Failed to set alert channel: {e}"
+            );
+            ServerFnError::new("Failed to set alert channel")
+        })?;
     }
 
     Ok(watch_to_item(&ctx.db, &watch).await)
@@ -295,7 +295,7 @@ pub async fn update_watch(
     let queries_value: Option<serde_json::Value> = queries
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|s| serde_json::from_str(s))
+        .map(serde_json::from_str)
         .transpose()
         .map_err(|e| ServerFnError::new(format!("Invalid queries JSON: {e}")))?;
 
@@ -842,10 +842,10 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
         agent_state = obj.get("agent_state").cloned();
 
         // Fallback for old executions that stored events in execution_trace
-        if thinking_events.is_none() {
-            if let Some(events) = obj.get("events").filter(|e| e.is_array()) {
-                thinking_events = Some(events.clone());
-            }
+        if thinking_events.is_none()
+            && let Some(events) = obj.get("events").filter(|e| e.is_array())
+        {
+            thinking_events = Some(events.clone());
         }
     }
 
@@ -1076,15 +1076,13 @@ pub async fn get_thinking_events(
         .as_array()
         .map(|a| a.is_empty())
         .unwrap_or(true)
-    {
-        if let Some(events) = execution
+        && let Some(events) = execution
             .execution_trace
             .as_ref()
             .and_then(|t| t.get("events"))
             .filter(|e| e.is_array())
-        {
-            thinking_events = events.clone();
-        }
+    {
+        thinking_events = events.clone();
     }
 
     Ok(thinking_events)

@@ -502,11 +502,11 @@ pub async fn create_watch(
 
     // Serialize JSON values for binding
     let datasource_hints_str = datasource_hints
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize datasource_hints: {e}")))?;
     let queries_str = queries
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize queries: {e}")))?;
 
@@ -1015,7 +1015,7 @@ pub async fn complete_execution(
     let status_str = status.as_ref();
 
     let trace_str = execution_trace
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize execution_trace: {e}")))?;
 

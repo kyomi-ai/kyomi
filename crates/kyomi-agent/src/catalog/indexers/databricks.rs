@@ -182,10 +182,10 @@ impl SQLCatalogIndexer for DatabricksIndexer {
                     dataset_override: Some(format!("{container_name}.{schema_name}")),
                 });
 
-                if let Some(max) = max_tables {
-                    if tables.len() >= max {
-                        return Ok(tables);
-                    }
+                if let Some(max) = max_tables
+                    && tables.len() >= max
+                {
+                    return Ok(tables);
                 }
             }
         }

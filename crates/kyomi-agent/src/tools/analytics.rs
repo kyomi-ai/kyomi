@@ -318,16 +318,16 @@ impl AgentTool for UpdateAnalyticsSiteTool {
             return Ok("Error: Provide at least one of 'name', 'allowed_domains', or 'datasource_slug' to update.".into());
         }
 
-        if let Some(ref n) = name {
-            if n.is_empty() || n.len() > 255 {
-                return Ok("Error: Site name must be 1-255 characters.".into());
-            }
+        if let Some(ref n) = name
+            && (n.is_empty() || n.len() > 255)
+        {
+            return Ok("Error: Site name must be 1-255 characters.".into());
         }
 
-        if let Some(ref domains) = allowed_domains {
-            if domains.is_empty() {
-                return Ok("Error: allowed_domains must contain at least one domain.".into());
-            }
+        if let Some(ref domains) = allowed_domains
+            && domains.is_empty()
+        {
+            return Ok("Error: allowed_domains must contain at least one domain.".into());
         }
 
         if allowed_domains.is_some() && ctx.config.analytics_signing_secret.is_empty() {

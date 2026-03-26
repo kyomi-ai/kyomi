@@ -262,7 +262,7 @@ impl AgentTool for QueryDatasourceTool {
         let provider =
             super::query_utils::create_provider_for_datasource(&query_ctx, &ds)
                 .await
-                .map_err(|e| kyomi_core::Error::Internal(e))?;
+                .map_err(kyomi_core::Error::Internal)?;
 
         let result = provider.execute_query(sql, Some(20), None, false).await?;
         provider.close().await;
@@ -404,7 +404,7 @@ impl AgentTool for ValidateSqlTool {
         let provider =
             super::query_utils::create_provider_for_datasource(&query_ctx, &ds)
                 .await
-                .map_err(|e| kyomi_core::Error::Internal(e))?;
+                .map_err(kyomi_core::Error::Internal)?;
 
         let result = provider.dry_run(sql).await?;
         provider.close().await;

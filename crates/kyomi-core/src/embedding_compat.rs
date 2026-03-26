@@ -19,7 +19,7 @@ pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
 /// or converting to pgvector::Vector for Postgres vector queries.
 pub fn bytes_to_embedding(bytes: &[u8]) -> Vec<f32> {
     debug_assert!(
-        bytes.len() % 4 == 0,
+        bytes.len().is_multiple_of(4),
         "embedding blob length {} is not a multiple of 4",
         bytes.len()
     );

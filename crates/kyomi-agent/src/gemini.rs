@@ -244,16 +244,16 @@ impl GeminiProvider {
         new_entry: serde_json::Value,
         role: &str,
     ) {
-        if let Some(last) = contents.last_mut() {
-            if last.get("role").and_then(|r| r.as_str()) == Some(role) {
-                // Merge parts into the existing entry.
-                if let (Some(existing_parts), Some(new_parts)) = (
-                    last.get_mut("parts").and_then(|p| p.as_array_mut()),
-                    new_entry.get("parts").and_then(|p| p.as_array()),
-                ) {
-                    existing_parts.extend(new_parts.iter().cloned());
-                    return;
-                }
+        if let Some(last) = contents.last_mut()
+            && last.get("role").and_then(|r| r.as_str()) == Some(role)
+        {
+            // Merge parts into the existing entry.
+            if let (Some(existing_parts), Some(new_parts)) = (
+                last.get_mut("parts").and_then(|p| p.as_array_mut()),
+                new_entry.get("parts").and_then(|p| p.as_array()),
+            ) {
+                existing_parts.extend(new_parts.iter().cloned());
+                return;
             }
         }
         contents.push(new_entry);

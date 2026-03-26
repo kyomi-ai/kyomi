@@ -129,7 +129,7 @@ async fn main() {
         && config_arc
             .slack_signing_secret
             .as_ref()
-            .map_or(true, |s| s.is_empty())
+            .is_none_or(|s| s.is_empty())
     {
         tracing::warn!(
             "SLACK_CLIENT_ID is set but SLACK_SIGNING_SECRET is missing — \

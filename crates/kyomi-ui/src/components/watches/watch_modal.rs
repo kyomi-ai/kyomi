@@ -716,10 +716,7 @@ fn SlackNotificationsSection(
     let slack_channels_resource = Resource::new(
         move || {
             let status = slack_status_resource.get().flatten();
-            match status {
-                Some(ref s) if s.workspace_connected && s.user_connected => true,
-                _ => false,
-            }
+            matches!(status, Some(ref s) if s.workspace_connected && s.user_connected)
         },
         move |should_fetch| async move {
             if !should_fetch {

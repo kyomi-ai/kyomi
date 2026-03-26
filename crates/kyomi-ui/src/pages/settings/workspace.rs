@@ -257,7 +257,6 @@ fn WorkspaceSlackCard() -> impl IntoView {
     };
 
     let handle_uninstall = {
-        let slack_status = slack_status;
         move |_| {
             // Get the team_id from current status for the uninstall call
             let team_id = slack_status
@@ -333,7 +332,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                                         </div>
                                         <Button
                                             variant=ButtonVariant::Outline
-                                            on:click=handle_uninstall.clone()
+                                            on:click=handle_uninstall
                                             disabled=uninstalling.get()
                                         >
                                             {move || {
@@ -366,7 +365,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                                         <p class="text-sm text-muted-foreground">
                                             "Connect Kyomi to your Slack workspace to receive watch alerts in channels."
                                         </p>
-                                        <Button on:click=handle_install.clone()>
+                                        <Button on:click=handle_install>
                                             <span class="inline-flex items-center gap-2">
                                                 <span class="inline-flex">
                                                     <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>

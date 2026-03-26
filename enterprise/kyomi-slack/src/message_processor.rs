@@ -491,7 +491,7 @@ fn replace_chartml_with_markers(
     message: &str,
     extraction: &ExtractionResult,
     rendered_indices: &HashSet<usize>,
-    failed_indices: &HashSet<usize>,
+    _failed_indices: &HashSet<usize>,
 ) -> String {
     if extraction.blocks.is_empty() {
         return message.to_string();
@@ -511,17 +511,13 @@ fn replace_chartml_with_markers(
         let parts: Vec<String> = block
             .spec_indices
             .iter()
-            .filter_map(|&spec_idx| {
+            .map(|&spec_idx| {
                 let spec = &extraction.specs[spec_idx];
                 if rendered_indices.contains(&spec_idx) {
-                    Some(format!("\n<<<SLACK_CHART_{spec_idx}>>>\n"))
-                } else if failed_indices.contains(&spec_idx) {
-                    let title = get_chart_title(spec);
-                    Some(format!("_[{title}] (view at Kyomi.ai)_"))
+                    format!("\n<<<SLACK_CHART_{spec_idx}>>>\n")
                 } else {
-                    // Beyond render limit or otherwise unrendered
                     let title = get_chart_title(spec);
-                    Some(format!("_[{title}] (view at Kyomi.ai)_"))
+                    format!("_[{title}] (view at Kyomi.ai)_")
                 }
             })
             .collect();
@@ -1010,13 +1006,12 @@ fn render_table_slack_blocks(spec: &Value) -> Vec<Value> {
 
 /// Extract column names from the first data row.
 fn columns_from_first_row(rows: &[Value]) -> (Vec<String>, Vec<String>) {
-    if let Some(first) = rows.first() {
-        if let Some(obj) = first.as_object() {
+    if let Some(first) = rows.first()
+        && let Some(obj) = first.as_object() {
             let cols: Vec<String> = obj.keys().cloned().collect();
             let labels = cols.clone();
             return (cols, labels);
         }
-    }
     (Vec::new(), Vec::new())
 }
 
@@ -1038,19 +1033,18 @@ fn find_next_marker(text: &str) -> Option<MarkerInfo> {
     }
 
     // Divider marker
-    if let Some(pos) = text.find(DIVIDER_MARKER) {
-        if earliest.as_ref().map_or(true, |e| pos < e.position) {
+    if let Some(pos) = text.find(DIVIDER_MARKER)
+        && earliest.as_ref().is_none_or(|e| pos < e.position) {
             earliest = Some(MarkerInfo {
                 position: pos,
                 marker_type: MarkerType::Divider,
                 marker_text: DIVIDER_MARKER.to_string(),
             });
         }
-    }
 
     // Chart markers
-    if let Some(m) = RE_CHART_MARKER.find(text) {
-        if earliest.as_ref().map_or(true, |e| m.start() < e.position) {
+    if let Some(m) = RE_CHART_MARKER.find(text)
+        && earliest.as_ref().is_none_or(|e| m.start() < e.position) {
             let idx: usize = RE_CHART_MARKER
                 .captures(text)
                 .and_then(|c| c.get(1))
@@ -1062,7 +1056,6 @@ fn find_next_marker(text: &str) -> Option<MarkerInfo> {
                 marker_text: m.as_str().to_string(),
             });
         }
-    }
 
     earliest
 }

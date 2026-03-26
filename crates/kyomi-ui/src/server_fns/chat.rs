@@ -538,25 +538,23 @@ pub async fn send_chat_message(
                 .map_err(|e| ServerFnError::new(e.to_string()))?;
 
         // Notify the frontend so the sidebar updates immediately.
-        if let Some(ref ws_manager) = ctx.ws_manager {
-            if let Ok(Some(session_info)) = kyomi_auth::chat_service::get_session_info(
+        if let Some(ref ws_manager) = ctx.ws_manager
+            && let Ok(Some(session_info)) = kyomi_auth::chat_service::get_session_info(
                 &ctx.db,
                 &auth.user_id,
                 &new_sid,
                 Some(ws_id),
             )
             .await
-            {
-                if let Ok(data) = serde_json::to_value(&session_info) {
-                    kyomi_auth::websocket::helpers::send_session_created(
-                        ws_manager,
-                        &auth.user_id,
-                        &new_sid,
-                        data,
-                    )
-                    .await;
-                }
-            }
+            && let Ok(data) = serde_json::to_value(&session_info)
+        {
+            kyomi_auth::websocket::helpers::send_session_created(
+                ws_manager,
+                &auth.user_id,
+                &new_sid,
+                data,
+            )
+            .await;
         }
 
         (new_sid, false) // New sessions are always private
@@ -614,26 +612,26 @@ pub async fn send_chat_message(
     let is_shared = existing_session_shared;
 
     // Broadcast user message to other workspace members if session is shared.
-    if is_shared {
-        if let Some(ref ws_manager) = ctx.ws_manager {
-            let display_name = auth
-                .name
-                .as_deref()
-                .unwrap_or(&auth.email);
-            kyomi_auth::websocket::helpers::send_shared_chat_message(
-                ws_manager,
-                ws_id,
-                &session_id,
-                &user_message_id,
-                "user",
-                &message,
-                &chrono::Utc::now().to_rfc3339(),
-                Some(display_name),
-                Some(&auth.user_id),
-                client_msg_id.as_deref(),
-            )
-            .await;
-        }
+    if is_shared
+        && let Some(ref ws_manager) = ctx.ws_manager
+    {
+        let display_name = auth
+            .name
+            .as_deref()
+            .unwrap_or(&auth.email);
+        kyomi_auth::websocket::helpers::send_shared_chat_message(
+            ws_manager,
+            ws_id,
+            &session_id,
+            &user_message_id,
+            "user",
+            &message,
+            &chrono::Utc::now().to_rfc3339(),
+            Some(display_name),
+            Some(&auth.user_id),
+            client_msg_id.as_deref(),
+        )
+        .await;
     }
 
     // 6. Build execution config and spawn agent task.
@@ -822,19 +820,18 @@ pub async fn send_chat_message(
     });
 
     // 8. Fire-and-forget title generation for new sessions.
-    if is_new_session {
-        if let Some(ref ws_mgr) = ctx.ws_manager {
-            if kyomi_agent::resolve_provider_config(&ctx.config).is_ok() {
-                kyomi_agent::generate_session_title(
-                    ctx.db.clone(),
-                    ws_mgr.clone(),
-                    session_id.clone(),
-                    auth.user_id.clone(),
-                    message.clone(),
-                    ctx.config.clone(),
-                );
-            }
-        }
+    if is_new_session
+        && let Some(ref ws_mgr) = ctx.ws_manager
+        && kyomi_agent::resolve_provider_config(&ctx.config).is_ok()
+    {
+        kyomi_agent::generate_session_title(
+            ctx.db.clone(),
+            ws_mgr.clone(),
+            session_id.clone(),
+            auth.user_id.clone(),
+            message.clone(),
+            ctx.config.clone(),
+        );
     }
 
     tracing::info!(
@@ -944,20 +941,20 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
     }
 
     // Block unsharing platform channel/group conversations.
-    if let Some(ref platform) = row.platform_type {
-        if platform == "slack" {
-            let channel_id = row
-                .platform_thread_key
-                .as_deref()
-                .and_then(|k| k.split(':').next())
-                .unwrap_or("");
-            if !channel_id.starts_with('D') {
-                return Err(ServerFnError::new(
-                    "Slack channel conversations cannot be unshared because they're \
-                     visible to your team in Slack. To have a private conversation, \
-                     start a new chat in Kyomi.",
-                ));
-            }
+    if let Some(ref platform) = row.platform_type
+        && platform == "slack"
+    {
+        let channel_id = row
+            .platform_thread_key
+            .as_deref()
+            .and_then(|k| k.split(':').next())
+            .unwrap_or("");
+        if !channel_id.starts_with('D') {
+            return Err(ServerFnError::new(
+                "Slack channel conversations cannot be unshared because they're \
+                 visible to your team in Slack. To have a private conversation, \
+                 start a new chat in Kyomi.",
+            ));
         }
     }
 

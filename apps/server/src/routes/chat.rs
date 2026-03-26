@@ -501,7 +501,7 @@ async fn search_sessions(
 // ---------------------------------------------------------------------------
 
 async fn get_models() -> Json<serde_json::Value> {
-    let models = vec![
+    let models = [
         ModelInfo {
             id: "claude-haiku-4-5-20251001".into(),
             name: "Claude Haiku 4.5".into(),
@@ -597,8 +597,7 @@ async fn send_message(
             Some(workspace_id),
         )
         .await
-        {
-            if let Ok(data) = serde_json::to_value(&session_info) {
+            && let Ok(data) = serde_json::to_value(&session_info) {
                 kyomi_auth::websocket::helpers::send_session_created(
                     &state.ws_manager,
                     &user.user_id,
@@ -607,7 +606,6 @@ async fn send_message(
                 )
                 .await;
             }
-        }
 
         new_sid
     };
@@ -915,8 +913,8 @@ async fn unshare_session(
     // Block unsharing platform channel/group conversations — they're visible
     // to other channel members on the platform so "private" doesn't make sense.
     // Platform DMs (Slack D prefix) can be unshared like regular sessions.
-    if let Some(ref platform) = row.platform_type {
-        if platform == "slack" {
+    if let Some(ref platform) = row.platform_type
+        && platform == "slack" {
             // Slack thread keys are "channel_id:thread_ts"; extract channel_id
             let channel_id = row.platform_thread_key.as_deref()
                 .and_then(|k| k.split(':').next())
@@ -930,7 +928,6 @@ async fn unshare_session(
                 ));
             }
         }
-    }
 
     kyomi_core::db_execute!(
         &state.db,

@@ -78,8 +78,7 @@ fn require_workspace_admin(user: &AuthUser) -> Result<(), kyomi_core::Error> {
     if !user
         .workspace
         .workspace_roles
-        .iter()
-        .any(|r| *r == kyomi_core::WorkspaceRole::WorkspaceAdmin)
+        .contains(&kyomi_core::WorkspaceRole::WorkspaceAdmin)
     {
         return Err(kyomi_core::Error::Forbidden(
             "Only workspace admins can perform this action".into(),

@@ -233,10 +233,10 @@ pub async fn resolve_indexing_credentials(
 ) -> Option<Value> {
     let encryption_key = &*ctx.encryption_key;
     // 1. Use provided credentials if they have content
-    if let Some(creds) = provided_credentials {
-        if creds.is_object() && !creds.as_object().unwrap().is_empty() {
-            return Some(creds.clone());
-        }
+    if let Some(creds) = provided_credentials
+        && creds.is_object() && !creds.as_object().unwrap().is_empty()
+    {
+        return Some(creds.clone());
     }
 
     // 2. Check shared credentials in connection_config
@@ -247,15 +247,13 @@ pub async fn resolve_indexing_credentials(
     if shared.is_object()
         && shared
             .as_object()
-            .map_or(false, |obj| !obj.is_empty() && obj.values().any(|v| v.is_string()))
+            .is_some_and(|obj| !obj.is_empty() && obj.values().any(|v| v.is_string()))
     {
         return Some(shared);
     }
 
     // 3. Look up user's stored credentials
-    let Some(email) = user_email else {
-        return None;
-    };
+    let email = user_email?;
 
     // Resolve user_id from email
     #[derive(sqlx::FromRow)]
@@ -270,9 +268,7 @@ pub async fn resolve_indexing_credentials(
     .ok()
     .flatten();
 
-    let Some(user_row) = user_id_row else {
-        return None;
-    };
+    let user_row = user_id_row?;
 
     let user_id = user_row.user_id;
 
@@ -286,9 +282,7 @@ pub async fn resolve_indexing_credentials(
     .ok()
     .flatten();
 
-    let Some(cred_record) = cred else {
-        return None;
-    };
+    let cred_record = cred?;
 
     // Decrypt the stored credentials
     match kyomi_auth::encryption::decrypt(&cred_record.credentials, encryption_key) {

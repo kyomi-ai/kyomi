@@ -213,7 +213,7 @@ pub async fn update_query_retention(days: i32) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    if days < 1 || days > 365 {
+    if !(1..=365).contains(&days) {
         return Err(ServerFnError::new(
             "Retention days must be between 1 and 365",
         ));

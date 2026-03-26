@@ -248,8 +248,8 @@ async fn oauth_authorize(
     let mut user_id = None;
     let mut workspace_id = None;
 
-    if let Some(token) = access_token {
-        if let Ok(decoded) = jwt::validate_token(token, &state.config.jwt_secret) {
+    if let Some(token) = access_token
+        && let Ok(decoded) = jwt::validate_token(token, &state.config.jwt_secret) {
             user_id = Some(decoded.claims.sub.clone());
             workspace_id = decoded
                 .claims
@@ -258,7 +258,6 @@ async fn oauth_authorize(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
         }
-    }
 
     // If not logged in, redirect to login
     let Some(user_id) = user_id else {
@@ -505,14 +504,13 @@ async fn handle_authorization_code(
     }
 
     // Verify redirect_uri matches (if provided)
-    if let Some(redirect_uri) = &params.redirect_uri {
-        if code_data.get("redirect_uri").and_then(|v| v.as_str()) != Some(redirect_uri) {
+    if let Some(redirect_uri) = &params.redirect_uri
+        && code_data.get("redirect_uri").and_then(|v| v.as_str()) != Some(redirect_uri) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "invalid_grant: redirect_uri mismatch"})),
             ));
         }
-    }
 
     let user_id = code_data["user_id"].as_str().unwrap_or("");
     let workspace_id = code_data["workspace_id"].as_str();
@@ -770,7 +768,7 @@ async fn register_client(
     }
 
     // Generate unique client_id
-    let client_id = format!("mcp-{}", redis_ops::generate_token()[..22].to_string());
+    let client_id = format!("mcp-{}", &redis_ops::generate_token()[..22]);
 
     let grant_types = registration
         .grant_types

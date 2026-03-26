@@ -129,12 +129,12 @@ pub async fn save_learning(
             .bind(&learning_id)
             .bind(workspace_id)
             .bind(insight)
-            .bind(&context)
+            .bind(context)
             .bind(&vec)
             .bind(scope)
             .bind(session_id)
             .bind(user_id)
-            .bind(&datasource_config_id)
+            .bind(datasource_config_id)
             .bind(learning_type)
             .bind(&ref_queries_val)
             .bind(&structured_meta_val)
@@ -155,12 +155,12 @@ pub async fn save_learning(
             .bind(&learning_id)
             .bind(workspace_id)
             .bind(insight)
-            .bind(&context)
+            .bind(context)
             .bind(&embedding_bytes)
             .bind(scope)
             .bind(session_id)
             .bind(user_id)
-            .bind(&datasource_config_id)
+            .bind(datasource_config_id)
             .bind(learning_type)
             .bind(ref_queries_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
             .bind(structured_meta_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
@@ -200,32 +200,32 @@ pub async fn get_all_learnings(
     let mut bind_scope = false;
     let mut bind_ds_id: Option<String> = None;
 
-    if let Some(s) = search {
-        if !s.trim().is_empty() {
-            if is_pg {
-                conditions.push(format!(
-                    "search_vector @@ websearch_to_tsquery('english', ${param_idx})"
-                ));
-            } else {
-                conditions.push(format!(
-                    "learning_id IN (SELECT learning_id FROM agent_learnings_fts WHERE agent_learnings_fts MATCH ${param_idx})"
-                ));
-            }
-            param_idx += 1;
-            bind_search = true;
+    if let Some(s) = search
+        && !s.trim().is_empty()
+    {
+        if is_pg {
+            conditions.push(format!(
+                "search_vector @@ websearch_to_tsquery('english', ${param_idx})"
+            ));
+        } else {
+            conditions.push(format!(
+                "learning_id IN (SELECT learning_id FROM agent_learnings_fts WHERE agent_learnings_fts MATCH ${param_idx})"
+            ));
         }
+        param_idx += 1;
+        bind_search = true;
     }
 
-    if let Some(s) = scope {
-        if s == "workspace" || s == "user" {
-            if is_pg {
-                conditions.push(format!("scope = ${param_idx}::learning_scope"));
-            } else {
-                conditions.push(format!("scope = ${param_idx}"));
-            }
-            param_idx += 1;
-            bind_scope = true;
+    if let Some(s) = scope
+        && (s == "workspace" || s == "user")
+    {
+        if is_pg {
+            conditions.push(format!("scope = ${param_idx}::learning_scope"));
+        } else {
+            conditions.push(format!("scope = ${param_idx}"));
         }
+        param_idx += 1;
+        bind_scope = true;
     }
 
     if let Some(ds_slug) = datasource_slug {
@@ -320,7 +320,7 @@ pub async fn get_all_learnings(
             q = q.bind(limit).bind(offset);
             let rows = q.fetch_all(pg).await
                 .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
-            rows.iter().map(|row| learning_record_from_pg_row(row)).collect()
+            rows.iter().map(learning_record_from_pg_row).collect()
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             let mut q = sqlx::query(&data_sql).bind(workspace_id);
@@ -330,7 +330,7 @@ pub async fn get_all_learnings(
             q = q.bind(limit).bind(offset);
             let rows = q.fetch_all(sq).await
                 .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
-            rows.iter().map(|row| learning_record_from_sq_row(row)).collect()
+            rows.iter().map(learning_record_from_sq_row).collect()
         }
     };
 
@@ -844,10 +844,10 @@ pub async fn get_relevant_learnings_hybrid(
                 if high_confidence.len() < HARD_CAP {
                     high_confidence.push(entry.clone());
                 }
-            } else if entry.semantic_score >= min_similarity {
-                if moderate_confidence.len() < MODERATE_CONFIDENCE_LIMIT {
-                    moderate_confidence.push(entry.clone());
-                }
+            } else if entry.semantic_score >= min_similarity
+                && moderate_confidence.len() < MODERATE_CONFIDENCE_LIMIT
+            {
+                moderate_confidence.push(entry.clone());
             }
         }
     }
@@ -1197,34 +1197,34 @@ pub fn format_learning_with_queries(
         parts.push(format!("[{}]", learning.learning_id));
     }
 
-    if let (Some(map), Some(ds_id)) = (ds_id_to_slug, &learning.datasource_config_id) {
-        if let Some(slug) = map.get(ds_id) {
-            parts.push(format!("(datasource: {slug})"));
-        }
+    if let (Some(map), Some(ds_id)) = (ds_id_to_slug, &learning.datasource_config_id)
+        && let Some(slug) = map.get(ds_id)
+    {
+        parts.push(format!("(datasource: {slug})"));
     }
 
     parts.push(learning.insight.clone());
     let mut line = format!("- {}", parts.join(" "));
 
     // Append reference queries if present
-    if let Some(ref rqs) = learning.reference_queries {
-        if let Some(arr) = rqs.as_array() {
-            let mut query_lines = Vec::new();
-            for rq in arr {
-                let comment = rq.get("comment").and_then(|v| v.as_str()).unwrap_or("Reference query");
-                let sql = rq.get("sql").and_then(|v| v.as_str()).unwrap_or("");
-                let ds = rq.get("datasource").and_then(|v| v.as_str()).unwrap_or("");
-                let mut header = format!("  Reference query ({comment})");
-                if !ds.is_empty() {
-                    header.push_str(&format!(" — datasource: {ds}"));
-                }
-                query_lines.push(format!("{header}:"));
-                query_lines.push(format!("  ```sql\n  {sql}\n  ```"));
+    if let Some(ref rqs) = learning.reference_queries
+        && let Some(arr) = rqs.as_array()
+    {
+        let mut query_lines = Vec::new();
+        for rq in arr {
+            let comment = rq.get("comment").and_then(|v| v.as_str()).unwrap_or("Reference query");
+            let sql = rq.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+            let ds = rq.get("datasource").and_then(|v| v.as_str()).unwrap_or("");
+            let mut header = format!("  Reference query ({comment})");
+            if !ds.is_empty() {
+                header.push_str(&format!(" — datasource: {ds}"));
             }
-            if !query_lines.is_empty() {
-                line.push('\n');
-                line.push_str(&query_lines.join("\n"));
-            }
+            query_lines.push(format!("{header}:"));
+            query_lines.push(format!("  ```sql\n  {sql}\n  ```"));
+        }
+        if !query_lines.is_empty() {
+            line.push('\n');
+            line.push_str(&query_lines.join("\n"));
         }
     }
 

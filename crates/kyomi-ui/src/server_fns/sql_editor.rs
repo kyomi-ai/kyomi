@@ -157,47 +157,47 @@ pub async fn fetch_query_page(
 
     // BigQuery job_id pagination: fetch page directly from a completed job
     // without re-executing the query. Only for direct BigQuery connections.
-    if let Some(ref bq_job_id) = job_id {
-        if ds.datasource_type.as_ref() == "bigquery" && ds.connection_type != "connect" {
-            let encryption_key = ctx
-                .encryption_key
-                .as_deref()
-                .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    if let Some(ref bq_job_id) = job_id
+        && ds.datasource_type.as_ref() == "bigquery" && ds.connection_type != "connect"
+    {
+        let encryption_key = ctx
+            .encryption_key
+            .as_deref()
+            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
 
-            let start = std::time::Instant::now();
+        let start = std::time::Instant::now();
 
-            let (access_token, billing_project) = resolve_bq_access_for_datasource(
-                &ctx.db,
-                &ctx.config,
-                encryption_key,
-                &ds,
-                &auth.user_id,
-            )
-            .await?;
+        let (access_token, billing_project) = resolve_bq_access_for_datasource(
+            &ctx.db,
+            &ctx.config,
+            encryption_key,
+            &ds,
+            &auth.user_id,
+        )
+        .await?;
 
-            let clamped_page_size = page_size.clamp(1, 1000);
-            let start_index = (page.saturating_sub(1) as u64) * (clamped_page_size as u64);
+        let clamped_page_size = page_size.clamp(1, 1000);
+        let start_index = (page.saturating_sub(1) as u64) * (clamped_page_size as u64);
 
-            let (columns, rows, total_rows) = fetch_bq_job_page(
-                &access_token,
-                &billing_project,
-                bq_job_id,
-                start_index,
-                clamped_page_size,
-            )
-            .await?;
+        let (columns, rows, total_rows) = fetch_bq_job_page(
+            &access_token,
+            &billing_project,
+            bq_job_id,
+            start_index,
+            clamped_page_size,
+        )
+        .await?;
 
-            let elapsed_ms = start.elapsed().as_millis() as u64;
-            return bq_rest_to_query_result(
-                columns,
-                rows,
-                total_rows,
-                job_id.clone(),
-                &ds.slug,
-                &sql,
-                elapsed_ms,
-            );
-        }
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        return bq_rest_to_query_result(
+            columns,
+            rows,
+            total_rows,
+            job_id.clone(),
+            &ds.slug,
+            &sql,
+            elapsed_ms,
+        );
     }
 
     // All other datasource types: re-execute with LIMIT/OFFSET.
@@ -301,8 +301,8 @@ async fn resolve_bq_access_for_datasource(
                 {
                     Ok(refreshed) if refreshed != cred_data => {
                         // Persist refreshed token back to DB
-                        if let Some(ref cred) = user_cred {
-                            if let Err(e) = kyomi_auth::datasource_service::save_user_credential(
+                        if let Some(ref cred) = user_cred
+                            && let Err(e) = kyomi_auth::datasource_service::save_user_credential(
                                 db,
                                 encryption_key,
                                 user_id,
@@ -311,12 +311,11 @@ async fn resolve_bq_access_for_datasource(
                                 &refreshed,
                             )
                             .await
-                            {
-                                tracing::warn!(
-                                    datasource_id = %datasource.id,
-                                    "Failed to persist refreshed enterprise OAuth token: {e}"
-                                );
-                            }
+                        {
+                            tracing::warn!(
+                                datasource_id = %datasource.id,
+                                "Failed to persist refreshed enterprise OAuth token: {e}"
+                            );
                         }
                         refreshed
                     }
@@ -589,10 +588,12 @@ async fn fetch_bq_job_page(
 /// - `schema.fields[].name` for column names
 /// - `rows[].f[].v` for cell values
 /// - `totalRows` (string or number) for the total row count
+type BqQueryResult = (Vec<String>, Vec<Vec<serde_json::Value>>, usize);
+
 #[cfg(feature = "ssr")]
 fn parse_bq_query_response(
     body: &serde_json::Value,
-) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize), ServerFnError> {
+) -> Result<BqQueryResult, ServerFnError> {
     // Extract column names from schema
     let columns: Vec<String> = body
         .get("schema")
@@ -2048,10 +2049,10 @@ fn infer_chart_type(analyses: &[ChartColumnAnalysis]) -> &'static str {
     if analyses.iter().any(|a| a.is_date) {
         return "line";
     }
-    if let Some(cat) = analyses.iter().find(|a| !a.is_numeric && !a.is_date) {
-        if cat.cardinality <= 20 {
-            return "bar";
-        }
+    if let Some(cat) = analyses.iter().find(|a| !a.is_numeric && !a.is_date)
+        && cat.cardinality <= 20
+    {
+        return "bar";
     }
     "table"
 }

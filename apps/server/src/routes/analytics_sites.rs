@@ -249,21 +249,19 @@ async fn update_site(
 
     let trimmed_name: Option<String> = request.name.as_ref().map(|n| n.trim().to_string());
 
-    if let Some(ref name) = trimmed_name {
-        if name.is_empty() || name.len() > 255 {
+    if let Some(ref name) = trimmed_name
+        && (name.is_empty() || name.len() > 255) {
             return Err(kyomi_core::Error::BadRequest(
                 "Site name must be 1-255 characters".into(),
             ));
         }
-    }
 
-    if let Some(ref domains) = request.allowed_domains {
-        if domains.is_empty() {
+    if let Some(ref domains) = request.allowed_domains
+        && domains.is_empty() {
             return Err(kyomi_core::Error::BadRequest(
                 "At least one domain is required".into(),
             ));
         }
-    }
 
     if request.allowed_domains.is_some() && state.config.analytics_signing_secret.is_empty() {
         return Err(kyomi_core::Error::ServiceUnavailable(

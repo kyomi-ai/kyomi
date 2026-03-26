@@ -153,11 +153,10 @@ fn walk_docs_dir(base: &Path, current: &Path, resources: &mut Vec<DocResource>) 
         let path = entry.path();
         if path.is_dir() {
             walk_docs_dir(base, &path, resources);
-        } else if path.extension().is_some_and(|e| e == "md") {
-            if let Some(resource) = doc_file_to_resource(base, &path) {
+        } else if path.extension().is_some_and(|e| e == "md")
+            && let Some(resource) = doc_file_to_resource(base, &path) {
                 resources.push(resource);
             }
-        }
     }
 }
 

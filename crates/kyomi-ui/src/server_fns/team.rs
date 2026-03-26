@@ -368,10 +368,10 @@ pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, Se
 
     // Merge and deduplicate
     let mut all_transfers = received;
-    if let Some(t) = initiated {
-        if !all_transfers.iter().any(|existing| existing.transfer_id == t.transfer_id) {
-            all_transfers.push(t);
-        }
+    if let Some(t) = initiated
+        && !all_transfers.iter().any(|existing| existing.transfer_id == t.transfer_id)
+    {
+        all_transfers.push(t);
     }
 
     let mut result = Vec::new();

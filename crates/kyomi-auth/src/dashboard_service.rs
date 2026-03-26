@@ -520,7 +520,7 @@ pub async fn search_dashboards(
                 .bind(recent_cutoff)
                 .bind(medium_cutoff)
                 .bind(old_cutoff)
-                .bind(&query_param)
+                .bind(query_param)
                 .fetch_all(pg)
                 .await
                 .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
@@ -555,7 +555,7 @@ pub async fn search_dashboards(
                 .bind(recent_cutoff)
                 .bind(medium_cutoff)
                 .bind(old_cutoff)
-                .bind(&query_param)
+                .bind(query_param)
                 .fetch_all(sq)
                 .await
                 .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
@@ -807,7 +807,7 @@ pub async fn list_versions(
                 .await
                 .map_err(|e| kyomi_core::Error::Internal(format!("failed to list versions: {e}")))?;
 
-            rows.iter().map(|row| version_summary_from_pg_row(row)).collect()
+            rows.iter().map(version_summary_from_pg_row).collect()
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             let rows = sqlx::query(sql)
@@ -818,7 +818,7 @@ pub async fn list_versions(
                 .await
                 .map_err(|e| kyomi_core::Error::Internal(format!("failed to list versions: {e}")))?;
 
-            rows.iter().map(|row| version_summary_from_sq_row(row)).collect()
+            rows.iter().map(version_summary_from_sq_row).collect()
         }
     };
 

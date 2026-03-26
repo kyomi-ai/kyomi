@@ -282,12 +282,10 @@ fn inline_formatting(text: &str) -> String {
     let text = text.replace(PH_BOLD_S, "*").replace(PH_BOLD_E, "*");
     let text = text.replace(PH_ITALIC_S, "_").replace(PH_ITALIC_E, "_");
     let text = text.replace(PH_CODE_S, "`").replace(PH_CODE_E, "`");
-    let text = text
+    text
         .replace(PH_LINK_S, "#link(\"")
         .replace(PH_LINK_M, "\")[")
-        .replace(PH_LINK_E, "]");
-
-    text
+        .replace(PH_LINK_E, "]")
 }
 
 /// Render a metric card as Typst markup.

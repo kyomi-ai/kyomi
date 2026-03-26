@@ -149,8 +149,8 @@ fn add_commas(formatted: &str) -> String {
     };
 
     // Handle negative numbers
-    let (sign, digits) = if integer_part.starts_with('-') {
-        ("-", &integer_part[1..])
+    let (sign, digits) = if let Some(stripped) = integer_part.strip_prefix('-') {
+        ("-", stripped)
     } else {
         ("", integer_part)
     };

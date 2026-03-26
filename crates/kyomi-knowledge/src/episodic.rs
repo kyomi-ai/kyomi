@@ -256,14 +256,13 @@ pub async fn detect_contradictions(
     }
 
     // Flush the last group.
-    if let Some(metric_name) = current_metric {
-        if current_conflicts.len() > 1 {
+    if let Some(metric_name) = current_metric
+        && current_conflicts.len() > 1 {
             contradictions.push(Contradiction {
                 metric_name,
                 conflicts: current_conflicts,
             });
         }
-    }
 
     tracing::info!(
         workspace_id,
@@ -302,9 +301,9 @@ pub async fn detect_stale_learnings(
     let true_val = kyomi_core::sql_compat::bool_true(is_pg);
     let false_val = kyomi_core::sql_compat::bool_false(is_pg);
     let staleness_check = if is_pg {
-        format!("(last_used_at IS NULL OR last_used_at < NOW() - make_interval(days => $2))")
+        "(last_used_at IS NULL OR last_used_at < NOW() - make_interval(days => $2))".to_string()
     } else {
-        format!("(last_used_at IS NULL OR last_used_at < datetime('now', '-' || $2 || ' days'))")
+        "(last_used_at IS NULL OR last_used_at < datetime('now', '-' || $2 || ' days'))".to_string()
     };
 
     let sql = format!(

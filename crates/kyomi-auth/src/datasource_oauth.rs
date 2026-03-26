@@ -27,7 +27,7 @@ pub enum OAuthProvider {
 
 impl OAuthProvider {
     /// Parse a provider name from a URL path segment.
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "snowflake" => Some(Self::Snowflake),
             "databricks" => Some(Self::Databricks),
@@ -719,24 +719,24 @@ mod tests {
 
     #[test]
     fn parse_provider_names() {
-        assert_eq!(OAuthProvider::from_str("snowflake"), Some(OAuthProvider::Snowflake));
-        assert_eq!(OAuthProvider::from_str("databricks"), Some(OAuthProvider::Databricks));
+        assert_eq!(OAuthProvider::parse("snowflake"), Some(OAuthProvider::Snowflake));
+        assert_eq!(OAuthProvider::parse("databricks"), Some(OAuthProvider::Databricks));
         assert_eq!(
-            OAuthProvider::from_str("bigquery-enterprise"),
+            OAuthProvider::parse("bigquery-enterprise"),
             Some(OAuthProvider::BigqueryEnterprise)
         );
         assert_eq!(
-            OAuthProvider::from_str("microsoft-enterprise"),
+            OAuthProvider::parse("microsoft-enterprise"),
             Some(OAuthProvider::MicrosoftEnterprise)
         );
-        assert_eq!(OAuthProvider::from_str("unknown"), None);
-        assert_eq!(OAuthProvider::from_str("google"), None);
+        assert_eq!(OAuthProvider::parse("unknown"), None);
+        assert_eq!(OAuthProvider::parse("google"), None);
     }
 
     #[test]
     fn provider_roundtrip() {
         for provider in OAuthProvider::all() {
-            assert_eq!(OAuthProvider::from_str(provider.as_str()), Some(*provider));
+            assert_eq!(OAuthProvider::parse(provider.as_str()), Some(*provider));
         }
     }
 

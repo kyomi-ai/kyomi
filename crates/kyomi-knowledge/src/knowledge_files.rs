@@ -161,11 +161,10 @@ pub async fn create_file(
     )?;
 
     // Chunk + embed file content
-    if let Some(text) = content {
-        if !text.trim().is_empty() {
+    if let Some(text) = content
+        && !text.trim().is_empty() {
             rechunk_file(db, embed, &file.id, text, workspace_id).await?;
         }
-    }
 
     Ok(file)
 }

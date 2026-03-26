@@ -150,35 +150,35 @@ impl AgentTool for SaveLearningTool {
         // Collect structured metadata for graph edge creation
         let structured_metadata = {
             let mut meta = serde_json::Map::new();
-            if let Some(tables) = args.get("related_tables") {
-                if tables.is_array() && !tables.as_array().unwrap().is_empty() {
-                    meta.insert("related_tables".into(), tables.clone());
-                }
+            if let Some(tables) = args.get("related_tables")
+                && tables.is_array() && !tables.as_array().unwrap().is_empty()
+            {
+                meta.insert("related_tables".into(), tables.clone());
             }
-            if let Some(columns) = args.get("related_columns") {
-                if columns.is_array() && !columns.as_array().unwrap().is_empty() {
-                    meta.insert("related_columns".into(), columns.clone());
-                }
+            if let Some(columns) = args.get("related_columns")
+                && columns.is_array() && !columns.as_array().unwrap().is_empty()
+            {
+                meta.insert("related_columns".into(), columns.clone());
             }
-            if let Some(metrics) = args.get("related_metrics") {
-                if metrics.is_array() && !metrics.as_array().unwrap().is_empty() {
-                    meta.insert("related_metrics".into(), metrics.clone());
-                }
+            if let Some(metrics) = args.get("related_metrics")
+                && metrics.is_array() && !metrics.as_array().unwrap().is_empty()
+            {
+                meta.insert("related_metrics".into(), metrics.clone());
             }
-            if let Some(name) = args.get("metric_name").and_then(|v| v.as_str()) {
-                if !name.is_empty() {
-                    meta.insert("metric_name".into(), serde_json::Value::String(name.to_string()));
-                }
+            if let Some(name) = args.get("metric_name").and_then(|v| v.as_str())
+                && !name.is_empty()
+            {
+                meta.insert("metric_name".into(), serde_json::Value::String(name.to_string()));
             }
-            if let Some(formula) = args.get("metric_formula").and_then(|v| v.as_str()) {
-                if !formula.is_empty() {
-                    meta.insert("metric_formula".into(), serde_json::Value::String(formula.to_string()));
-                }
+            if let Some(formula) = args.get("metric_formula").and_then(|v| v.as_str())
+                && !formula.is_empty()
+            {
+                meta.insert("metric_formula".into(), serde_json::Value::String(formula.to_string()));
             }
-            if let Some(unit) = args.get("metric_unit").and_then(|v| v.as_str()) {
-                if !unit.is_empty() {
-                    meta.insert("metric_unit".into(), serde_json::Value::String(unit.to_string()));
-                }
+            if let Some(unit) = args.get("metric_unit").and_then(|v| v.as_str())
+                && !unit.is_empty()
+            {
+                meta.insert("metric_unit".into(), serde_json::Value::String(unit.to_string()));
             }
             if meta.is_empty() {
                 None

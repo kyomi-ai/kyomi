@@ -64,8 +64,7 @@ fn verify_workspace_access(
 fn is_workspace_admin(user: &AuthUser) -> bool {
     user.workspace
         .workspace_roles
-        .iter()
-        .any(|r| *r == kyomi_core::WorkspaceRole::WorkspaceAdmin)
+        .contains(&kyomi_core::WorkspaceRole::WorkspaceAdmin)
 }
 
 /// Check learning management permission.

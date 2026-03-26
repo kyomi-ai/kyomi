@@ -101,8 +101,8 @@ async fn recovery_start(
         .ok()
         .flatten();
 
-    if let Some(user) = user {
-        if user.verified {
+    if let Some(user) = user
+        && user.verified {
             // Create recovery token (15 min = 0.25 hours)
             if let Ok(raw_token) = token_service::create_verification_token_with_expiry(
                 &state.db,
@@ -139,7 +139,6 @@ async fn recovery_start(
                 });
             }
         }
-    }
 
     Ok(Json(serde_json::json!({
         "message": success_msg,
@@ -237,15 +236,13 @@ async fn recovery_set_password(
     // If the user already has a password, verify the new one is different.
     // This is critical for security: recovery disables TOTP, so we must
     // invalidate any compromised password by requiring a different one.
-    if let Some(existing) = user_service::get_auth_method(&state.db, &user_id, "password").await? {
-        if let Some(existing_hash) = existing.auth_data.get("hash").and_then(|v| v.as_str()) {
-            if password::verify_password(&data.new_password, existing_hash)? {
-                return Err(kyomi_core::Error::BadRequest(
-                    "New password must be different from your current password.".into(),
-                ));
-            }
+    if let Some(existing) = user_service::get_auth_method(&state.db, &user_id, "password").await?
+        && let Some(existing_hash) = existing.auth_data.get("hash").and_then(|v| v.as_str())
+        && password::verify_password(&data.new_password, existing_hash)? {
+            return Err(kyomi_core::Error::BadRequest(
+                "New password must be different from your current password.".into(),
+            ));
         }
-    }
 
     // Hash password and upsert auth method (create new or replace existing)
     let hash = password::hash_password(&data.new_password)?;

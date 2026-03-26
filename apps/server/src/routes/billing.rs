@@ -218,10 +218,10 @@ async fn create_checkout(
     let workspace = load_workspace(&state.db, workspace_id).await?;
 
     // If user already has an active subscription, modify it directly
-    if let Some(ref sub_id) = workspace.stripe_subscription_id {
-        if workspace.subscription_status == "active"
-            || workspace.subscription_status == "cancelled"
-        {
+    if let Some(ref sub_id) = workspace.stripe_subscription_id
+        && (workspace.subscription_status == "active"
+            || workspace.subscription_status == "cancelled")
+    {
             return modify_existing_subscription(
                 &state,
                 stripe_service,
@@ -231,7 +231,6 @@ async fn create_checkout(
             )
             .await;
         }
-    }
 
     // New subscription flow: create Stripe customer if needed + checkout session
     let is_test = is_stripe_test_mode(&state.config);
@@ -344,9 +343,8 @@ async fn modify_existing_subscription(
 
     // If downgrading from Team to Starter/Pro, remove additional users item
     if (request.tier == "starter" || request.tier == "pro")
-        && workspace.stripe_additional_users_item_id.is_some()
+        && let Some(ref item_id) = workspace.stripe_additional_users_item_id
     {
-        if let Some(ref item_id) = workspace.stripe_additional_users_item_id {
             tracing::info!(
                 item_id,
                 "Downgrading from Team tier — removing additional users item"
@@ -369,7 +367,6 @@ async fn modify_existing_subscription(
                 &workspace.workspace_id
             )?;
         }
-    }
 
     // Modify the subscription
     let sub_data = stripe_service
@@ -718,8 +715,8 @@ async fn handle_invoice_payment_failed(state: &AppState, invoice: &Invoice) {
         None => None,
     };
 
-    if let Some(ref sub_id) = subscription_id {
-        if let Some(workspace) = load_workspace_by_subscription(&state.db, sub_id).await {
+    if let Some(ref sub_id) = subscription_id
+        && let Some(workspace) = load_workspace_by_subscription(&state.db, sub_id).await {
             let result = kyomi_core::db_execute!(
                 &state.db,
                 "UPDATE workspaces SET subscription_status = 'past_due' WHERE workspace_id = $1",
@@ -741,7 +738,6 @@ async fn handle_invoice_payment_failed(state: &AppState, invoice: &Invoice) {
                 }
             }
         }
-    }
 }
 
 // ---------------------------------------------------------------------------

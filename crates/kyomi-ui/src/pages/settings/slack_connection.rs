@@ -253,7 +253,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                             </div>
                                                         }.into_any()
                                                     } else {
-                                                        let save = save_channel.clone();
+                                                        let save = save_channel;
                                                         view! {
                                                             <div class="space-y-2">
                                                                 <select

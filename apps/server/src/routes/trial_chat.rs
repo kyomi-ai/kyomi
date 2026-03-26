@@ -384,7 +384,7 @@ async fn create_session(
             generate_trial_token(secret, &session.session_token, &ip, expires_at);
         let expires_at_str =
             chrono::DateTime::from_timestamp(expires_at, 0)
-                .unwrap_or_else(|| Utc::now())
+                .unwrap_or_else(Utc::now)
                 .to_rfc3339();
         let queries_remaining = MAX_SESSION_QUERIES.saturating_sub(session.query_count);
 
@@ -421,7 +421,7 @@ async fn create_session(
     let trial_access_token = generate_trial_token(secret, &session_token, &ip, expires_at);
     let expires_at_str =
         chrono::DateTime::from_timestamp(expires_at, 0)
-            .unwrap_or_else(|| Utc::now())
+            .unwrap_or_else(Utc::now)
             .to_rfc3339();
 
     tracing::info!("Created trial session for IP {ip}");

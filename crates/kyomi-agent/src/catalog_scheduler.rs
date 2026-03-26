@@ -706,9 +706,7 @@ impl CatalogRefreshScheduler {
         .ok()
         .flatten();
 
-        let Some(row) = row else {
-            return None;
-        };
+        let row = row?;
 
         // Exchange service account JWT for access token
         let client = match kyomi_datasource_server::http_client() {

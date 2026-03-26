@@ -133,39 +133,39 @@ impl AgentTool for RenderChartTool {
         // The MCP App doesn't have a transform engine, so we run the
         // DataFusion pipeline here and return a spec with no transform section.
         let mut resolved_spec = resolved_spec;
-        if interactive {
-            if resolved_spec.get("transform").is_some() {
-                // Render via chartml-rs which applies transforms internally.
-                // We re-serialize the resolved spec to YAML, render it through
-                // the full pipeline, then extract the transformed data.
-                // For interactive mode, we just need the transform applied —
-                // the actual chart rendering happens in the MCP App.
-                let chartml = chartml_factory::create_chartml();
-                let yaml = serde_yaml::to_string(&resolved_spec).map_err(|e| {
-                    kyomi_core::Error::Internal(format!("Failed to serialize spec: {e}"))
-                })?;
+        if interactive
+            && resolved_spec.get("transform").is_some()
+        {
+            // Render via chartml-rs which applies transforms internally.
+            // We re-serialize the resolved spec to YAML, render it through
+            // the full pipeline, then extract the transformed data.
+            // For interactive mode, we just need the transform applied —
+            // the actual chart rendering happens in the MCP App.
+            let chartml = chartml_factory::create_chartml();
+            let yaml = serde_yaml::to_string(&resolved_spec).map_err(|e| {
+                kyomi_core::Error::Internal(format!("Failed to serialize spec: {e}"))
+            })?;
 
-                // Use the async render to apply transforms, then extract the element.
-                // If transform succeeds, strip the transform from the spec and
-                // update data to inline (the MCP App will re-render from the spec).
-                match chartml.render_from_yaml_with_params_async(
-                    &yaml,
-                    Some(width as f64),
-                    Some(height as f64),
-                    None,
-                ).await {
-                    Ok(_) => {
-                        // Transform was applied successfully. For interactive mode,
-                        // we pass the original resolved spec (transforms will be
-                        // applied by chartml-rs in the MCP App's WASM runtime too).
-                        // Remove transform section for clients that can't handle it.
-                        if let Some(obj) = resolved_spec.as_object_mut() {
-                            obj.remove("transform");
-                        }
+            // Use the async render to apply transforms, then extract the element.
+            // If transform succeeds, strip the transform from the spec and
+            // update data to inline (the MCP App will re-render from the spec).
+            match chartml.render_from_yaml_with_params_async(
+                &yaml,
+                Some(width as f64),
+                Some(height as f64),
+                None,
+            ).await {
+                Ok(_) => {
+                    // Transform was applied successfully. For interactive mode,
+                    // we pass the original resolved spec (transforms will be
+                    // applied by chartml-rs in the MCP App's WASM runtime too).
+                    // Remove transform section for clients that can't handle it.
+                    if let Some(obj) = resolved_spec.as_object_mut() {
+                        obj.remove("transform");
                     }
-                    Err(e) => {
-                        return Ok(json_error(&format!("Failed to apply data transforms: {e}")));
-                    }
+                }
+                Err(e) => {
+                    return Ok(json_error(&format!("Failed to apply data transforms: {e}")));
                 }
             }
         }

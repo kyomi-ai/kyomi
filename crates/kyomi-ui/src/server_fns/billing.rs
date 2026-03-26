@@ -290,21 +290,20 @@ pub async fn create_checkout(
     let additional_users = additional_users.unwrap_or(0);
 
     // If user already has an active subscription, modify it directly
-    if let Some(ref sub_id) = workspace.stripe_subscription_id {
-        if workspace.subscription_status == "active"
-            || workspace.subscription_status == "cancelled"
-        {
-            return modify_existing_subscription(
-                &ctx.db,
-                &ctx.config,
-                &stripe_service,
-                &workspace,
-                sub_id,
-                &tier,
-                &billing_cycle,
-            )
-            .await;
-        }
+    if let Some(ref sub_id) = workspace.stripe_subscription_id
+        && (workspace.subscription_status == "active"
+            || workspace.subscription_status == "cancelled")
+    {
+        return modify_existing_subscription(
+            &ctx.db,
+            &ctx.config,
+            &stripe_service,
+            &workspace,
+            sub_id,
+            &tier,
+            &billing_cycle,
+        )
+        .await;
     }
 
     // New subscription flow
@@ -399,22 +398,20 @@ async fn modify_existing_subscription(
 
     // If downgrading from Team, remove additional users item
     if (tier == "starter" || tier == "pro")
-        && workspace.stripe_additional_users_item_id.is_some()
+        && let Some(ref item_id) = workspace.stripe_additional_users_item_id
     {
-        if let Some(ref item_id) = workspace.stripe_additional_users_item_id {
-            stripe_service
-                .update_subscription_quantity(subscription_id, item_id, 0)
-                .await
-                .map_err(|e| ServerFnError::new(format!("Failed to remove additional users: {e}")))?;
+        stripe_service
+            .update_subscription_quantity(subscription_id, item_id, 0)
+            .await
+            .map_err(|e| ServerFnError::new(format!("Failed to remove additional users: {e}")))?;
 
-            kyomi_core::db_execute!(
-                db,
-                "UPDATE workspaces SET stripe_additional_users_item_id = NULL \
-                 WHERE workspace_id = $1",
-                &workspace.workspace_id
-            )
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        }
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE workspaces SET stripe_additional_users_item_id = NULL \
+             WHERE workspace_id = $1",
+            &workspace.workspace_id
+        )
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
     }
 
     // Modify the subscription

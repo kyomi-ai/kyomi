@@ -232,27 +232,27 @@ pub async fn login_with_password(
             .await
             .map_err(|_| ServerFnError::new("Internal server error"))?;
 
-    if let Some(totp_method) = totp_method {
-        if totp_method.active {
-            match &totp_code {
-                None => {
-                    return Ok(LoginResult::TwoFactorRequired {
-                        email: user.email.clone(),
+    if let Some(totp_method) = totp_method
+        && totp_method.active
+    {
+        match &totp_code {
+            None => {
+                return Ok(LoginResult::TwoFactorRequired {
+                    email: user.email.clone(),
+                });
+            }
+            Some(code) => {
+                // Extract TOTP secret and verify the code
+                let Some(secret) =
+                    totp_method.auth_data.get("secret").and_then(|v| v.as_str())
+                else {
+                    tracing::error!(user_id = %user.user_id, "TOTP auth method missing secret");
+                    return Err(ServerFnError::new("Internal server error"));
+                };
+                if !kyomi_auth::totp::verify_code(secret, code) {
+                    return Ok(LoginResult::Error {
+                        message: "Invalid 2FA verification code".to_string(),
                     });
-                }
-                Some(code) => {
-                    // Extract TOTP secret and verify the code
-                    let Some(secret) =
-                        totp_method.auth_data.get("secret").and_then(|v| v.as_str())
-                    else {
-                        tracing::error!(user_id = %user.user_id, "TOTP auth method missing secret");
-                        return Err(ServerFnError::new("Internal server error"));
-                    };
-                    if !kyomi_auth::totp::verify_code(secret, code) {
-                        return Ok(LoginResult::Error {
-                            message: "Invalid 2FA verification code".to_string(),
-                        });
-                    }
                 }
             }
         }
@@ -358,24 +358,24 @@ pub async fn signup_start(
 
     // Self-hosted without SMTP: only the first user can self-register.
     // Subsequent users must have a pending invitation from the admin.
-    if smtp_less_self_hosted && existing_user.is_none() {
-        if kyomi_auth::user_service::has_any_users(&ctx.db).await.map_err(|e| {
+    if smtp_less_self_hosted && existing_user.is_none()
+        && kyomi_auth::user_service::has_any_users(&ctx.db).await.map_err(|e| {
             tracing::error!(error = %e, "Failed to check if any users exist");
             ServerFnError::new("Internal server error")
-        })? {
-            let pending =
-                kyomi_auth::workspace_service::get_pending_invitations_for_email(&ctx.db, &email)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to check pending invitations");
-                        ServerFnError::new("Internal server error")
-                    })?;
-            if pending.is_empty() {
-                return Ok(SignupResult::Error {
-                    message: "Registration is closed. Ask your administrator to invite you."
-                        .to_string(),
-                });
-            }
+        })?
+    {
+        let pending =
+            kyomi_auth::workspace_service::get_pending_invitations_for_email(&ctx.db, &email)
+                .await
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to check pending invitations");
+                    ServerFnError::new("Internal server error")
+                })?;
+        if pending.is_empty() {
+            return Ok(SignupResult::Error {
+                message: "Registration is closed. Ask your administrator to invite you."
+                    .to_string(),
+            });
         }
     }
 
@@ -1217,33 +1217,33 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
             ServerFnError::new("Internal server error")
         })?;
 
-    if let Some(user) = user {
-        if !user.verified {
-            tracing::info!(email = %email, user_id = %user.user_id, "Resending verification email");
+    if let Some(user) = user
+        && !user.verified
+    {
+        tracing::info!(email = %email, user_id = %user.user_id, "Resending verification email");
 
-            let raw_token = kyomi_auth::token_service::create_verification_token(
-                &ctx.db,
-                &email,
-                "email_verification",
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to create verification token");
-                ServerFnError::new("Internal server error")
-            })?;
+        let raw_token = kyomi_auth::token_service::create_verification_token(
+            &ctx.db,
+            &email,
+            "email_verification",
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to create verification token");
+            ServerFnError::new("Internal server error")
+        })?;
 
-            let verification_url = format!(
-                "{}/verify-email?token={raw_token}",
-                ctx.config.frontend_url.trim_end_matches('/')
-            );
-            tracing::info!(
-                "Resend verification link for {email}: {verification_url} (user_id={})",
-                user.user_id
-            );
+        let verification_url = format!(
+            "{}/verify-email?token={raw_token}",
+            ctx.config.frontend_url.trim_end_matches('/')
+        );
+        tracing::info!(
+            "Resend verification link for {email}: {verification_url} (user_id={})",
+            user.user_id
+        );
 
-            let user_name = user.name.clone().unwrap_or_default();
-            spawn_verification_email(email, user_name, verification_url);
-        }
+        let user_name = user.name.clone().unwrap_or_default();
+        spawn_verification_email(email, user_name, verification_url);
     }
 
     // Always return Ok to prevent email enumeration
@@ -1326,44 +1326,44 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
         .ok()
         .flatten();
 
-    if let Some(user) = user {
-        if user.verified {
-            // Create recovery token (15 min = 0.25 hours)
-            if let Ok(raw_token) =
-                kyomi_auth::token_service::create_verification_token_with_expiry(
-                    &ctx.db,
-                    &email,
-                    "account_recovery",
-                    Some(0.25),
-                )
-                .await
-            {
-                let recovery_url = format!(
-                    "{}/account/recover/complete?token={raw_token}",
-                    ctx.config.frontend_url.trim_end_matches('/')
-                );
+    if let Some(user) = user
+        && user.verified
+    {
+        // Create recovery token (15 min = 0.25 hours)
+        if let Ok(raw_token) =
+            kyomi_auth::token_service::create_verification_token_with_expiry(
+                &ctx.db,
+                &email,
+                "account_recovery",
+                Some(0.25),
+            )
+            .await
+        {
+            let recovery_url = format!(
+                "{}/account/recover/complete?token={raw_token}",
+                ctx.config.frontend_url.trim_end_matches('/')
+            );
 
-                // Send recovery email (async, non-blocking)
-                let user_name = user.name.clone().unwrap_or_default();
-                let email_clone = email.clone();
-                let url_clone = recovery_url.clone();
-                tokio::spawn(async move {
-                    let email_svc = kyomi_auth::email_service::EmailService::from_env();
-                    let sent = email_svc
-                        .send_account_recovery(&email_clone, &user_name, &url_clone)
-                        .await;
-                    if sent {
-                        tracing::info!("Account recovery email sent to {email_clone}");
-                    } else {
-                        tracing::warn!(
-                            "Failed to send account recovery email to {email_clone}"
-                        );
-                        tracing::info!(
-                            "ACCOUNT RECOVERY LINK for {email_clone}: {url_clone}"
-                        );
-                    }
-                });
-            }
+            // Send recovery email (async, non-blocking)
+            let user_name = user.name.clone().unwrap_or_default();
+            let email_clone = email.clone();
+            let url_clone = recovery_url.clone();
+            tokio::spawn(async move {
+                let email_svc = kyomi_auth::email_service::EmailService::from_env();
+                let sent = email_svc
+                    .send_account_recovery(&email_clone, &user_name, &url_clone)
+                    .await;
+                if sent {
+                    tracing::info!("Account recovery email sent to {email_clone}");
+                } else {
+                    tracing::warn!(
+                        "Failed to send account recovery email to {email_clone}"
+                    );
+                    tracing::info!(
+                        "ACCOUNT RECOVERY LINK for {email_clone}: {url_clone}"
+                    );
+                }
+            });
         }
     }
 
@@ -1519,18 +1519,17 @@ pub async fn recovery_set_password(
                 tracing::error!(error = %e, "Failed to get existing password auth method");
                 ServerFnError::new("Internal server error")
             })?
+        && let Some(existing_hash) = existing.auth_data.get("hash").and_then(|v| v.as_str())
     {
-        if let Some(existing_hash) = existing.auth_data.get("hash").and_then(|v| v.as_str()) {
-            let same = kyomi_auth::password::verify_password(&new_password, existing_hash)
-                .map_err(|e| {
-                    tracing::error!(error = %e, "Password verification error during recovery");
-                    ServerFnError::new("Internal server error")
-                })?;
-            if same {
-                return Ok(RecoverySetPasswordResult::Error {
-                    message: "New password must be different from your current password.".into(),
-                });
-            }
+        let same = kyomi_auth::password::verify_password(&new_password, existing_hash)
+            .map_err(|e| {
+                tracing::error!(error = %e, "Password verification error during recovery");
+                ServerFnError::new("Internal server error")
+            })?;
+        if same {
+            return Ok(RecoverySetPasswordResult::Error {
+                message: "New password must be different from your current password.".into(),
+            });
         }
     }
 
@@ -2577,12 +2576,11 @@ async fn get_passkeys_for_auth(
 
     let mut passkeys = Vec::new();
     for (_cred_id, cred_data) in &creds {
-        if let Some(passkey_json) = cred_data.get("passkey") {
-            if let Ok(passkey) =
+        if let Some(passkey_json) = cred_data.get("passkey")
+            && let Ok(passkey) =
                 serde_json::from_value::<webauthn_rs::prelude::Passkey>(passkey_json.clone())
-            {
-                passkeys.push(passkey);
-            }
+        {
+            passkeys.push(passkey);
         }
     }
     Ok(passkeys)
@@ -2657,12 +2655,11 @@ pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
     if let Some(xff) = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
+        && let Some(first_ip) = xff.split(',').next()
     {
-        if let Some(first_ip) = xff.split(',').next() {
-            let ip = first_ip.trim();
-            if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
-                return ip.to_string();
-            }
+        let ip = first_ip.trim();
+        if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
+            return ip.to_string();
         }
     }
 

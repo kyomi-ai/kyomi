@@ -642,13 +642,12 @@ async fn handle_user_callback(
     };
 
     // Verify Slack user matches if expected (from /kyomi connect flow)
-    if let Some(ref expected) = expected_slack_user_id {
-        if slack_user_id != expected {
+    if let Some(ref expected) = expected_slack_user_id
+        && slack_user_id != expected {
             return Err(kyomi_core::Error::BadRequest(
                 "Slack user mismatch. Please run /kyomi connect again.".into(),
             ));
         }
-    }
 
     // Verify we have user_id
     let user_id = user_id.ok_or_else(|| {
@@ -1510,8 +1509,8 @@ async fn handle_app_mention(
     .await?;
 
     // Fire-and-forget title generation for new sessions.
-    if is_new_session {
-        if kyomi_agent::resolve_provider_config(&state.config).is_ok() {
+    if is_new_session
+        && kyomi_agent::resolve_provider_config(&state.config).is_ok() {
             kyomi_agent::generate_session_title(
                 state.db.clone(),
                 state.ws_manager.clone(),
@@ -1521,7 +1520,6 @@ async fn handle_app_mention(
                 state.config.clone(),
             );
         }
-    }
 
     // Post "thinking" placeholder.
     let placeholder_ts = post_slack_placeholder(
@@ -1700,8 +1698,8 @@ async fn handle_direct_message(
     .await?;
 
     // Fire-and-forget title generation for new sessions.
-    if is_new_session {
-        if kyomi_agent::resolve_provider_config(&state.config).is_ok() {
+    if is_new_session
+        && kyomi_agent::resolve_provider_config(&state.config).is_ok() {
             kyomi_agent::generate_session_title(
                 state.db.clone(),
                 state.ws_manager.clone(),
@@ -1711,7 +1709,6 @@ async fn handle_direct_message(
                 state.config.clone(),
             );
         }
-    }
 
     // Post "thinking" placeholder.
     let placeholder_ts = post_slack_placeholder(
@@ -2157,14 +2154,13 @@ async fn get_slack_user_timezone(
     if let Some(ref cfg) = config {
         let cached_tz = cfg.get("timezone").and_then(|v| v.as_str());
         let cached_at = cfg.get("timezone_fetched_at").and_then(|v| v.as_str());
-        if let (Some(tz), Some(fetched_at_str)) = (cached_tz, cached_at) {
-            if let Ok(fetched_at) = chrono::DateTime::parse_from_rfc3339(fetched_at_str) {
+        if let (Some(tz), Some(fetched_at_str)) = (cached_tz, cached_at)
+            && let Ok(fetched_at) = chrono::DateTime::parse_from_rfc3339(fetched_at_str) {
                 let age_hours = (Utc::now() - fetched_at.with_timezone(&Utc)).num_hours();
                 if age_hours < SLACK_TIMEZONE_CACHE_HOURS {
                     return Some(tz.to_string());
                 }
             }
-        }
     }
 
     // Fetch from Slack API.

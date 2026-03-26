@@ -402,11 +402,7 @@ async fn resolve_bq_access(
                 .get("oauth_token_expiry")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    // No expiry stored — this shouldn't happen after a refresh,
-                    // but provide a fallback
-                    ""
-                })
+                .unwrap_or("")
                 .to_string();
 
             let expires = if expires.is_empty() {
@@ -1934,8 +1930,7 @@ async fn search_tables(
                     workspace_id,
                 )
                 .await?
-                {
-                    if ds.datasource_type == kyomi_core::DatasourceType::Bigquery {
+                    && ds.datasource_type == kyomi_core::DatasourceType::Bigquery {
                         let setting = ds
                             .connection_config
                             .get("include_public_datasets")
@@ -1945,7 +1940,6 @@ async fn search_tables(
                             val = false;
                         }
                     }
-                }
             } else {
                 // No specific datasource — check first active BigQuery datasource
                 #[derive(sqlx::FromRow)]

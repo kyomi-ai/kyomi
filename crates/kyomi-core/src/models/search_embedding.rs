@@ -12,7 +12,7 @@
 //!
 //! This table has been replaced by pgvector embeddings on `datasource_table_cache`
 //! + `column_embeddings` via `kyomi-knowledge`. The `datasource_search_embeddings`
-//! table is being dropped.
+//!   table is being dropped.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

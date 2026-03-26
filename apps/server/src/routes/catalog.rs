@@ -358,47 +358,44 @@ async fn discover_catalog(
         .is_some_and(|s| !s.is_empty());
 
     // For OAuth mode, look up credentials from database if datasource_slug provided
-    if let Some(ref slug) = request.datasource_slug {
-        if is_oauth_mode && !has_oauth_token {
-            if let Ok(datasource) = datasource_service::resolve_datasource(
+    if let Some(ref slug) = request.datasource_slug
+        && is_oauth_mode && !has_oauth_token
+        && let Ok(datasource) = datasource_service::resolve_datasource(
+            &state.db,
+            slug,
+            workspace_id,
+            false,
+        )
+        .await
+    {
+            let user_cred = datasource_service::get_user_credential(
                 &state.db,
-                slug,
-                workspace_id,
-                false,
+                &user.user_id,
+                &datasource.id,
             )
             .await
-            {
-                let user_cred = datasource_service::get_user_credential(
-                    &state.db,
-                    &user.user_id,
-                    &datasource.id,
-                )
-                .await
-                .ok()
-                .flatten();
+            .ok()
+            .flatten();
 
-                if let Some(cred) = user_cred {
-                    if let Ok(db_creds) =
-                        credential_service::decrypt_credentials(&cred.credentials, &state.encryption_key)
-                    {
-                        // Merge OAuth tokens from database
-                        if let Some(obj) = db_creds.as_object() {
-                            if let Some(cred_obj) = credentials.as_object_mut() {
-                                for (k, v) in obj {
-                                    cred_obj.insert(k.clone(), v.clone());
-                                }
-                            } else {
-                                credentials = db_creds;
+            if let Some(cred) = user_cred
+                && let Ok(db_creds) =
+                    credential_service::decrypt_credentials(&cred.credentials, &state.encryption_key)
+            {
+                    // Merge OAuth tokens from database
+                    if let Some(obj) = db_creds.as_object() {
+                        if let Some(cred_obj) = credentials.as_object_mut() {
+                            for (k, v) in obj {
+                                cred_obj.insert(k.clone(), v.clone());
                             }
+                        } else {
+                            credentials = db_creds;
                         }
-                        tracing::info!(
-                            "[discover-catalog] Loaded OAuth credentials from database for {slug}"
-                        );
                     }
+                    tracing::info!(
+                        "[discover-catalog] Loaded OAuth credentials from database for {slug}"
+                    );
                 }
-            }
         }
-    }
 
     // Validate datasource type
     let meta = match datasource_registry::get_metadata_by_str(&request.datasource_type) {
@@ -532,15 +529,15 @@ async fn discover_resources(
     let mut _user_cred_id: Option<i32> = None;
 
     // For existing datasources (edit mode), load stored credentials first
-    if let Some(ref slug) = request.datasource_slug {
-        if let Ok(datasource) = datasource_service::resolve_datasource(
+    if let Some(ref slug) = request.datasource_slug
+        && let Ok(datasource) = datasource_service::resolve_datasource(
             &state.db,
             slug,
             workspace_id,
             false,
         )
         .await
-        {
+    {
             // Merge connection_config: database has secrets, request has current UI values
             let db_config = &datasource.connection_config;
             let request_config = &request.connection_config;
@@ -549,35 +546,29 @@ async fn discover_resources(
             let mut merged_config = db_config.clone();
 
             // Always use request's auth_mode if provided
-            if let Some(am) = request_config.get("auth_mode") {
-                if let Some(obj) = merged_config.as_object_mut() {
+            if let Some(am) = request_config.get("auth_mode")
+                && let Some(obj) = merged_config.as_object_mut() {
                     obj.insert("auth_mode".to_string(), am.clone());
                 }
-            }
 
             // For service_account mode, use request's service_account_json if it looks like real JSON
-            if let Some(sa_json) = request_config.get("service_account_json").and_then(|v| v.as_str()) {
-                if sa_json.trim().starts_with('{') {
-                    if let Some(obj) = merged_config.as_object_mut() {
-                        obj.insert("service_account_json".to_string(), json!(sa_json));
-                    }
+            if let Some(sa_json) = request_config.get("service_account_json").and_then(|v| v.as_str())
+                && sa_json.trim().starts_with('{')
+                && let Some(obj) = merged_config.as_object_mut() {
+                    obj.insert("service_account_json".to_string(), json!(sa_json));
                 }
-            }
 
             // Handle OAuth client credentials with mask awareness
             const MASKED_VALUE: &str = "********";
-            if let Some(oci) = request_config.get("oauth_client_id") {
-                if let Some(obj) = merged_config.as_object_mut() {
+            if let Some(oci) = request_config.get("oauth_client_id")
+                && let Some(obj) = merged_config.as_object_mut() {
                     obj.insert("oauth_client_id".to_string(), oci.clone());
                 }
-            }
-            if let Some(ocs) = request_config.get("oauth_client_secret").and_then(|v| v.as_str()) {
-                if ocs != MASKED_VALUE {
-                    if let Some(obj) = merged_config.as_object_mut() {
-                        obj.insert("oauth_client_secret".to_string(), json!(ocs));
-                    }
+            if let Some(ocs) = request_config.get("oauth_client_secret").and_then(|v| v.as_str())
+                && ocs != MASKED_VALUE
+                && let Some(obj) = merged_config.as_object_mut() {
+                    obj.insert("oauth_client_secret".to_string(), json!(ocs));
                 }
-            }
 
             connection_config = merged_config;
 
@@ -588,10 +579,9 @@ async fn discover_resources(
                 &datasource.id,
             )
             .await
-            {
-                if let Ok(db_creds) =
+                && let Ok(db_creds) =
                     credential_service::decrypt_credentials(&user_cred.credentials, &state.encryption_key)
-                {
+            {
                     credentials = db_creds;
                     _user_cred_id = Some(user_cred.id);
                     tracing::info!(
@@ -605,8 +595,8 @@ async fn discover_resources(
                     } else {
                         &request.credentials
                     };
-                    if let Some(req_obj) = request_creds.as_object() {
-                        if let Some(cred_obj) = credentials.as_object_mut() {
+                    if let Some(req_obj) = request_creds.as_object()
+                        && let Some(cred_obj) = credentials.as_object_mut() {
                             for (key, value) in req_obj {
                                 if !value.is_null()
                                     && value.as_str().map(|s| !s.is_empty()).unwrap_or(true)
@@ -615,11 +605,8 @@ async fn discover_resources(
                                 }
                             }
                         }
-                    }
                 }
-            }
         }
-    }
 
     // Validate datasource type
     let ds_type = match datasource_registry::DatasourceType::from_str(&request.datasource_type) {
@@ -926,7 +913,7 @@ async fn get_catalog_tree(
         // with fallback to updated_at (only set on schema changes).
         let checked_at = table.last_verified.unwrap_or(table.updated_at);
         let checked_str = checked_at.to_rfc3339();
-        if last_indexed.as_ref().map_or(true, |li| &checked_str > li) {
+        if last_indexed.as_ref().is_none_or(|li| &checked_str > li) {
             last_indexed = Some(checked_str);
         }
     }
@@ -1061,7 +1048,7 @@ async fn get_catalog_status(
         // Use last_verified (set on every refresh check) with fallback to updated_at
         let checked_at = table.last_verified.unwrap_or(table.updated_at);
         let checked_str = checked_at.to_rfc3339();
-        if last_indexed.as_ref().map_or(true, |li| &checked_str > li) {
+        if last_indexed.as_ref().is_none_or(|li| &checked_str > li) {
             last_indexed = Some(checked_str);
         }
     }
@@ -1259,8 +1246,8 @@ async fn list_schemas(
     .await
     {
         Ok(refreshed) if refreshed != credentials => {
-            if let Some(ref cred) = user_cred {
-                if let Err(e) = datasource_service::save_user_credential(
+            if let Some(ref cred) = user_cred
+                && let Err(e) = datasource_service::save_user_credential(
                     &state.db,
                     &state.encryption_key,
                     &user.user_id,
@@ -1269,13 +1256,12 @@ async fn list_schemas(
                     &refreshed,
                 )
                 .await
-                {
+            {
                     tracing::warn!(
                         datasource_id = %datasource.id,
                         "Failed to persist refreshed OAuth token: {e}"
                     );
                 }
-            }
             refreshed
         }
         Ok(unchanged) => unchanged,

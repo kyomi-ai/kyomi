@@ -1052,14 +1052,14 @@ pub async fn bulk_delete_sessions(
             for sid in &owned_ids {
                 query = query.bind(sid);
             }
-            query.execute(&*sq).await?;
+            query.execute(sq).await?;
 
             let del_sessions_sql = format!("DELETE FROM chat_sessions WHERE session_id IN {in_clause}");
             let mut query = sqlx::query(&del_sessions_sql);
             for sid in &owned_ids {
                 query = query.bind(sid);
             }
-            let result = query.execute(&*sq).await?;
+            let result = query.execute(sq).await?;
 
             Ok(result.rows_affected() as i64)
         }

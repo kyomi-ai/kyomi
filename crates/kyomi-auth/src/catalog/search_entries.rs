@@ -60,16 +60,16 @@ pub fn create_search_entries(
         });
 
         // Level 4: column_description (only if description is present and non-empty)
-        if let Some(ref desc) = col.description {
-            if !desc.trim().is_empty() {
-                entries.push(SearchEntry {
-                    text: desc.clone(),
-                    table_id: table_id.to_string(),
-                    entry_type: "column_description".into(),
-                    weight: WEIGHT_COLUMN_DESCRIPTION,
-                    column_name: Some(col.name.clone()),
-                });
-            }
+        if let Some(ref desc) = col.description
+            && !desc.trim().is_empty()
+        {
+            entries.push(SearchEntry {
+                text: desc.clone(),
+                table_id: table_id.to_string(),
+                entry_type: "column_description".into(),
+                weight: WEIGHT_COLUMN_DESCRIPTION,
+                column_name: Some(col.name.clone()),
+            });
         }
     }
 

@@ -90,11 +90,9 @@ pub fn get_subscription_tier(workspace: &Workspace) -> SubscriptionTier {
         && let Some(custom) = settings.get("custom_settings")
         && let Some(tier_val) = custom.get("subscription_tier")
         && let Some(tier_str) = tier_val.as_str()
-    {
-        if let Some(tier) = parse_tier(tier_str) {
+        && let Some(tier) = parse_tier(tier_str) {
             return tier;
         }
-    }
 
     // Use the DB field directly — it's already a SubscriptionTier enum
     workspace.subscription_tier

@@ -313,10 +313,10 @@ impl AgentTool for BrowseCatalogTool {
         let mut schemas: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();
         for row in &rows {
-            if let Some(filter) = schema_filter {
-                if row.dataset_id != filter {
-                    continue;
-                }
+            if let Some(filter) = schema_filter
+                && row.dataset_id != filter
+            {
+                continue;
             }
             let full_name = if row.project_id.is_empty() {
                 if row.dataset_id.is_empty() {

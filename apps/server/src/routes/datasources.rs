@@ -1368,7 +1368,7 @@ async fn get_settings(
                 // Resolve effective BigQuery settings (workspace config wins)
                 let billing_project =
                     kyomi_datasource_server::providers::bigquery::resolve_billing_project(
-                        &connection_config,
+                        connection_config,
                         &user_settings,
                         None,
                     );

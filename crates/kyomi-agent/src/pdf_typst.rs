@@ -55,7 +55,7 @@ pub fn generate_pdf(
             format!("PDF export failed: {}", msgs.join("; "))
         })?;
 
-    Ok(pdf_bytes.into())
+    Ok(pdf_bytes)
 }
 
 /// Build a complete Typst document with page setup, styling, and body content.

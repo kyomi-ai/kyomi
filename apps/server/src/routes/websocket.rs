@@ -124,7 +124,7 @@ async fn handle_authenticated_ws(
     // 5. Register with WebSocketManager (heartbeat sent automatically)
     let (connection_id, mut manager_rx) = match state.ws_manager.connect(jwt_user_id) {
         Ok(conn) => conn,
-        Err(()) => {
+        Err(_) => {
             close_with_code(socket, CLOSE_TOO_MANY_CONNECTIONS, "Too many connections").await;
             return;
         }
@@ -473,7 +473,7 @@ async fn handle_trial_ws(
 async fn close_with_code(socket: ws::WebSocket, code: u16, reason: &str) {
     let (mut sender, _) = socket.split();
     let close_frame = ws::CloseFrame {
-        code: code.into(),
+        code,
         reason: reason.to_string().into(),
     };
     let _ = sender.send(ws::Message::Close(Some(close_frame))).await;

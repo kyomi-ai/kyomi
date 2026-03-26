@@ -313,17 +313,16 @@ impl AgentTool for CreateDashboardTool {
         }
 
         // Validate SQL in ChartML blocks before saving (skip for trial mode).
-        if !ctx.is_trial {
-            if let Some(sql_errors) =
+        if !ctx.is_trial
+            && let Some(sql_errors) =
                 super::query_utils::validate_chartml_sql(&ctx.query_context(), content).await
-            {
-                return Ok(serde_json::json!({
-                    "success": false,
-                    "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
-                    "validation_errors": [sql_errors],
-                })
-                .to_string());
-            }
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
+                "validation_errors": [sql_errors],
+            })
+            .to_string());
         }
 
         let dashboard_id = match kyomi_auth::dashboard_service::create_dashboard(
@@ -473,19 +472,17 @@ impl AgentTool for ModifyDashboardTool {
         }
 
         // Validate SQL in ChartML blocks before saving (skip for trial mode).
-        if !ctx.is_trial {
-            if let Some(c) = content {
-                if let Some(sql_errors) =
-                    super::query_utils::validate_chartml_sql(&ctx.query_context(), c).await
-                {
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
-                        "validation_errors": [sql_errors],
-                    })
-                    .to_string());
-                }
-            }
+        if !ctx.is_trial
+            && let Some(c) = content
+            && let Some(sql_errors) =
+                super::query_utils::validate_chartml_sql(&ctx.query_context(), c).await
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
+                "validation_errors": [sql_errors],
+            })
+            .to_string());
         }
 
         match kyomi_auth::dashboard_service::update_dashboard(

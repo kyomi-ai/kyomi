@@ -451,20 +451,20 @@ pub async fn update_site(
     }
 
     // Update datasource slug if requested and a datasource is linked
-    if let Some(new_slug) = datasource_slug {
-        if let Some(ref ds_id) = existing.datasource_id {
-            datasource_service::update_datasource(
-                db,
-                ds_id,
-                workspace_id,
-                None,
-                Some(new_slug),
-                None,
-                None,
-                None,
-            )
-            .await?;
-        }
+    if let Some(new_slug) = datasource_slug
+        && let Some(ref ds_id) = existing.datasource_id
+    {
+        datasource_service::update_datasource(
+            db,
+            ds_id,
+            workspace_id,
+            None,
+            Some(new_slug),
+            None,
+            None,
+            None,
+        )
+        .await?;
     }
 
     // Re-fetch with JOIN to get datasource_slug
@@ -503,24 +503,23 @@ pub async fn delete_site(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete analytics site: {e}")))?;
 
     // Clean up ClickHouse database + user (best-effort)
-    if let Some(ref ch_db) = site.clickhouse_database {
-        if let Err(e) =
+    if let Some(ref ch_db) = site.clickhouse_database
+        && let Err(e) =
             analytics_clickhouse::delete_site_user(ch_host, ch_port, ch_admin_password, &site.site_id, ch_db, ch_secure)
                 .await
-        {
-            tracing::error!(site_id = %site.site_id, error = %e, "Failed to delete ClickHouse database/user");
-        }
+    {
+        tracing::error!(site_id = %site.site_id, error = %e, "Failed to delete ClickHouse database/user");
     }
 
     // Clean up the auto-provisioned datasource
-    if let Some(ds_id) = &site.datasource_id {
-        if let Err(e) = kyomi_core::db_execute!(
+    if let Some(ds_id) = &site.datasource_id
+        && let Err(e) = kyomi_core::db_execute!(
             db,
             "DELETE FROM datasource_configs WHERE id = $1",
             ds_id
-        ) {
-            tracing::error!(datasource_id = %ds_id, error = %e, "Failed to delete auto-provisioned datasource");
-        }
+        )
+    {
+        tracing::error!(datasource_id = %ds_id, error = %e, "Failed to delete auto-provisioned datasource");
     }
 
     tracing::info!(site_id = %site.site_id, "Deleted analytics site");

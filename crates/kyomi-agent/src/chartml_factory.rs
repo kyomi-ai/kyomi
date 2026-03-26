@@ -105,12 +105,11 @@ fn inject_palette(yaml: &str, palette: &[String]) -> String {
                         .or_insert_with(|| serde_json::json!({}));
                     v.get_mut("style")
                 });
-            if let Some(style) = style {
-                if style.get("colors").is_none() {
-                    style.as_object_mut().map(|s| {
-                        s.insert("colors".to_string(), serde_json::json!(colors));
-                    });
-                }
+            if let Some(style) = style
+                && style.get("colors").is_none()
+                && let Some(s) = style.as_object_mut()
+            {
+                s.insert("colors".to_string(), serde_json::json!(colors));
             }
         }
     };

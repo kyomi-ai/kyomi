@@ -162,10 +162,10 @@ pub async fn get_per_site_counts_from_clickhouse(
                     if line.trim().is_empty() {
                         continue;
                     }
-                    if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(cnt) = row.get("cnt").and_then(|v| v.as_u64()) {
-                            return (site_id, Some(cnt));
-                        }
+                    if let Ok(row) = serde_json::from_str::<serde_json::Value>(line)
+                        && let Some(cnt) = row.get("cnt").and_then(|v| v.as_u64())
+                    {
+                        return (site_id, Some(cnt));
                     }
                 }
                 (site_id, None)
@@ -222,7 +222,8 @@ pub async fn reconcile_counters(
     for (ws_id, site_id, database, tier) in rows {
         map.entry(ws_id).or_insert_with(|| (tier, Vec::new())).1.push((site_id, database));
     }
-    let workspaces: Vec<(String, String, Vec<(String, String)>)> = map.into_iter()
+    type WorkspaceWithSites = (String, String, Vec<(String, String)>);
+    let workspaces: Vec<WorkspaceWithSites> = map.into_iter()
         .map(|(ws_id, (tier, sites))| (ws_id, tier, sites))
         .collect();
 
@@ -241,10 +242,10 @@ pub async fn reconcile_counters(
     for (workspace_id, tier, site_pairs) in &workspaces {
         // Ensure quota hash exists in Redis (idempotent — fixes missing quota from
         // sites created before spawn_analytics_post_create was added, or after Redis restart)
-        if let Some(config) = tier_configs.get(tier.as_str()) {
-            if let Err(e) = sync_quota_to_redis(redis, workspace_id, config).await {
-                tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to sync quota during reconciliation");
-            }
+        if let Some(config) = tier_configs.get(tier.as_str())
+            && let Err(e) = sync_quota_to_redis(redis, workspace_id, config).await
+        {
+            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to sync quota during reconciliation");
         }
 
         // If any site's ClickHouse query failed it will be absent from ch_counts.

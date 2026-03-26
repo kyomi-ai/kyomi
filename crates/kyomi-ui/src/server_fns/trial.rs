@@ -117,12 +117,12 @@ mod ssr {
             }
         }
 
-        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first_ip) = xff.split(',').next() {
-                let ip = first_ip.trim();
-                if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
-                    return ip.to_string();
-                }
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+            && let Some(first_ip) = xff.split(',').next()
+        {
+            let ip = first_ip.trim();
+            if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
+                return ip.to_string();
             }
         }
 
@@ -419,7 +419,7 @@ pub async fn create_trial_session() -> Result<TrialSessionResponse, ServerFnErro
         let trial_access_token =
             generate_trial_token(secret, &session.session_token, &ip, expires_at);
         let expires_at_str = chrono::DateTime::from_timestamp(expires_at, 0)
-            .unwrap_or_else(|| Utc::now())
+            .unwrap_or_else(Utc::now)
             .to_rfc3339();
         let queries_remaining = MAX_SESSION_QUERIES.saturating_sub(session.query_count);
 
@@ -452,7 +452,7 @@ pub async fn create_trial_session() -> Result<TrialSessionResponse, ServerFnErro
     let expires_at = now.timestamp() + TOKEN_EXPIRY_SECS;
     let trial_access_token = generate_trial_token(secret, &session_token, &ip, expires_at);
     let expires_at_str = chrono::DateTime::from_timestamp(expires_at, 0)
-        .unwrap_or_else(|| Utc::now())
+        .unwrap_or_else(Utc::now)
         .to_rfc3339();
 
     tracing::info!("Created trial session for IP {ip}");
@@ -769,7 +769,7 @@ pub async fn execute_trial_query(
         .map_err(|e| ServerFnError::new(format!("Failed to connect to sample database: {e}")))?;
 
     // Limit to 10,000 rows max for chart rendering.
-    let row_limit = limit.map(|l| l.max(1).min(10_000) as u32).unwrap_or(10_000);
+    let row_limit = limit.map(|l| l.clamp(1, 10_000) as u32).unwrap_or(10_000);
     let result = provider
         .execute_query(&sql, Some(row_limit), None, false)
         .await;

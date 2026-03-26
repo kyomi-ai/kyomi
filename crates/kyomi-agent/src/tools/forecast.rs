@@ -165,7 +165,7 @@ impl AgentTool for ForecastDataTool {
         let provider =
             super::query_utils::create_provider_for_datasource(&query_ctx, &ds)
                 .await
-                .map_err(|e| kyomi_core::Error::Internal(e))?;
+                .map_err(kyomi_core::Error::Internal)?;
 
         let result = provider
             .execute_query(sql, Some(FORECAST_QUERY_LIMIT), None, false)
