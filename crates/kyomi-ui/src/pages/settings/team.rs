@@ -14,7 +14,7 @@ use crate::components::{
     ButtonVariant, ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
 };
 use crate::components::select::SELECT_CLASS;
-use crate::server_fns::context::{get_user_context, UserContext};
+use crate::server_fns::context::UserContext;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 
