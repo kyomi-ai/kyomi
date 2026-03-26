@@ -1177,6 +1177,7 @@ async fn execute_watch_inner(
         user_message_id: None,
         assistant_message_id: None,
         conversation_history: None,
+        user_display_name: "Kyomi Watch".to_string(),
     };
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
@@ -1253,6 +1254,7 @@ async fn execute_watch_inner(
                         user_message_id: None,
                         assistant_message_id: None,
                         conversation_history: None,
+                        user_display_name: "Kyomi Watch".to_string(),
                     };
 
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());

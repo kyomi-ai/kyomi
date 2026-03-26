@@ -64,6 +64,9 @@ pub struct AgentExecutionConfig {
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
     /// Used by trial chat to pass prior messages (max 10).
     pub conversation_history: Option<Vec<(String, String)>>,
+    /// Display name for event attribution (e.g., WebSocket dashboard updates).
+    /// Populated by the caller from the authenticated user record.
+    pub user_display_name: String,
 }
 
 impl Default for AgentExecutionConfig {
@@ -88,6 +91,7 @@ impl Default for AgentExecutionConfig {
             user_message_id: None,
             assistant_message_id: None,
             conversation_history: None,
+            user_display_name: "Unknown".to_string(),
         }
     }
 }
@@ -220,6 +224,7 @@ pub async fn execute_agent_chat(
 
     // 6. Create tool context.
     let is_trial = config.context_type == "trial_chat";
+
     let tool_context = ToolContext {
         db: db.clone(),
         kv: kv.clone(),
@@ -235,6 +240,7 @@ pub async fn execute_agent_chat(
         workspace_roles: vec![], // Chat/watch — no admin checks needed
         connect_registry: connect_registry.clone(),
         platforms,
+        user_display_name: config.user_display_name.clone(),
     };
 
     // 7. Create agent and inject system prompt as the first message.
@@ -842,6 +848,7 @@ mod tests {
                 ("user".into(), "What's our MRR?".into()),
                 ("assistant".into(), "Let me look that up.".into()),
             ]),
+            user_display_name: "Test User".to_string(),
         };
 
         assert_eq!(config.session_id, "sess-123");

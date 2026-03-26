@@ -748,6 +748,11 @@ fn build_tool_context(
     workspace_id: &str,
     supports_mcp_apps: bool,
 ) -> ToolContext {
+    let user_display_name = user
+        .name
+        .clone()
+        .unwrap_or_else(|| user.email.clone());
+
     ToolContext {
         db: state.db.clone(),
         kv: state.kv.clone(),
@@ -763,6 +768,7 @@ fn build_tool_context(
         workspace_roles: user.workspace.workspace_roles.clone(),
         connect_registry: Some(state.connect_registry.clone()),
         platforms: state.platforms.clone(),
+        user_display_name,
     }
 }
 

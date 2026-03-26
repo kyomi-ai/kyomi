@@ -4,6 +4,8 @@
 
 use async_trait::async_trait;
 
+use kyomi_auth::websocket::helpers as ws_helpers;
+
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -365,6 +367,18 @@ impl AgentTool for CreateDashboardTool {
             );
         }
 
+        // Broadcast dashboard creation to workspace members.
+        ws_helpers::send_dashboard_update(
+            &ctx.ws_manager,
+            &ctx.workspace_id,
+            &dashboard_id,
+            "created",
+            &ctx.user_id,
+            &ctx.user_display_name,
+            Some(&ctx.user_id),
+        )
+        .await;
+
         let frontend_url = &ctx.config.frontend_url;
 
         Ok(serde_json::json!({
@@ -527,6 +541,18 @@ impl AgentTool for ModifyDashboardTool {
             );
         }
 
+        // Broadcast dashboard update to workspace members.
+        ws_helpers::send_dashboard_update(
+            &ctx.ws_manager,
+            &ctx.workspace_id,
+            dashboard_id,
+            "updated",
+            &ctx.user_id,
+            &ctx.user_display_name,
+            Some(&ctx.user_id),
+        )
+        .await;
+
         let frontend_url = &ctx.config.frontend_url;
         let display_title = title.map(|t| t.trim()).unwrap_or("(unchanged)");
 
@@ -601,12 +627,26 @@ impl AgentTool for DeleteDashboardTool {
         )
         .await
         {
-            Ok(_) => Ok(serde_json::json!({
-                "success": true,
-                "dashboard_id": dashboard_id,
-                "message": format!("Deleted dashboard '{dashboard_id}'"),
-            })
-            .to_string()),
+            Ok(_) => {
+                // Broadcast dashboard deletion to workspace members.
+                ws_helpers::send_dashboard_update(
+                    &ctx.ws_manager,
+                    &ctx.workspace_id,
+                    dashboard_id,
+                    "deleted",
+                    &ctx.user_id,
+                    &ctx.user_display_name,
+                    Some(&ctx.user_id),
+                )
+                .await;
+
+                Ok(serde_json::json!({
+                    "success": true,
+                    "dashboard_id": dashboard_id,
+                    "message": format!("Deleted dashboard '{dashboard_id}'"),
+                })
+                .to_string())
+            }
             Err(kyomi_core::Error::NotFound(msg)) => {
                 Ok(serde_json::json!({ "error": msg }).to_string())
             }

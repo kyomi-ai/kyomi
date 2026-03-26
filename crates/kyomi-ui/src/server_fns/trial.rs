@@ -623,6 +623,7 @@ pub async fn send_trial_message(
         user_message_id: None,
         assistant_message_id: None,
         conversation_history: history,
+        user_display_name: "Trial User".to_string(),
     };
 
     // Unwrap required dependencies for agent execution.
