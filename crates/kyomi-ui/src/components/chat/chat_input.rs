@@ -255,7 +255,7 @@ pub fn ChatInput(
                 <button
                     on:click=move |_| on_cancel.run(())
                     disabled=move || !can_cancel.get()
-                    class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-white rounded-lg transition-colors flex items-center gap-1.5"
+                    class="absolute right-2 top-2 bottom-2 my-auto px-3 py-2 bg-destructive hover:bg-destructive/90 disabled:bg-muted disabled:cursor-not-allowed text-destructive-foreground rounded-lg transition-colors flex items-center gap-1.5"
                     style=move || if show_stop_button.get() { "" } else { "display: none" }
                     aria-label="Stop generating"
                     title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }

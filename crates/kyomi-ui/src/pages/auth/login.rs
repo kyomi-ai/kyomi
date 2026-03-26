@@ -570,7 +570,7 @@ fn CredentialsView(
                         if loading.get() {
                             view! {
                                 <div class="flex items-center justify-center space-x-2">
-                                    <Spinner class="text-white"/>
+                                    <Spinner class="text-primary-foreground"/>
                                     <span>"Signing in..."</span>
                                 </div>
                             }.into_any()
@@ -731,7 +731,7 @@ fn TwoFactorView(
                         if loading.get() {
                             view! {
                                 <div class="flex items-center justify-center space-x-2">
-                                    <Spinner class="text-white"/>
+                                    <Spinner class="text-primary-foreground"/>
                                     <span>"Verifying..."</span>
                                 </div>
                             }.into_any()
@@ -857,7 +857,7 @@ fn SignupView(
                         if signup_loading.get() {
                             view! {
                                 <div class="flex items-center justify-center space-x-2">
-                                    <Spinner class="text-white"/>
+                                    <Spinner class="text-primary-foreground"/>
                                     <span>
                                         {if is_self_hosted_no_smtp() {
                                             "Creating account..."

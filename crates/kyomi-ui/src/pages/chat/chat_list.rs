@@ -613,7 +613,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                     on:click=move |_| set_chat_filter.set(ChatFilter::Slack)
                                     class=move || {
                                         if chat_filter.get() == ChatFilter::Slack {
-                                            "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-white"
+                                            "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground"
                                         } else {
                                             "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-accent text-foreground hover:bg-accent/80"
                                         }
@@ -935,7 +935,7 @@ fn FilterButton(
             on:click=move |_| on_click.run(())
             class=move || {
                 if active.get() {
-                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-primary text-white"
+                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-primary text-primary-foreground"
                 } else {
                     "px-3 py-1.5 text-sm rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
                 }

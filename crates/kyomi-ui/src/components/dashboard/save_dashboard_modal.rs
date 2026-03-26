@@ -376,7 +376,7 @@ fn CreateNewOption(
                 }>
                     {move || {
                         let class = if is_creating_new.get() {
-                            "w-5 h-5 text-white"
+                            "w-5 h-5 text-primary-foreground"
                         } else {
                             "w-5 h-5 text-muted-foreground"
                         };

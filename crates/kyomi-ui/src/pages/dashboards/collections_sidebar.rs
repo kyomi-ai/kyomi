@@ -413,7 +413,7 @@ fn SidebarHeader(
         // React: `flex-shrink-0 p-4 border-b border-border`
         <div class="flex-shrink-0 p-4 border-b border-border">
             <button
-                class="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-primary text-white rounded-lg hover:bg-primary/90 transition-colors"
+                class="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
                 on:click=move |_| on_new.run(())
             >
                 {icon_plus_4()}

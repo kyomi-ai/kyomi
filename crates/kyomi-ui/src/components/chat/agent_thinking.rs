@@ -401,7 +401,7 @@ pub fn AgentThinking(
             // Tab sticking out from top-left
             view! {
                 <div class="mb-3 relative" data-testid="agent-thinking">
-                    <div class="absolute -top-3 left-0 bg-primary text-white px-3 py-1 rounded-t-lg text-xs font-medium shadow">
+                    <div class="absolute -top-3 left-0 bg-primary text-primary-foreground px-3 py-1 rounded-t-lg text-xs font-medium shadow">
                         "\u{1F9E0} Thinking"
                     </div>
                     <Card class="mt-2 bg-muted border-border pt-6">

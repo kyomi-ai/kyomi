@@ -304,7 +304,7 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                                                     }
                                                 }
                                             }
-                                            class="w-full px-4 py-2 bg-primary text-white rounded-lg hover:bg-primary/90 transition-colors"
+                                            class="w-full px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
                                         >
                                             "Try Again"
                                         </button>

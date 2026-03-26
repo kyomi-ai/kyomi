@@ -645,7 +645,7 @@ fn ResultsError(
                     {on_rerun.map(|cb| {
                         view! {
                             <button
-                                class="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 disabled=move || is_rerunning.get()
                                 on:click=move |_| {
                                     if !is_rerunning.get_untracked() {
@@ -688,7 +688,7 @@ fn ResultsError(
                     {on_rerun.map(|cb| {
                         view! {
                             <button
-                                class="px-4 py-2 text-sm font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 disabled=move || is_rerunning.get()
                                 on:click=move |_| {
                                     if !is_rerunning.get_untracked() {
@@ -751,7 +751,7 @@ fn ChartYamlModal(
                     <div class="flex items-center gap-2">
                         // Copy button
                         <button
-                            class="px-3 py-1.5 text-xs font-medium bg-primary text-white rounded-md hover:bg-primary/90 transition-colors flex items-center gap-1.5"
+                            class="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors flex items-center gap-1.5"
                             on:click=on_copy
                             aria-label="Copy ChartML to clipboard"
                         >

@@ -163,7 +163,7 @@ fn FormView(
                             if loading.get() {
                                 view! {
                                     <div class="flex items-center justify-center space-x-2">
-                                        <Spinner class="text-white"/>
+                                        <Spinner class="text-primary-foreground"/>
                                         <span>"Sending..."</span>
                                     </div>
                                 }.into_any()

@@ -199,7 +199,7 @@ pub(crate) fn DashboardListEntry(
                     {move || {
                         let selected = selected_dashboard_id.get().as_deref() == Some(&*id_for_icon_text);
                         let class = if selected {
-                            "w-5 h-5 text-white"
+                            "w-5 h-5 text-primary-foreground"
                         } else {
                             "w-5 h-5 text-muted-foreground"
                         };

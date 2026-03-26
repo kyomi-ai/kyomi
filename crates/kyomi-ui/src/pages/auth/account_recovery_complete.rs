@@ -339,7 +339,7 @@ fn ready_view(
                             view! {
                                 <div class="flex items-center justify-center space-x-2">
                                     <svg
-                                        class="animate-spin h-4 w-4 text-white"
+                                        class="animate-spin h-4 w-4 text-primary-foreground"
                                         xmlns="http://www.w3.org/2000/svg"
                                         width="24"
                                         height="24"

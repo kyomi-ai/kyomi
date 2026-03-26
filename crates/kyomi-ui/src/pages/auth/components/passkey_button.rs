@@ -34,13 +34,13 @@ pub fn PasskeySignInButton(
             type="button"
             on:click=handle_click
             disabled=is_disabled
-            class="w-full py-3.5 px-4 bg-primary text-white font-semibold rounded-lg shadow hover:shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="w-full py-3.5 px-4 bg-primary text-primary-foreground font-semibold rounded-lg shadow hover:shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
         >
             {move || {
                 if loading.get() {
                     view! {
                         <div class="flex items-center justify-center space-x-2">
-                            <Spinner class="text-white" />
+                            <Spinner class="text-primary-foreground" />
                             <span>"Authenticating..."</span>
                         </div>
                     }.into_any()

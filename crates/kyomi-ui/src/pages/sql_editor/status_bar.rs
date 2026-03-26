@@ -153,7 +153,7 @@ pub fn StatusBar(
                 <button
                     on:click=move |_| on_run_query.run(())
                     disabled=move || query_running.get() || run_disabled.get()
-                    class="px-3 py-1.5 text-xs font-medium bg-primary text-white hover:bg-primary/90 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                    class="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                 >
                     {move || if query_running.get() { "Running..." } else { "Run Query" }}
                 </button>
