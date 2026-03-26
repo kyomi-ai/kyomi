@@ -183,32 +183,9 @@ pub fn SqlEditorSidebar(
         }
     });
 
-    // ── Catalog search state (with 700ms debounce) ─────────────────────
+    // ── Catalog search state (immediate — client-side filtering only) ──
     let (catalog_search_input, set_catalog_search_input) = signal(String::new());
-    let (catalog_search, _set_catalog_search) = signal(String::new());
     let (catalog_refresh_trigger, set_catalog_refresh_trigger) = signal(0u32);
-
-    // Debounce catalog search input → actual search query.
-    #[cfg(feature = "hydrate")]
-    {
-        use gloo_timers::callback::Timeout;
-        use send_wrapper::SendWrapper;
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        let set_catalog_search = _set_catalog_search;
-        let pending = Rc::new(Cell::new(None::<SendWrapper<Timeout>>));
-
-        Effect::new(move |_| {
-            let input = catalog_search_input.get();
-            let pending = pending.clone();
-            pending.set(None); // cancel previous timeout
-            let timeout = Timeout::new(700, move || {
-                set_catalog_search.set(input);
-            });
-            pending.set(Some(SendWrapper::new(timeout)));
-        });
-    }
 
     // ── History search state (with 300ms debounce) ──────────────────────
     let (history_search_input, set_history_search_input) = signal(String::new());
@@ -378,7 +355,7 @@ pub fn SqlEditorSidebar(
                             <div class="flex-1 overflow-auto">
                                 <CatalogTree
                                     datasource_slug=ds_slug
-                                    search_query=catalog_search
+                                    search_query=catalog_search_input
                                     refresh_trigger=catalog_refresh_trigger
                                     on_table_click=on_table
                                     on_column_click=on_column

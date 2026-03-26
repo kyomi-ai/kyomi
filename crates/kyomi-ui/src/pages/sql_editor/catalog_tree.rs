@@ -175,11 +175,27 @@ fn CatalogTreeView(
             // Tree nodes
             {move || {
                 let query = search_query.get().to_lowercase();
-                tree.get_value()
+                let filtered: Vec<_> = tree.get_value()
                     .into_iter()
-                    .filter_map(|node| {
-                        if query.is_empty() || node_matches_search(&node, &query) {
-                            Some(view! {
+                    .filter(|node| query.is_empty() || node_matches_search(node, &query))
+                    .collect();
+
+                if filtered.is_empty() && !query.is_empty() {
+                    // Empty search results — matches React "No tables found" state
+                    view! {
+                        <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
+                            <svg class="w-12 h-12 text-muted-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                            </svg>
+                            <p class="text-sm text-muted-foreground">"No tables found"</p>
+                            <p class="text-xs text-muted-foreground mt-1">"Try a different search term"</p>
+                        </div>
+                    }.into_any()
+                } else {
+                    filtered
+                        .into_iter()
+                        .map(|node| {
+                            view! {
                                 <CatalogNodeView
                                     node=node
                                     depth=0
@@ -189,12 +205,11 @@ fn CatalogTreeView(
                                     on_table_click=on_table_click
                                     on_column_click=on_column_click
                                 />
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect_view()
+                            }
+                        })
+                        .collect_view()
+                        .into_any()
+                }
             }}
         </div>
     }
