@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use kyomi_agent::tools::chart_palettes;
-use kyomi_auth::{dashboard_service, middleware::AuthUser, workspace_service};
+use kyomi_auth::{
+    dashboard_service, middleware::AuthUser, websocket::helpers as ws_helpers, workspace_service,
+};
 use kyomi_core::capability;
 
 use crate::state::AppState;
@@ -332,6 +334,19 @@ async fn create_dashboard(
             kyomi_core::Error::Internal("Dashboard created but not found on read-back".into())
         })?;
 
+    // Notify workspace members about the new dashboard
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    ws_helpers::send_dashboard_update(
+        &state.ws_manager,
+        workspace_id,
+        &dashboard_id,
+        "created",
+        &user.user_id,
+        changed_by_name,
+        Some(&user.user_id),
+    )
+    .await;
+
     Ok(Json(dashboard_to_response(&dashboard)))
 }
 
@@ -453,6 +468,19 @@ async fn update_dashboard(
         kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
     })?;
 
+    // Notify workspace members about the update
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    ws_helpers::send_dashboard_update(
+        &state.ws_manager,
+        workspace_id,
+        &dashboard_id,
+        "updated",
+        &user.user_id,
+        changed_by_name,
+        Some(&user.user_id),
+    )
+    .await;
+
     Ok(Json(dashboard_to_response(&dashboard)))
 }
 
@@ -469,6 +497,19 @@ async fn delete_dashboard(
 
     dashboard_service::delete_dashboard(&state.db, &dashboard_id, workspace_id, &user.user_id)
         .await?;
+
+    // Notify workspace members about the deletion
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    ws_helpers::send_dashboard_update(
+        &state.ws_manager,
+        workspace_id,
+        &dashboard_id,
+        "deleted",
+        &user.user_id,
+        changed_by_name,
+        Some(&user.user_id),
+    )
+    .await;
 
     Ok(Json(json!({
         "message": "Dashboard deleted",
@@ -672,6 +713,19 @@ async fn restore_version(
             d.content.clone(),
         );
     }
+
+    // Notify workspace members about the restore (treated as an update)
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    ws_helpers::send_dashboard_update(
+        &state.ws_manager,
+        workspace_id,
+        &dashboard_id,
+        "updated",
+        &user.user_id,
+        changed_by_name,
+        Some(&user.user_id),
+    )
+    .await;
 
     Ok(Json(json!({
         "message": format!("Restored to version {num}"),

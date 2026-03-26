@@ -732,6 +732,33 @@ pub async fn send_ownership_transfer_declined(
     manager.send_to_user(user_id, msg).await;
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard CRUD events
+// ---------------------------------------------------------------------------
+
+/// Broadcast a dashboard_update to all workspace members (except the author).
+pub async fn send_dashboard_update(
+    manager: &WebSocketManager,
+    workspace_id: &str,
+    dashboard_id: &str,
+    action: &str,
+    changed_by: &str,
+    changed_by_name: &str,
+    exclude_user_id: Option<&str>,
+) {
+    let msg = WebSocketMessage::new(MessageType::DashboardUpdate)
+        .with_data(serde_json::json!({
+            "action": action,
+            "dashboard_id": dashboard_id,
+            "changed_by": changed_by,
+            "changed_by_name": changed_by_name,
+        }));
+
+    manager
+        .broadcast_to_workspace(workspace_id, msg, exclude_user_id)
+        .await;
+}
+
 /// Send a dashboard_summary_ready notification.
 pub async fn send_dashboard_summary_ready(
     manager: &WebSocketManager,
