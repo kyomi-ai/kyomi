@@ -7,8 +7,24 @@
 //! the existing REST routes in `apps/server/src/routes/watches.rs`.
 
 use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{AlertsPage, WatchExecutionItem, WatchListItem};
+
+/// Shared config for creating or updating a watch.
+/// Used by [`create_watch`] and [`update_watch`] to keep argument count under clippy's limit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WatchConfig {
+    pub name: String,
+    pub prompt: String,
+    pub schedule: String,
+    pub mode: Option<String>,
+    pub queries: Option<String>,
+    pub slack_channel_id: Option<String>,
+    pub slack_channel_name: Option<String>,
+    pub alert_emails: Option<String>,
+    pub alert_emails_enabled: Option<bool>,
+}
 #[cfg(feature = "ssr")]
 use crate::types::AlertItem;
 
@@ -162,20 +178,22 @@ pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
 ///
 /// Mirrors `POST /watches/` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
-pub async fn create_watch(
-    name: String,
-    prompt: String,
-    schedule: String,
-    mode: Option<String>,
-    queries: Option<String>,
-    slack_channel_id: Option<String>,
-    slack_channel_name: Option<String>,
-    alert_emails: Option<String>,
-    alert_emails_enabled: Option<bool>,
-) -> Result<WatchListItem, ServerFnError> {
+pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
+
+    let WatchConfig {
+        name,
+        prompt,
+        schedule,
+        mode,
+        queries,
+        slack_channel_id,
+        slack_channel_name,
+        alert_emails,
+        alert_emails_enabled,
+    } = config;
 
     let mode = mode.unwrap_or_else(|| "alert".to_string());
 
@@ -250,19 +268,28 @@ pub async fn get_watch(watch_id: String) -> Result<WatchListItem, ServerFnError>
 #[server(prefix = "/leptos-api")]
 pub async fn update_watch(
     watch_id: String,
-    name: Option<String>,
-    prompt: Option<String>,
-    schedule: Option<String>,
-    mode: Option<String>,
-    queries: Option<String>,
-    slack_channel_id: Option<String>,
-    slack_channel_name: Option<String>,
-    alert_emails: Option<String>,
-    alert_emails_enabled: Option<bool>,
+    config: WatchConfig,
 ) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
+
+    let WatchConfig {
+        name: name_val,
+        prompt: prompt_val,
+        schedule: schedule_val,
+        mode,
+        queries,
+        slack_channel_id,
+        slack_channel_name,
+        alert_emails,
+        alert_emails_enabled,
+    } = config;
+
+    // Wrap in Option for the update path (all fields optional)
+    let name = Some(name_val);
+    let prompt = Some(prompt_val);
+    let schedule = Some(schedule_val);
 
     // Parse queries JSON string into Value
     let queries_value: Option<serde_json::Value> = queries

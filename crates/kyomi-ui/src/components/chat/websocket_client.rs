@@ -181,7 +181,7 @@ mod wasm {
 
         // -- subscribe function -----------------------------------------------
         let subscribe_state = state.clone();
-        let subscribe_fn: Box<dyn Fn(String, Box<dyn Fn(WebSocketMessage)>) -> Box<dyn FnOnce()>> =
+        let subscribe_fn: SubscribeBox =
             Box::new(move |message_type: String, callback: Box<dyn Fn(WebSocketMessage)>| {
                 let sub_id = {
                     let mut s = subscribe_state.borrow_mut();
@@ -526,9 +526,7 @@ mod ssr {
     ) -> WebSocketContext {
         let (connection_state, _) = signal(ConnectionState::Disconnected);
 
-        let subscribe_fn: Box<
-            dyn Fn(String, Box<dyn Fn(WebSocketMessage)>) -> Box<dyn FnOnce()>,
-        > = Box::new(|_msg_type, _callback| Box::new(|| {}));
+        let subscribe_fn: SubscribeBox = Box::new(|_msg_type, _callback| Box::new(|| {}));
 
         let send_fn: Box<dyn Fn(serde_json::Value) -> bool> = Box::new(|_| false);
 

@@ -315,16 +315,16 @@ pub fn ResultsContainer(
                     </div>
                 }.into_any()
             }
-            Some(tab) => render_tab_content(
+            Some(tab) => render_tab_content(TabContentProps {
                 tab,
-                paginating,
+                is_paginating: paginating,
                 ui_state,
-                handle_page_change,
-                handle_page_size_change,
+                on_page_change: handle_page_change,
+                on_page_size_change: handle_page_size_change,
                 on_run_query,
-                is_rerunning.into(),
+                is_rerunning: is_rerunning.into(),
                 set_is_rerunning,
-            ),
+            }),
         }
     };
 
@@ -475,8 +475,8 @@ pub fn ResultsContainer(
 // Tab content rendering
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Render the content area for the active tab based on its status.
-fn render_tab_content(
+/// Props for [`render_tab_content`] — groups the arguments to stay under clippy's limit.
+struct TabContentProps {
     tab: ResultTab,
     is_paginating: bool,
     ui_state: super::types::TableUIState,
@@ -485,7 +485,20 @@ fn render_tab_content(
     on_run_query: Option<Callback<String>>,
     is_rerunning: Signal<bool>,
     set_is_rerunning: WriteSignal<bool>,
-) -> AnyView {
+}
+
+/// Render the content area for the active tab based on its status.
+fn render_tab_content(props: TabContentProps) -> AnyView {
+    let TabContentProps {
+        tab,
+        is_paginating,
+        ui_state,
+        on_page_change,
+        on_page_size_change,
+        on_run_query,
+        is_rerunning,
+        set_is_rerunning,
+    } = props;
     // Needs refresh → loading state
     if tab.needs_refresh {
         return view! {

@@ -192,15 +192,17 @@ pub fn WatchModal(
         leptos::task::spawn_local(async move {
             let result = crate::server_fns::watches::update_watch(
                 watch_id,
-                Some(name_val.trim().to_string()),
-                Some(prompt_val.trim().to_string()),
-                Some(schedule_val),
-                Some(mode_val),
-                queries_json,
-                slack_channel_id_param,
-                None, // slack_channel_name — resolved server-side
-                Some(emails_val.trim().to_string()),
-                Some(emails_enabled),
+                crate::server_fns::watches::WatchConfig {
+                    name: name_val.trim().to_string(),
+                    prompt: prompt_val.trim().to_string(),
+                    schedule: schedule_val,
+                    mode: Some(mode_val),
+                    queries: queries_json,
+                    slack_channel_id: slack_channel_id_param,
+                    slack_channel_name: None, // resolved server-side
+                    alert_emails: Some(emails_val.trim().to_string()),
+                    alert_emails_enabled: Some(emails_enabled),
+                },
             )
             .await;
 

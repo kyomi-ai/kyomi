@@ -124,30 +124,34 @@ pub fn WatchPreviewCard(
                 // Update existing watch
                 crate::server_fns::watches::update_watch(
                     watch_id.clone(),
-                    Some(cfg.name.clone()),
-                    Some(cfg.prompt.clone()),
-                    Some(cfg.schedule.clone()),
-                    cfg.mode.clone(),
-                    queries_json,
-                    None, // slack_channel_id
-                    None, // slack_channel_name
-                    None, // alert_emails
-                    None, // alert_emails_enabled
+                    crate::server_fns::watches::WatchConfig {
+                        name: cfg.name.clone(),
+                        prompt: cfg.prompt.clone(),
+                        schedule: cfg.schedule.clone(),
+                        mode: cfg.mode.clone(),
+                        queries: queries_json,
+                        slack_channel_id: None,
+                        slack_channel_name: None,
+                        alert_emails: None,
+                        alert_emails_enabled: None,
+                    },
                 )
                 .await
                 .map(|_| watch_id.clone())
             } else {
                 // Create new watch
                 crate::server_fns::watches::create_watch(
-                    cfg.name.clone(),
-                    cfg.prompt.clone(),
-                    cfg.schedule.clone(),
-                    cfg.mode.clone(),
-                    queries_json,
-                    None, // slack_channel_id
-                    None, // slack_channel_name
-                    None, // alert_emails
-                    None, // alert_emails_enabled
+                    crate::server_fns::watches::WatchConfig {
+                        name: cfg.name.clone(),
+                        prompt: cfg.prompt.clone(),
+                        schedule: cfg.schedule.clone(),
+                        mode: cfg.mode.clone(),
+                        queries: queries_json,
+                        slack_channel_id: None,
+                        slack_channel_name: None,
+                        alert_emails: None,
+                        alert_emails_enabled: None,
+                    },
                 )
                 .await
                 .map(|item| item.watch_id)

@@ -960,7 +960,7 @@ fn WatchPreviewCardView(
 #[derive(Clone)]
 enum ChartState {
     Loading,
-    Success(ChartElement),
+    Success(Box<ChartElement>),
     Error(String),
 }
 
@@ -1068,7 +1068,7 @@ fn ChartBlock(
 
             match result {
                 Ok(element) => {
-                    set_chart_state.set(ChartState::Success(element));
+                    set_chart_state.set(ChartState::Success(Box::new(element)));
                     let now = chrono::Utc::now().format("%H:%M:%S").to_string();
                     set_last_refreshed.set(Some(now));
                 }
