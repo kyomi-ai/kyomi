@@ -90,7 +90,7 @@ pub fn UsagePage() -> impl IntoView {
     view! {
         <div class="p-6">
             <h2 class="text-xl font-semibold text-foreground mb-6">"Usage"</h2>
-            <Suspense fallback=move || view! { <UsageLoadingSkeleton/> }>
+            <Transition fallback=move || view! { <UsageLoadingSkeleton/> }>
                 {move || Suspend::new(async move {
                     match usage_resource.await {
                         Ok(data) => view! { <UsageContent data=data/> }.into_any(),
@@ -116,7 +116,7 @@ pub fn UsagePage() -> impl IntoView {
                         }
                     }
                 })}
-            </Suspense>
+            </Transition>
         </div>
     }
 }

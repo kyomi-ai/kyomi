@@ -36,6 +36,23 @@ pub fn Layout(children: Children) -> impl IntoView {
     // Fetch sidebar user info — used for both the sidebar UI and WebSocket auth signals.
     // This avoids an extra server function call just for WebSocket config.
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
+
+    // If sidebar user fetch fails with an auth error (expired access_token),
+    // try refreshing the token and reload the page. This catches the case where
+    // a user has a valid refresh_token but an expired/missing access_token.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::utils::auth_refresh;
+        let user_info_for_effect = user_info;
+        Effect::new(move || {
+            if let Some(Err(e)) = user_info_for_effect.get() {
+                if auth_refresh::is_auth_error(&e.to_string()) {
+                    auth_refresh::refresh_and_reload();
+                }
+            }
+        });
+    }
+
     let ws_user_id = Memo::new(move |_| {
         user_info
             .get()
@@ -314,7 +331,7 @@ fn Sidebar(
                         <div class="text-xs text-muted-foreground font-medium">"Recent Chats"</div>
                     </div>
                     <div class="space-y-1 overflow-y-auto">
-                        <Suspense fallback=|| view! {
+                        <Transition fallback=|| view! {
                             <div class="text-xs text-muted-foreground px-3 py-2 italic">"Loading..."</div>
                         }>
                             {move || sessions.get().map(|result| match result {
@@ -339,7 +356,7 @@ fn Sidebar(
                                     <div class="text-xs text-muted-foreground px-3 py-2 italic">"No chats yet"</div>
                                 }.into_any(),
                             })}
-                        </Suspense>
+                        </Transition>
                     </div>
                 </div>
             </div>
@@ -347,7 +364,7 @@ fn Sidebar(
             // ── User Account Section ───────────────────────────────────────
             // React: "border-t border-border px-3 py-4 relative"
             <div class="border-t border-border px-3 py-4 relative">
-                <Suspense fallback=|| ()>
+                <Transition fallback=|| ()>
                     {move || user_info.get().map(|result| {
                         let user = match result {
                             Ok(u) => u,
@@ -455,7 +472,7 @@ fn Sidebar(
                             </div>
                         }.into_any()
                     })}
-                </Suspense>
+                </Transition>
             </div>
         </div>
     }

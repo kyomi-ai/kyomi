@@ -131,7 +131,7 @@ pub fn SettingsShell() -> impl IntoView {
             <div class="w-full bg-card rounded-xl shadow-sm border border-border mb-6 overflow-hidden">
                 <div class="border-b border-border overflow-x-auto scrollbar-thin scrollbar-thumb-muted-foreground/30 scrollbar-track-transparent">
                     <div class="flex space-x-4 md:space-x-8 px-4 md:px-6 min-w-max">
-                        <Suspense fallback=move || {
+                        <Transition fallback=move || {
                             // While user_ctx loads, show always-visible tabs.
                             TABS.iter()
                                 .filter(|tab| matches!(tab.id, "profile" | "security" | "workspace" | "datasources"))
@@ -181,7 +181,7 @@ pub fn SettingsShell() -> impl IntoView {
                                     })
                                     .collect_view()
                             })}
-                        </Suspense>
+                        </Transition>
                     </div>
                 </div>
             </div>

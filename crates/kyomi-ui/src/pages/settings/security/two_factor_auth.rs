@@ -159,7 +159,7 @@ pub fn TwoFactorAuth() -> impl IntoView {
     };
 
     view! {
-        <Suspense fallback=|| view! { <Skeleton class="h-24 w-full" /> }>
+        <Transition fallback=|| view! { <Skeleton class="h-24 w-full" /> }>
             // Error alert
             {move || error.get().map(|msg| view! {
                 <Alert variant=AlertVariant::Error>
@@ -345,6 +345,6 @@ pub fn TwoFactorAuth() -> impl IntoView {
                 })}
             </Show>
 
-        </Suspense>
+        </Transition>
     }
 }

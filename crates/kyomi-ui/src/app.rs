@@ -5,11 +5,11 @@
 use leptos::prelude::*;
 use leptos_meta::provide_meta_context;
 use leptos_router::{
-    components::{ParentRoute, Redirect, Route, Router, Routes},
+    components::{Outlet, ParentRoute, Redirect, Route, Router, Routes},
     path,
 };
 
-use crate::components::{Layout, ThemeProvider};
+use crate::components::{Layout, NavigationProgress, ThemeProvider};
 use crate::pages::accept_ownership::AcceptOwnershipPage;
 use crate::pages::auth::account_recovery::AccountRecoveryPage;
 use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
@@ -71,9 +71,12 @@ pub fn Shell(#[prop(optional)] children: Option<Children>) -> impl IntoView {
 pub fn App() -> impl IntoView {
     provide_meta_context();
 
+    let (is_routing, set_is_routing) = signal(false);
+
     view! {
         <ThemeProvider initial_preference="system">
-            <Router>
+            <NavigationProgress is_routing />
+            <Router set_is_routing>
                 <Routes fallback=|| view! { <p>"Page not found"</p> }>
                     // Auth pages — NO sidebar/layout wrapper
                     <Route path=path!("/login") view=LoginPage/>
@@ -107,9 +110,13 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/dashboard/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
                     // Main app pages — wrapped in Layout
                     <Route path=path!("/") view=|| view! { <Layout><HomePage/></Layout> }/>
-                    // Chat pages — ChatPage handles both new (/chat) and existing (/chat/:session_id)
-                    <Route path=path!("/chat") view=|| view! { <Layout><ChatPage/></Layout> }/>
-                    <Route path=path!("/chat/:session_id") view=|| view! { <Layout><ChatPage/></Layout> }/>
+                    // Chat pages — ParentRoute keeps ChatPage mounted when navigating
+                    // from /chat (new chat) to /chat/:session_id (after session creation),
+                    // so streaming state is not lost on the URL transition.
+                    <ParentRoute path=path!("/chat") view=|| view! { <Layout><ChatPage/></Layout> }>
+                        <Route path=path!("") view=|| view! { <Outlet/> }/>
+                        <Route path=path!("/:session_id") view=|| view! { <Outlet/> }/>
+                    </ParentRoute>
                     <Route path=path!("/chats") view=|| view! { <Layout><ChatsListPage/></Layout> }/>
                     <Route path=path!("/sql-editor") view=|| view! { <Layout><crate::pages::sql_editor::SqlEditorPage/></Layout> }/>
                     <Route path=path!("/knowledge") view=|| view! { <Layout><KnowledgePage/></Layout> }/>

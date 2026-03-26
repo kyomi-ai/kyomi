@@ -80,7 +80,7 @@ pub fn AnalyticsPage() -> impl IntoView {
                     }
                 }
                 view! {
-                    <Suspense fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
+                    <Transition fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
                         {move || Suspend::new(async move {
                             match sites_resource.await {
                                 Ok(sites) => {
@@ -107,7 +107,7 @@ pub fn AnalyticsPage() -> impl IntoView {
                                 }
                             }
                         })}
-                    </Suspense>
+                    </Transition>
                 }.into_any()
             }}
         </div>

@@ -268,7 +268,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
     };
 
     view! {
-        <Suspense fallback=move || view! {
+        <Transition fallback=move || view! {
             <div class="min-h-screen flex items-center justify-center bg-background p-4">
                 <Card class="max-w-lg w-full p-8">
                     <div class="flex items-center justify-center py-12">
@@ -372,7 +372,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
                     </div>
                 }.into_any()
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

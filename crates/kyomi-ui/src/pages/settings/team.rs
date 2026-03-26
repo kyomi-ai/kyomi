@@ -29,7 +29,7 @@ pub fn TeamPage() -> impl IntoView {
     let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
 
     view! {
-        <Suspense>
+        <Transition>
             {move || Suspend::new(async move {
                 match user_ctx.await {
                     Ok(ctx) => {
@@ -56,7 +56,7 @@ pub fn TeamPage() -> impl IntoView {
                     Err(_) => view! { <TeamPageInner /> }.into_any(),
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 
@@ -394,7 +394,7 @@ fn TeamPageInner() -> impl IntoView {
                 <h3 class="text-base sm:text-lg font-semibold text-foreground mb-4">
                     "Pending Invitations"
                 </h3>
-                <Suspense fallback=move || view! {
+                <Transition fallback=move || view! {
                     <div class="text-center py-8">
                         <span class="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent inline-block"></span>
                         <p class="text-muted-foreground mt-2">"Loading invitations..."</p>
@@ -428,11 +428,11 @@ fn TeamPageInner() -> impl IntoView {
                             },
                         })
                     }}
-                </Suspense>
+                </Transition>
             </div>
 
             // Pending Ownership Transfers
-            <Suspense fallback=|| ()>
+            <Transition fallback=|| ()>
                 {move || {
                     let current_user_id = user_ctx.get()
                         .and_then(|r| r.ok())
@@ -466,14 +466,14 @@ fn TeamPageInner() -> impl IntoView {
                         _ => view! { <span></span> }.into_any(),
                     })
                 }}
-            </Suspense>
+            </Transition>
 
             // Workspace Members
             <div class="mb-6">
                 <h3 class="text-base sm:text-lg font-semibold text-foreground mb-4">
                     "Workspace Members"
                 </h3>
-                <Suspense fallback=move || view! {
+                <Transition fallback=move || view! {
                     <div class="text-center py-8">
                         <span class="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent inline-block"></span>
                         <p class="text-muted-foreground mt-2">"Loading members..."</p>
@@ -521,7 +521,7 @@ fn TeamPageInner() -> impl IntoView {
                             },
                         })
                     }}
-                </Suspense>
+                </Transition>
             </div>
 
             // Invite Member Modal

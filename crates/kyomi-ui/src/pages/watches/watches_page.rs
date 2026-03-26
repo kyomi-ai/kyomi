@@ -812,7 +812,7 @@ pub fn WatchesPage() -> impl IntoView {
                         if active_view.get() == "watches" {
                             // Watches list view
                             view! {
-                                <Suspense fallback=move || view! {
+                                <Transition fallback=move || view! {
                                     <div class="flex items-center justify-center py-12">
                                         <Spinner />
                                     </div>
@@ -881,7 +881,7 @@ pub fn WatchesPage() -> impl IntoView {
                                             }
                                         })
                                     }}
-                                </Suspense>
+                                </Transition>
                             }.into_any()
                         } else {
                             // Alerts history view

@@ -51,7 +51,7 @@ pub fn DatasourcesPage() -> impl IntoView {
     let datasources_resource = Resource::new(|| (), |_| list_datasources());
 
     view! {
-        <Suspense fallback=move || view! { <DatasourcesLoadingSkeleton/> }>
+        <Transition fallback=move || view! { <DatasourcesLoadingSkeleton/> }>
             {move || Suspend::new(async move {
                 match datasources_resource.await {
                     Ok(datasources) => {
@@ -81,7 +81,7 @@ pub fn DatasourcesPage() -> impl IntoView {
                     }.into_any(),
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

@@ -29,7 +29,7 @@ pub fn PersonalSetupPage() -> impl IntoView {
     let has_datasources = Resource::new(|| (), |_| check_has_datasources());
 
     view! {
-        <Suspense fallback=move || view! { <LoadingState/> }>
+        <Transition fallback=move || view! { <LoadingState/> }>
             {move || {
                 has_datasources.get().map(|result| {
                     let has_ds = result.unwrap_or(false);
@@ -40,7 +40,7 @@ pub fn PersonalSetupPage() -> impl IntoView {
                     }
                 })
             }}
-        </Suspense>
+        </Transition>
     }
 }
 

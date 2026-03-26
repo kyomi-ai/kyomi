@@ -421,7 +421,7 @@ pub fn BillingPage() -> impl IntoView {
                     })}
 
                     // Main content
-                    <Suspense fallback=move || view! {
+                    <Transition fallback=move || view! {
                         <div class="flex items-center justify-center p-8">
                             <Skeleton class="h-8 w-8 rounded-full"/>
                         </div>
@@ -460,7 +460,7 @@ pub fn BillingPage() -> impl IntoView {
                                 }
                             }
                         })}
-                    </Suspense>
+                    </Transition>
 
                     // Confirm Dialog
                     <ConfirmDialog
@@ -1160,7 +1160,7 @@ fn InvoicesSection(
     current_tier: String,
 ) -> impl IntoView {
     view! {
-        <Suspense fallback=|| ()>
+        <Transition fallback=|| ()>
             {move || {
                 let current_tier = current_tier.clone();
                 Suspend::new(async move {
@@ -1266,6 +1266,6 @@ fn InvoicesSection(
                     Err(_) => view! { <div/> }.into_any(),
                 }
             })}}
-        </Suspense>
+        </Transition>
     }
 }

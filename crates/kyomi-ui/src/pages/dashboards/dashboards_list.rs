@@ -408,7 +408,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 // Main Content — Dashboards Grid
                 <div class="flex-1 overflow-y-auto">
                     <div class="p-4 md:p-6">
-                        <Suspense fallback=move || view! {
+                        <Transition fallback=move || view! {
                             <div class="flex items-center justify-center py-16">
                                 <Spinner class="h-8 w-8 text-muted-foreground" />
                             </div>
@@ -461,7 +461,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                                     }
                                 })
                             }}
-                        </Suspense>
+                        </Transition>
                     </div>
                 </div>
 

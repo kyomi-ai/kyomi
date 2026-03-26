@@ -28,7 +28,7 @@ pub fn SlackConnectionCard() -> impl IntoView {
     let slack_status = Resource::new(|| (), |_| get_slack_status());
 
     view! {
-        <Suspense fallback=|| ()>
+        <Transition fallback=|| ()>
             {move || {
                 slack_status.get().map(|result| match result {
                     Ok(status) => view! { <SlackConnectionInner status=status/> }.into_any(),
@@ -36,7 +36,7 @@ pub fn SlackConnectionCard() -> impl IntoView {
                     Err(_) => view! { <span class="hidden"></span> }.into_any(),
                 })
             }}
-        </Suspense>
+        </Transition>
     }
 }
 
@@ -227,7 +227,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                 </span>
                                             </Label>
 
-                                            <Suspense fallback=move || view! {
+                                            <Transition fallback=move || view! {
                                                 <div class="flex items-center gap-2 text-sm text-muted-foreground">
                                                     <span class="animate-spin h-4 w-4 border-2 border-current border-t-transparent rounded-full"/>
                                                     <span>"Loading channels..."</span>
@@ -292,7 +292,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                         }.into_any()
                                                     }
                                                 }}
-                                            </Suspense>
+                                            </Transition>
                                         </div>
 
                                         // Disconnect button

@@ -666,7 +666,7 @@ pub fn ChatsListPage() -> impl IntoView {
 
             // Chats List
             <div class="flex-1 overflow-y-auto p-4 md:p-6">
-                <Suspense fallback=move || view! {
+                <Transition fallback=move || view! {
                     <div class="flex items-center justify-center py-12">
                         <div class="text-muted-foreground">"Loading chats..."</div>
                     </div>
@@ -882,7 +882,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             </div>
                         }.into_any()
                     }}
-                </Suspense>
+                </Transition>
             </div>
 
             // Confirm Dialog — wrapped in a reactive closure so the title and

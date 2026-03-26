@@ -182,7 +182,7 @@ pub fn PasswordManager() -> impl IntoView {
     };
 
     view! {
-        <Suspense fallback=|| view! { <Skeleton class="h-24 w-full" /> }>
+        <Transition fallback=|| view! { <Skeleton class="h-24 w-full" /> }>
             <Show
                 when=move || editing.get()
                 fallback=move || {
@@ -341,6 +341,6 @@ pub fn PasswordManager() -> impl IntoView {
                     </CardContent>
                 </Card>
             </Show>
-        </Suspense>
+        </Transition>
     }
 }

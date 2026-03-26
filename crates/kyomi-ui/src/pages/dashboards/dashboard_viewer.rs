@@ -250,7 +250,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
     }
 
     view! {
-        <Suspense fallback=move || view! {
+        <Transition fallback=move || view! {
             <div class="flex h-full items-center justify-center bg-muted">
                 <Spinner class="h-8 w-8 text-muted-foreground" />
             </div>
@@ -1063,6 +1063,6 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     }
                 })
             }}
-        </Suspense>
+        </Transition>
     }
 }

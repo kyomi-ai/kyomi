@@ -149,7 +149,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
             } else {
                 // Existing dashboard: fetch then render
                 view! {
-                    <Suspense fallback=move || {
+                    <Transition fallback=move || {
                         view! {
                             <div class="flex h-full items-center justify-center bg-muted">
                                 <Spinner class="h-8 w-8 text-muted-foreground" />
@@ -191,7 +191,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
                                     }
                                 })
                         }}
-                    </Suspense>
+                    </Transition>
                 }
                 .into_any()
             }
@@ -850,10 +850,13 @@ fn DashboardCodeEditor(
     {
         use kode_leptos::{CodeEditor, Language};
 
+        let editor_theme = crate::pages::sql_editor::code_editor::use_editor_theme();
+
         view! {
             <CodeEditor
                 language=Signal::stored(Language::Markdown)
                 content=content
+                theme=editor_theme
                 on_change=on_change
             />
         }

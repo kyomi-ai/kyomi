@@ -77,7 +77,7 @@ pub fn CatalogTree(
     };
 
     view! {
-        <Suspense fallback=move || view! {
+        <Transition fallback=move || view! {
             <div class="flex items-center justify-center py-8">
                 <crate::components::Spinner />
             </div>
@@ -141,7 +141,7 @@ pub fn CatalogTree(
                     }
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

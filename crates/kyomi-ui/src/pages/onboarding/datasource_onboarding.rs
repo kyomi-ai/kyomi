@@ -34,7 +34,7 @@ pub fn DatasourceOnboardingPage() -> impl IntoView {
     let state_resource = Resource::new(|| (), |_| get_onboarding_state());
 
     view! {
-        <Suspense fallback=move || view! { <LoadingState/> }>
+        <Transition fallback=move || view! { <LoadingState/> }>
             {move || Suspend::new(async move {
                 match state_resource.await {
                     Ok(state) => {
@@ -58,7 +58,7 @@ pub fn DatasourceOnboardingPage() -> impl IntoView {
                     }.into_any()
                 }
             })}
-        </Suspense>
+        </Transition>
     }
 }
 

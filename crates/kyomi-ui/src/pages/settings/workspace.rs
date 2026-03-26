@@ -29,7 +29,7 @@ pub fn WorkspacePage() -> impl IntoView {
                 "Configure workspace-wide preferences (admin only)."
             </p>
 
-            <Suspense fallback=move || view! {
+            <Transition fallback=move || view! {
                 <Card>
                     <CardContent>
                         <p class="text-sm text-muted-foreground text-center py-8">
@@ -61,7 +61,7 @@ pub fn WorkspacePage() -> impl IntoView {
                         },
                     })
                 }}
-            </Suspense>
+            </Transition>
         </div>
     }
 }
@@ -312,7 +312,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                     </Alert>
                 })}
 
-                <Suspense fallback=move || view! {
+                <Transition fallback=move || view! {
                     <div class="flex items-center gap-2 text-muted-foreground">
                         <span class="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"></span>
                         <span>"Loading Slack status..."</span>
@@ -401,7 +401,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                             },
                         })
                     }}
-                </Suspense>
+                </Transition>
             </CardContent>
         </Card>
     }

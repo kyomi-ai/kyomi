@@ -16,40 +16,6 @@ use crate::pages::settings::push_notifications::PushNotificationsCard;
 use crate::server_fns::profile::*;
 use crate::types::{DashboardSummary, ProfileData};
 
-/// Refresh the auth session by calling the REST refresh endpoint.
-/// This runs as a JS fetch (non-Send) so it can't go inside a Resource.
-/// Call from an Effect or event handler, then trigger resource refetch.
-#[cfg(target_arch = "wasm32")]
-fn refresh_session_and_retry(profile: Resource<Result<ProfileData, ServerFnError>>) {
-    use wasm_bindgen::prelude::*;
-
-    // Use spawn_local since JS futures aren't Send
-    leptos::task::spawn_local(async move {
-        let promise = js_sys::Function::new_no_args(
-            "return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'include' }).then(r => r.ok)"
-        ).call0(&JsValue::NULL);
-
-        let refreshed = match promise {
-            Ok(val) => {
-                if let Ok(promise) = val.dyn_into::<js_sys::Promise>() {
-                    wasm_bindgen_futures::JsFuture::from(promise)
-                        .await
-                        .ok()
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
-        };
-
-        if refreshed {
-            profile.refetch();
-        }
-    });
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Palette data — matches apps/frontend/src/config/chartPalettes.js
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,21 +60,7 @@ const PALETTES: &[PaletteInfo] = &[
 #[component]
 pub fn ProfilePage() -> impl IntoView {
     let profile = Resource::new(|| (), |_| get_profile());
-
-    // If the profile load fails with an auth error, try refreshing the session
-    // and refetch. This handles the case where cookies have expired.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let profile_for_effect = profile;
-        Effect::new(move || {
-            if let Some(Err(e)) = profile_for_effect.get() {
-                let msg = e.to_string();
-                if msg.contains("Authentication required") || msg.contains("Unauthorized") {
-                    refresh_session_and_retry(profile_for_effect);
-                }
-            }
-        });
-    }
+    // Auth error handling (expired access_token) is done globally in Layout.
     let dashboards = Resource::new(|| (), |_| get_dashboards());
     let invitations = Resource::new(|| (), |_| get_pending_invitations());
 
@@ -116,7 +68,7 @@ pub fn ProfilePage() -> impl IntoView {
         <div class="p-6">
             <h2 class="text-xl font-semibold text-foreground mb-6">"Profile Settings"</h2>
 
-            <Suspense fallback=move || view! {
+            <Transition fallback=move || view! {
                 <div class="flex items-center justify-center py-12">
                     <p class="text-muted-foreground">"Loading settings..."</p>
                 </div>
@@ -186,7 +138,7 @@ pub fn ProfilePage() -> impl IntoView {
                         },
                     })
                 }}
-            </Suspense>
+            </Transition>
         </div>
     }
 }
