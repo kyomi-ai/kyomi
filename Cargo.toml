@@ -47,8 +47,13 @@ base64 = "0.22"
 # Redis
 redis = { version = "0.29", features = ["tokio-rustls-comp", "connection-manager"] }
 
-# Embeddings
-fastembed = { version = "4", default-features = false, features = ["ort-download-binaries"] }
+# Embeddings (pure Rust via Candle)
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+safetensors = "0.7"
+memmap2 = "0.9"
 
 # HTTP client (for external APIs: Anthropic, Stripe, Slack, etc.)
 # Uses native-roots so reqwest trusts both public CAs and our internal CA

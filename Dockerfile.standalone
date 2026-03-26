@@ -7,11 +7,11 @@
 # Run:
 #   docker run -v kyomi-data:/data -p 3000:3000 kyomi
 #
-# Everything is embedded in the binary: frontend assets, ONNX model, constants.
+# Everything is embedded in the binary: frontend assets, ML model, constants.
 # No external dependencies needed — just set your LLM API key:
 #   docker run -v kyomi-data:/data -p 3000:3000 -e ANTHROPIC_API_KEY=sk-... kyomi
 #
-# Uses debian:bookworm-slim as runtime (ONNX Runtime needs libstdc++).
+# Uses debian:bookworm-slim as runtime (ring crypto needs libstdc++).
 # ---------------------------------------------------------------------------
 
 # ===== Stage 0: Build Rust binary =====
@@ -33,8 +33,8 @@ COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 
-# Build the binary. The ONNX model is downloaded by build.rs and embedded
-# via include_bytes!() — no runtime model files needed.
+# Build the binary. The BGE-small-en-v1.5 model is downloaded by build.rs
+# and embedded via include_bytes!() — no runtime model files needed.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
@@ -44,7 +44,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ===== Stage 1: Minimal Debian runtime =====
 FROM debian:bookworm-slim
 
-# Install only what ONNX Runtime and TLS need
+# Install runtime dependencies (ring crypto needs libstdc++)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ca-certificates \

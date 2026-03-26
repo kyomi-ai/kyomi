@@ -11,7 +11,7 @@
 #
 # Runtime: scratch with only the binary, runtime data, CA certs, and the
 # minimal set of shared libraries detected by ldd (glibc, libstdc++, libssl
-# — ONNX Runtime needs libstdc++, webauthn-rs needs libssl/libcrypto).
+# — ring crypto needs libstdc++, webauthn-rs needs libssl/libcrypto).
 # All outbound TLS uses rustls; openssl is only used locally by webauthn-rs
 # for X.509 cert parsing.
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/kyomi /tmp/kyomi
 
 # Collect the minimal shared libraries the binary needs at runtime.
-# ONNX Runtime (via fastembed) requires libstdc++ and glibc.
+# ring crypto requires libstdc++ and glibc.
 # Also include glibc NSS modules — getaddrinfo() loads these via dlopen()
 # at runtime, so ldd doesn't list them, but they're needed for DNS resolution.
 RUN mkdir -p /tmp/runtime-libs && \
@@ -55,7 +55,7 @@ RUN mkdir -p /tmp/runtime-libs && \
     cp /lib/x86_64-linux-gnu/libnss_files.so.2 /tmp/runtime-libs/ && \
     cp /lib/x86_64-linux-gnu/libresolv.so.2 /tmp/runtime-libs/
 
-# Create writable /tmp for ONNX Runtime temp files.
+# Create writable /tmp for runtime temp files.
 RUN mkdir -p /tmp/scratch-tmp && touch /tmp/scratch-tmp/.keep
 
 # ===== Stage 1: Scratch runtime =====
@@ -78,11 +78,11 @@ COPY --from=builder /tmp/kyomi /app/kyomi
 COPY data/constants.toml /app/data/constants.toml
 COPY data/chartml-spec/ /app/data/chartml-spec/
 
-# Writable /tmp for ONNX Runtime temp files
+# Writable /tmp
 COPY --from=builder --chown=1000:1000 /tmp/scratch-tmp /tmp
 
 # Tell the binary where to find runtime data and CA certs
-# Note: ONNX model is now embedded via include_bytes!() — no runtime cache needed
+# Note: ML model is embedded via include_bytes!() — no runtime model files needed
 ENV SHARED_CONSTANTS_PATH=/app/data/constants.toml \
     CHARTML_SPEC_DIR=/app/data/chartml-spec \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \

@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Build script for kyomi-embed: downloads BGE-small-en-v1.5 ONNX model files
+//! Build script for kyomi-embed: downloads BGE-small-en-v1.5 model files
 //! from HuggingFace at compile time so they can be embedded via `include_bytes!()`.
+//!
+//! Uses safetensors weights (for Candle pure-Rust inference) + tokenizer files.
 
 use std::path::Path;
 use std::process::Command;
 
-const BASE_URL: &str = "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main";
+const BASE_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main";
 
 /// Files to download: (remote_path, local_filename)
 const MODEL_FILES: &[(&str, &str)] = &[
-    ("onnx/model.onnx", "model.onnx"),
+    ("model.safetensors", "model.safetensors"),
     ("tokenizer.json", "tokenizer.json"),
     ("config.json", "config.json"),
     ("special_tokens_map.json", "special_tokens_map.json"),

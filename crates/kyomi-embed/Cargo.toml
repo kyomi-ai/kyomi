@@ -6,6 +6,13 @@ license.workspace = true
 
 [dependencies]
 kyomi-core = { workspace = true }
-fastembed = { workspace = true }
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+candle-transformers = { workspace = true }
+tokenizers = { workspace = true }
+safetensors = { workspace = true }
+memmap2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

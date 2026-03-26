@@ -368,7 +368,7 @@ async fn start_server(
         None
     };
 
-    let router = kyomi_server::build_router(state);
+    let router = kyomi_server::build_router(state, kyomi_server::ServerExtras::default());
     let app = kyomi_server::wrap_service(router);
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 
