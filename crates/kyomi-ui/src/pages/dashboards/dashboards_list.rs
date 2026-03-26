@@ -250,6 +250,43 @@ pub fn DashboardsListPage() -> impl IntoView {
             .unwrap_or_default()
     };
 
+    // ── WebSocket subscription: dashboard_update ─────────────────────────
+    // When any dashboard is created or deleted (by another user or agent),
+    // refetch the list so the UI stays in sync in real-time.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::components::chat::websocket_client::WebSocketContext;
+        let ws_ctx = use_context::<WebSocketContext>();
+
+        let ws_ctx_for_effect = ws_ctx.clone();
+        Effect::new(move |_| {
+            let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
+                return;
+            };
+
+            let unsub = ws.subscribe("dashboard_update", move |msg| {
+                let action = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("action"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                match action {
+                    "created" | "deleted" => {
+                        dashboards_resource.refetch();
+                    }
+                    _ => {}
+                }
+            });
+
+            let unsub = send_wrapper::SendWrapper::new(unsub);
+            on_cleanup(move || {
+                unsub.take()();
+            });
+        });
+    }
+
     view! {
         <div class="flex flex-col h-full bg-muted">
             // Header

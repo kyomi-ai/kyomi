@@ -194,6 +194,61 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let (setting_user_default, set_setting_user_default) = signal(false);
     let (setting_ws_default, set_setting_ws_default) = signal(false);
 
+    // ── WebSocket subscription: dashboard_update ─────────────────────────
+    // When another user or agent updates/deletes the currently viewed
+    // dashboard, react in real-time: refetch on "updated", navigate away
+    // on "deleted".
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::components::chat::websocket_client::WebSocketContext;
+        let ws_ctx = use_context::<WebSocketContext>();
+        let navigate_ws = leptos_router::hooks::use_navigate();
+
+        let ws_ctx_for_effect = ws_ctx.clone();
+        Effect::new(move |_| {
+            let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
+                return;
+            };
+            let navigate = navigate_ws.clone();
+
+            let unsub = ws.subscribe("dashboard_update", move |msg| {
+                let data = match &msg.data {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                let event_dashboard_id =
+                    match data.get("dashboard_id").and_then(|v| v.as_str()) {
+                        Some(id) => id,
+                        None => return,
+                    };
+
+                // Only process events for the currently viewed dashboard
+                let current_id = dashboard_id.get_untracked();
+                if event_dashboard_id != current_id {
+                    return;
+                }
+
+                let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+                match action {
+                    "updated" => {
+                        dashboard_resource.refetch();
+                    }
+                    "deleted" => {
+                        navigate("/dashboards", leptos_router::NavigateOptions::default());
+                    }
+                    _ => {}
+                }
+            });
+
+            let unsub = send_wrapper::SendWrapper::new(unsub);
+            on_cleanup(move || {
+                unsub.take()();
+            });
+        });
+    }
+
     view! {
         <Suspense fallback=move || view! {
             <div class="flex h-full items-center justify-center bg-muted">
