@@ -578,7 +578,7 @@ fn BillingContent(
                 <CardContent>
                     <div class="space-y-4">
                         // Subscription Status Info
-                        {(tier_for_status != "free").then(|| {
+                        {(tier_for_status != "free" && period_end.is_some()).then(|| {
                             let period_end_for_active = period_end.clone();
                             let period_end_for_cancelled = period_end.clone();
                             let billing_cycle_cl = billing_cycle.clone();

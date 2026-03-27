@@ -888,10 +888,10 @@ fn DashboardWysiwygEditor(
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
-        use kode_leptos::WysiwygEditor;
+        use kode_leptos::TreeWysiwygEditor;
 
         view! {
-            <WysiwygEditor
+            <TreeWysiwygEditor
                 content=content
                 on_change=on_change
             />
