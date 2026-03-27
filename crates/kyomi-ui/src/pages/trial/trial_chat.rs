@@ -32,10 +32,10 @@ use crate::server_fns::trial::{
 /// Suggested questions shown in the welcome state.
 /// Matches the React `SUGGESTED_QUESTIONS` array.
 const SUGGESTED_QUESTIONS: &[&str] = &[
-    "What's our current MRR?",
-    "Show me user signups over time",
-    "Which subscription plans are most popular?",
-    "What's our conversion funnel look like?",
+    "What was our MRR trend last quarter?",
+    "Show me the top 10 customers by revenue",
+    "What's our churn rate by plan type?",
+    "Which landing pages have the best conversion?",
 ];
 
 /// Maximum number of conversation history entries sent to the server.

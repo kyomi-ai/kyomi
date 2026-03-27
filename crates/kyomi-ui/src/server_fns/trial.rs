@@ -16,6 +16,7 @@
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
+use server_fn::codec::Json;
 
 // ---------------------------------------------------------------------------
 // Shared types (cross server/client boundary)
@@ -473,7 +474,7 @@ pub async fn create_trial_session() -> Result<TrialSessionResponse, ServerFnErro
 ///
 /// The agent runs with a `trial_chat` context type which restricts available
 /// tools and uses the sample ClickHouse datasource.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", input = Json)]
 pub async fn send_trial_message(
     message: String,
     conversation_history: Vec<ConversationEntry>,
