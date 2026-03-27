@@ -57,9 +57,44 @@ WORKSPACE_NAME = "E2E Test Workspace"
 def make_user_id():
     return "usr_" + uuid.uuid4().hex[:20]
 
+def make_message_id():
+    return "msg_" + uuid.uuid4().hex[:20]
+
+def make_session_id():
+    return "ses_" + uuid.uuid4().hex[:20]
+
 def hash_password(pw: str) -> str:
     ph = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
     return ph.hash(pw)
+
+# ChartML content for seed message — inline data, no datasource required.
+CHART_SESSION_TITLE = "E2E Chart Info Test Session"
+CHART_MESSAGE_CONTENT = """\
+Here is a chart showing monthly revenue:
+
+```chartml
+type: chart
+version: 1
+title: "Monthly Revenue"
+
+data:
+  provider: inline
+  rows:
+    - month: "Jan"
+      revenue: 125000
+    - month: "Feb"
+      revenue: 138000
+    - month: "Mar"
+      revenue: 152000
+
+visualize:
+  type: bar
+  columns: month
+  rows: revenue
+```
+
+The data shows steady growth over the first quarter.
+"""
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
@@ -142,6 +177,47 @@ def seed():
                     active = true
         """, (WORKSPACE_ID, uid, user["role"], now))
         print(f"  ✓ Added {user['email']} to workspace as {user['role']}")
+
+    # Seed chart info test session (chat-adv-08)
+    # Creates a session with a ChartML assistant message so the chart info
+    # button is visible without needing a live LLM response.
+    e2e_user_id = user_ids["e2e-test@kyomi.dev"]
+    cur.execute(
+        "SELECT session_id FROM chat_sessions WHERE title = %s AND workspace_id = %s",
+        (CHART_SESSION_TITLE, WORKSPACE_ID)
+    )
+    chart_session_row = cur.fetchone()
+    if chart_session_row:
+        chart_session_id = chart_session_row[0]
+        print(f"  ✓ Chart session already exists: {CHART_SESSION_TITLE} ({chart_session_id})")
+    else:
+        chart_session_id = make_session_id()
+        cur.execute("""
+            INSERT INTO chat_sessions (
+                session_id, user_id, workspace_id, title,
+                session_type, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, 'chat', %s, %s)
+        """, (chart_session_id, e2e_user_id, WORKSPACE_ID, CHART_SESSION_TITLE, now, now))
+        print(f"  ✓ Created chart session: {CHART_SESSION_TITLE} ({chart_session_id})")
+
+        # Seed user message
+        user_msg_id = make_message_id()
+        cur.execute("""
+            INSERT INTO chat_messages (
+                message_id, session_id, role, content,
+                pinned, created_at
+            ) VALUES (%s, %s, 'user', %s, false, %s)
+        """, (user_msg_id, chart_session_id, "Show me a revenue chart", now))
+
+        # Seed assistant message with ChartML block
+        asst_msg_id = make_message_id()
+        cur.execute("""
+            INSERT INTO chat_messages (
+                message_id, session_id, role, content,
+                pinned, created_at
+            ) VALUES (%s, %s, 'assistant', %s, false, %s)
+        """, (asst_msg_id, chart_session_id, CHART_MESSAGE_CONTENT, now))
+        print(f"  ✓ Seeded ChartML assistant message into chart session")
 
     conn.commit()
     cur.close()
