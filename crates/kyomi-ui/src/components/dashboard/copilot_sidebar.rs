@@ -144,6 +144,7 @@ pub fn CopilotSidebar(
     let (thinking_map, set_thinking_map) = signal(HashMap::<String, ThinkingState>::new());
 
     // ── WebSocket context ────────────────────────────────────────────────
+    #[allow(unused_variables)] // used in cfg-gated blocks (debug_assertions, wasm32)
     let ws_ctx = use_context::<WebSocketContext>();
 
     #[cfg(debug_assertions)]

@@ -517,7 +517,7 @@ pub async fn create_watch(
             datasource_hints, queries, alert_emails,
             alert_emails_enabled, enabled, next_run_at, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, {enabled}, $12, $13, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, {enabled}, $12, $13, $13)
         RETURNING watch_id, workspace_id, created_by, name, prompt, schedule,
                   mode, datasource_hints, queries, alert_emails,
                   alert_emails_enabled, enabled, last_run_at, last_run_status,
@@ -712,11 +712,11 @@ pub async fn update_watch(
         param_idx += 1;
     }
     if updates.queries.is_some() {
-        set_parts.push(format!("queries = ${param_idx}"));
+        set_parts.push(format!("queries = ${param_idx}::jsonb"));
         param_idx += 1;
     }
     if updates.datasource_hints.is_some() {
-        set_parts.push(format!("datasource_hints = ${param_idx}"));
+        set_parts.push(format!("datasource_hints = ${param_idx}::jsonb"));
         param_idx += 1;
     }
     if next_run_at.is_some() {

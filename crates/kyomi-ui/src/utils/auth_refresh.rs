@@ -23,8 +23,6 @@ pub fn is_auth_error(msg: &str) -> bool {
 /// This is a client-only operation (JS fetch + window.location).
 #[cfg(target_arch = "wasm32")]
 pub fn refresh_and_reload() {
-    use wasm_bindgen::prelude::*;
-
     leptos::task::spawn_local(async {
         let refreshed = try_refresh().await;
 

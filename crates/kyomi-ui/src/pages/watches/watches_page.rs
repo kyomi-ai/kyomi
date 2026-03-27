@@ -434,7 +434,7 @@ pub fn WatchesPage() -> impl IntoView {
         user_ctx_resource
             .get()
             .and_then(|r| r.ok())
-            .and_then(|ctx| ctx.capabilities.get("ai_enabled").copied())
+            .and_then(|ctx| ctx.capabilities.get("ai_chat_enabled").copied())
             .unwrap_or(false)
     });
 
