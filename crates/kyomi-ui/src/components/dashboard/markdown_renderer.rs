@@ -1230,17 +1230,17 @@ fn ChartBlock(
             // Chart header bar web component (wrapped in div for NodeRef access)
             <div node_ref=header_wrapper_ref>
                 <chart-header-bar
-                    attr:last-updated=last_updated_attr
-                    attr:refreshing=refreshing_attr
-                    attr:show-refresh=has_refresh.then_some("")
-                    attr:show-edit=has_edit.then_some("")
-                    attr:show-delete=has_delete.then_some("")
-                    attr:show-save-to-dashboard=has_save.then_some("")
-                    attr:show-info=has_info.then_some("")
-                    attr:show-type-selector=""
-                    attr:chart-type=chart_type
-                    attr:chart-orientation=chart_orientation
-                    attr:chart-mode=chart_mode
+                    last-updated=last_updated_attr
+                    refreshing=refreshing_attr
+                    show-refresh=has_refresh.then_some("")
+                    show-edit=has_edit.then_some("")
+                    show-delete=has_delete.then_some("")
+                    show-save-to-dashboard=has_save.then_some("")
+                    show-info=has_info.then_some("")
+                    show-type-selector=""
+                    chart-type=chart_type
+                    chart-orientation=chart_orientation
+                    chart-mode=chart_mode
                 />
             </div>
             // Chart content area
