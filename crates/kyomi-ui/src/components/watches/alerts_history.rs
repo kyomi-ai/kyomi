@@ -378,57 +378,65 @@ fn AlertDropdownMenu(
 
 /// Format a date string for display.
 /// Matches React: `date.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' })`.
+///
+/// Uses `js_sys::Date` on WASM for proper locale/timezone handling (same as
+/// React's `toLocaleString`). Falls back to `chrono` on the server.
 fn format_date(date_str: &str) -> String {
-    // Simple ISO 8601 parsing — extract date and time parts.
-    // Full `Intl.DateTimeFormat` is not available server-side; we do a
-    // best-effort format. On the client this is fine since the actual data
-    // is just displayed as text.
     if date_str.is_empty() {
         return String::new();
     }
 
-    // Try to parse "2026-03-15T10:30:00+00:00" or similar
-    let date_part = date_str.split('T').next().unwrap_or(date_str);
-    let time_part = date_str
-        .split('T')
-        .nth(1)
-        .unwrap_or("")
-        .split('+')
-        .next()
-        .unwrap_or("")
-        .split('Z')
-        .next()
-        .unwrap_or("");
+    // Use JS Date in WASM for proper locale formatting and timezone conversion,
+    // matching React's `new Date(str).toLocaleString(...)` exactly.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(date_str));
+        if js_date.get_time().is_nan() {
+            return date_str.to_string();
+        }
 
-    let parts: Vec<&str> = date_part.split('-').collect();
-    if parts.len() < 3 {
-        return date_str.to_string();
+        let month = match js_date.get_month() {
+            0 => "Jan",
+            1 => "Feb",
+            2 => "Mar",
+            3 => "Apr",
+            4 => "May",
+            5 => "Jun",
+            6 => "Jul",
+            7 => "Aug",
+            8 => "Sep",
+            9 => "Oct",
+            10 => "Nov",
+            11 => "Dec",
+            _ => "???",
+        };
+        let day = js_date.get_date();
+        let year = js_date.get_full_year();
+        let hours = js_date.get_hours();
+        let minutes = js_date.get_minutes();
+        let hour_12 = if hours == 0 {
+            12
+        } else if hours > 12 {
+            hours - 12
+        } else {
+            hours
+        };
+        let ampm = if hours < 12 { "am" } else { "pm" };
+
+        return format!("{day} {month} {year}, {:02}:{:02} {ampm}", hour_12, minutes);
     }
 
-    let month = match parts.get(1).copied().unwrap_or("01") {
-        "01" => "Jan",
-        "02" => "Feb",
-        "03" => "Mar",
-        "04" => "Apr",
-        "05" => "May",
-        "06" => "Jun",
-        "07" => "Jul",
-        "08" => "Aug",
-        "09" => "Sep",
-        "10" => "Oct",
-        "11" => "Nov",
-        "12" => "Dec",
-        _ => "???",
-    };
-
-    let day = parts.get(2).copied().unwrap_or("01");
-    let year = parts.first().copied().unwrap_or("2026");
-
-    let time_parts: Vec<&str> = time_part.split(':').collect();
-    let hour = time_parts.first().copied().unwrap_or("00");
-    let minute = time_parts.get(1).copied().unwrap_or("00");
-
-    format!("{month} {day}, {year}, {hour}:{minute}")
+    // Server-side fallback: use chrono for best-effort formatting (UTC).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(date_str) else {
+            return date_str.to_string();
+        };
+        let utc = parsed.with_timezone(&chrono::Utc);
+        let formatted = utc.format("%-d %b %Y, %I:%M %p").to_string();
+        // Lowercase AM/PM to match React's locale output (e.g. "06:14 pm")
+        formatted.replace(" AM", " am").replace(" PM", " pm")
+    }
 }
 
 /// Get the display name for a watch from an alert, looking up in the watches list if needed.

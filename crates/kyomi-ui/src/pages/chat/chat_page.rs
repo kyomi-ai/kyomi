@@ -2059,8 +2059,11 @@ pub fn ChatPage() -> impl IntoView {
                                         </div>
                                     }.into_any()
                                 } else if msgs.is_empty() {
-                                    // New chat — greeting (vertically centered)
+                                    // New chat — greeting + inline input (vertically centered)
                                     // Matches React: new chat greeting (Chat.jsx lines 1624-1689)
+                                    // React renders the input INSIDE the centered greeting area, NOT
+                                    // at the bottom of the viewport. The bottom ChatInput is hidden
+                                    // when messages are empty.
                                     view! {
                                         <div class="h-full flex items-center justify-center px-4">
                                             <div class="text-center w-full max-w-2xl -mt-24">
@@ -2086,6 +2089,20 @@ pub fn ChatPage() -> impl IntoView {
                                                     <h1 class="text-3xl md:text-4xl font-normal text-foreground mb-8">
                                                         {greeting}
                                                     </h1>
+                                                </div>
+                                                // Inline chat input — centered with the greeting.
+                                                // Matches React: Chat.jsx lines 1650-1686.
+                                                // No cancel button needed on new chat screen.
+                                                <div class="mt-8">
+                                                    <ChatInput
+                                                        on_send=on_send
+                                                        on_cancel=on_cancel
+                                                        can_send=can_send_signal
+                                                        show_stop_button=show_stop_button_signal
+                                                        connection_state=connection_state_signal
+                                                        credits_exhausted=credits_exhausted.get()
+                                                        inline=true
+                                                    />
                                                 </div>
                                             </div>
                                         </div>
@@ -2153,47 +2170,53 @@ pub fn ChatPage() -> impl IntoView {
                             <div node_ref=messages_end_ref />
                         </div>
 
-                        // Phase 9 — "Skip AI response" checkbox for existing sessions
-                        // M13: React shows this for ALL existing sessions (currentSessionId &&),
-                        // not just shared ones.
-                        <Show when=move || current_session_id.get().is_some()>
-                            <div class="flex items-center gap-2 px-4 py-2 border-t border-border bg-card">
-                                <input
-                                    type="checkbox"
-                                    id="skip-ai-checkbox"
-                                    prop:checked=move || skip_ai_response.get()
-                                    on:change=move |ev| {
-                                        #[cfg(target_arch = "wasm32")]
-                                        {
-                                            use wasm_bindgen::JsCast;
-                                            if let Some(target) = ev.target() {
-                                                if let Some(input) = target.dyn_ref::<web_sys::HtmlInputElement>() {
-                                                    set_skip_ai_response.set(input.checked());
+                        // Bottom-pinned input area — only shown when messages exist.
+                        // Matches React: Chat.jsx line 1718 — `{messages.length > 0 && (`
+                        // When messages are empty (new chat), the input is rendered inline
+                        // with the greeting above, not at the bottom.
+                        <Show when=move || !messages.get().is_empty()>
+                            // Phase 9 — "Skip AI response" checkbox for existing sessions
+                            // M13: React shows this for ALL existing sessions (currentSessionId &&),
+                            // not just shared ones.
+                            <Show when=move || current_session_id.get().is_some()>
+                                <div class="flex items-center gap-2 px-4 py-2 border-t border-border bg-card">
+                                    <input
+                                        type="checkbox"
+                                        id="skip-ai-checkbox"
+                                        prop:checked=move || skip_ai_response.get()
+                                        on:change=move |ev| {
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                use wasm_bindgen::JsCast;
+                                                if let Some(target) = ev.target() {
+                                                    if let Some(input) = target.dyn_ref::<web_sys::HtmlInputElement>() {
+                                                        set_skip_ai_response.set(input.checked());
+                                                    }
                                                 }
                                             }
+                                            #[cfg(not(target_arch = "wasm32"))]
+                                            {
+                                                let _ = ev;
+                                            }
                                         }
-                                        #[cfg(not(target_arch = "wasm32"))]
-                                        {
-                                            let _ = ev;
-                                        }
-                                    }
-                                    class="h-4 w-4 rounded border-input text-primary focus:ring-ring"
-                                />
-                                <label for="skip-ai-checkbox" class="text-sm text-muted-foreground">
-                                    "Post as comment (skip AI response)"
-                                </label>
-                            </div>
-                        </Show>
+                                        class="h-4 w-4 rounded border-input text-primary focus:ring-ring"
+                                    />
+                                    <label for="skip-ai-checkbox" class="text-sm text-muted-foreground">
+                                        "Post as comment (skip AI response)"
+                                    </label>
+                                </div>
+                            </Show>
 
-                        // Chat input area — wired to send_message and cancel handlers
-                        <ChatInput
-                            on_send=on_send
-                            on_cancel=on_cancel
-                            can_send=can_send_signal
-                            show_stop_button=show_stop_button_signal
-                            connection_state=connection_state_signal
-                            credits_exhausted=credits_exhausted.get()
-                        />
+                            // Chat input area — wired to send_message and cancel handlers
+                            <ChatInput
+                                on_send=on_send
+                                on_cancel=on_cancel
+                                can_send=can_send_signal
+                                show_stop_button=show_stop_button_signal
+                                connection_state=connection_state_signal
+                                credits_exhausted=credits_exhausted.get()
+                            />
+                        </Show>
                     </div>
                 </div>
             </Show>

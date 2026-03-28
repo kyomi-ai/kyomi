@@ -39,7 +39,7 @@ pub fn ChatInput(
     #[prop(into)]
     connection_state: Signal<String>,
     /// Placeholder text for the textarea.
-    #[prop(default = "Ask me anything...")]
+    #[prop(default = "Ask me anything about your data \u{2728}")]
     placeholder: &'static str,
     /// Whether to show the "Skip AI response" checkbox.
     #[prop(default = false)]
@@ -50,6 +50,11 @@ pub fn ChatInput(
     /// Whether the user's AI credits are exhausted.
     #[prop(default = false)]
     credits_exhausted: bool,
+    /// Whether to render in inline mode (centered with greeting, no border/bg).
+    /// When true, the outer wrapper is unstyled. When false (default), the wrapper
+    /// has `border-t border-border bg-card` for the bottom-pinned layout.
+    #[prop(default = false)]
+    inline: bool,
     /// Maximum height for the auto-expanding textarea in pixels.
     #[prop(default = 200)]
     max_height: u32,
@@ -169,7 +174,7 @@ pub fn ChatInput(
     };
 
     view! {
-        <div class="border-t border-border flex-shrink-0 p-4 bg-card">
+        <div class=if inline { "" } else { "border-t border-border flex-shrink-0 p-4 bg-card" }>
             // Credits exhausted warning banner — shown above the (disabled) textarea.
             // Matches React: Chat.jsx lines 1651-1657 and 1721-1727.
             {if credits_exhausted {

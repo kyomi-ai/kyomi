@@ -19,6 +19,7 @@ use leptos_router::NavigateOptions;
 use crate::components::chat::WebSocketProvider;
 use crate::server_fns::security::logout;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
+use crate::server_fns::watches::get_unread_alerts_count;
 
 /// Main layout shell wrapping all Leptos pages.
 ///
@@ -249,6 +250,9 @@ fn Sidebar(
 ) -> impl IntoView {
     let sessions = Resource::new(|| (), |_| get_recent_sessions());
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
+    // Fetch unread alerts count for the Watches sidebar badge.
+    // Mirrors React's `useQuery(['unread-alerts-count'])` in Sidebar.jsx.
+    let unread_alerts = Resource::new(|| (), |_| get_unread_alerts_count());
     let (user_menu_open, set_user_menu_open) = signal(false);
 
     // Logout action — calls POST /leptos-api/logout to revoke the current session
@@ -367,7 +371,19 @@ fn Sidebar(
 
                     <NavItem href="/chats" icon=icondata_lu::LuMessagesSquare label="Chats" collapsed=collapsed/>
                     <NavItem href="/dashboards" icon=icondata_lu::LuChartBar label="Dashboards" collapsed=collapsed/>
-                    <NavItem href="/watches" icon=icondata_lu::LuEye label="Watches" collapsed=collapsed/>
+                    <NavItem
+                        href="/watches"
+                        icon=icondata_lu::LuEye
+                        label="Watches"
+                        collapsed=collapsed
+                        badge_count=Signal::derive(move || {
+                            match unread_alerts.get() {
+                                Some(Ok(count)) => count,
+                                // Resource not yet loaded, or server fn error — show no badge
+                                Some(Err(_)) | None => 0,
+                            }
+                        })
+                    />
                     <NavItem href="/knowledge" icon=icondata_lu::LuBookOpen label="Knowledge" collapsed=collapsed/>
                     <NavItem href="/sql-editor" icon=icondata_lu::LuDatabase label="SQL Editor" collapsed=collapsed/>
                 </div>
@@ -542,7 +558,13 @@ fn NavItem(
     icon: &'static icondata_core::IconData,
     label: &'static str,
     collapsed: ReadSignal<bool>,
+    /// Optional badge count (e.g. unread alerts). When > 0, shows a count badge
+    /// (expanded) or a dot indicator (collapsed). Mirrors React Sidebar.jsx badge.
+    #[prop(optional, into)]
+    badge_count: Option<Signal<i64>>,
 ) -> impl IntoView {
+    let count = badge_count.unwrap_or_else(|| Signal::derive(|| 0));
+
     view! {
         <a
             href=href
@@ -551,15 +573,31 @@ fn NavItem(
                 if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" }
             )
         >
-            <span class="w-5 h-5 text-muted-foreground flex-shrink-0 flex items-center justify-center">
-                <Icon icon=icon width="20" height="20"/>
-            </span>
+            <div class="relative flex-shrink-0">
+                <span class="w-5 h-5 text-muted-foreground flex items-center justify-center">
+                    <Icon icon=icon width="20" height="20"/>
+                </span>
+                // Collapsed dot indicator — React: "absolute -top-1 -right-1 h-2 w-2 rounded-full bg-primary"
+                {move || (count.get() > 0 && collapsed.get()).then(|| view! {
+                    <span class="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-primary"/>
+                })}
+            </div>
             <span
                 class="text-sm font-medium text-foreground whitespace-nowrap overflow-hidden transition-opacity duration-300"
                 style=move || if collapsed.get() { "opacity: 0" } else { "opacity: 1" }
             >
                 {label}
             </span>
+            // Expanded badge — React: "ml-auto px-1.5 py-0.5 text-xs font-medium rounded-full bg-primary text-primary-foreground"
+            {move || (count.get() > 0 && !collapsed.get()).then(|| {
+                let n = count.get();
+                let display = if n > 99 { "99+".to_string() } else { n.to_string() };
+                view! {
+                    <span class="ml-auto px-1.5 py-0.5 text-xs font-medium rounded-full bg-primary text-primary-foreground">
+                        {display}
+                    </span>
+                }
+            })}
         </a>
     }
 }

@@ -203,15 +203,59 @@ fn ChartBarIcon(#[prop(into, optional)] class: String) -> impl IntoView {
 
 /// Format an RFC 3339 date string for display.
 ///
-/// Matches React's `formatDate` helper in WatchesPage.jsx.
+/// Matches React's `formatDate` helper in WatchesPage.jsx:
+/// `date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })`.
+///
+/// Uses `js_sys::Date` on WASM for proper locale/timezone handling. Falls back
+/// to `chrono` on the server.
 fn format_date(date_str: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(date_str) else {
-        return date_str.to_string();
-    };
-    // NOTE: Displays in UTC. Browser local time would require js_sys::Date
-    // integration. The React version uses toLocaleString() for local display.
-    let utc = parsed.with_timezone(&chrono::Utc);
-    utc.format("%b %-d, %H:%M").to_string()
+    #[cfg(target_arch = "wasm32")]
+    {
+        let js_date = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(date_str));
+        if js_date.get_time().is_nan() {
+            return date_str.to_string();
+        }
+
+        let month = match js_date.get_month() {
+            0 => "Jan",
+            1 => "Feb",
+            2 => "Mar",
+            3 => "Apr",
+            4 => "May",
+            5 => "Jun",
+            6 => "Jul",
+            7 => "Aug",
+            8 => "Sep",
+            9 => "Oct",
+            10 => "Nov",
+            11 => "Dec",
+            _ => "???",
+        };
+        let day = js_date.get_date();
+        let hours = js_date.get_hours();
+        let minutes = js_date.get_minutes();
+        let hour_12 = if hours == 0 {
+            12
+        } else if hours > 12 {
+            hours - 12
+        } else {
+            hours
+        };
+        let ampm = if hours < 12 { "am" } else { "pm" };
+
+        return format!("{day} {month}, {:02}:{:02} {ampm}", hour_12, minutes);
+    }
+
+    // Server-side fallback: use chrono (UTC).
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(date_str) else {
+            return date_str.to_string();
+        };
+        let utc = parsed.with_timezone(&chrono::Utc);
+        let formatted = utc.format("%-d %b, %I:%M %p").to_string();
+        formatted.replace(" AM", " am").replace(" PM", " pm")
+    }
 }
 
 /// Map a watch status string to StatusBadge configuration.
