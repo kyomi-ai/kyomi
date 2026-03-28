@@ -52,21 +52,19 @@ pub fn ChartInfoModal(
     /// Whether the modal is open.
     #[prop(into)]
     open: Signal<bool>,
-    /// The raw ChartML YAML spec to display.
-    yaml: String,
+    /// The raw ChartML YAML spec to display (reactive signal).
+    #[prop(into)]
+    yaml: Signal<String>,
     /// Callback to close the modal.
     on_close: Callback<()>,
 ) -> impl IntoView {
-    let datasource = extract_datasource(&yaml);
-    let query = extract_query(&yaml);
-
-    let yaml_stored = StoredValue::new(yaml.clone());
-    let yaml_for_display = StoredValue::new(yaml);
+    let datasource = Memo::new(move |_| extract_datasource(&yaml.get()));
+    let query = Memo::new(move |_| extract_query(&yaml.get()));
 
     let (copied, set_copied) = signal(false);
 
     let on_copy = move |_: leptos::ev::MouseEvent| {
-        let text = yaml_stored.get_value();
+        let text = yaml.get_untracked();
         leptos::task::spawn_local(async move {
             if let Some(window) = web_sys::window() {
                 let clipboard = window.navigator().clipboard();
@@ -78,9 +76,6 @@ pub fn ChartInfoModal(
             }
         });
     };
-
-    let query = StoredValue::new(query);
-    let datasource = StoredValue::new(datasource);
 
     view! {
         <Modal
@@ -95,14 +90,14 @@ pub fn ChartInfoModal(
                 <div>
                     <span class="text-sm font-medium text-foreground">"Datasource"</span>
                     <p class="mt-1 text-sm text-muted-foreground font-mono bg-muted px-3 py-2 rounded-md">
-                        {datasource.get_value()}
+                        {move || datasource.get()}
                     </p>
                 </div>
 
                 // SQL Query section — only shown when present
                 // Matches React: `{query && <CopyableCodeBlock label="SQL Query" />}`
-                {query.get_value().map(|sql| {
-                    let sql = StoredValue::new(sql.clone());
+                {move || query.get().map(|sql| {
+                    let sql = StoredValue::new(sql);
                     let (sql_copied, set_sql_copied) = signal(false);
                     let on_sql_copy = move |_: leptos::ev::MouseEvent| {
                         let text = sql.get_value();
@@ -183,7 +178,7 @@ pub fn ChartInfoModal(
                             style="margin: 0; border-radius: 6px; border: none; font-size: 0.929rem; background-color: var(--color-muted); padding: 16px;"
                         >
                             <code style="font-family: var(--font-mono); background-color: transparent;">
-                                {yaml_for_display.get_value()}
+                                {move || yaml.get()}
                             </code>
                         </pre>
                     </div>

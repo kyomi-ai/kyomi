@@ -2253,10 +2253,14 @@ pub fn ChatPage() -> impl IntoView {
         // Chart info modal — shown when user clicks chart info button in MarkdownRenderer.
         // Matches React: <ChartInfoModal open={chartInfoModal.isOpen} spec={chartInfoModal.spec} onClose={...} />
         {move || chart_info_spec.get().map(|spec| {
+            let yaml_signal = Signal::derive({
+                let spec = spec.clone();
+                move || spec.clone()
+            });
             view! {
                 <ChartInfoModal
                     open=Signal::derive(move || chart_info_modal_open.get())
-                    yaml=spec
+                    yaml=yaml_signal
                     on_close=Callback::new(move |()| set_chart_info_modal_open.set(false))
                 />
             }

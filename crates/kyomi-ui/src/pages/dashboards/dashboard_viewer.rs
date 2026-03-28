@@ -1055,7 +1055,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 />
                                 <ChartInfoModal
                                     open=Signal::derive(move || chart_info_open.get())
-                                    yaml=chart_info_yaml.get_untracked()
+                                    yaml=chart_info_yaml
                                     on_close=on_chart_info_close
                                 />
                             </div>

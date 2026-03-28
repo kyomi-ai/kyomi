@@ -19,6 +19,8 @@ use chartml_chart_scatter::ScatterRenderer;
 use chartml_core::element::ChartElement;
 use chartml_core::ChartML;
 use leptos::prelude::*;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 
 use crate::server_fns::datasources::query_datasource_arrow;
 
@@ -337,6 +339,30 @@ fn extract_datasource(spec: &serde_json::Value) -> Option<String> {
 fn extract_query(spec: &serde_json::Value) -> Option<String> {
     spec.get("data")
         .and_then(|d| d.get("query").or_else(|| d.get("url")))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Extract the chart type from a parsed YAML spec (e.g. "bar", "line", "pie").
+fn extract_chart_type(spec: &serde_json::Value) -> Option<String> {
+    spec.get("visualize")
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Extract the chart orientation from a parsed YAML spec (e.g. "horizontal").
+fn extract_chart_orientation(spec: &serde_json::Value) -> Option<String> {
+    spec.get("visualize")
+        .and_then(|v| v.get("orientation"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Extract the chart mode from a parsed YAML spec (e.g. "stacked", "grouped").
+fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
+    spec.get("visualize")
+        .and_then(|v| v.get("mode"))
         .and_then(|v| v.as_str())
         .map(String::from)
 }
@@ -991,18 +1017,22 @@ fn ChartBlock(
     let parsed_spec: Option<serde_json::Value> =
         serde_yaml::from_str(&yaml_owned).ok();
 
-    let chart_title = parsed_spec
+    let _chart_title = parsed_spec
         .as_ref()
         .and_then(extract_title)
         .unwrap_or_else(|| "Chart".to_string());
 
     let datasource_slug = parsed_spec.as_ref().and_then(extract_datasource);
     let sql_query = parsed_spec.as_ref().and_then(extract_query);
+    let chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
+    let chart_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
+    let chart_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
 
     // Reactive state for the chart
     let (chart_state, set_chart_state) = signal(ChartState::Loading);
     let (refresh_count, set_refresh_count) = signal(0_u32);
-    let (last_refreshed, set_last_refreshed) = signal(None::<String>);
+    let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
+    let (is_refreshing, set_is_refreshing) = signal(false);
 
     // Create the ChartML instance (created once, shared via Arc)
     let chartml = create_chartml();
@@ -1022,6 +1052,7 @@ fn ChartBlock(
         let chartml = chartml.clone();
 
         set_chart_state.set(ChartState::Loading);
+        set_is_refreshing.set(true);
 
         leptos::task::spawn_local(async move {
             let result = if let (Some(slug), Some(query)) = (ds, q) {
@@ -1069,147 +1100,148 @@ fn ChartBlock(
             match result {
                 Ok(element) => {
                     set_chart_state.set(ChartState::Success(Box::new(element)));
-                    let now = chrono::Utc::now().format("%H:%M:%S").to_string();
-                    set_last_refreshed.set(Some(now));
+                    // Store timestamp as milliseconds for the chart-header-bar web component
+                    let now_ms = js_sys::Date::now();
+                    set_last_refreshed.set(Some(now_ms));
+                    set_is_refreshing.set(false);
                 }
                 Err(err) => {
                     set_chart_state.set(ChartState::Error(err));
+                    set_is_refreshing.set(false);
                 }
             }
         });
     });
 
-    // Refresh handler — defined as a function to avoid closure clone issues.
-    // `set_refresh_count` is Copy so we can capture it in multiple closures.
-    let handle_refresh = move |_: leptos::ev::MouseEvent| {
-        set_refresh_count.update(|c| *c += 1);
-    };
+    // Retry handler for error state
     let handle_refresh_for_retry = move |_: leptos::ev::MouseEvent| {
         set_refresh_count.update(|c| *c += 1);
     };
 
     // Store callbacks as StoredValue so they can be used inside move closures.
-    // Callback is Copy in Leptos 0.8, but Option<Callback> must be stored for reuse.
     let edit_cb = StoredValue::new(on_edit_chart);
     let delete_cb = StoredValue::new(on_delete_chart);
     let save_cb = StoredValue::new(on_save_to_dashboard);
     let info_cb = StoredValue::new(on_chart_info);
-    let ask_cb = StoredValue::new(on_ask_about_chart);
+    let _ask_cb = StoredValue::new(on_ask_about_chart);
     let yaml_for_save_stored = StoredValue::new(yaml_for_save);
     let yaml_for_info_stored = StoredValue::new(yaml_for_info);
-    let yaml_for_ask_stored = StoredValue::new(yaml_for_ask);
+    let _yaml_for_ask_stored = StoredValue::new(yaml_for_ask);
 
-    // Menu state
-    let (menu_open, set_menu_open) = signal(false);
+    // NodeRef for the wrapper div — we find the chart-header-bar child inside it
+    let header_wrapper_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Attach event listeners to the web component after it mounts
+    Effect::new(move || {
+        let Some(wrapper) = header_wrapper_ref.get() else {
+            return;
+        };
+        let wrapper_el: &web_sys::Element = wrapper.as_ref();
+        let Some(header_el) = wrapper_el.query_selector("chart-header-bar").ok().flatten() else {
+            return;
+        };
+        {
+            let el: &web_sys::EventTarget = header_el.as_ref();
+
+            // Refresh event
+            let refresh_closure = Closure::<dyn Fn()>::new(move || {
+                set_refresh_count.update(|c| *c += 1);
+            });
+            let _ = el.add_event_listener_with_callback(
+                "header-refresh",
+                refresh_closure.as_ref().unchecked_ref(),
+            );
+            refresh_closure.forget();
+
+            // Edit event
+            if let Some(cb) = edit_cb.get_value() {
+                let bi = block_index;
+                let ai = array_index;
+                let edit_closure = Closure::<dyn Fn()>::new(move || {
+                    cb.run((bi, ai));
+                });
+                let _ = el.add_event_listener_with_callback(
+                    "header-edit",
+                    edit_closure.as_ref().unchecked_ref(),
+                );
+                edit_closure.forget();
+            }
+
+            // Delete event
+            if let Some(cb) = delete_cb.get_value() {
+                let bi = block_index;
+                let ai = array_index;
+                let delete_closure = Closure::<dyn Fn()>::new(move || {
+                    cb.run((bi, ai));
+                });
+                let _ = el.add_event_listener_with_callback(
+                    "header-delete",
+                    delete_closure.as_ref().unchecked_ref(),
+                );
+                delete_closure.forget();
+            }
+
+            // Save-to-dashboard event
+            if let Some(cb) = save_cb.get_value() {
+                let yaml = yaml_for_save_stored.get_value();
+                let save_closure = Closure::<dyn Fn()>::new(move || {
+                    let chart_md = format!("```chartml\n{}\n```", yaml);
+                    cb.run(chart_md);
+                });
+                let _ = el.add_event_listener_with_callback(
+                    "header-save-to-dashboard",
+                    save_closure.as_ref().unchecked_ref(),
+                );
+                save_closure.forget();
+            }
+
+            // Info event
+            if let Some(cb) = info_cb.get_value() {
+                let yaml = yaml_for_info_stored.get_value();
+                let info_closure = Closure::<dyn Fn()>::new(move || {
+                    cb.run(yaml.clone());
+                });
+                let _ = el.add_event_listener_with_callback(
+                    "header-info",
+                    info_closure.as_ref().unchecked_ref(),
+                );
+                info_closure.forget();
+            }
+        } // end inner block borrowing el
+    });
+
+    // Compute attribute values for the web component
+    let last_updated_attr = move || {
+        last_refreshed.get().map(|ms| ms.to_string())
+    };
+    let refreshing_attr = move || {
+        if is_refreshing.get() { Some("".to_string()) } else { None }
+    };
+
+    // Build static boolean attributes based on which callbacks are provided
+    let has_refresh = true; // Always show refresh
+    let has_edit = on_edit_chart.is_some();
+    let has_delete = on_delete_chart.is_some();
+    let has_save = on_save_to_dashboard.is_some();
+    let has_info = on_chart_info.is_some();
 
     view! {
-        <div class="my-4 rounded-lg border border-border overflow-hidden">
-            // Chart title bar
-            <div class="flex items-center justify-between px-4 py-2 bg-muted/50 border-b border-border">
-                <span class="text-sm font-medium text-foreground">{chart_title}</span>
-                <div class="flex items-center gap-1">
-                    // Refresh button
-                    <button
-                        on:click=handle_refresh
-                        class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                        title="Refresh"
-                    >
-                        <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                        </svg>
-                    </button>
-                    // Action menu
-                    <div class="relative">
-                        <button
-                            on:click=move |_| set_menu_open.update(|v| *v = !*v)
-                            class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                            title="Actions"
-                        >
-                            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-                            </svg>
-                        </button>
-                        // Dropdown menu
-                        <Show when=move || menu_open.get()>
-                            <div class="absolute right-0 top-full mt-1 w-48 bg-popover border border-border rounded-md shadow-lg z-50 py-1">
-                                {edit_cb.get_value().map(|cb| {
-                                    let bi = block_index;
-                                    let ai = array_index;
-                                    view! {
-                                        <button
-                                            on:click=move |_| {
-                                                cb.run((bi, ai));
-                                                set_menu_open.set(false);
-                                            }
-                                            class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
-                                        >
-                                            "Edit"
-                                        </button>
-                                    }
-                                })}
-                                {delete_cb.get_value().map(|cb| {
-                                    let bi = block_index;
-                                    let ai = array_index;
-                                    view! {
-                                        <button
-                                            on:click=move |_| {
-                                                cb.run((bi, ai));
-                                                set_menu_open.set(false);
-                                            }
-                                            class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
-                                        >
-                                            "Delete"
-                                        </button>
-                                    }
-                                })}
-                                {save_cb.get_value().map(|cb| {
-                                    let yaml = yaml_for_save_stored.get_value();
-                                    view! {
-                                        <button
-                                            on:click=move |_| {
-                                                let chart_md = format!("```chartml\n{}\n```", yaml);
-                                                cb.run(chart_md);
-                                                set_menu_open.set(false);
-                                            }
-                                            class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
-                                        >
-                                            "Save to Dashboard"
-                                        </button>
-                                    }
-                                })}
-                                {info_cb.get_value().map(|cb| {
-                                    let yaml = yaml_for_info_stored.get_value();
-                                    view! {
-                                        <button
-                                            on:click=move |_| {
-                                                cb.run(yaml.clone());
-                                                set_menu_open.set(false);
-                                            }
-                                            class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
-                                        >
-                                            "Chart Info"
-                                        </button>
-                                    }
-                                })}
-                                {ask_cb.get_value().map(|cb| {
-                                    let yaml = yaml_for_ask_stored.get_value();
-                                    view! {
-                                        <button
-                                            on:click=move |_| {
-                                                let chart_md = format!("```chartml\n{}\n```", yaml);
-                                                cb.run(chart_md);
-                                                set_menu_open.set(false);
-                                            }
-                                            class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
-                                        >
-                                            "Ask About Chart"
-                                        </button>
-                                    }
-                                })}
-                            </div>
-                        </Show>
-                    </div>
-                </div>
+        <div class="my-2">
+            // Chart header bar web component (wrapped in div for NodeRef access)
+            <div node_ref=header_wrapper_ref>
+                <chart-header-bar
+                    attr:last-updated=last_updated_attr
+                    attr:refreshing=refreshing_attr
+                    attr:show-refresh=has_refresh.then_some("")
+                    attr:show-edit=has_edit.then_some("")
+                    attr:show-delete=has_delete.then_some("")
+                    attr:show-save-to-dashboard=has_save.then_some("")
+                    attr:show-info=has_info.then_some("")
+                    attr:show-type-selector=""
+                    attr:chart-type=chart_type
+                    attr:chart-orientation=chart_orientation
+                    attr:chart-mode=chart_mode
+                />
             </div>
             // Chart content area
             <div class="p-4">
@@ -1256,17 +1288,6 @@ fn ChartBlock(
                         }
                     }
                 }}
-            </div>
-            // Footer
-            <div class="px-4 py-1.5 bg-muted/30 border-t border-border">
-                <span class="text-xs text-muted-foreground">
-                    {move || {
-                        match last_refreshed.get() {
-                            Some(time) => format!("Last refreshed: {}", time),
-                            None => "Not yet loaded".to_string(),
-                        }
-                    }}
-                </span>
             </div>
         </div>
     }
