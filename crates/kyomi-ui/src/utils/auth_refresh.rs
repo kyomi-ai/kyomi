@@ -31,8 +31,15 @@ pub fn refresh_and_reload() {
                 // Reload the current page — fresh cookies will be sent automatically
                 let _ = window.location().reload();
             } else {
-                // Refresh token is also invalid — redirect to login
-                let _ = window.location().set_href("/login");
+                // Refresh token is also invalid — redirect to login.
+                // Preserve the current path so the user is returned here after login.
+                let path = window.location().pathname().unwrap_or_default();
+                let login_url = if path.is_empty() || path == "/" {
+                    "/login".to_string()
+                } else {
+                    format!("/login?redirect={path}")
+                };
+                let _ = window.location().set_href(&login_url);
             }
         }
     });

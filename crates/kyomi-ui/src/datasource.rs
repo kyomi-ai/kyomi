@@ -27,7 +27,8 @@ use crate::server_fns::datasources::query_datasource_arrow;
 // but the versions should be aligned once datafusion upgrades to arrow v57+.
 pub struct KyomiDataSource;
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl DataSource for KyomiDataSource {
     async fn fetch(&self, spec: &DataSpec, _options: &FetchOptions) -> Result<DataTable, ChartError> {
         let datasource_slug = spec

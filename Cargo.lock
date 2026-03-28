@@ -5532,6 +5532,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kode-doc"
+version = "0.1.0"
+dependencies = [
+ "arborium-markdown",
+ "arborium-tree-sitter",
+ "log",
+ "smallvec",
+]
+
+[[package]]
 name = "kode-leptos"
 version = "0.2.0-alpha.1"
 dependencies = [
@@ -5541,9 +5551,11 @@ dependencies = [
  "gloo-timers",
  "js-sys",
  "kode-core",
+ "kode-doc",
  "kode-markdown",
  "leptos",
  "log",
+ "send_wrapper",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

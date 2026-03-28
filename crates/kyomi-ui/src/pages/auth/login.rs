@@ -8,6 +8,8 @@
 //! functions (`get_auth_config`, `login_with_password`).
 
 use leptos::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use leptos_router::hooks::use_query_map;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Label, Spinner, INPUT_CLASS,
@@ -65,6 +67,21 @@ pub fn LoginPage() -> impl IntoView {
     let (verification_email, set_verification_email) = signal(String::new());
     let (resend_loading, set_resend_loading) = signal(false);
     let (resend_success, set_resend_success) = signal(false);
+
+    // ── Read redirect URL from query params (set by server auth guard) ─
+    // Only compiled on WASM — used after successful login to redirect back
+    // to the original page the user was trying to access.
+    #[cfg(target_arch = "wasm32")]
+    let redirect_url = {
+        let query = use_query_map();
+        move || -> String {
+            query.with(|q| {
+                q.get("redirect")
+                    .filter(|r| !r.is_empty() && r.starts_with('/'))
+                    .unwrap_or_else(|| "/".to_string())
+            })
+        }
+    };
 
     // ── Auth config resource ────────────────────────────────────────────
     let auth_config = Resource::new(|| (), |_| get_auth_config());
@@ -189,7 +206,7 @@ pub fn LoginPage() -> impl IntoView {
                     // Full page reload to initialize auth state from cookies
                     #[cfg(target_arch = "wasm32")]
                     if let Some(window) = web_sys::window() {
-                        let _ = window.location().set_href("/");
+                        let _ = window.location().set_href(&redirect_url());
                     }
                 }
                 Ok(LoginResult::VerificationRequired { email }) => {
@@ -241,11 +258,14 @@ pub fn LoginPage() -> impl IntoView {
 
                 match result {
                     Ok(LoginResult::Success { .. }) => {
-                        // Full page reload to initialize auth state from cookies
+                        // Full page reload to initialize auth state from cookies.
+                        // Use redirect URL from query params if present (set by
+                        // server auth guard when redirecting to /login).
                         #[cfg(target_arch = "wasm32")]
                         {
+                            let dest = redirect_url();
                             if let Some(window) = web_sys::window() {
-                                let _ = window.location().set_href("/");
+                                let _ = window.location().set_href(&dest);
                             }
                         }
                     }

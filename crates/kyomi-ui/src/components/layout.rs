@@ -37,21 +37,56 @@ pub fn Layout(children: Children) -> impl IntoView {
     // This avoids an extra server function call just for WebSocket config.
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
 
-    // If sidebar user fetch fails with an auth error (expired access_token),
-    // try refreshing the token and reload the page. This catches the case where
-    // a user has a valid refresh_token but an expired/missing access_token.
+    // Auth guard: tracks whether the user has been authenticated.
+    // Starts as `false`; set to `true` once `user_info` resolves successfully.
+    // While `false`, the layout renders a loading state instead of the full
+    // app shell, preventing unauthenticated users from seeing protected pages.
+    // Matches React's `<ProtectedRoute>` in App.jsx.
+    #[cfg(target_arch = "wasm32")]
+    let (auth_confirmed, set_auth_confirmed) = signal(false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let (auth_confirmed, _) = signal(false);
+
+    // Auth guard: when user_info resolves, either confirm auth or redirect to /login.
+    // On WASM: if auth fails, try token refresh first (handles expired access_token
+    // with valid refresh_token). If refresh also fails, redirect to /login.
+    // On SSR/native: just gate rendering — the client will handle the redirect.
     #[cfg(target_arch = "wasm32")]
     {
         use crate::utils::auth_refresh;
         let user_info_for_effect = user_info;
         Effect::new(move || {
-            if let Some(Err(e)) = user_info_for_effect.get() {
-                if auth_refresh::is_auth_error(&e.to_string()) {
-                    auth_refresh::refresh_and_reload();
+            match user_info_for_effect.get() {
+                Some(Ok(_)) => {
+                    // Auth succeeded — allow layout to render
+                    set_auth_confirmed.set(true);
+                }
+                Some(Err(e)) => {
+                    let msg = e.to_string();
+                    if auth_refresh::is_auth_error(&msg) {
+                        // Try token refresh; refresh_and_reload() redirects
+                        // to /login if the refresh also fails
+                        auth_refresh::refresh_and_reload();
+                    } else {
+                        // Any other error loading the user — redirect to login
+                        // as a safe fallback (can't render layout without user)
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().set_href("/login");
+                        }
+                    }
+                }
+                None => {
+                    // Resource still loading — keep waiting
                 }
             }
         });
     }
+
+    // On SSR, auth_confirmed stays `false` intentionally — SSR always renders
+    // the "Loading..." placeholder. Effects do not run during Leptos SSR, so
+    // there is no server-side auth confirmation. The WASM Effect above handles
+    // auth confirmation and redirect after hydration. (This is also a CSR-only
+    // app served via trunk, so the SSR path is academic.)
 
     let ws_user_id = Memo::new(move |_| {
         user_info
@@ -130,59 +165,74 @@ pub fn Layout(children: Children) -> impl IntoView {
     });
 
     view! {
-        <WebSocketProvider user_id=ws_user_id.into() workspace_id=ws_workspace_id.into()>
-            <div class="h-screen flex flex-col bg-background">
-                // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
-                <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
-                    <button
-                        on:click=move |_| set_mobile_open.update(|o| *o = !*o)
-                        class="p-2 hover:bg-accent rounded-lg transition-colors relative z-10"
-                        aria-label="Toggle menu"
-                    >
-                        <svg class="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
-                        </svg>
-                    </button>
-                    <div class="absolute left-1/2 -translate-x-1/2">
-                        <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-10 dark:hidden"/>
-                        <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-10 hidden dark:block"/>
+        // Auth guard loading screen — shown while auth check is in progress.
+        // Hidden once auth_confirmed becomes true (user is authenticated).
+        // Matches React `<ProtectedRoute>` loading state.
+        <div
+            class="min-h-screen flex items-center justify-center"
+            style=move || if auth_confirmed.get() { "display:none" } else { "" }
+        >
+            "Loading..."
+        </div>
+        // Main layout — hidden until auth is confirmed to prevent
+        // unauthenticated users from seeing the sidebar/app shell.
+        // If auth fails, refresh_and_reload() redirects to /login
+        // before this ever becomes visible.
+        <div style=move || if auth_confirmed.get() { "" } else { "display:none" }>
+            <WebSocketProvider user_id=ws_user_id.into() workspace_id=ws_workspace_id.into()>
+                <div class="h-screen flex flex-col bg-background">
+                    // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
+                    <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
+                        <button
+                            on:click=move |_| set_mobile_open.update(|o| *o = !*o)
+                            class="p-2 hover:bg-accent rounded-lg transition-colors relative z-10"
+                            aria-label="Toggle menu"
+                        >
+                            <svg class="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                            </svg>
+                        </button>
+                        <div class="absolute left-1/2 -translate-x-1/2">
+                            <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-10 dark:hidden"/>
+                            <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-10 hidden dark:block"/>
+                        </div>
+                    </div>
+
+                    // ── Mobile overlay (matches React line 283) ─────────────────
+                    <Show when=move || is_mobile.get() && mobile_open.get()>
+                        <div
+                            class="fixed inset-0 z-20 md:hidden"
+                            style="background-color: var(--color-overlay)"
+                            on:click=move |_| set_mobile_open.set(false)
+                        />
+                    </Show>
+
+                    <div class="flex relative flex-1 overflow-hidden">
+                        <Sidebar
+                            collapsed=collapsed
+                            set_collapsed=set_collapsed
+                            is_mobile=is_mobile
+                            mobile_open=mobile_open
+                        />
+                        <main
+                            class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out"
+                            style=move || {
+                                if is_mobile.get() {
+                                    // Mobile: no sidebar margin, top padding for the fixed header
+                                    "padding-top: 4rem".to_string()
+                                } else if collapsed.get() {
+                                    "margin-left: 4rem".to_string()
+                                } else {
+                                    "margin-left: 20rem".to_string()
+                                }
+                            }
+                        >
+                            {children()}
+                        </main>
                     </div>
                 </div>
-
-                // ── Mobile overlay (matches React line 283) ─────────────────
-                <Show when=move || is_mobile.get() && mobile_open.get()>
-                    <div
-                        class="fixed inset-0 z-20 md:hidden"
-                        style="background-color: var(--color-overlay)"
-                        on:click=move |_| set_mobile_open.set(false)
-                    />
-                </Show>
-
-                <div class="flex relative flex-1 overflow-hidden">
-                    <Sidebar
-                        collapsed=collapsed
-                        set_collapsed=set_collapsed
-                        is_mobile=is_mobile
-                        mobile_open=mobile_open
-                    />
-                    <main
-                        class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out"
-                        style=move || {
-                            if is_mobile.get() {
-                                // Mobile: no sidebar margin, top padding for the fixed header
-                                "padding-top: 4rem".to_string()
-                            } else if collapsed.get() {
-                                "margin-left: 4rem".to_string()
-                            } else {
-                                "margin-left: 20rem".to_string()
-                            }
-                        }
-                    >
-                        {children()}
-                    </main>
-                </div>
-            </div>
-        </WebSocketProvider>
+            </WebSocketProvider>
+        </div>
     }
 }
 
