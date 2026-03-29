@@ -277,6 +277,10 @@ pub fn DashboardViewerPage() -> impl IntoView {
                     .copied()
                     .unwrap_or(false);
 
+                let chart_palette = user_ctx.as_ref()
+                    .map(|ctx| ctx.chart_palette.clone())
+                    .unwrap_or_else(|| "balanced".to_string());
+
                 Some(match dashboard_result {
                     Err(e) => {
                         view! {
@@ -1002,6 +1006,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                 parameters=Signal::derive(move || param_values.get())
                                                                 on_save_to_dashboard=on_save_to_dashboard
                                                                 on_chart_info=on_chart_info
+                                                                chart_palette=chart_palette.clone()
                                                             />
                                                         }.into_any()
                                                     } else {

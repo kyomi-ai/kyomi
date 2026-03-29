@@ -125,10 +125,12 @@ kyomi-knowledge = { workspace = true, optional = true }
 
 # ChartML (Arrow-backed data tables for chart rendering)
 chartml-core = { workspace = true }
+chartml-leptos = { workspace = true }
 chartml-chart-cartesian = { workspace = true }
 chartml-chart-pie = { workspace = true }
 chartml-chart-scatter = { workspace = true }
 chartml-chart-metric = { workspace = true }
+chartml-datafusion = { workspace = true }
 async-trait = { workspace = true }
 
 # Markdown rendering (shared — works in both SSR and WASM)

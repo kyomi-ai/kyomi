@@ -195,13 +195,13 @@ pub fn DashboardsListPage() -> impl IntoView {
     // ── Confirm dialog derived signals ───────────────────────────────────
     let confirm_title = move || {
         deleting_dashboard
-            .get()
+            .get_untracked()
             .map(|(_, title)| format!("Delete \"{title}\"?"))
             .unwrap_or_else(|| "Delete Dashboard?".to_string())
     };
     let confirm_message = move || {
         deleting_dashboard
-            .get()
+            .get_untracked()
             .map(|(_, title)| {
                 format!(
                     "Are you sure you want to delete \"{title}\"? This action cannot be undone."

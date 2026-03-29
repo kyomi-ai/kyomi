@@ -83,6 +83,24 @@ pub fn LoginPage() -> impl IntoView {
         }
     };
 
+    // ── Already authenticated? Redirect away from login page ──────────
+    // Matches React: Login.jsx line 124 — `if (isAuthenticated) { navigate(redirect) }`
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::server_fns::sidebar::get_sidebar_user;
+        let auth_check = Resource::new(|| (), |_| get_sidebar_user());
+        let redirect_for_check = redirect_url.clone();
+        Effect::new(move || {
+            if let Some(Ok(_)) = auth_check.get() {
+                // Already authenticated — redirect to intended page
+                if let Some(window) = web_sys::window() {
+                    let target = redirect_for_check();
+                    let _ = window.location().set_href(&target);
+                }
+            }
+        });
+    }
+
     // ── Auth config resource ────────────────────────────────────────────
     let auth_config = Resource::new(|| (), |_| get_auth_config());
 

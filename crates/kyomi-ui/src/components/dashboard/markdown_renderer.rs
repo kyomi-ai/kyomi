@@ -16,11 +16,10 @@ use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
-use chartml_core::element::ChartElement;
 use chartml_core::ChartML;
+use chartml_datafusion::DataFusionTransform;
+use chartml_leptos::{use_chartml_configured, ChartHeaderBar, ChartMLChart};
 use leptos::prelude::*;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
 
 use crate::server_fns::datasources::query_datasource_arrow;
 
@@ -368,275 +367,46 @@ fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// ChartML instance factory
+// Kyomi chart palettes — must match apps/frontend/src/config/chartPalettes.js
 // ---------------------------------------------------------------------------
 
-/// Create a configured ChartML instance with all chart renderers registered.
-fn create_chartml() -> Arc<ChartML> {
-    let mut chartml = ChartML::new();
-    chartml.register_renderer("bar", CartesianRenderer::new());
-    chartml.register_renderer("line", CartesianRenderer::new());
-    chartml.register_renderer("area", CartesianRenderer::new());
-    chartml.register_renderer("pie", PieRenderer::new());
-    chartml.register_renderer("donut", PieRenderer::new());
-    chartml.register_renderer("scatter", ScatterRenderer::new());
-    chartml.register_renderer("metric", MetricRenderer::new());
-    Arc::new(chartml)
+fn kyomi_palette(name: &str) -> Vec<String> {
+    match name {
+        "vibrant" => vec![
+            "#1E88C7", "#D92849", "#28C75A", "#E8B733", "#28C7A8", "#E87333",
+            "#3355D9", "#A8D928", "#C728A8", "#D97328", "#28A8D9", "#73A828",
+        ],
+        "accessible" => vec![
+            "#2D5F7A", "#A83D52", "#3D7A52", "#C9A642", "#3D8A8A", "#E89970",
+            "#5C6D99", "#B8D96B", "#996B8A", "#B87752", "#85B8D9", "#85996B",
+        ],
+        // "balanced" (default)
+        _ => vec![
+            "#1A75C9", "#B8405A", "#3D8A5A", "#D9952D", "#2D7A8A", "#C9734D",
+            "#4D5A8A", "#99C94D", "#8A5A7A", "#D9B370", "#70B8D9", "#6B8A4D",
+        ],
+    }.into_iter().map(String::from).collect()
 }
 
 // ---------------------------------------------------------------------------
-// ChartElement → Leptos SVG view
+// ChartML instance factory
 // ---------------------------------------------------------------------------
 
-/// Recursively render a `ChartElement` tree into Leptos view nodes.
-///
-/// Handles all variants: Svg, Group, Rect, Path, Circle, Line, Text, Div, Span.
-fn render_chart_element(element: &ChartElement) -> AnyView {
-    match element {
-        ChartElement::Svg {
-            viewbox,
-            width: _,
-            height,
-            class,
-            children,
-        } => {
-            let viewbox_str = viewbox.to_string();
-            let class = class.clone();
-            let height_str = height.map(|h| h.to_string()).unwrap_or_default();
-            let children_views: Vec<AnyView> =
-                children.iter().map(render_chart_element).collect();
-
-            view! {
-                <svg
-                    viewBox=viewbox_str
-                    width="100%"
-                    height=height_str
-                    class=class
-                    style="overflow: visible; display: block;"
-                >
-                    {children_views}
-                </svg>
-            }
-            .into_any()
-        }
-
-        ChartElement::Group {
-            class,
-            transform,
-            children,
-        } => {
-            let class = class.clone();
-            let transform_str = transform
-                .as_ref()
-                .map(|t| t.to_svg_string())
-                .unwrap_or_default();
-            let children_views: Vec<AnyView> =
-                children.iter().map(render_chart_element).collect();
-
-            view! {
-                <g class=class transform=transform_str>
-                    {children_views}
-                </g>
-            }
-            .into_any()
-        }
-
-        ChartElement::Rect {
-            x,
-            y,
-            width,
-            height,
-            fill,
-            stroke,
-            class,
-            ..
-        } => {
-            let x_str = x.to_string();
-            let y_str = y.to_string();
-            let w_str = width.to_string();
-            let h_str = height.to_string();
-            let fill = fill.clone();
-            let stroke_str = stroke.clone().unwrap_or_default();
-            let class = class.clone();
-
-            view! {
-                <rect
-                    x=x_str y=y_str width=w_str height=h_str
-                    fill=fill stroke=stroke_str class=class
-                />
-            }
-            .into_any()
-        }
-
-        ChartElement::Path {
-            d,
-            fill,
-            stroke,
-            stroke_width,
-            stroke_dasharray,
-            opacity,
-            class,
-            ..
-        } => {
-            let d = d.clone();
-            let fill_str = fill.clone().unwrap_or_else(|| "none".to_string());
-            let stroke_str = stroke.clone().unwrap_or_else(|| "none".to_string());
-            let sw = stroke_width.map(|w| w.to_string()).unwrap_or_default();
-            let sda = stroke_dasharray.clone().unwrap_or_default();
-            let op = opacity.map(|o| o.to_string()).unwrap_or_default();
-            let class = class.clone();
-
-            view! {
-                <path
-                    d=d fill=fill_str stroke=stroke_str
-                    stroke-width=sw stroke-dasharray=sda opacity=op class=class
-                />
-            }
-            .into_any()
-        }
-
-        ChartElement::Circle {
-            cx,
-            cy,
-            r,
-            fill,
-            stroke,
-            class,
-            ..
-        } => {
-            let cx_str = cx.to_string();
-            let cy_str = cy.to_string();
-            let r_str = r.to_string();
-            let fill = fill.clone();
-            let stroke_str = stroke.clone().unwrap_or_default();
-            let class = class.clone();
-
-            view! {
-                <circle
-                    cx=cx_str cy=cy_str r=r_str
-                    fill=fill stroke=stroke_str class=class
-                />
-            }
-            .into_any()
-        }
-
-        ChartElement::Line {
-            x1,
-            y1,
-            x2,
-            y2,
-            stroke,
-            stroke_width,
-            stroke_dasharray,
-            class,
-        } => {
-            let x1 = x1.to_string();
-            let y1 = y1.to_string();
-            let x2 = x2.to_string();
-            let y2 = y2.to_string();
-            let stroke = stroke.clone();
-            let sw = stroke_width.map(|w| w.to_string()).unwrap_or_default();
-            let sda = stroke_dasharray.clone().unwrap_or_default();
-            let class = class.clone();
-
-            view! {
-                <line
-                    x1=x1 y1=y1 x2=x2 y2=y2
-                    stroke=stroke stroke-width=sw stroke-dasharray=sda class=class
-                />
-            }
-            .into_any()
-        }
-
-        ChartElement::Text {
-            x,
-            y,
-            content,
-            anchor,
-            dominant_baseline,
-            transform,
-            font_size,
-            font_weight,
-            fill,
-            class,
-            ..
-        } => {
-            let x = x.to_string();
-            let y = y.to_string();
-            let content = content.clone();
-            let anchor = anchor.to_string();
-            let db = dominant_baseline.clone().unwrap_or_default();
-            let transform_str = transform
-                .as_ref()
-                .map(|t| t.to_svg_string())
-                .unwrap_or_default();
-            let fs = font_size.clone().unwrap_or_default();
-            let fw = font_weight.clone().unwrap_or_default();
-            let fill = fill.clone().unwrap_or_default();
-            let class = class.clone();
-
-            view! {
-                <text
-                    x=x y=y
-                    text-anchor=anchor
-                    dominant-baseline=db
-                    transform=transform_str
-                    font-size=fs
-                    font-weight=fw
-                    fill=fill
-                    class=class
-                >
-                    {content}
-                </text>
-            }
-            .into_any()
-        }
-
-        ChartElement::Div {
-            class,
-            style,
-            children,
-        } => {
-            let class = class.clone();
-            let mut pairs: Vec<_> = style.iter().collect();
-            pairs.sort_by_key(|(k, _)| (*k).clone());
-            let style_str = pairs
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect::<Vec<_>>()
-                .join("; ");
-            let children_views: Vec<AnyView> =
-                children.iter().map(render_chart_element).collect();
-
-            view! {
-                <div class=class style=style_str>
-                    {children_views}
-                </div>
-            }
-            .into_any()
-        }
-
-        ChartElement::Span {
-            class,
-            style,
-            content,
-        } => {
-            let class = class.clone();
-            let mut pairs: Vec<_> = style.iter().collect();
-            pairs.sort_by_key(|(k, _)| (*k).clone());
-            let style_str = pairs
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, v))
-                .collect::<Vec<_>>()
-                .join("; ");
-            let content = content.clone();
-
-            view! {
-                <span class=class style=style_str>{content}</span>
-            }
-            .into_any()
-        }
-    }
+/// Create a configured ChartML instance with all chart renderers registered
+/// and the user's palette preference applied.
+fn configured_chartml(palette_name: &str) -> Arc<ChartML> {
+    let colors = kyomi_palette(palette_name);
+    use_chartml_configured(|c| {
+        c.register_renderer("bar", CartesianRenderer::new());
+        c.register_renderer("line", CartesianRenderer::new());
+        c.register_renderer("area", CartesianRenderer::new());
+        c.register_renderer("pie", PieRenderer::new());
+        c.register_renderer("donut", PieRenderer::new());
+        c.register_renderer("scatter", ScatterRenderer::new());
+        c.register_renderer("metric", MetricRenderer::new());
+        c.register_transform(DataFusionTransform);
+        c.set_default_palette(colors.clone());
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -982,15 +752,101 @@ fn WatchPreviewCardView(
     }
 }
 
-/// Internal chart rendering state.
-#[derive(Clone)]
-enum ChartState {
-    Loading,
-    Success(Box<ChartElement>),
-    Error(String),
+/// Apply type/orientation/mode overrides to a parsed ChartML spec.
+///
+/// Matches React's `ChartWithChrome` useMemo logic:
+/// - Applies `type_override` to `visualize.type`
+/// - Applies `orientation_override` (Some = set, None = remove)
+/// - Applies `mode_override` (Some = set, None = remove)
+/// - When type changes, strips per-row `mark` overrides so the new type applies uniformly
+/// - When switching away from bar, removes incompatible `orientation`
+/// - When switching away from bar/area, removes incompatible `mode`
+fn apply_spec_overrides(
+    yaml: &str,
+    type_override: Option<&str>,
+    orientation_override: Option<Option<&str>>,
+    mode_override: Option<Option<&str>>,
+) -> String {
+    let mut spec: serde_json::Value = match serde_yaml::from_str(yaml) {
+        Ok(v) => v,
+        Err(_) => return yaml.to_string(),
+    };
+
+    let viz = match spec.get_mut("visualize").and_then(|v| v.as_object_mut()) {
+        Some(v) => v,
+        None => return yaml.to_string(),
+    };
+
+    let original_type = viz
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Apply type override
+    let effective_type = if let Some(t) = type_override {
+        viz.insert("type".to_string(), serde_json::Value::String(t.to_string()));
+        t.to_string()
+    } else {
+        original_type.clone()
+    };
+
+    // Apply orientation override (Some(Some("horizontal")) = set, Some(None) = remove)
+    if let Some(orient_val) = orientation_override {
+        if let Some(o) = orient_val {
+            viz.insert(
+                "orientation".to_string(),
+                serde_json::Value::String(o.to_string()),
+            );
+        } else {
+            viz.remove("orientation");
+        }
+    }
+
+    // Apply mode override (Some(Some("stacked")) = set, Some(None) = remove)
+    if let Some(mode_val) = mode_override {
+        if let Some(m) = mode_val {
+            viz.insert("mode".to_string(), serde_json::Value::String(m.to_string()));
+        } else {
+            viz.remove("mode");
+        }
+    }
+
+    // If type changed, clean up incompatible properties
+    if type_override.is_some() && effective_type != original_type {
+        // Remove orientation for non-bar charts
+        if effective_type != "bar" {
+            viz.remove("orientation");
+        }
+        // Remove mode for non-bar/area charts
+        if effective_type != "bar" && effective_type != "area" {
+            viz.remove("mode");
+        }
+        // Strip per-row mark overrides so new type applies uniformly
+        if let Some(arr) = viz.get_mut("rows").and_then(|r| r.as_array_mut()) {
+            for item in arr.iter_mut() {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.remove("mark");
+                }
+            }
+        }
+    }
+
+    // Re-serialize to YAML
+    serde_yaml::to_string(&spec).unwrap_or_else(|_| yaml.to_string())
 }
 
-/// Renders a single ChartML chart with chrome (title bar, actions, footer).
+/// Renders a single ChartML chart with chrome (header bar, type/orientation/mode
+/// overrides, refresh, and action menu).
+///
+/// Uses `chartml_leptos::ChartHeaderBar` (native Rust/Tailwind) instead of the
+/// JS `<chart-header-bar>` web component. Type/orientation/mode overrides are
+/// applied as reactive signals that derive an effective YAML spec.
+///
+/// For **remote datasource** charts (with `data.datasource` + `data.query`),
+/// fetches data via `query_datasource_arrow`, injects it into a per-render
+/// `ChartML` instance, and renders via `ChartMLChart`. For **inline data**
+/// charts, passes through directly to `ChartMLChart`.
 #[component]
 fn ChartBlock(
     #[prop(into)] yaml: String,
@@ -1007,56 +863,116 @@ fn ChartBlock(
     on_chart_info: Option<Callback<String>>,
     /// "Ask about this chart" callback — receives chart YAML wrapped in code fence.
     on_ask_about_chart: Option<Callback<String>>,
+    /// User's chart palette preference name.
+    #[prop(into, optional)]
+    chart_palette: Option<String>,
 ) -> impl IntoView {
     let yaml_owned = yaml.clone();
     let yaml_for_info = yaml.clone();
     let yaml_for_save = yaml.clone();
-    let yaml_for_ask = yaml.clone();
 
     // Parse the spec to extract metadata
     let parsed_spec: Option<serde_json::Value> =
         serde_yaml::from_str(&yaml_owned).ok();
 
-    let _chart_title = parsed_spec
-        .as_ref()
-        .and_then(extract_title)
-        .unwrap_or_else(|| "Chart".to_string());
+    let chart_title = parsed_spec.as_ref().and_then(extract_title);
+    let initial_chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
+    let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
+    let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
 
     let datasource_slug = parsed_spec.as_ref().and_then(extract_datasource);
     let sql_query = parsed_spec.as_ref().and_then(extract_query);
-    let chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
-    let chart_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
-    let chart_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
+    let is_remote = datasource_slug.is_some() && sql_query.is_some();
 
-    // Reactive state for the chart
-    let (chart_state, set_chart_state) = signal(ChartState::Loading);
+    // -- Override signals (matches React's ChartWithChrome state) --
+    let (type_override, set_type_override) = signal(None::<String>);
+    let (orientation_override, set_orientation_override) = signal(None::<Option<String>>);
+    let (mode_override, set_mode_override) = signal(None::<Option<String>>);
+
     let (refresh_count, set_refresh_count) = signal(0_u32);
     let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
     let (is_refreshing, set_is_refreshing) = signal(false);
 
-    // Create the ChartML instance (created once, shared via Arc)
-    let chartml = create_chartml();
+    // Derive current chart type/orientation/mode for the header bar display
+    let initial_type_stored = StoredValue::new(initial_chart_type.clone());
+    let initial_orient_stored = StoredValue::new(initial_orientation.clone());
+    let initial_mode_stored = StoredValue::new(initial_mode.clone());
 
-    // Effect that fetches data and renders the chart reactively.
-    // Runs whenever parameters or refresh_count change.
-    let ds_slug = datasource_slug.clone();
-    let sql = sql_query.clone();
-    let yaml_for_render = yaml_owned.clone();
+    let current_chart_type = Memo::new(move |_| {
+        type_override.get().or_else(|| initial_type_stored.get_value())
+    });
+    let current_orientation = Memo::new(move |_| {
+        match orientation_override.get() {
+            Some(o) => o, // Some(Some("horizontal")) or Some(None)
+            None => initial_orient_stored.get_value(), // No override
+        }
+    });
+    let current_mode = Memo::new(move |_| {
+        match mode_override.get() {
+            Some(m) => m, // Some(Some("stacked")) or Some(None)
+            None => initial_mode_stored.get_value(), // No override
+        }
+    });
 
-    Effect::new(move || {
-        let params = parameters.get();
-        let _refresh = refresh_count.get();
-        let ds = ds_slug.clone();
-        let q = sql.clone();
-        let yaml_str = yaml_for_render.clone();
-        let chartml = chartml.clone();
+    // Derive the effective YAML spec with overrides applied
+    let yaml_for_spec = yaml_owned.clone();
+    let effective_spec = Memo::new(move |_| {
+        let t_ovr = type_override.get();
+        let o_ovr = orientation_override.get();
+        let m_ovr = mode_override.get();
 
-        set_chart_state.set(ChartState::Loading);
-        set_is_refreshing.set(true);
+        // No overrides — return original YAML unchanged
+        if t_ovr.is_none() && o_ovr.is_none() && m_ovr.is_none() {
+            return yaml_for_spec.clone();
+        }
 
-        leptos::task::spawn_local(async move {
-            let result = if let (Some(slug), Some(query)) = (ds, q) {
-                // Remote data — fetch via server function
+        let result = apply_spec_overrides(
+            &yaml_for_spec,
+            t_ovr.as_deref(),
+            o_ovr.as_ref().map(|o| o.as_deref()),
+            m_ovr.as_ref().map(|m| m.as_deref()),
+        );
+
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(&format!(
+            "[ChartBlock] spec override: type={:?} orient={:?} mode={:?}\nfull_result={}",
+            t_ovr, o_ovr, m_ovr, &result
+        ).into());
+
+        result
+    });
+
+    // Create the ChartML instance
+    let palette = chart_palette.unwrap_or_else(|| "balanced".to_string());
+    let chartml = configured_chartml(&palette);
+
+    // -- Remote data path: fetch data, register on ChartML instance, render via ChartMLChart --
+    // We store fetched remote data as a signal. When data arrives, we create a new ChartML
+    // instance with the data registered as a named source ("_remote") and rewrite the YAML
+    // `data:` section to reference it. This lets ChartMLChart handle everything uniformly.
+    let (remote_chartml, set_remote_chartml) = signal(None::<Arc<ChartML>>);
+    let (remote_error, set_remote_error) = signal(None::<String>);
+    let (remote_loading, set_remote_loading) = signal(is_remote);
+
+    if is_remote {
+        let ds_slug = datasource_slug.clone();
+        let sql = sql_query.clone();
+        let palette_for_remote = palette.clone();
+
+        Effect::new(move || {
+            let params = parameters.get();
+            let _refresh = refresh_count.get();
+            let ds = ds_slug.clone();
+            let q = sql.clone();
+            let pal = palette_for_remote.clone();
+
+            set_remote_loading.set(true);
+            set_remote_error.set(None);
+            set_is_refreshing.set(true);
+
+            leptos::task::spawn_local(async move {
+                let slug = ds.unwrap();
+                let query = q.unwrap();
                 let resolved_sql = substitute_params(&query, &params);
 
                 match query_datasource_arrow(slug, resolved_sql, None).await {
@@ -1067,8 +983,9 @@ fn ChartBlock(
                         {
                             Ok(bytes) => bytes,
                             Err(e) => {
-                                set_chart_state
-                                    .set(ChartState::Error(format!("Base64 decode error: {e}")));
+                                set_remote_error.set(Some(format!("Base64 decode error: {e}")));
+                                set_remote_loading.set(false);
+                                set_is_refreshing.set(false);
                                 return;
                             }
                         };
@@ -1077,48 +994,81 @@ fn ChartBlock(
                             match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                 Ok(dt) => dt,
                                 Err(e) => {
-                                    set_chart_state
-                                        .set(ChartState::Error(format!("Arrow decode error: {e}")));
+                                    set_remote_error
+                                        .set(Some(format!("Arrow decode error: {e}")));
+                                    set_remote_loading.set(false);
+                                    set_is_refreshing.set(false);
                                     return;
                                 }
                             };
 
-                        chartml
-                            .render_from_yaml_with_data_async(&yaml_str, data_table)
-                            .await
-                            .map_err(|e| format!("Chart render error: {e}"))
-                    }
-                    Err(e) => Err(format!("Query error: {e}")),
-                }
-            } else {
-                // Inline data — render directly
-                chartml
-                    .render_from_yaml(&yaml_str)
-                    .map_err(|e| format!("Chart render error: {e}"))
-            };
+                        // Create a new ChartML instance with the fetched data registered
+                        let instance = configured_chartml(&pal);
+                        // Safety: Arc::get_mut works here because we just created it and
+                        // hold the only reference. We need to register the source before
+                        // wrapping it.
+                        let mut chartml_mut = ChartML::new();
+                        // Re-register all renderers + transform + palette on the mutable instance
+                        let colors = kyomi_palette(&pal);
+                        chartml_mut.register_renderer("bar", CartesianRenderer::new());
+                        chartml_mut.register_renderer("line", CartesianRenderer::new());
+                        chartml_mut.register_renderer("area", CartesianRenderer::new());
+                        chartml_mut.register_renderer("pie", PieRenderer::new());
+                        chartml_mut.register_renderer("donut", PieRenderer::new());
+                        chartml_mut.register_renderer("scatter", ScatterRenderer::new());
+                        chartml_mut.register_renderer("metric", MetricRenderer::new());
+                        chartml_mut.register_transform(DataFusionTransform);
+                        chartml_mut.set_default_palette(colors);
+                        chartml_mut.register_source("_remote", data_table);
+                        let _ = instance; // drop unused Arc
 
-            match result {
-                Ok(element) => {
-                    set_chart_state.set(ChartState::Success(Box::new(element)));
-                    // Store timestamp as milliseconds for the chart-header-bar web component
-                    let now_ms = js_sys::Date::now();
-                    set_last_refreshed.set(Some(now_ms));
-                    set_is_refreshing.set(false);
+                        set_remote_chartml.set(Some(Arc::new(chartml_mut)));
+                        let now_ms = js_sys::Date::now();
+                        set_last_refreshed.set(Some(now_ms));
+                        set_remote_loading.set(false);
+                        set_is_refreshing.set(false);
+                    }
+                    Err(e) => {
+                        set_remote_error.set(Some(format!("Query error: {e}")));
+                        set_remote_loading.set(false);
+                        set_is_refreshing.set(false);
+                    }
                 }
-                Err(err) => {
-                    set_chart_state.set(ChartState::Error(err));
-                    set_is_refreshing.set(false);
-                }
-            }
+            });
         });
+    }
+
+    // Derive the spec signal for ChartMLChart, rewriting data ref for remote charts
+    let effective_spec_for_chartml = Memo::new(move |_| {
+        let base_spec = effective_spec.get();
+
+        if !is_remote {
+            return base_spec;
+        }
+
+        // Rewrite the data section to reference the named "_remote" source
+        // so ChartMLChart resolves it from the registered sources
+        match serde_yaml::from_str::<serde_json::Value>(&base_spec) {
+            Ok(mut val) => {
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert(
+                        "data".to_string(),
+                        serde_json::Value::String("_remote".to_string()),
+                    );
+                }
+                serde_yaml::to_string(&val).unwrap_or(base_spec)
+            }
+            Err(_) => base_spec,
+        }
     });
 
-    // Retry handler for error state
-    let handle_refresh_for_retry = move |_: leptos::ev::MouseEvent| {
-        set_refresh_count.update(|c| *c += 1);
-    };
+    // Determine which callbacks are available
+    let has_edit = on_edit_chart.is_some();
+    let has_delete = on_delete_chart.is_some();
+    let has_save = on_save_to_dashboard.is_some();
+    let has_info = on_chart_info.is_some();
 
-    // Store callbacks as StoredValue so they can be used inside move closures.
+    // Store callbacks for use in closures
     let edit_cb = StoredValue::new(on_edit_chart);
     let delete_cb = StoredValue::new(on_delete_chart);
     let save_cb = StoredValue::new(on_save_to_dashboard);
@@ -1126,169 +1076,180 @@ fn ChartBlock(
     let _ask_cb = StoredValue::new(on_ask_about_chart);
     let yaml_for_save_stored = StoredValue::new(yaml_for_save);
     let yaml_for_info_stored = StoredValue::new(yaml_for_info);
-    let _yaml_for_ask_stored = StoredValue::new(yaml_for_ask);
 
-    // NodeRef for the wrapper div — we find the chart-header-bar child inside it
-    let header_wrapper_ref = NodeRef::<leptos::html::Div>::new();
-
-    // Attach event listeners to the web component after it mounts
-    Effect::new(move || {
-        let Some(wrapper) = header_wrapper_ref.get() else {
-            return;
-        };
-        let wrapper_el: &web_sys::Element = wrapper.as_ref();
-        let Some(header_el) = wrapper_el.query_selector("chart-header-bar").ok().flatten() else {
-            return;
-        };
-        {
-            let el: &web_sys::EventTarget = header_el.as_ref();
-
-            // Refresh event
-            let refresh_closure = Closure::<dyn Fn()>::new(move || {
-                set_refresh_count.update(|c| *c += 1);
-            });
-            let _ = el.add_event_listener_with_callback(
-                "header-refresh",
-                refresh_closure.as_ref().unchecked_ref(),
-            );
-            refresh_closure.forget();
-
-            // Edit event
-            if let Some(cb) = edit_cb.get_value() {
-                let bi = block_index;
-                let ai = array_index;
-                let edit_closure = Closure::<dyn Fn()>::new(move || {
-                    cb.run((bi, ai));
-                });
-                let _ = el.add_event_listener_with_callback(
-                    "header-edit",
-                    edit_closure.as_ref().unchecked_ref(),
-                );
-                edit_closure.forget();
-            }
-
-            // Delete event
-            if let Some(cb) = delete_cb.get_value() {
-                let bi = block_index;
-                let ai = array_index;
-                let delete_closure = Closure::<dyn Fn()>::new(move || {
-                    cb.run((bi, ai));
-                });
-                let _ = el.add_event_listener_with_callback(
-                    "header-delete",
-                    delete_closure.as_ref().unchecked_ref(),
-                );
-                delete_closure.forget();
-            }
-
-            // Save-to-dashboard event
-            if let Some(cb) = save_cb.get_value() {
-                let yaml = yaml_for_save_stored.get_value();
-                let save_closure = Closure::<dyn Fn()>::new(move || {
-                    let chart_md = format!("```chartml\n{}\n```", yaml);
-                    cb.run(chart_md);
-                });
-                let _ = el.add_event_listener_with_callback(
-                    "header-save-to-dashboard",
-                    save_closure.as_ref().unchecked_ref(),
-                );
-                save_closure.forget();
-            }
-
-            // Info event
-            if let Some(cb) = info_cb.get_value() {
-                let yaml = yaml_for_info_stored.get_value();
-                let info_closure = Closure::<dyn Fn()>::new(move || {
-                    cb.run(yaml.clone());
-                });
-                let _ = el.add_event_listener_with_callback(
-                    "header-info",
-                    info_closure.as_ref().unchecked_ref(),
-                );
-                info_closure.forget();
-            }
-        } // end inner block borrowing el
+    // Build typed callbacks for ChartHeaderBar
+    let on_type_change_cb = Callback::new(move |t: String| {
+        set_type_override.set(Some(t));
+    });
+    let on_orientation_change_cb = Callback::new(move |o: Option<String>| {
+        set_orientation_override.set(Some(o));
+    });
+    let on_mode_change_cb = Callback::new(move |m: Option<String>| {
+        set_mode_override.set(Some(m));
+    });
+    let on_refresh_cb = Callback::new(move |()| {
+        set_refresh_count.update(|c| *c += 1);
     });
 
-    // Compute attribute values for the web component
-    let last_updated_attr = move || {
-        last_refreshed.get().map(|ms| ms.to_string())
+    // Build typed callbacks for the header bar's action buttons.
+    // Always create a callback (the header bar respects show_* flags for visibility).
+    let on_edit_cb = {
+        let bi = block_index;
+        let ai = array_index;
+        Callback::new(move |()| {
+            if let Some(cb) = edit_cb.get_value() {
+                cb.run((bi, ai));
+            }
+        })
     };
-    let refreshing_attr = move || {
-        if is_refreshing.get() { Some("".to_string()) } else { None }
+    let on_delete_cb = {
+        let bi = block_index;
+        let ai = array_index;
+        Callback::new(move |()| {
+            if let Some(cb) = delete_cb.get_value() {
+                cb.run((bi, ai));
+            }
+        })
     };
+    let on_save_cb = Callback::new(move |()| {
+        if let Some(cb) = save_cb.get_value() {
+            let yaml = yaml_for_save_stored.get_value();
+            let chart_md = format!("```chartml\n{}\n```", yaml);
+            cb.run(chart_md);
+        }
+    });
+    let on_info_cb = Callback::new(move |()| {
+        if let Some(cb) = info_cb.get_value() {
+            let yaml = yaml_for_info_stored.get_value();
+            cb.run(yaml);
+        }
+    });
 
-    // Build static boolean attributes based on which callbacks are provided
-    let has_refresh = true; // Always show refresh
-    let has_edit = on_edit_chart.is_some();
-    let has_delete = on_delete_chart.is_some();
-    let has_save = on_save_to_dashboard.is_some();
-    let has_info = on_chart_info.is_some();
+    // Spec signal for ChartMLChart
+    let spec_signal = Signal::derive(move || effective_spec_for_chartml.get());
+
+    // ChartML instance signal — for remote charts, uses the instance with data registered;
+    // for inline charts, uses the static configured instance.
+    let chartml_for_inline = chartml.clone();
+
+    // Store callbacks as StoredValues for use inside the reactive header closure.
+    let on_type_change_stored = StoredValue::new(on_type_change_cb);
+    let on_orientation_change_stored = StoredValue::new(on_orientation_change_cb);
+    let on_mode_change_stored = StoredValue::new(on_mode_change_cb);
+    let on_refresh_stored = StoredValue::new(on_refresh_cb);
+    let on_edit_stored = StoredValue::new(on_edit_cb);
+    let on_delete_stored = StoredValue::new(on_delete_cb);
+    let on_save_stored = StoredValue::new(on_save_cb);
+    let on_info_stored = StoredValue::new(on_info_cb);
 
     view! {
         <div class="my-2">
-            // Chart header bar web component (wrapped in div for NodeRef access)
-            <div node_ref=header_wrapper_ref>
-                <chart-header-bar
-                    last-updated=last_updated_attr
-                    refreshing=refreshing_attr
-                    show-refresh=has_refresh.then_some("")
-                    show-edit=has_edit.then_some("")
-                    show-delete=has_delete.then_some("")
-                    show-save-to-dashboard=has_save.then_some("")
-                    show-info=has_info.then_some("")
-                    show-type-selector=""
-                    chart-type=chart_type
-                    chart-orientation=chart_orientation
-                    chart-mode=chart_mode
-                />
-            </div>
-            // Chart content area
-            <div class="p-4">
-                {move || {
-                    match chart_state.get() {
-                        ChartState::Loading => {
-                            view! {
-                                <div class="flex items-center justify-center py-12">
-                                    <svg class="animate-spin h-6 w-6 text-muted-foreground" fill="none" viewBox="0 0 24 24">
-                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                    </svg>
-                                    <span class="ml-2 text-sm text-muted-foreground">"Loading chart..."</span>
-                                </div>
-                            }.into_any()
-                        }
-                        ChartState::Success(element) => {
-                            view! {
-                                <div class="w-full">
-                                    {render_chart_element(&element)}
-                                </div>
-                            }.into_any()
-                        }
-                        ChartState::Error(err) => {
-                            view! {
-                                <div class="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-                                    <div class="flex items-start gap-3">
-                                        <svg class="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                        </svg>
-                                        <div class="flex-1">
-                                            <h3 class="text-sm font-semibold text-destructive mb-1">"Chart Error"</h3>
-                                            <p class="text-sm text-destructive/90">{err}</p>
-                                            <button
-                                                on:click=handle_refresh_for_retry
-                                                class="mt-2 text-xs text-primary hover:text-primary/80 underline"
-                                            >
-                                                "Retry"
-                                            </button>
+            // Native Rust ChartHeaderBar — re-renders when type/orientation/mode change
+            {move || {
+                let ct = current_chart_type.get();
+                let co = current_orientation.get();
+                let cm = current_mode.get();
+
+                // Build the header bar view. ChartHeaderBar uses #[prop(optional, into)]
+                // for string props (expects Into<String>, wraps in Some automatically)
+                // and #[prop(optional)] for callbacks (expects bare Callback<T>).
+                // We conditionally pass props only when values are present.
+                let type_cb = on_type_change_stored.get_value();
+                let orient_cb = on_orientation_change_stored.get_value();
+                let mode_cb = on_mode_change_stored.get_value();
+                let refresh_cb = on_refresh_stored.get_value();
+                let edit_action = on_edit_stored.get_value();
+                let delete_action = on_delete_stored.get_value();
+                let save_action = on_save_stored.get_value();
+                let info_action = on_info_stored.get_value();
+                let last_sig = Signal::derive(move || last_refreshed.get());
+                let refreshing_sig = Signal::derive(move || is_refreshing.get());
+                let title_val = chart_title.clone();
+
+                view! {
+                    <ChartHeaderBar
+                        title=title_val.unwrap_or_default()
+                        chart_type=ct.unwrap_or_default()
+                        chart_orientation=co.unwrap_or_default()
+                        chart_mode=cm.unwrap_or_default()
+                        show_type_selector=true
+                        show_refresh=true
+                        show_edit=has_edit
+                        show_delete=has_delete
+                        show_save_to_dashboard=has_save
+                        show_info=has_info
+                        on_type_change=type_cb
+                        on_orientation_change=orient_cb
+                        on_mode_change=mode_cb
+                        on_refresh=refresh_cb
+                        on_edit=edit_action
+                        on_delete=delete_action
+                        on_save_to_dashboard=save_action
+                        on_info=info_action
+                        last_updated=last_sig
+                        is_refreshing=refreshing_sig
+                    />
+                }
+            }}
+            // Chart content area — unified through ChartMLChart
+            {if is_remote {
+                // Remote path: show loading/error states, or ChartMLChart once data arrives
+                view! {
+                    <div class="w-full">
+                        {move || {
+                            if let Some(err) = remote_error.get() {
+                                view! {
+                                    <div class="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
+                                        <div class="flex items-start gap-3">
+                                            <svg class="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                            </svg>
+                                            <div class="flex-1">
+                                                <h3 class="text-sm font-semibold text-destructive mb-1">"Chart Error"</h3>
+                                                <p class="text-sm text-destructive/90">{err}</p>
+                                                <button
+                                                    on:click=move |_| set_refresh_count.update(|c| *c += 1)
+                                                    class="mt-2 text-xs text-primary hover:text-primary/80 underline"
+                                                >
+                                                    "Retry"
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                            }.into_any()
-                        }
-                    }
-                }}
-            </div>
+                                }.into_any()
+                            } else if remote_loading.get() {
+                                view! {
+                                    <div class="flex items-center justify-center py-12">
+                                        <svg class="animate-spin h-6 w-6 text-muted-foreground" fill="none" viewBox="0 0 24 24">
+                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                        </svg>
+                                        <span class="ml-2 text-sm text-muted-foreground">"Loading chart..."</span>
+                                    </div>
+                                }.into_any()
+                            } else if let Some(remote_instance) = remote_chartml.get() {
+                                view! {
+                                    <ChartMLChart
+                                        spec=spec_signal
+                                        chartml=remote_instance
+                                    />
+                                }.into_any()
+                            } else {
+                                // Should not happen — either loading, error, or data
+                                view! { <div /> }.into_any()
+                            }
+                        }}
+                    </div>
+                }.into_any()
+            } else {
+                // Inline data path — delegate to ChartMLChart directly
+                view! {
+                    <ChartMLChart
+                        spec=spec_signal
+                        chartml=chartml_for_inline
+                    />
+                }.into_any()
+            }}
         </div>
     }
 }
@@ -1338,7 +1299,11 @@ pub fn MarkdownRenderer(
     /// Message ID used to generate stable card IDs for watch preview cards
     #[prop(optional, into)]
     message_id: Option<String>,
+    /// User's chart palette preference (e.g. "balanced", "vibrant", "accessible")
+    #[prop(optional, into)]
+    chart_palette: Option<String>,
 ) -> impl IntoView {
+    let palette_name = StoredValue::new(chart_palette.unwrap_or_else(|| "balanced".to_string()));
     let msg_id = StoredValue::new(message_id.unwrap_or_default());
 
     let segments = Memo::new(move |_| {
@@ -1399,6 +1364,7 @@ pub fn MarkdownRenderer(
                                     on_save_to_dashboard=save
                                     on_chart_info=info
                                     on_ask_about_chart=ask
+                                    chart_palette=palette_name.get_value()
                                 />
                             }.into_any()
                         }

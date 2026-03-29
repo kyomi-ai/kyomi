@@ -1561,6 +1561,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "chartml-leptos"
+version = "0.1.0"
+dependencies = [
+ "chartml-core",
+ "chartml-render",
+ "js-sys",
+ "leptos",
+ "send_wrapper",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "chartml-render"
 version = "3.0.0"
 dependencies = [
@@ -5999,6 +6014,8 @@ dependencies = [
  "chartml-chart-pie",
  "chartml-chart-scatter",
  "chartml-core",
+ "chartml-datafusion",
+ "chartml-leptos",
  "chrono",
  "console_error_panic_hook",
  "dashmap",

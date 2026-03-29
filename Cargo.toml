@@ -124,14 +124,15 @@ kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 
-# ChartML rendering (chartml-rs)
-chartml-core = { path = "../chartml-rs/crates/chartml-core" }
-chartml-render = { path = "../chartml-rs/crates/chartml-render" }
-chartml-chart-cartesian = { path = "../chartml-rs/crates/chartml-chart-cartesian" }
-chartml-chart-pie = { path = "../chartml-rs/crates/chartml-chart-pie" }
-chartml-chart-scatter = { path = "../chartml-rs/crates/chartml-chart-scatter" }
-chartml-chart-metric = { path = "../chartml-rs/crates/chartml-chart-metric" }
-chartml-datafusion = { path = "../chartml-rs/crates/chartml-datafusion" }
+# ChartML rendering (chartml)
+chartml-core = { path = "../chartml/crates/chartml-core" }
+chartml-render = { path = "../chartml/crates/chartml-render" }
+chartml-chart-cartesian = { path = "../chartml/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "../chartml/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "../chartml/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "../chartml/crates/chartml-chart-metric" }
+chartml-datafusion = { path = "../chartml/crates/chartml-datafusion" }
+chartml-leptos = { path = "../chartml/crates/chartml-leptos" }
 
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }

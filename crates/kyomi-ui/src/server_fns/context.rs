@@ -38,6 +38,8 @@ pub struct UserContext {
     pub billing_enabled: bool,
     /// Feature flags — boolean capabilities keyed by name.
     pub capabilities: HashMap<String, bool>,
+    /// User's chart color palette preference (e.g. "balanced", "vibrant", "accessible").
+    pub chart_palette: String,
 }
 
 /// Load the authenticated user's full context: identity, workspace, and capabilities.
@@ -104,6 +106,25 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     // Matches the Capabilities struct's billing_enabled field.
     let billing_enabled = capabilities.billing_enabled;
 
+    // Read user's chart palette preference from chartml_config JSON
+    let chart_palette = {
+        let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
+            .await
+            .ok()
+            .flatten();
+        user.and_then(|u| {
+            u.chartml_config
+                .as_ref()
+                .and_then(|config| {
+                    config.get("config")
+                        .and_then(|c| c.get("style"))
+                        .and_then(|s| s.as_str())
+                        .map(String::from)
+                })
+        })
+        .unwrap_or_else(|| "balanced".to_string())
+    };
+
     Ok(UserContext {
         user_id: auth.user_id,
         email: auth.email,
@@ -122,6 +143,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
         is_self_hosted: ctx.config.self_hosted,
         billing_enabled,
         capabilities: caps_map,
+        chart_palette,
     })
 }
 

@@ -32,26 +32,33 @@ pub async fn serve_protected_page(headers: HeaderMap, uri: axum::http::Uri) -> R
     serve_leptos_shell().await
 }
 
-/// Check for `access_token` cookie and redirect to `/login?redirect=<path>` if missing.
+/// Check for auth cookies and redirect to `/login?redirect=<path>` if none present.
+///
+/// Serves the page if either `access_token` OR `refresh_token` is present.
+/// When only `refresh_token` exists (access token expired), the pre-boot
+/// refresh script in index.html will exchange it for a new access token
+/// before WASM boots.
 ///
 /// The redirect path is validated to contain only safe characters (alphanumeric,
 /// `/`, `-`, `_`) to prevent query-param injection or open-redirect attacks.
 fn check_auth_cookie_or_redirect(headers: &HeaderMap, uri: Option<&axum::http::Uri>) -> Option<Response> {
-    let cookie_name = &kyomi_core::constants::get().cookies.access_token_name;
-    let prefix = format!("{cookie_name}=");
-    let has_token = headers
+    let cookies_str = headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|cookies| {
-            cookies
-                .split(';')
-                .any(|c| {
-                    let c = c.trim();
-                    c.starts_with(&prefix) && c.len() > prefix.len()
-                })
-        });
+        .unwrap_or("");
 
-    if has_token {
+    let has_cookie = |name: &str| {
+        let prefix = format!("{name}=");
+        cookies_str.split(';').any(|c| {
+            let c = c.trim();
+            c.starts_with(&prefix) && c.len() > prefix.len()
+        })
+    };
+
+    let access_name = &kyomi_core::constants::get().cookies.access_token_name;
+    let refresh_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+
+    if has_cookie(access_name) || has_cookie(refresh_name) {
         return None;
     }
 

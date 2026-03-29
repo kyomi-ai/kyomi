@@ -35,7 +35,6 @@ pub fn Layout(children: Children) -> impl IntoView {
     let (mobile_open, set_mobile_open) = signal(false);
 
     // Fetch sidebar user info — used for both the sidebar UI and WebSocket auth signals.
-    // This avoids an extra server function call just for WebSocket config.
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
 
     // Auth guard: tracks whether the user has been authenticated.
@@ -65,12 +64,8 @@ pub fn Layout(children: Children) -> impl IntoView {
                 Some(Err(e)) => {
                     let msg = e.to_string();
                     if auth_refresh::is_auth_error(&msg) {
-                        // Try token refresh; refresh_and_reload() redirects
-                        // to /login if the refresh also fails
                         auth_refresh::refresh_and_reload();
                     } else {
-                        // Any other error loading the user — redirect to login
-                        // as a safe fallback (can't render layout without user)
                         if let Some(window) = web_sys::window() {
                             let _ = window.location().set_href("/login");
                         }
@@ -252,7 +247,8 @@ fn Sidebar(
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
     // Fetch unread alerts count for the Watches sidebar badge.
     // Mirrors React's `useQuery(['unread-alerts-count'])` in Sidebar.jsx.
-    let unread_alerts = Resource::new(|| (), |_| get_unread_alerts_count());
+    // Uses LocalResource to avoid hydration mismatch — badge is client-only UI.
+    let unread_alerts = LocalResource::new(get_unread_alerts_count);
     let (user_menu_open, set_user_menu_open) = signal(false);
 
     // Logout action — calls POST /leptos-api/logout to revoke the current session
