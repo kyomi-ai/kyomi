@@ -926,20 +926,12 @@ fn ChartBlock(
             return yaml_for_spec.clone();
         }
 
-        let result = apply_spec_overrides(
+        apply_spec_overrides(
             &yaml_for_spec,
             t_ovr.as_deref(),
             o_ovr.as_ref().map(|o| o.as_deref()),
             m_ovr.as_ref().map(|m| m.as_deref()),
-        );
-
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!(
-            "[ChartBlock] spec override: type={:?} orient={:?} mode={:?}\nfull_result={}",
-            t_ovr, o_ovr, m_ovr, &result
-        ).into());
-
-        result
+        )
     });
 
     // Create the ChartML instance
@@ -1038,28 +1030,29 @@ fn ChartBlock(
         });
     }
 
-    // Derive the spec signal for ChartMLChart, rewriting data ref for remote charts
-    let effective_spec_for_chartml = Memo::new(move |_| {
+    // RwSignal for ChartMLChart spec — updated by Effect when overrides change.
+    let (chartml_spec, set_chartml_spec) = signal(yaml_owned.clone());
+    Effect::new(move || {
         let base_spec = effective_spec.get();
 
-        if !is_remote {
-            return base_spec;
-        }
-
-        // Rewrite the data section to reference the named "_remote" source
-        // so ChartMLChart resolves it from the registered sources
-        match serde_yaml::from_str::<serde_json::Value>(&base_spec) {
-            Ok(mut val) => {
-                if let Some(obj) = val.as_object_mut() {
-                    obj.insert(
-                        "data".to_string(),
-                        serde_json::Value::String("_remote".to_string()),
-                    );
+        let final_spec = if !is_remote {
+            base_spec
+        } else {
+            // Rewrite the data section to reference the named "_remote" source
+            match serde_yaml::from_str::<serde_json::Value>(&base_spec) {
+                Ok(mut val) => {
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert(
+                            "data".to_string(),
+                            serde_json::Value::String("_remote".to_string()),
+                        );
+                    }
+                    serde_yaml::to_string(&val).unwrap_or(base_spec)
                 }
-                serde_yaml::to_string(&val).unwrap_or(base_spec)
+                Err(_) => base_spec,
             }
-            Err(_) => base_spec,
-        }
+        };
+        set_chartml_spec.set(final_spec);
     });
 
     // Determine which callbacks are available
@@ -1125,8 +1118,8 @@ fn ChartBlock(
         }
     });
 
-    // Spec signal for ChartMLChart
-    let spec_signal = Signal::derive(move || effective_spec_for_chartml.get());
+    // Spec signal for ChartMLChart — reads from the RwSignal updated by the Effect above
+    let spec_signal = Signal::derive(move || chartml_spec.get());
 
     // ChartML instance signal — for remote charts, uses the instance with data registered;
     // for inline charts, uses the static configured instance.
