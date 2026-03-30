@@ -528,6 +528,15 @@ pub fn DashboardViewerPage() -> impl IntoView {
                             set_chart_info_open.set(true);
                         });
 
+                        let on_ask_about_chart = Callback::new(move |chart_md: String| {
+                            // Navigate to chat with chart context — matches React's handleAskAboutChart
+                            let nav = leptos_router::hooks::use_navigate();
+                            nav(
+                                &format!("/chat?chart={}", js_sys::encode_uri_component(&chart_md)),
+                                leptos_router::NavigateOptions::default(),
+                            );
+                        });
+
                         // ── Default dashboard toggle handlers ──────────
                         let is_user_default = {
                             let did = did_for_user_default.clone();
@@ -1006,6 +1015,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                 parameters=Signal::derive(move || param_values.get())
                                                                 on_save_to_dashboard=on_save_to_dashboard
                                                                 on_chart_info=on_chart_info
+                                                                on_ask_about_chart=on_ask_about_chart
                                                                 chart_palette=chart_palette.clone()
                                                             />
                                                         }.into_any()

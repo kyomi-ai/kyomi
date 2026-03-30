@@ -871,6 +871,7 @@ fn ChartBlock(
     let yaml_owned = yaml.clone();
     let yaml_for_info = yaml.clone();
     let yaml_for_save = yaml.clone();
+    let yaml_for_ask = yaml.clone();
 
     // Parse the spec to extract metadata
     let parsed_spec: Option<serde_json::Value> =
@@ -1066,15 +1067,17 @@ fn ChartBlock(
     let has_delete = on_delete_chart.is_some();
     let has_save = on_save_to_dashboard.is_some();
     let has_info = on_chart_info.is_some();
+    let has_ask = on_ask_about_chart.is_some();
 
     // Store callbacks for use in closures
     let edit_cb = StoredValue::new(on_edit_chart);
     let delete_cb = StoredValue::new(on_delete_chart);
     let save_cb = StoredValue::new(on_save_to_dashboard);
     let info_cb = StoredValue::new(on_chart_info);
-    let _ask_cb = StoredValue::new(on_ask_about_chart);
+    let ask_cb = StoredValue::new(on_ask_about_chart);
     let yaml_for_save_stored = StoredValue::new(yaml_for_save);
     let yaml_for_info_stored = StoredValue::new(yaml_for_info);
+    let yaml_for_ask_stored = StoredValue::new(yaml_for_ask);
 
     // Build typed callbacks for ChartHeaderBar
     let on_type_change_cb = Callback::new(move |t: String| {
@@ -1123,6 +1126,13 @@ fn ChartBlock(
             cb.run(yaml);
         }
     });
+    let on_ask_cb = Callback::new(move |()| {
+        if let Some(cb) = ask_cb.get_value() {
+            let yaml = yaml_for_ask_stored.get_value();
+            let chart_md = format!("```chartml\n{}\n```", yaml);
+            cb.run(chart_md);
+        }
+    });
 
     // Spec signal for ChartMLChart — reads from the RwSignal updated by the Effect above
     let spec_signal = Signal::derive(move || chartml_spec.get());
@@ -1140,6 +1150,7 @@ fn ChartBlock(
     let on_delete_stored = StoredValue::new(on_delete_cb);
     let on_save_stored = StoredValue::new(on_save_cb);
     let on_info_stored = StoredValue::new(on_info_cb);
+    let on_ask_stored = StoredValue::new(on_ask_cb);
 
     view! {
         <div class="my-2">
@@ -1161,6 +1172,7 @@ fn ChartBlock(
                 let delete_action = on_delete_stored.get_value();
                 let save_action = on_save_stored.get_value();
                 let info_action = on_info_stored.get_value();
+                let ask_action = on_ask_stored.get_value();
                 let last_sig = Signal::derive(move || last_refreshed.get());
                 let refreshing_sig = Signal::derive(move || is_refreshing.get());
                 view! {
@@ -1174,6 +1186,7 @@ fn ChartBlock(
                         show_delete=has_delete
                         show_save_to_dashboard=has_save
                         show_info=has_info
+                        show_ask_about=has_ask
                         on_type_change=type_cb
                         on_orientation_change=orient_cb
                         on_mode_change=mode_cb
@@ -1182,6 +1195,7 @@ fn ChartBlock(
                         on_delete=delete_action
                         on_save_to_dashboard=save_action
                         on_info=info_action
+                        on_ask_about=ask_action
                         last_updated=last_sig
                         is_refreshing=refreshing_sig
                     />

@@ -46,11 +46,22 @@ mod icons {
         }
     }
 
+    /// Save to dashboard — SquaresPlusIcon (grid with plus, matches React)
     #[component]
-    pub fn BookmarkIcon() -> impl IntoView {
+    pub fn SquaresPlusIcon() -> impl IntoView {
         view! {
             <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z" />
+            </svg>
+        }
+    }
+
+    /// Ask about this chart — ChatBubbleLeftRightIcon (matches React)
+    #[component]
+    pub fn ChatBubbleIcon() -> impl IntoView {
+        view! {
+            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
             </svg>
         }
     }
@@ -387,7 +398,7 @@ pub fn ChartHeaderBar(
     let show_mode_chip = matches!(chart_type.as_deref(), Some("bar") | Some("area")) && show_type_selector;
 
     // Overflow menu only contains Edit, Delete, and Ask About
-    let has_menu_items = show_edit || show_delete || show_ask_about;
+    let has_menu_items = show_edit || show_delete;
 
     // Close menu on Escape / click-outside
     type MKeyHandler = SendWrapper<Rc<RefCell<Option<(Closure<dyn Fn(web_sys::KeyboardEvent)>, web_sys::Window)>>>>;
@@ -560,7 +571,21 @@ pub fn ChartHeaderBar(
                             title="Save to Dashboard"
                             on:click=move |_| cb.run(())
                         >
-                            <icons::BookmarkIcon />
+                            <icons::SquaresPlusIcon />
+                        </button>
+                    }
+                })}
+
+                // Ask about this chart button (direct icon, matches React)
+                {(show_ask_about && on_ask_about.is_some()).then(|| {
+                    let cb = on_ask_about.unwrap();
+                    view! {
+                        <button
+                            class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                            title="Ask about this chart"
+                            on:click=move |_| cb.run(())
+                        >
+                            <icons::ChatBubbleIcon />
                         </button>
                     }
                 })}
@@ -579,11 +604,10 @@ pub fn ChartHeaderBar(
                     }
                 })}
 
-                // Action overflow menu (Edit, Delete, Ask About only)
+                // Action overflow menu (Edit, Delete only)
                 {has_menu_items.then(|| {
                     let edit_cb = StoredValue::new(on_edit);
                     let delete_cb = StoredValue::new(on_delete);
-                    let ask_cb = StoredValue::new(on_ask_about);
 
                     view! {
                         <div class="relative" node_ref=menu_ref>
@@ -604,15 +628,6 @@ pub fn ChartHeaderBar(
                                                 class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
                                             >"Edit"</button>
-                                        })
-                                    })}
-                                    {show_ask_about.then(|| {
-                                        let cb = ask_cb.get_value();
-                                        cb.map(|cb| view! {
-                                            <button
-                                                class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
-                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
-                                            >"Ask About Chart"</button>
                                         })
                                     })}
                                     {show_delete.then(|| {
