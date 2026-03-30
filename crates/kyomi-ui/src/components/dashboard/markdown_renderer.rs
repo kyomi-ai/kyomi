@@ -18,7 +18,8 @@ use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
 use chartml_core::ChartML;
 use chartml_datafusion::DataFusionTransform;
-use chartml_leptos::{use_chartml_configured, ChartHeaderBar, ChartMLChart};
+use chartml_leptos::{use_chartml_configured, ChartMLChart};
+use super::chart_header_bar::ChartHeaderBar;
 use leptos::prelude::*;
 
 use crate::server_fns::datasources::query_datasource_arrow;
@@ -839,7 +840,7 @@ fn apply_spec_overrides(
 /// Renders a single ChartML chart with chrome (header bar, type/orientation/mode
 /// overrides, refresh, and action menu).
 ///
-/// Uses `chartml_leptos::ChartHeaderBar` (native Rust/Tailwind) instead of the
+/// Uses `ChartHeaderBar` (Kyomi's native Rust/Tailwind header bar) instead of the
 /// JS `<chart-header-bar>` web component. Type/orientation/mode overrides are
 /// applied as reactive signals that derive an effective YAML spec.
 ///
@@ -875,7 +876,7 @@ fn ChartBlock(
     let parsed_spec: Option<serde_json::Value> =
         serde_yaml::from_str(&yaml_owned).ok();
 
-    let chart_title = parsed_spec.as_ref().and_then(extract_title);
+    let _chart_title = parsed_spec.as_ref().and_then(extract_title);
     let initial_chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
     let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
     let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
@@ -1030,6 +1031,11 @@ fn ChartBlock(
         });
     }
 
+    // Set initial "Last refreshed" timestamp for inline charts (rendered immediately on mount)
+    if !is_remote {
+        set_last_refreshed.set(Some(js_sys::Date::now()));
+    }
+
     // RwSignal for ChartMLChart spec — updated by Effect when overrides change.
     let (chartml_spec, set_chartml_spec) = signal(yaml_owned.clone());
     Effect::new(move || {
@@ -1157,11 +1163,8 @@ fn ChartBlock(
                 let info_action = on_info_stored.get_value();
                 let last_sig = Signal::derive(move || last_refreshed.get());
                 let refreshing_sig = Signal::derive(move || is_refreshing.get());
-                let title_val = chart_title.clone();
-
                 view! {
                     <ChartHeaderBar
-                        title=title_val.unwrap_or_default()
                         chart_type=ct.unwrap_or_default()
                         chart_orientation=co.unwrap_or_default()
                         chart_mode=cm.unwrap_or_default()

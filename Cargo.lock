@@ -1565,7 +1565,6 @@ name = "chartml-leptos"
 version = "0.1.0"
 dependencies = [
  "chartml-core",
- "chartml-render",
  "js-sys",
  "leptos",
  "send_wrapper",

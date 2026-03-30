@@ -3,6 +3,7 @@
 //! Dashboard components — rendering, layout, and interaction.
 
 pub mod chart_builder;
+pub mod chart_header_bar;
 pub mod chart_info_modal;
 pub mod copilot_sidebar;
 pub mod history_panel;

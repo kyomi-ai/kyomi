@@ -90,6 +90,13 @@ html {
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
+  /* ChartML theme — map to Kyomi's dark mode colors */
+  --chartml-text: #e5e7eb;
+  --chartml-text-secondary: #9ca3af;
+  --chartml-text-strong: #f1f5f9;
+  --chartml-grid: #383838;
+  --chartml-axis-line: #94a3b8;
+  --chartml-annotation: #9ca3af;
 }
 
 /* Text selection */
