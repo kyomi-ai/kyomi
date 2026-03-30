@@ -518,7 +518,7 @@ fn DashboardEditorInner(
     view! {
         <div class="flex flex-col h-screen bg-background">
             // ── Toolbar ──────────────────────────────────────────────────
-            <div class="flex items-center gap-3 px-4 py-2 border-b border-border bg-card min-h-[52px]">
+            <div class="flex items-center gap-2 sm:gap-3 px-2 sm:px-4 py-2 border-b border-border bg-card min-h-[52px] overflow-x-auto">
                 // Back link
                 <a
                     href=move || back_href.get()
@@ -531,14 +531,14 @@ fn DashboardEditorInner(
                 // Title input
                 <input
                     type="text"
-                    class="flex-1 min-w-0 text-lg font-semibold bg-transparent border-none outline-none text-foreground placeholder:text-muted-foreground"
+                    class="flex-1 min-w-[100px] text-sm sm:text-lg font-semibold bg-transparent border-none outline-none text-foreground placeholder:text-muted-foreground truncate"
                     placeholder="Dashboard title..."
                     prop:value=move || title.get()
                     on:input=on_title_input
                 />
 
                 // Mode toggle: Source / Visual
-                <div class="flex items-center bg-accent rounded-md p-0.5">
+                <div class="flex items-center bg-accent rounded-md p-0.5 flex-shrink-0">
                     <button
                         class=move || {
                             let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
