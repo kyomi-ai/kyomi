@@ -90,13 +90,14 @@ html {
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
-  /* ChartML theme — map to Kyomi's dark mode colors */
-  --chartml-text: #e5e7eb;
-  --chartml-text-secondary: #9ca3af;
-  --chartml-text-strong: #f1f5f9;
-  --chartml-grid: #383838;
-  --chartml-axis-line: #94a3b8;
-  --chartml-annotation: #9ca3af;
+  /* ChartML theme — match React's dark mode chart colors.
+   * Uses !important to override chartml's auto-injected @media defaults. */
+  --chartml-text: #e5e7eb !important;
+  --chartml-text-secondary: #e5e7eb !important;
+  --chartml-text-strong: #f3f4f6 !important;
+  --chartml-grid: #383838 !important;
+  --chartml-axis-line: #9ca3af !important;
+  --chartml-annotation: #9ca3af !important;
 }
 
 /* Text selection */
