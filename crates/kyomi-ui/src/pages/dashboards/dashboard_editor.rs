@@ -888,12 +888,19 @@ fn DashboardWysiwygEditor(
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
+        use std::sync::Arc;
         use kode_leptos::TreeWysiwygEditor;
+        use crate::components::dashboard::chartml_extension::ChartMLExtension;
+
+        let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![
+            Arc::new(ChartMLExtension::new()),
+        ];
 
         view! {
             <TreeWysiwygEditor
                 content=content
                 on_change=on_change
+                extensions=extensions
             />
         }
         .into_any()
