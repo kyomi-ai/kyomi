@@ -519,7 +519,7 @@ pub fn ChartBuilderModal(
                                 <div class="flex items-center gap-3 flex-shrink-0">
                                     // Database icon before dropdown
                                     <Icon icon=icondata_lu::LuDatabase attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                                    <div class="flex-1 min-w-0">
+                                    <div class="w-[240px] flex-shrink-0">
                                         <Suspense fallback=move || view! {
                                             <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
                                         }>
@@ -580,8 +580,8 @@ pub fn ChartBuilderModal(
 
                                 view! {
                                     <div class="w-72 flex-shrink-0 border-l border-border bg-muted/30 flex flex-col min-h-0">
-                                        // Sidebar header with Catalog / History pill toggle
-                                        <div class="px-3 py-3 border-b border-border flex-shrink-0">
+                                        // Sidebar header: pill toggle + refresh + close
+                                        <div class="px-3 py-3 border-b border-border flex-shrink-0 flex items-center justify-between">
                                             <div class="flex items-center gap-1 rounded-lg bg-muted p-0.5">
                                                 <button
                                                     type="button"
@@ -608,6 +608,28 @@ pub fn ChartBuilderModal(
                                                     on:click=move |_| set_catalog_tab.set("history".to_string())
                                                 >
                                                     "History"
+                                                </button>
+                                            </div>
+                                            // Refresh + Close buttons
+                                            <div class="flex items-center gap-1">
+                                                <button
+                                                    type="button"
+                                                    class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                    title="Refresh catalog"
+                                                >
+                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182M21.015 4.356v4.992" />
+                                                    </svg>
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                    title="Close catalog"
+                                                    on:click=move |_| set_catalog_open.set(false)
+                                                >
+                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                                    </svg>
                                                 </button>
                                             </div>
                                         </div>
