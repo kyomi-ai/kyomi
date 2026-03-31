@@ -15,10 +15,12 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::DynSelect;
+use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
@@ -448,6 +450,12 @@ pub fn ChartBuilderModal(
         });
     let sql_on_change = StoredValue::new(sql_on_change);
 
+    // ── Catalog sidebar state ──────────────────────────────────────────
+    let (catalog_open, set_catalog_open) = signal(false);
+    let (catalog_tab, set_catalog_tab) = signal("catalog".to_string());
+    let (catalog_search, set_catalog_search) = signal(String::new());
+    let (catalog_refresh_trigger, _set_catalog_refresh_trigger) = signal(0u32);
+
     // ── View ────────────────────────────────────────────────────────────
 
     let modal_title = if is_edit_mode {
@@ -503,41 +511,167 @@ pub fn ChartBuilderModal(
                 // React: px-6 py-4 flex-1 min-h-0 flex flex-col gap-4
                 {move || {
                     (active_tab.get() == "sql").then(|| view! {
-                        <div class="px-6 py-4 flex-1 min-h-0 flex flex-col gap-4">
-                            // Datasource selector
-                            // TODO: Add catalog sidebar toggle button (React has Catalog/History panel)
-                            <div class="flex items-center gap-3">
-                                <Suspense fallback=move || view! {
-                                    <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
-                                }>
-                                    <DynSelect
-                                        value=Signal::derive(move || datasource_slug.get())
-                                        options=datasource_options
-                                        on_change=move |slug: String| set_datasource_slug.set(slug)
-                                        placeholder="Select a datasource..."
+                        // Horizontal layout: editor area + optional catalog sidebar
+                        <div class="flex flex-1 min-h-0">
+                            // Main editor column
+                            <div class="px-6 py-4 flex-1 min-h-0 min-w-0 flex flex-col gap-4">
+                                // Datasource selector row with catalog toggle
+                                <div class="flex items-center gap-3 flex-shrink-0">
+                                    // Database icon before dropdown
+                                    <Icon icon=icondata_lu::LuDatabase attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                    <div class="flex-1 min-w-0">
+                                        <Suspense fallback=move || view! {
+                                            <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
+                                        }>
+                                            <DynSelect
+                                                value=Signal::derive(move || datasource_slug.get())
+                                                options=datasource_options
+                                                on_change=move |slug: String| set_datasource_slug.set(slug)
+                                                placeholder="Select a datasource..."
+                                            />
+                                        </Suspense>
+                                    </div>
+                                    // Catalog toggle button (pill-style)
+                                    <button
+                                        type="button"
+                                        class=move || {
+                                            if catalog_open.get() {
+                                                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-primary text-primary-foreground transition-colors flex-shrink-0"
+                                            } else {
+                                                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border border-input text-muted-foreground hover:text-foreground hover:bg-accent transition-colors flex-shrink-0"
+                                            }
+                                        }
+                                        on:click=move |_| set_catalog_open.update(|v| *v = !*v)
+                                    >
+                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                                        </svg>
+                                        "Catalog"
+                                    </button>
+                                </div>
+
+                                // SQL query editor — fills remaining space
+                                <div class="flex-1 min-h-0">
+                                    <SqlEditorSection
+                                        content=sql.into()
+                                        on_change=sql_on_change.get_value()
                                     />
-                                </Suspense>
+                                </div>
+
+                                // Run Query button
+                                <div class="flex justify-end flex-shrink-0">
+                                    <button
+                                        type="button"
+                                        class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
+                                        disabled=true
+                                        title="Query execution coming soon"
+                                    >
+                                        "Run Query"
+                                    </button>
+                                </div>
                             </div>
 
-                            // SQL query editor — fills remaining space
-                            <div class="flex-1 min-h-0">
-                                <SqlEditorSection
-                                    content=sql.into()
-                                    on_change=sql_on_change.get_value()
-                                />
-                            </div>
+                            // Catalog sidebar (280px, shown when catalog_open is true)
+                            {move || catalog_open.get().then(|| {
+                                let catalog_slug_signal = Signal::derive(move || {
+                                    let slug = datasource_slug.get();
+                                    if slug.is_empty() { None } else { Some(slug) }
+                                });
 
-                            // Run Query button
-                            <div class="flex justify-end flex-shrink-0">
-                                <button
-                                    type="button"
-                                    class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
-                                    disabled=true
-                                    title="Query execution coming soon"
-                                >
-                                    "Run Query"
-                                </button>
-                            </div>
+                                view! {
+                                    <div class="w-72 flex-shrink-0 border-l border-border bg-muted/30 flex flex-col min-h-0">
+                                        // Sidebar header with Catalog / History pill toggle
+                                        <div class="px-3 py-3 border-b border-border flex-shrink-0">
+                                            <div class="flex items-center gap-1 rounded-lg bg-muted p-0.5">
+                                                <button
+                                                    type="button"
+                                                    class=move || {
+                                                        if catalog_tab.get() == "catalog" {
+                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md bg-background text-foreground shadow-sm transition-colors"
+                                                        } else {
+                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                                                        }
+                                                    }
+                                                    on:click=move |_| set_catalog_tab.set("catalog".to_string())
+                                                >
+                                                    "Catalog"
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    class=move || {
+                                                        if catalog_tab.get() == "history" {
+                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md bg-background text-foreground shadow-sm transition-colors"
+                                                        } else {
+                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                                                        }
+                                                    }
+                                                    on:click=move |_| set_catalog_tab.set("history".to_string())
+                                                >
+                                                    "History"
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        // Sidebar body
+                                        {move || {
+                                            if catalog_tab.get() == "catalog" {
+                                                view! {
+                                                    <div class="flex flex-col flex-1 min-h-0">
+                                                        // Search input
+                                                        <div class="px-3 py-2 flex-shrink-0">
+                                                            <input
+                                                                type="text"
+                                                                class=INPUT_CLASS
+                                                                placeholder="Search tables..."
+                                                                prop:value=move || catalog_search.get()
+                                                                on:input=move |ev| set_catalog_search.set(event_target_value(&ev))
+                                                            />
+                                                        </div>
+                                                        // Catalog tree
+                                                        <div class="flex-1 overflow-y-auto min-h-0">
+                                                            <CatalogTree
+                                                                datasource_slug=catalog_slug_signal
+                                                                search_query=Signal::derive(move || catalog_search.get())
+                                                                refresh_trigger=Signal::derive(move || catalog_refresh_trigger.get())
+                                                                on_table_click=Callback::new(move |table_id: String| {
+                                                                    // Insert table name into SQL — append at cursor or end
+                                                                    set_sql.update(|s| {
+                                                                        if s.is_empty() {
+                                                                            *s = format!("SELECT * FROM {table_id}");
+                                                                        } else {
+                                                                            s.push(' ');
+                                                                            s.push_str(&table_id);
+                                                                        }
+                                                                    });
+                                                                })
+                                                                on_column_click=Callback::new(move |col_name: String| {
+                                                                    set_sql.update(|s| {
+                                                                        if !s.is_empty() {
+                                                                            s.push(' ');
+                                                                        }
+                                                                        s.push_str(&col_name);
+                                                                    });
+                                                                })
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                }.into_any()
+                                            } else {
+                                                // History tab placeholder
+                                                view! {
+                                                    <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
+                                                        <svg class="w-10 h-10 text-muted-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                        <p class="text-sm text-muted-foreground">"Query history"</p>
+                                                        <p class="text-xs text-muted-foreground mt-1">"Coming soon"</p>
+                                                    </div>
+                                                }.into_any()
+                                            }
+                                        }}
+                                    </div>
+                                }
+                            })}
                         </div>
                     })
                 }}
@@ -696,7 +830,7 @@ fn SqlEditorSection(
         use kode_leptos::{CodeEditor, Language};
 
         view! {
-            <div class="h-full min-h-[200px] border border-input rounded-md overflow-hidden" style="flex: 1 1 0%; min-height: 300px;">
+            <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 300px);">
                 <CodeEditor
                     language=Signal::stored(Language::Sql)
                     content=content
