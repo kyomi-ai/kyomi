@@ -830,7 +830,7 @@ fn SqlEditorSection(
         use kode_leptos::{CodeEditor, Language};
 
         view! {
-            <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 300px);">
+            <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 380px);">
                 <CodeEditor
                     language=Signal::stored(Language::Sql)
                     content=content
