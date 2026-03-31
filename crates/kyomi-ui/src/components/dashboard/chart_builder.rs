@@ -21,7 +21,7 @@ use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::DynSelect;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
-use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_OUTLINE, BTN_SIZE};
+use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 
 /// Label classes — matches the project's design system.
 const LABEL_CLASS: &str = "text-sm font-medium text-foreground";
@@ -400,7 +400,8 @@ pub fn ChartBuilderModal(
 
     // ── Footer ──────────────────────────────────────────────────────────
 
-    let cancel_class = format!("{BTN_BASE} {BTN_OUTLINE} {BTN_SIZE}");
+    // React: Cancel = ghost style, Save = primary style
+    let cancel_class = format!("{BTN_BASE} text-foreground hover:text-foreground hover:bg-accent {BTN_SIZE}");
     let insert_class = format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}");
 
     let cancel_class_clone = cancel_class.clone();
@@ -409,7 +410,7 @@ pub fn ChartBuilderModal(
     let insert_label = if is_edit_mode {
         "Update Chart"
     } else {
-        "Insert Chart"
+        "Save Chart"
     };
 
     let footer_view: ChildrenFn = Arc::new(move || {
@@ -450,31 +451,34 @@ pub fn ChartBuilderModal(
     // ── View ────────────────────────────────────────────────────────────
 
     let modal_title = if is_edit_mode {
-        "Edit Chart"
+        format!("Chart Builder: {}", initial.title)
     } else {
-        "Chart Builder"
+        "Chart Builder: New Chart".to_string()
     };
 
     // ── Tab state ──────────────────────────────────────────────────────
     let (active_tab, set_active_tab) = signal("sql".to_string());
 
-    /// CSS classes for tab buttons.
+    /// CSS classes for underlined tab buttons — matches React's border-b-2 style.
     const TAB_ACTIVE: &str =
-        "bg-card text-foreground shadow-sm rounded px-4 py-1.5 text-sm font-medium";
+        "px-1 py-3 text-sm font-medium border-b-2 border-amber-600 text-primary transition-colors";
     const TAB_INACTIVE: &str =
-        "text-muted-foreground hover:text-foreground px-4 py-1.5 text-sm font-medium";
+        "px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground hover:border-border transition-colors";
 
     view! {
         <Modal
             show=open
             on_close=on_close
             title=modal_title
-            size=ModalSize::Lg
+            size=ModalSize::Full
             footer=footer_view
         >
-            <div class="space-y-6">
-                // ── Tab bar ─────────────────────────────────────────────
-                <div class="flex items-center bg-accent rounded-md p-0.5">
+            // Full-height flex column so content fills the modal.
+            // Use explicit min-height so the SQL editor gets real space.
+            <div class="flex flex-col min-h-[70vh] -m-4 sm:-m-6">
+                // ── Tab bar — underlined style matching React ────────────
+                // React: border-b border-border px-6 flex gap-8
+                <div class="border-b border-border px-6 flex gap-8 flex-shrink-0">
                     <button
                         type="button"
                         class=move || {
@@ -496,12 +500,13 @@ pub fn ChartBuilderModal(
                 </div>
 
                 // ── SQL Editor tab ──────────────────────────────────────
+                // React: px-6 py-4 flex-1 min-h-0 flex flex-col gap-4
                 {move || {
                     (active_tab.get() == "sql").then(|| view! {
-                        <div class="space-y-6">
+                        <div class="px-6 py-4 flex-1 min-h-0 flex flex-col gap-4">
                             // Datasource selector
-                            <div class="space-y-2">
-                                <label class=LABEL_CLASS>"Datasource"</label>
+                            // TODO: Add catalog sidebar toggle button (React has Catalog/History panel)
+                            <div class="flex items-center gap-3">
                                 <Suspense fallback=move || view! {
                                     <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
                                 }>
@@ -514,17 +519,16 @@ pub fn ChartBuilderModal(
                                 </Suspense>
                             </div>
 
-                            // SQL query editor (taller in its own tab)
-                            <div class="space-y-2">
-                                <label class=LABEL_CLASS>"SQL Query"</label>
+                            // SQL query editor — fills remaining space
+                            <div class="flex-1 min-h-0">
                                 <SqlEditorSection
                                     content=sql.into()
                                     on_change=sql_on_change.get_value()
                                 />
                             </div>
 
-                            // Run Query button (stub — query execution not yet implemented)
-                            <div class="flex justify-end">
+                            // Run Query button
+                            <div class="flex justify-end flex-shrink-0">
                                 <button
                                     type="button"
                                     class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
@@ -541,129 +545,131 @@ pub fn ChartBuilderModal(
                 // ── Chart Config tab ────────────────────────────────────
                 {move || {
                     (active_tab.get() == "chart").then(|| view! {
-                        <div class="space-y-6">
-                            // Chart Title
-                            <div class="space-y-2">
-                                <label class=LABEL_CLASS>"Chart Title"</label>
-                                <input
-                                    type="text"
-                                    class=INPUT_CLASS
-                                    prop:value=move || title.get()
-                                    on:input=move |ev| set_title.set(event_target_value(&ev))
-                                    placeholder="Enter chart title..."
-                                />
-                            </div>
-
-                            // Chart Type
-                            <div class="space-y-2">
-                                <label class=LABEL_CLASS>"Chart Type"</label>
-                                <DynSelect
-                                    value=Signal::derive(move || chart_type.get())
-                                    options=Signal::stored(
-                                        CHART_TYPES
-                                            .iter()
-                                            .map(|(k, v)| (k.to_string(), v.to_string()))
-                                            .collect::<Vec<_>>()
-                                    )
-                                    on_change=move |ct: String| set_chart_type.set(ct)
-                                />
-                            </div>
-
-                            // X Axis Field — hidden for pie/doughnut/metric
-                            {move || {
-                                let ct = chart_type.get();
-                                let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
-                                needs_axes.then(|| view! {
-                                    <div class="space-y-2">
-                                        <label class=LABEL_CLASS>"X Axis Field"</label>
-                                        <input
-                                            type="text"
-                                            class=INPUT_CLASS
-                                            prop:value=move || x_field.get()
-                                            on:input=move |ev| set_x_field.set(event_target_value(&ev))
-                                            placeholder="e.g. date, category, name..."
-                                        />
-                                    </div>
-                                })
-                            }}
-
-                            // Series (Y Axis)
-                            <div class="space-y-3">
-                                <div class="flex items-center justify-between">
-                                    <label class=LABEL_CLASS>"Series (Y Axis)"</label>
-                                    <button
-                                        type="button"
-                                        class="text-xs text-primary hover:text-primary/80 font-medium transition-colors"
-                                        on:click=add_series
-                                    >
-                                        "+ Add Series"
-                                    </button>
+                        <div class="px-6 py-4 flex-1 min-h-0 overflow-y-auto">
+                            <div class="space-y-6">
+                                // Chart Title
+                                <div class="space-y-2">
+                                    <label class=LABEL_CLASS>"Chart Title"</label>
+                                    <input
+                                        type="text"
+                                        class=INPUT_CLASS
+                                        prop:value=move || title.get()
+                                        on:input=move |ev| set_title.set(event_target_value(&ev))
+                                        placeholder="Enter chart title..."
+                                    />
                                 </div>
 
-                                <For
-                                    each=move || {
-                                        let s = series.get();
-                                        s.into_iter().enumerate().collect::<Vec<_>>()
-                                    }
-                                    key=|(_, entry)| entry.id
-                                    let:item
-                                >
-                                    {
-                                        let (idx, entry) = item;
-                                        let y_val = entry.y_field.clone();
-                                        let label_val = entry.label.clone();
-                                        let show_remove = move || series.get().len() > 1;
+                                // Chart Type
+                                <div class="space-y-2">
+                                    <label class=LABEL_CLASS>"Chart Type"</label>
+                                    <DynSelect
+                                        value=Signal::derive(move || chart_type.get())
+                                        options=Signal::stored(
+                                            CHART_TYPES
+                                                .iter()
+                                                .map(|(k, v)| (k.to_string(), v.to_string()))
+                                                .collect::<Vec<_>>()
+                                        )
+                                        on_change=move |ct: String| set_chart_type.set(ct)
+                                    />
+                                </div>
 
-                                        view! {
-                                            <div class="flex items-start gap-2">
-                                                <div class="flex-1 space-y-1">
-                                                    <input
-                                                        type="text"
-                                                        class=INPUT_CLASS
-                                                        prop:value=y_val.clone()
-                                                        on:input=move |ev| {
-                                                            let val = event_target_value(&ev);
-                                                            set_series.update(|s| {
-                                                                if let Some(entry) = s.get_mut(idx) {
-                                                                    entry.y_field = val;
-                                                                }
-                                                            });
-                                                        }
-                                                        placeholder="Y field name (e.g. revenue, count)"
-                                                    />
-                                                    <input
-                                                        type="text"
-                                                        class=INPUT_CLASS
-                                                        prop:value=label_val.clone()
-                                                        on:input=move |ev| {
-                                                            let val = event_target_value(&ev);
-                                                            set_series.update(|s| {
-                                                                if let Some(entry) = s.get_mut(idx) {
-                                                                    entry.label = val;
-                                                                }
-                                                            });
-                                                        }
-                                                        placeholder="Label (optional)"
-                                                    />
-                                                </div>
-                                                {move || show_remove().then(|| {
-                                                    view! {
-                                                        <button
-                                                            type="button"
-                                                            class="mt-1.5 p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-                                                            on:click=move |_| remove_series(idx)
-                                                            title="Remove series"
-                                                        >
-                                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                                            </svg>
-                                                        </button>
-                                                    }
-                                                })}
-                                            </div>
+                                // X Axis Field — hidden for pie/doughnut/metric
+                                {move || {
+                                    let ct = chart_type.get();
+                                    let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
+                                    needs_axes.then(|| view! {
+                                        <div class="space-y-2">
+                                            <label class=LABEL_CLASS>"X Axis Field"</label>
+                                            <input
+                                                type="text"
+                                                class=INPUT_CLASS
+                                                prop:value=move || x_field.get()
+                                                on:input=move |ev| set_x_field.set(event_target_value(&ev))
+                                                placeholder="e.g. date, category, name..."
+                                            />
+                                        </div>
+                                    })
+                                }}
+
+                                // Series (Y Axis)
+                                <div class="space-y-3">
+                                    <div class="flex items-center justify-between">
+                                        <label class=LABEL_CLASS>"Series (Y Axis)"</label>
+                                        <button
+                                            type="button"
+                                            class="text-xs text-primary hover:text-primary/80 font-medium transition-colors"
+                                            on:click=add_series
+                                        >
+                                            "+ Add Series"
+                                        </button>
+                                    </div>
+
+                                    <For
+                                        each=move || {
+                                            let s = series.get();
+                                            s.into_iter().enumerate().collect::<Vec<_>>()
                                         }
-                                    }
-                                </For>
+                                        key=|(_, entry)| entry.id
+                                        let:item
+                                    >
+                                        {
+                                            let (idx, entry) = item;
+                                            let y_val = entry.y_field.clone();
+                                            let label_val = entry.label.clone();
+                                            let show_remove = move || series.get().len() > 1;
+
+                                            view! {
+                                                <div class="flex items-start gap-2">
+                                                    <div class="flex-1 space-y-1">
+                                                        <input
+                                                            type="text"
+                                                            class=INPUT_CLASS
+                                                            prop:value=y_val.clone()
+                                                            on:input=move |ev| {
+                                                                let val = event_target_value(&ev);
+                                                                set_series.update(|s| {
+                                                                    if let Some(entry) = s.get_mut(idx) {
+                                                                        entry.y_field = val;
+                                                                    }
+                                                                });
+                                                            }
+                                                            placeholder="Y field name (e.g. revenue, count)"
+                                                        />
+                                                        <input
+                                                            type="text"
+                                                            class=INPUT_CLASS
+                                                            prop:value=label_val.clone()
+                                                            on:input=move |ev| {
+                                                                let val = event_target_value(&ev);
+                                                                set_series.update(|s| {
+                                                                    if let Some(entry) = s.get_mut(idx) {
+                                                                        entry.label = val;
+                                                                    }
+                                                                });
+                                                            }
+                                                            placeholder="Label (optional)"
+                                                        />
+                                                    </div>
+                                                    {move || show_remove().then(|| {
+                                                        view! {
+                                                            <button
+                                                                type="button"
+                                                                class="mt-1.5 p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                                on:click=move |_| remove_series(idx)
+                                                                title="Remove series"
+                                                            >
+                                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                                                </svg>
+                                                            </button>
+                                                        }
+                                                    })}
+                                                </div>
+                                            }
+                                        }
+                                    </For>
+                                </div>
                             </div>
                         </div>
                     })
@@ -690,7 +696,7 @@ fn SqlEditorSection(
         use kode_leptos::{CodeEditor, Language};
 
         view! {
-            <div class="h-80 border border-input rounded-md overflow-hidden">
+            <div class="h-full min-h-[200px] border border-input rounded-md overflow-hidden" style="flex: 1 1 0%; min-height: 300px;">
                 <CodeEditor
                     language=Signal::stored(Language::Sql)
                     content=content
@@ -707,7 +713,7 @@ fn SqlEditorSection(
         let _ = on_change;
 
         view! {
-            <div class="h-80 bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
+            <div class="h-full min-h-[200px] bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
                 "Loading SQL editor..."
             </div>
         }
