@@ -57,7 +57,9 @@ pub fn Layout(children: Children) -> impl IntoView {
         let user_info_for_effect = user_info;
         Effect::new(move || {
             match user_info_for_effect.get() {
-                Some(Ok(_)) => {
+                Some(Ok(user)) => {
+                    // Apply the user's saved theme preference
+                    crate::components::theme::set_theme(&user.theme_preference);
                     // Auth succeeded — allow layout to render
                     set_auth_confirmed.set(true);
                 }

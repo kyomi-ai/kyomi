@@ -21,6 +21,8 @@ pub struct SidebarUser {
     pub email: String,
     pub workspace_name: Option<String>,
     pub is_personal_mode: bool,
+    /// User's theme preference: "light", "dark", or "system".
+    pub theme_preference: String,
 }
 
 /// Load recent chat sessions for the sidebar.
@@ -62,6 +64,20 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     let auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
 
+    // Read theme preference from user's extra_metadata (same source as profile.rs)
+    let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("User not found"))?;
+
+    let theme_preference = user
+        .extra_metadata
+        .as_ref()
+        .and_then(|v| v.get("theme"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("system")
+        .to_string();
+
     Ok(SidebarUser {
         user_id: auth.user_id.clone(),
         workspace_id: auth.workspace.workspace_id.clone(),
@@ -69,5 +85,6 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
         email: auth.email.clone(),
         workspace_name: auth.workspace.workspace_name.clone(),
         is_personal_mode: ctx.config.is_personal(),
+        theme_preference,
     })
 }
