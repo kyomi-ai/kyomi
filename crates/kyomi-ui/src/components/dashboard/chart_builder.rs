@@ -536,7 +536,7 @@ pub fn ChartBuilderModal(
                                         type="button"
                                         class=move || {
                                             if catalog_open.get() {
-                                                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-primary text-primary-foreground transition-colors flex-shrink-0"
+                                                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-primary/10 text-primary border border-primary/30 transition-colors flex-shrink-0"
                                             } else {
                                                 "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border border-input text-muted-foreground hover:text-foreground hover:bg-accent transition-colors flex-shrink-0"
                                             }
@@ -852,7 +852,7 @@ fn SqlEditorSection(
         use kode_leptos::{CodeEditor, Language};
 
         view! {
-            <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 380px);">
+            <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 420px);">
                 <CodeEditor
                     language=Signal::stored(Language::Sql)
                     content=content
