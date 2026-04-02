@@ -22,8 +22,8 @@ use kode_leptos::extension::Extension;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
 
-/// Create a configured ChartML instance for the extension.
-fn create_chartml() -> Arc<ChartML> {
+/// Create a configured ChartML instance, optionally with a color palette.
+fn create_chartml(colors: Option<Vec<String>>) -> Arc<ChartML> {
     let mut chartml = ChartML::new();
     chartml.register_renderer("bar", CartesianRenderer::new());
     chartml.register_renderer("line", CartesianRenderer::new());
@@ -32,6 +32,9 @@ fn create_chartml() -> Arc<ChartML> {
     chartml.register_renderer("donut", PieRenderer::new());
     chartml.register_renderer("scatter", ScatterRenderer::new());
     chartml.register_renderer("metric", MetricRenderer::new());
+    if let Some(colors) = colors {
+        chartml.set_default_palette(colors);
+    }
     Arc::new(chartml)
 }
 
@@ -49,7 +52,13 @@ impl Default for ChartMLExtension {
 impl ChartMLExtension {
     pub fn new() -> Self {
         Self {
-            chartml: create_chartml(),
+            chartml: create_chartml(None),
+        }
+    }
+
+    pub fn with_colors(colors: Vec<String>) -> Self {
+        Self {
+            chartml: create_chartml(Some(colors)),
         }
     }
 }

@@ -29,8 +29,10 @@ use leptos_router::hooks::use_params_map;
 
 use crate::components::dashboard::{
     ChartBuilderModal, CopilotSidebar, HistoryPanel, InsertDashboardLinkModal, MarkdownRenderer,
+    markdown_renderer::kyomi_palette,
 };
 use crate::components::Spinner;
+use crate::server_fns::context::get_user_context;
 use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
 
 // ─── Editor mode ─────────────────────────────────────────────────────────────
@@ -243,6 +245,15 @@ fn DashboardEditorInner(
 
     // ── Copilot sidebar ──────────────────────────────────────────────────
     let (copilot_open, set_copilot_open) = signal(false);
+
+    // ── User context (for chart palette) ────────────────────────────────
+    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+    let chart_palette = Memo::new(move |_| {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .map(|ctx| ctx.chart_palette)
+    });
 
     // ── Unsaved changes (derived) ────────────────────────────────────────
     let has_unsaved_changes = Memo::new(move |_| {
@@ -736,8 +747,11 @@ fn DashboardEditorInner(
                                         })
                                     }}
 
-                                    <div class="p-6 max-w-4xl mx-auto flex-1">
-                                        <MarkdownRenderer content=effective_preview />
+                                    <div class="p-6 flex-1">
+                                        <MarkdownRenderer
+                                            content=effective_preview
+                                            chart_palette=chart_palette.get().unwrap_or_else(|| "balanced".to_string())
+                                        />
                                     </div>
                                 </div>
                             </div>
@@ -751,6 +765,7 @@ fn DashboardEditorInner(
                                     <DashboardWysiwygEditor
                                         content=editor_content
                                         on_change=on_editor_change.clone()
+                                        chart_colors=kyomi_palette(&chart_palette.get().unwrap_or_else(|| "balanced".to_string()))
                                     />
                                 </div>
                             </div>
@@ -885,6 +900,8 @@ fn DashboardWysiwygEditor(
     #[prop(into)]
     content: Signal<String>,
     on_change: Arc<dyn Fn(String) + Send + Sync>,
+    #[prop(optional)]
+    chart_colors: Option<Vec<String>>,
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
@@ -892,15 +909,23 @@ fn DashboardWysiwygEditor(
         use kode_leptos::TreeWysiwygEditor;
         use crate::components::dashboard::chartml_extension::ChartMLExtension;
 
+        let editor_theme = crate::pages::sql_editor::code_editor::use_editor_theme();
+
+        let extension = match chart_colors {
+            Some(colors) => ChartMLExtension::with_colors(colors),
+            None => ChartMLExtension::new(),
+        };
         let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![
-            Arc::new(ChartMLExtension::new()),
+            Arc::new(extension),
         ];
 
         view! {
             <TreeWysiwygEditor
                 content=content
                 on_change=on_change
+                theme=editor_theme
                 extensions=extensions
+                container_max_width="100%"
             />
         }
         .into_any()
@@ -910,6 +935,7 @@ fn DashboardWysiwygEditor(
     {
         let _ = content;
         let _ = on_change;
+        let _ = chart_colors;
 
         view! {
             <div class="flex-1 bg-muted p-4 text-muted-foreground">
@@ -919,3 +945,4 @@ fn DashboardWysiwygEditor(
         .into_any()
     }
 }
+

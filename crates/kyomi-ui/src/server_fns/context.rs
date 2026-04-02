@@ -116,8 +116,10 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
             u.chartml_config
                 .as_ref()
                 .and_then(|config| {
-                    config.get("config")
-                        .and_then(|c| c.get("style"))
+                    // DB stores flat: {"type":"config","style":"vibrant","version":1}
+                    // Try flat first, then nested (for backward compat with REST API format)
+                    config.get("style")
+                        .or_else(|| config.get("config").and_then(|c| c.get("style")))
                         .and_then(|s| s.as_str())
                         .map(String::from)
                 })

@@ -201,6 +201,7 @@ panic = "abort"
 inherits = "release"
 lto = false
 codegen-units = 16
+debug-assertions = true
 
 # Uncomment to use a local checkout of kyomi-connect for development:
 # [patch.crates-io]

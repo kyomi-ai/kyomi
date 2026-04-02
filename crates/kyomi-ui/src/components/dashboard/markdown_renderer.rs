@@ -371,7 +371,7 @@ fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
 // Kyomi chart palettes — must match apps/frontend/src/config/chartPalettes.js
 // ---------------------------------------------------------------------------
 
-fn kyomi_palette(name: &str) -> Vec<String> {
+pub(crate) fn kyomi_palette(name: &str) -> Vec<String> {
     match name {
         "vibrant" => vec![
             "#1E88C7", "#D92849", "#28C75A", "#E8B733", "#28C7A8", "#E87333",
