@@ -10,7 +10,7 @@
 //! provides the chart rendering. Same pattern as React extending Tiptap
 //! with `ChartMLNode.jsx`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
@@ -38,9 +38,26 @@ fn create_chartml(colors: Option<Vec<String>>) -> Arc<ChartML> {
     Arc::new(chartml)
 }
 
+/// Per-chart cached state: the YAML content and the reactive signal that
+/// `ChartMLChart` reads. Reusing the same signal across render passes means
+/// the chart component is only re-rendered when the YAML actually changes.
+struct CachedChart {
+    content: String,
+    spec: RwSignal<String>,
+}
+
 /// Kode extension that renders `chartml` code blocks as live charts.
+///
+/// Maintains a per-render-pass index so that chart blocks are matched by
+/// their ordinal position in the document (first chart = 0, second = 1, …).
+/// Signals are reused across passes; charts only re-render when their YAML
+/// content actually changes.
 pub struct ChartMLExtension {
     chartml: Arc<ChartML>,
+    /// Index of the next chart block to render in this pass.
+    render_index: Mutex<usize>,
+    /// Cached chart signals from the previous render pass, indexed by ordinal.
+    cache: Mutex<Vec<CachedChart>>,
 }
 
 impl Default for ChartMLExtension {
@@ -53,12 +70,16 @@ impl ChartMLExtension {
     pub fn new() -> Self {
         Self {
             chartml: create_chartml(None),
+            render_index: Mutex::new(0),
+            cache: Mutex::new(Vec::new()),
         }
     }
 
     pub fn with_colors(colors: Vec<String>) -> Self {
         Self {
             chartml: create_chartml(Some(colors)),
+            render_index: Mutex::new(0),
+            cache: Mutex::new(Vec::new()),
         }
     }
 }
@@ -72,6 +93,11 @@ impl Extension for ChartMLExtension {
         &["chartml"]
     }
 
+    fn begin_render_pass(&self) {
+        let mut idx = self.render_index.lock().unwrap();
+        *idx = 0;
+    }
+
     fn render_code_block(
         &self,
         language: &str,
@@ -83,12 +109,37 @@ impl Extension for ChartMLExtension {
             return None;
         }
 
-        let yaml = content.to_string();
-        let chartml = self.chartml.clone();
+        // Determine which chart slot this is (0-indexed ordinal within the doc).
+        let chart_idx = {
+            let mut idx = self.render_index.lock().unwrap();
+            let i = *idx;
+            *idx += 1;
+            i
+        };
 
-        // Create a static signal for the spec — the WYSIWYG editor owns the
-        // content lifecycle, so we just render what we're given.
-        let spec = RwSignal::new(yaml);
+        // Get or create the signal for this chart slot.
+        let spec = {
+            let mut cache = self.cache.lock().unwrap();
+            if chart_idx < cache.len() {
+                // Existing slot — update signal only if content changed.
+                let entry = &mut cache[chart_idx];
+                if entry.content != content {
+                    entry.content = content.to_string();
+                    entry.spec.set(content.to_string());
+                }
+                entry.spec
+            } else {
+                // New slot — create signal and push to cache.
+                let signal = RwSignal::new(content.to_string());
+                cache.push(CachedChart {
+                    content: content.to_string(),
+                    spec: signal,
+                });
+                signal
+            }
+        };
+
+        let chartml = self.chartml.clone();
 
         Some(
             view! {
