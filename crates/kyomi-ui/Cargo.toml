@@ -130,6 +130,7 @@ chartml-chart-cartesian = { workspace = true }
 chartml-chart-pie = { workspace = true }
 chartml-chart-scatter = { workspace = true }
 chartml-chart-metric = { workspace = true }
+chartml-render = { workspace = true }
 chartml-datafusion = { workspace = true }
 async-trait = { workspace = true }
 

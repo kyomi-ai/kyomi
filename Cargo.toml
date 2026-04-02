@@ -126,7 +126,7 @@ kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 
 # ChartML rendering (chartml)
 chartml-core = { path = "../chartml/crates/chartml-core" }
-chartml-render = { path = "../chartml/crates/chartml-render" }
+chartml-render = { path = "../chartml/crates/chartml-render", default-features = false }
 chartml-chart-cartesian = { path = "../chartml/crates/chartml-chart-cartesian" }
 chartml-chart-pie = { path = "../chartml/crates/chartml-chart-pie" }
 chartml-chart-scatter = { path = "../chartml/crates/chartml-chart-scatter" }
