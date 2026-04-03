@@ -165,6 +165,17 @@ fn is_no_cache(path: &str) -> bool {
     )
 }
 
+/// Files with content hashes in their filename that can be cached forever.
+/// Trunk generates filenames like `kyomi-ui-<hash>_bg.wasm` and `kyomi-ui-<hash>.js`.
+fn is_content_hashed(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    // Trunk output: name contains a hex hash before the extension
+    // e.g. kyomi-ui-b2c0d10d0de1bbf3_bg.wasm, kyomi-ui-b2c0d10d0de1bbf3.js
+    (name.ends_with(".wasm") || name.ends_with(".js") || name.ends_with(".css"))
+        && name.contains('-')
+        && name.len() > 20
+}
+
 fn file_response(
     path: &str,
     file: &rust_embed::EmbeddedFile,
@@ -180,6 +191,51 @@ fn file_response(
                 (
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("no-cache"),
+                ),
+            ],
+            file.data.to_vec(),
+        )
+            .into_response();
+    }
+
+    if is_content_hashed(path) {
+        // Content-hashed filenames (WASM, JS, CSS from trunk) — cache forever.
+        // The hash changes when content changes, so this is safe.
+
+        // Serve pre-compressed version if client supports gzip and a .gz
+        // file exists. Avoids nginx compressing 32 MB WASM on every request.
+        let accepts_gzip = request_headers
+            .get(header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("gzip"));
+
+        if accepts_gzip {
+            let gz_path = format!("{path}.gz");
+            if let Some(gz_file) = LeptosAssets::get(&gz_path) {
+                return (
+                    [
+                        (header::CONTENT_TYPE, mime),
+                        (
+                            header::CACHE_CONTROL,
+                            HeaderValue::from_static("public, max-age=31536000, immutable"),
+                        ),
+                        (
+                            header::CONTENT_ENCODING,
+                            HeaderValue::from_static("gzip"),
+                        ),
+                    ],
+                    gz_file.data.to_vec(),
+                )
+                    .into_response();
+            }
+        }
+
+        return (
+            [
+                (header::CONTENT_TYPE, mime),
+                (
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("public, max-age=31536000, immutable"),
                 ),
             ],
             file.data.to_vec(),

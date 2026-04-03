@@ -1,13 +1,74 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
-    <title>Kyomi — Settings</title>
+    <title>Kyomi</title>
     <link rel="icon" type="image/svg+xml" href="/kyomi_small_logo.svg"/>
     <link rel="apple-touch-icon" href="/kyomi_icon_192.png"/>
+
+    <!-- Detect theme before CSS loads — prevents flash of wrong theme -->
+    <script>
+        (function() {
+            var d = document.documentElement;
+            try {
+                var stored = localStorage.getItem('theme-preference');
+                if (stored === 'dark' || (!stored && matchMedia('(prefers-color-scheme:dark)').matches)) {
+                    d.classList.add('dark');
+                }
+            } catch(e) {}
+        })();
+    </script>
+
     <link data-trunk rel="css" href="style/output.css"/>
     <link data-trunk rel="copy-dir" href="public"/>
+
+    <!-- Loading screen styles — inlined so they render before any external CSS -->
+    <style>
+        .kyomi-loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--color-background, #ffffff);
+            z-index: 99999;
+            transition: opacity 0.3s ease;
+        }
+        .dark .kyomi-loading {
+            background: var(--color-background, #1e1e1e);
+        }
+        .kyomi-loading svg {
+            width: 48px;
+            height: 48px;
+        }
+        .kyomi-loading .ray {
+            fill: #d97706;
+            animation: sparkle 2s ease-in-out infinite;
+        }
+        .kyomi-loading .ray-1 { animation-delay: 0.6s; }
+        .kyomi-loading .ray-2 { animation-delay: 1.3s; }
+        .kyomi-loading .ray-3 { animation-delay: 0.2s; }
+        .kyomi-loading .ray-4 { animation-delay: 1.7s; }
+        .kyomi-loading .ray-5 { animation-delay: 0.9s; }
+        .kyomi-loading .ray-6 { animation-delay: 0.1s; }
+        .kyomi-loading .ray-7 { animation-delay: 1.4s; }
+        .kyomi-loading .ray-8 { animation-delay: 0.4s; }
+        .kyomi-loading .center {
+            fill: #d97706;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes sparkle {
+            0%, 100% { opacity: 0.4; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.1); }
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.15); }
+        }
+    </style>
+
     <script type="module">
         // Ensure auth session is fresh before WASM boots.
         // Access tokens expire after 15 min — refresh to get a new one.
@@ -16,6 +77,23 @@
     <link data-trunk rel="rust" data-cargo-features="hydrate"/>
 </head>
 <body class="min-h-screen bg-background text-foreground antialiased">
-<div id="leptos-indicator" style="position:fixed;bottom:4px;right:4px;background:#7c3aed;color:white;font-size:10px;padding:2px 6px;border-radius:4px;z-index:99999;opacity:0.7;pointer-events:none;">Leptos</div>
+
+<!-- Loading screen — visible immediately, replaced when WASM mounts -->
+<div class="kyomi-loading" id="kyomi-loading">
+    <svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+        <g transform="translate(30, 30)">
+            <polygon class="ray ray-1" points="0,-28 4.5,-11 0,-6 -4.5,-11"/>
+            <polygon class="ray ray-2" points="20,-20 11.5,-4 7,-7 11.5,-11.5"/>
+            <polygon class="ray ray-3" points="28,0 11.5,4.5 7,0 11.5,-4.5"/>
+            <polygon class="ray ray-4" points="20,20 4.5,11.5 0,7 4.5,11.5"/>
+            <polygon class="ray ray-5" points="0,28 -4.5,11.5 0,7 4.5,11.5"/>
+            <polygon class="ray ray-6" points="-20,20 -11.5,4.5 -7,7 -11.5,11.5"/>
+            <polygon class="ray ray-7" points="-28,0 -11.5,-4.5 -7,0 -11.5,4.5"/>
+            <polygon class="ray ray-8" points="-20,-20 -4.5,-11.5 0,-7 -4.5,-11.5"/>
+            <circle class="center" cx="0" cy="0" r="6"/>
+        </g>
+    </svg>
+</div>
+
 </body>
 </html>
