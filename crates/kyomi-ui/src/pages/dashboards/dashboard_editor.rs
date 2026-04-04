@@ -45,16 +45,6 @@ enum EditorMode {
 
 // ─── SVG Icons ───────────────────────────────────────────────────────────────
 
-/// Left-arrow icon for the "Back" link (Heroicons outline ArrowLeft).
-#[component]
-fn ArrowLeftIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" />
-        </svg>
-    }
-}
-
 /// Clock icon (Heroicons outline) for the History button.
 #[component]
 fn ClockIcon(#[prop(into, optional)] class: String) -> impl IntoView {
@@ -82,26 +72,6 @@ fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
         <svg class=class fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-        </svg>
-    }
-}
-
-/// Chart bar icon (Heroicons outline) for the "Add Chart" button.
-#[component]
-fn ChartBarIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-        </svg>
-    }
-}
-
-/// Link icon (Heroicons outline) for the "Insert Link" button.
-#[component]
-fn LinkIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
         </svg>
     }
 }
@@ -207,6 +177,45 @@ pub fn DashboardEditorPage() -> impl IntoView {
 ///
 /// Owns all editor state: title, content, mode, unsaved tracking, save logic,
 /// history panel integration, keyboard shortcuts, and beforeunload guard.
+/// Source/Visual mode toggle pill — rendered inside the editor area, not the header.
+/// Matches React's `modeToggle` which appears in the toolbar row.
+fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<EditorMode>) -> impl IntoView {
+    view! {
+        <div class="flex items-center bg-accent rounded-md p-0.5 flex-shrink-0">
+            <button
+                class=move || {
+                    let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
+                    if mode.get() == EditorMode::Source {
+                        format!("{base} bg-card text-foreground shadow-sm")
+                    } else {
+                        format!("{base} text-muted-foreground hover:text-foreground")
+                    }
+                }
+                on:click=move |_| set_mode.set(EditorMode::Source)
+                aria-label="Source editor"
+            >
+                <CodeBracketIcon class="w-3.5 h-3.5" />
+                <span class="hidden sm:inline">"Source"</span>
+            </button>
+            <button
+                class=move || {
+                    let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
+                    if mode.get() == EditorMode::Visual {
+                        format!("{base} bg-card text-foreground shadow-sm")
+                    } else {
+                        format!("{base} text-muted-foreground hover:text-foreground")
+                    }
+                }
+                on:click=move |_| set_mode.set(EditorMode::Visual)
+                aria-label="Visual editor"
+            >
+                <EyeIcon class="w-3.5 h-3.5" />
+                <span class="hidden sm:inline">"Visual"</span>
+            </button>
+        </div>
+    }
+}
+
 #[component]
 fn DashboardEditorInner(
     /// `None` for new dashboards, `Some(id)` for existing.
@@ -528,191 +537,146 @@ fn DashboardEditorInner(
 
     view! {
         <div class="flex flex-col h-screen bg-background">
-            // ── Toolbar ──────────────────────────────────────────────────
-            <div class="flex items-center gap-2 sm:gap-3 px-2 sm:px-4 py-2 border-b border-border bg-card min-h-[52px] overflow-x-auto">
-                // Back link
-                <a
-                    href=move || back_href.get()
-                    class="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap"
-                >
-                    <ArrowLeftIcon class="w-4 h-4" />
-                    <span class="hidden sm:inline">"Dashboard"</span>
-                </a>
-
-                // Title input
-                <input
-                    type="text"
-                    class="flex-1 min-w-[100px] text-sm sm:text-lg font-semibold bg-transparent border-none outline-none text-foreground placeholder:text-muted-foreground truncate"
-                    placeholder="Dashboard title..."
-                    prop:value=move || title.get()
-                    on:input=on_title_input
-                />
-
-                // Mode toggle: Source / Visual
-                <div class="flex items-center bg-accent rounded-md p-0.5 flex-shrink-0">
-                    <button
-                        class=move || {
-                            let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
-                            if mode.get() == EditorMode::Source {
-                                format!("{base} bg-card text-foreground shadow")
-                            } else {
-                                format!("{base} text-muted-foreground hover:text-foreground")
-                            }
-                        }
-                        on:click=move |_| set_mode.set(EditorMode::Source)
-                        aria-label="Source editor"
-                    >
-                        <CodeBracketIcon class="w-3.5 h-3.5" />
-                        <span class="hidden sm:inline">"Source"</span>
-                    </button>
-                    <button
-                        class=move || {
-                            let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
-                            if mode.get() == EditorMode::Visual {
-                                format!("{base} bg-card text-foreground shadow")
-                            } else {
-                                format!("{base} text-muted-foreground hover:text-foreground")
-                            }
-                        }
-                        on:click=move |_| set_mode.set(EditorMode::Visual)
-                        aria-label="Visual editor"
-                    >
-                        <EyeIcon class="w-3.5 h-3.5" />
-                        <span class="hidden sm:inline">"Visual"</span>
-                    </button>
+            // ── Header bar ───────────────────────────────────────────────
+            // Matches React: Title | (spacer) | History | Copilot | Close | Save
+            <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
+                // Title (left side, takes remaining space)
+                <div class="flex items-center flex-1">
+                    <input
+                        type="text"
+                        class="flex-1 min-w-[100px] text-sm sm:text-lg font-semibold bg-transparent border-none outline-none text-foreground placeholder:text-muted-foreground truncate"
+                        placeholder="Untitled Dashboard"
+                        prop:value=move || title.get()
+                        on:input=on_title_input
+                    />
                 </div>
 
-                // Add Chart button
-                <button
-                    class="flex items-center gap-1.5 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
-                    on:click=move |_| set_chart_builder_open.set(true)
-                    aria-label="Add chart"
-                >
-                    <ChartBarIcon class="w-4 h-4 flex-shrink-0" />
-                    <span class="hidden sm:inline">"Chart"</span>
-                </button>
-
-                // Insert Link button
-                <button
-                    class="flex items-center gap-1.5 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
-                    on:click=move |_| set_insert_link_open.set(true)
-                    aria-label="Insert link"
-                >
-                    <LinkIcon class="w-4 h-4 flex-shrink-0" />
-                    <span class="hidden sm:inline">"Link"</span>
-                </button>
-
-                // Unsaved indicator
-                {move || {
-                    has_unsaved_changes.get().then(|| {
-                        view! {
-                            <div class="flex items-center gap-1.5 whitespace-nowrap">
-                                <span class="w-2 h-2 rounded-full bg-warning-foreground" />
-                                <span class="text-xs text-warning-foreground font-medium">"Unsaved"</span>
-                            </div>
-                        }
-                    })
-                }}
-
-                // Save error
-                {move || {
-                    save_error.get().map(|err| {
-                        view! {
-                            <span class="text-xs text-destructive font-medium truncate max-w-48">
-                                {err}
-                            </span>
-                        }
-                    })
-                }}
-
-                // Copilot button (only for existing dashboards)
-                {move || {
-                    is_existing.get().then(|| {
-                        view! {
-                            <button
-                                class=move || {
-                                    let base = "flex items-center gap-2 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors";
-                                    if copilot_open.get() {
-                                        format!("{base} bg-primary/10 text-primary")
-                                    } else {
-                                        format!("{base} bg-accent text-foreground hover:bg-accent/80")
-                                    }
-                                }
-                                on:click=move |_| {
-                                    if copilot_open.get() {
-                                        set_copilot_open.set(false);
-                                    } else {
-                                        // Close history panel (mutual exclusion)
-                                        set_history_open.set(false);
-                                        set_history_preview_content.set(None);
-                                        set_copilot_open.set(true);
-                                    }
-                                }
-                                aria-label="Toggle copilot"
-                            >
-                                <SparklesIcon class="w-4 h-4 flex-shrink-0" />
-                                <span class="hidden sm:inline">"Copilot"</span>
-                            </button>
-                        }
-                    })
-                }}
-
-                // History button (only for existing dashboards)
-                {move || {
-                    is_existing.get().then(|| {
-                        view! {
-                            <button
-                                class=move || {
-                                    let base = "flex items-center gap-2 px-2 md:px-3 py-1.5 text-sm font-medium rounded-lg transition-colors";
-                                    if history_open.get() {
-                                        format!("{base} bg-primary/10 text-primary")
-                                    } else {
-                                        format!("{base} bg-accent text-foreground hover:bg-accent/80")
-                                    }
-                                }
-                                on:click=move |_| {
-                                    if history_open.get() {
-                                        set_history_open.set(false);
-                                        set_history_preview_content.set(None);
-                                    } else {
-                                        // Close copilot panel (mutual exclusion)
-                                        set_copilot_open.set(false);
-                                        set_history_open.set(true);
-                                    }
-                                }
-                                aria-label="Toggle version history"
-                            >
-                                <ClockIcon class="w-4 h-4 flex-shrink-0" />
-                                <span class="hidden sm:inline">"History"</span>
-                            </button>
-                        }
-                    })
-                }}
-
-                // Save button
-                <button
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                    on:click=save_on_click
-                    disabled=move || saving.get() || !has_unsaved_changes.get()
-                >
+                // Action buttons (right side)
+                <div class="flex items-center space-x-3">
+                    // Unsaved indicator
                     {move || {
-                        if saving.get() {
+                        has_unsaved_changes.get().then(|| {
                             view! {
-                                <Spinner class="w-4 h-4" />
-                            }.into_any()
-                        } else {
-                            view! {
-                                // Save icon (Heroicons outline)
-                                <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
-                                </svg>
-                            }.into_any()
-                        }
+                                <div class="flex items-center gap-1.5 whitespace-nowrap">
+                                    <span class="w-2 h-2 rounded-full bg-warning-foreground" />
+                                    <span class="text-xs text-warning-foreground font-medium">"Unsaved"</span>
+                                </div>
+                            }
+                        })
                     }}
-                    <span class="hidden sm:inline">
-                        {move || if saving.get() { "Saving..." } else { "Save" }}
-                    </span>
-                </button>
+
+                    // Save error
+                    {move || {
+                        save_error.get().map(|err| {
+                            view! {
+                                <span class="text-xs text-destructive font-medium truncate max-w-48">
+                                    {err}
+                                </span>
+                            }
+                        })
+                    }}
+
+                    // History button (only for existing dashboards)
+                    {move || {
+                        is_existing.get().then(|| {
+                            view! {
+                                <button
+                                    class=move || {
+                                        let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors";
+                                        if history_open.get() {
+                                            format!("{base} bg-primary/10 text-primary")
+                                        } else {
+                                            format!("{base} bg-accent text-foreground hover:bg-accent/80")
+                                        }
+                                    }
+                                    on:click=move |_| {
+                                        if history_open.get() {
+                                            set_history_open.set(false);
+                                            set_history_preview_content.set(None);
+                                        } else {
+                                            set_copilot_open.set(false);
+                                            set_history_open.set(true);
+                                        }
+                                    }
+                                    aria-label="Toggle version history"
+                                >
+                                    <ClockIcon class="w-4 h-4 flex-shrink-0" />
+                                    <span class="hidden sm:inline">"History"</span>
+                                </button>
+                            }
+                        })
+                    }}
+
+                    // Copilot button (only for existing dashboards)
+                    {move || {
+                        is_existing.get().then(|| {
+                            view! {
+                                <button
+                                    class=move || {
+                                        let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors";
+                                        if copilot_open.get() {
+                                            format!("{base} bg-primary/10 text-primary")
+                                        } else {
+                                            format!("{base} bg-accent text-foreground hover:bg-accent/80")
+                                        }
+                                    }
+                                    on:click=move |_| {
+                                        if copilot_open.get() {
+                                            set_copilot_open.set(false);
+                                        } else {
+                                            set_history_open.set(false);
+                                            set_history_preview_content.set(None);
+                                            set_copilot_open.set(true);
+                                        }
+                                    }
+                                    aria-label="Toggle copilot"
+                                >
+                                    <SparklesIcon class="w-4 h-4 flex-shrink-0" />
+                                    <span class="hidden sm:inline">"Copilot"</span>
+                                </button>
+                            }
+                        })
+                    }}
+
+                    // Close button — navigates back to dashboard or list
+                    <a
+                        href=move || back_href.get()
+                        class="flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-accent/80 rounded-lg transition-colors"
+                    >
+                        // X icon
+                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        <span class="hidden sm:inline">"Close"</span>
+                    </a>
+
+                    // Save button
+                    <button
+                        class=move || {
+                            let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium text-primary-foreground rounded-lg transition-colors disabled:opacity-50";
+                            format!("{base} bg-primary hover:bg-primary/90")
+                        }
+                        on:click=save_on_click
+                        disabled=move || saving.get() || !has_unsaved_changes.get()
+                    >
+                        {move || {
+                            if saving.get() {
+                                view! {
+                                    <Spinner class="w-4 h-4" />
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                                    </svg>
+                                }.into_any()
+                            }
+                        }}
+                        <span class="hidden sm:inline">
+                            {move || if saving.get() { "Saving..." } else { "Save" }}
+                        </span>
+                    </button>
+                </div>
             </div>
 
             // ── Two-panel editor + optional history panel ────────────────
@@ -720,45 +684,106 @@ fn DashboardEditorInner(
                 // Main editor area (switches between Source and Visual)
                 {move || {
                     if mode.get() == EditorMode::Source {
-                        // Source mode: code editor | live preview
+                        // Source mode: sub-toolbar + code editor + live preview
                         view! {
-                            <div class="flex flex-1 min-h-0 overflow-hidden">
-                                // Left panel: Kode editor
-                                <div class="flex-1 min-h-0 overflow-hidden border-r border-border">
-                                    <DashboardCodeEditor
-                                        content=editor_content
-                                        on_change=on_editor_change.clone()
-                                    />
-                                </div>
-
-                                // Right panel: Live preview
-                                <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
-                                    // Yellow banner when previewing a history version
+                            <div class="flex flex-col flex-1 min-h-0">
+                                // Sub-toolbar: "Markdown" label + mode toggle (matches React)
+                                <div class="flex items-center gap-2 p-3 border-b border-border bg-muted/50 flex-shrink-0">
                                     {move || {
-                                        is_previewing_version.get().then(|| {
+                                        if is_previewing_version.get() {
                                             view! {
-                                                <div class="flex items-center gap-2 p-3 border-b border-warning-border bg-warning flex-shrink-0">
-                                                    <span class="text-sm font-medium text-warning-foreground">
-                                                        "Previewing historical version"
-                                                    </span>
+                                                <>
+                                                    <span class="text-sm font-medium text-warning-foreground">"Previewing historical version"</span>
                                                     <span class="text-xs text-warning-foreground">"Read-only"</span>
-                                                </div>
-                                            }
-                                        })
+                                                </>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <span class="text-xs text-muted-foreground">"Markdown"</span>
+                                            }.into_any()
+                                        }
                                     }}
-
-                                    <div class="p-6 flex-1">
-                                        <MarkdownRenderer
-                                            content=effective_preview
-                                            chart_palette=chart_palette.get().unwrap_or_else(|| "balanced".to_string())
+                                    <div class="flex-1" />
+                                    {editor_mode_toggle(mode, set_mode)}
+                                </div>
+                                // Editor panels
+                                <div class="flex flex-1 min-h-0 overflow-hidden">
+                                    // Left panel: Kode editor
+                                    <div class="flex-1 min-h-0 overflow-hidden border-r border-border">
+                                        <DashboardCodeEditor
+                                            content=editor_content
+                                            on_change=on_editor_change.clone()
                                         />
+                                    </div>
+
+                                    // Right panel: Live preview
+                                    <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
+                                        <div class="p-6 flex-1">
+                                            <MarkdownRenderer
+                                                content=effective_preview
+                                                chart_palette=chart_palette.get().unwrap_or_else(|| "balanced".to_string())
+                                            />
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         }
                         .into_any()
                     } else {
-                        // Visual mode: WYSIWYG editor (full width, no preview panel)
+                        // Visual mode: toolbar matches React — H1-H3 | B I <> | lists | Add Chart, Link | spacer | Source/Visual
+                        let set_chart_open = set_chart_builder_open;
+                        let set_link_open = set_insert_link_open;
+
+                        use kode_leptos::{BuiltinButton, CustomToolbarButton, ToolbarItem};
+
+                        let items = vec![
+                            // Headings
+                            ToolbarItem::Builtin(BuiltinButton::H1),
+                            ToolbarItem::Builtin(BuiltinButton::H2),
+                            ToolbarItem::Builtin(BuiltinButton::H3),
+                            ToolbarItem::Separator,
+                            // Formatting
+                            ToolbarItem::Builtin(BuiltinButton::Bold),
+                            ToolbarItem::Builtin(BuiltinButton::Italic),
+                            ToolbarItem::Builtin(BuiltinButton::InlineCode),
+                            ToolbarItem::Separator,
+                            // Lists + blocks
+                            ToolbarItem::Builtin(BuiltinButton::BulletList),
+                            ToolbarItem::Builtin(BuiltinButton::OrderedList),
+                            ToolbarItem::Builtin(BuiltinButton::Blockquote),
+                            ToolbarItem::Builtin(BuiltinButton::CodeBlock),
+                            ToolbarItem::Separator,
+                            // Add Chart — secondary style
+                            ToolbarItem::Custom(CustomToolbarButton {
+                                label: view! {
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                                    </svg>
+                                    <span>"Add Chart"</span>
+                                }.into_any(),
+                                title: "Add Chart".to_string(),
+                                on_click: Arc::new(move || set_chart_open.set(true)),
+                                class: Some("kode-toolbar-button kode-toolbar-button-secondary".to_string()),
+                            }),
+                            // Link
+                            ToolbarItem::Custom(CustomToolbarButton {
+                                label: view! {
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
+                                    </svg>
+                                    <span>"Link"</span>
+                                }.into_any(),
+                                title: "Link to Dashboard".to_string(),
+                                on_click: Arc::new(move || set_link_open.set(true)),
+                                class: None,
+                            }),
+                            // Push mode toggle to far right
+                            ToolbarItem::Spacer,
+                            // Source/Visual mode toggle
+                            ToolbarItem::Slot(editor_mode_toggle(mode, set_mode).into_any()),
+                        ];
+
                         view! {
                             <div class="flex flex-1 min-h-0 overflow-hidden">
                                 <div class="flex-1 min-h-0 overflow-hidden">
@@ -766,6 +791,7 @@ fn DashboardEditorInner(
                                         content=editor_content
                                         on_change=on_editor_change.clone()
                                         chart_colors=kyomi_palette(&chart_palette.get().unwrap_or_else(|| "balanced".to_string()))
+                                        toolbar_items=items
                                     />
                                 </div>
                             </div>
@@ -902,6 +928,8 @@ fn DashboardWysiwygEditor(
     on_change: Arc<dyn Fn(String) + Send + Sync>,
     #[prop(optional)]
     chart_colors: Option<Vec<String>>,
+    #[prop(optional)]
+    toolbar_items: Option<Vec<kode_leptos::ToolbarItem>>,
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
@@ -926,6 +954,7 @@ fn DashboardWysiwygEditor(
                 theme=editor_theme
                 extensions=extensions
                 container_max_width="100%"
+                toolbar_items=toolbar_items
             />
         }
         .into_any()
@@ -936,6 +965,7 @@ fn DashboardWysiwygEditor(
         let _ = content;
         let _ = on_change;
         let _ = chart_colors;
+        let _ = toolbar_items;
 
         view! {
             <div class="flex-1 bg-muted p-4 text-muted-foreground">
