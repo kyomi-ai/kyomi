@@ -6015,7 +6015,6 @@ dependencies = [
  "chartml-core",
  "chartml-datafusion",
  "chartml-leptos",
- "chartml-render",
  "chrono",
  "console_error_panic_hook",
  "dashmap",
