@@ -84,3 +84,5 @@ apps/mcp-chart-app/chart_app.html
 # Rust build artifacts
 apps/backend-rust/target/
 .worktrees/
+.gstack/
+.review-approval

@@ -947,17 +947,30 @@ fn DashboardWysiwygEditor(
             Arc::new(extension),
         ];
 
-        view! {
-            <TreeWysiwygEditor
-                content=content
-                on_change=on_change
-                theme=editor_theme
-                extensions=extensions
-                container_max_width="100%"
-                toolbar_items=toolbar_items
-            />
+        if let Some(items) = toolbar_items {
+            view! {
+                <TreeWysiwygEditor
+                    content=content
+                    on_change=on_change
+                    theme=editor_theme
+                    extensions=extensions
+                    container_max_width="100%"
+                    toolbar_items=items
+                />
+            }
+            .into_any()
+        } else {
+            view! {
+                <TreeWysiwygEditor
+                    content=content
+                    on_change=on_change
+                    theme=editor_theme
+                    extensions=extensions
+                    container_max_width="100%"
+                />
+            }
+            .into_any()
         }
-        .into_any()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
