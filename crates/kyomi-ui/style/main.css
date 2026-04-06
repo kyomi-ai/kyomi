@@ -106,47 +106,47 @@ html {
   color: var(--color-secondary-foreground);
 }
 
-/* ── kode toolbar overrides ─────────────────────────────────────────
- * Override kode's default toolbar styles to match Kyomi's design system.
- * kode ships .kode-toolbar-* classes with CSS variable defaults;
- * we override them here with Kyomi's Tailwind-based colors. */
+/* ── kode theme variables ──────────────────────────────────────────
+ * Map kode's --kode-* CSS variables to Kyomi's design system.
+ * kode's injected <style> reads these variables, so setting them is
+ * the correct override mechanism (no specificity war needed). */
 
-.kode-toolbar {
-  padding: 6px 12px;
-  gap: 2px;
-  background: var(--color-muted);
-  border-bottom: 1px solid var(--color-border);
-  font-family: inherit;
-  font-size: 13px;
-  overflow-x: auto;
+:root {
+  --kode-bg: var(--color-muted);
+  --kode-fg: var(--color-muted-foreground);
+  --kode-fg-bright: var(--color-foreground);
+  --kode-fg-dim: var(--color-muted-foreground);
+  --kode-accent: var(--color-primary);
+  --kode-border: var(--color-border);
+  --kode-border-dim: var(--color-border);
+  --kode-bg-hover: var(--color-accent);
+  --kode-bg-highlight: var(--color-accent);
+  --kode-link: var(--color-primary);
+  --kode-code-fg: var(--color-foreground);
 }
 
-.kode-toolbar-button {
+/* ── kode toolbar overrides ─────────────────────────────────────────
+ * Additional toolbar styling beyond what kode variables control.
+ * Uses doubled class selectors for specificity over kode's <style>. */
+
+.kode-toolbar.kode-toolbar {
+  padding: 6px 12px;
+  gap: 2px;
+  font-family: inherit;
+  overflow-x: auto;
+  background: var(--color-accent);
+}
+
+.kode-toolbar-button.kode-toolbar-button {
   padding: 6px 10px;
   min-width: 32px;
   height: 32px;
-  font-size: 13px;
   font-family: inherit;
   border-radius: 6px;
-  border: none;
-  color: var(--color-muted-foreground);
-  background: transparent;
-}
-
-.kode-toolbar-button:hover {
-  background: var(--color-accent);
-  color: var(--color-foreground);
-  border-color: transparent;
+  border: 1px solid transparent;
 }
 
 .kode-toolbar-button.active {
-  background: var(--color-primary);
-  color: var(--color-primary-foreground);
-  border-color: transparent;
-}
-
-.kode-toolbar-button.active:hover {
-  background: var(--color-primary);
   color: var(--color-primary-foreground);
 }
 
@@ -160,12 +160,9 @@ html {
   background: color-mix(in srgb, var(--color-secondary) 90%, black);
 }
 
-.kode-toolbar-separator {
-  width: 1px;
+.kode-toolbar-separator.kode-toolbar-separator {
   height: 20px;
-  background: var(--color-border);
   margin: 0 6px;
-  flex-shrink: 0;
 }
 
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected
