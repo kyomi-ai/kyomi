@@ -112,23 +112,24 @@ html {
  * we override them here with Kyomi's Tailwind-based colors. */
 
 .kode-toolbar {
-  padding: 8px 12px;
-  gap: 4px;
-  background: var(--color-card);
+  padding: 6px 12px;
+  gap: 2px;
+  background: var(--color-muted);
   border-bottom: 1px solid var(--color-border);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  overflow-x: auto;
 }
 
 .kode-toolbar-button {
-  padding: 4px 8px;
-  min-width: auto;
-  height: auto;
-  font-size: 12px;
+  padding: 6px 10px;
+  min-width: 32px;
+  height: 32px;
+  font-size: 13px;
   font-family: inherit;
-  border-radius: 4px;
+  border-radius: 6px;
   border: none;
-  color: var(--color-foreground);
+  color: var(--color-muted-foreground);
   background: transparent;
 }
 
@@ -161,9 +162,10 @@ html {
 
 .kode-toolbar-separator {
   width: 1px;
-  height: 16px;
+  height: 20px;
   background: var(--color-border);
-  margin: 0 4px;
+  margin: 0 6px;
+  flex-shrink: 0;
 }
 
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected
