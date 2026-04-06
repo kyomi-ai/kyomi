@@ -104,7 +104,7 @@ pub async fn security_headers(
             HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static(
                 "default-src 'self'; \
-                 script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; \
+                 script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; \
                  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
                  font-src 'self' https://fonts.gstatic.com; \
                  img-src 'self' data: blob:; \
