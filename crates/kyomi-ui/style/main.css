@@ -180,6 +180,24 @@ html {
   margin: 0 4px;
 }
 
+/* ── kode wysiwyg container overrides ──────────────────────────────
+ * Remove padding from the wysiwyg-container so the toolbar stretches
+ * edge-to-edge of the parent card. Content padding is applied to the
+ * scroll container instead. */
+
+.wysiwyg-container.wysiwyg-container {
+  padding: 0;
+}
+
+.tree-wysiwyg-scroll-container.tree-wysiwyg-scroll-container {
+  padding: 1rem 1.5rem;
+}
+
+/* Give the toolbar the card's top border-radius so it looks like a header */
+.kode-toolbar.kode-toolbar {
+  border-radius: 7.5px 7.5px 0 0;
+}
+
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected
  * automatically by chartml-leptos's ChartMLChart component on mount.
  * No manual CSS needed — styles are embedded in the chartml-leptos crate. */
