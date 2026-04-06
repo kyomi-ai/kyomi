@@ -536,7 +536,7 @@ fn DashboardEditorInner(
     });
 
     view! {
-        <div class="flex flex-col h-screen bg-background">
+        <div class="h-full flex flex-col overflow-hidden">
             // ── Header bar ───────────────────────────────────────────────
             // Matches React: Title | (spacer) | History | Copilot | Close | Save
             <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
@@ -679,8 +679,10 @@ fn DashboardEditorInner(
                 </div>
             </div>
 
-            // ── Two-panel editor + optional history panel ────────────────
-            <div class="flex flex-1 min-h-0 overflow-hidden">
+            // ── Content area with card framing (matches React DashboardEditor.jsx:795-798) ──
+            <div class="flex-1 overflow-hidden flex">
+                <div class="flex-1 overflow-hidden bg-muted p-4 md:p-6">
+                    <div class="bg-card rounded-lg border border-border shadow-sm h-full flex flex-col overflow-hidden">
                 // Main editor area (switches between Source and Visual)
                 {move || {
                     if mode.get() == EditorMode::Source {
@@ -799,6 +801,8 @@ fn DashboardEditorInner(
                         .into_any()
                     }
                 }}
+                    </div>
+                </div>
 
                 // History panel (only for existing dashboards)
                 {move || {

@@ -135,6 +135,7 @@ html {
   font-family: inherit;
   overflow-x: auto;
   background: var(--color-accent);
+  flex-wrap: nowrap;
 }
 
 .kode-toolbar-button.kode-toolbar-button {
