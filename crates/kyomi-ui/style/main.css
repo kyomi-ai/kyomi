@@ -134,6 +134,7 @@ html {
   gap: 4px;
   font-family: inherit;
   overflow-x: auto;
+  overflow-y: hidden;
   background: color-mix(in srgb, var(--color-muted) 50%, transparent);
   flex-wrap: nowrap;
   scrollbar-width: thin;
