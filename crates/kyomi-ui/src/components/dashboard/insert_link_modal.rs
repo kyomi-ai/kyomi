@@ -109,8 +109,6 @@ pub fn InsertDashboardLinkModal(
         let cancel_class = cancel_class_clone.clone();
         let insert_class = insert_class_clone.clone();
 
-        let is_insert_disabled = selected_dashboard_id.get().is_none();
-
         view! {
             <button
                 class=cancel_class
@@ -121,7 +119,7 @@ pub fn InsertDashboardLinkModal(
             <button
                 class=insert_class
                 on:click=move |_| handle_insert.run(())
-                disabled=is_insert_disabled
+                disabled=move || selected_dashboard_id.get().is_none()
             >
                 "Insert Link"
             </button>
