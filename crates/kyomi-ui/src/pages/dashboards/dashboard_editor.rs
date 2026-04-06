@@ -76,12 +76,13 @@ fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
     }
 }
 
-/// Sparkles icon (Heroicons outline) for the "Copilot" button.
+/// Chat bubble icon (Heroicons outline) for the "Copilot" button.
+/// Matches React's ChatBubbleLeftRightIcon from @heroicons/react/24/outline.
 #[component]
-fn SparklesIcon(#[prop(into, optional)] class: String) -> impl IntoView {
+fn ChatBubbleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
     view! {
         <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 0 0-2.455 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
         </svg>
     }
 }
@@ -240,6 +241,7 @@ fn DashboardEditorInner(
     // ── Save state ───────────────────────────────────────────────────────
     let (saving, set_saving) = signal(false);
     let (save_error, set_save_error) = signal(Option::<String>::None);
+    let (save_success, set_save_success) = signal(false);
 
     // ── History panel ────────────────────────────────────────────────────
     let (history_open, set_history_open) = signal(false);
@@ -339,6 +341,11 @@ fn DashboardEditorInner(
                         set_original_title.set(current_title);
                         set_original_content.set(current_content);
                         set_saving.set(false);
+                        set_save_success.set(true);
+                        #[cfg(target_arch = "wasm32")]
+                        gloo_timers::callback::Timeout::new(2000, move || {
+                            set_save_success.set(false);
+                        }).forget();
                     }
                     Err(e) => {
                         set_save_error.set(Some(e.to_string()));
@@ -358,6 +365,11 @@ fn DashboardEditorInner(
                         set_original_title.set(current_title);
                         set_original_content.set(current_content);
                         set_saving.set(false);
+                        set_save_success.set(true);
+                        #[cfg(target_arch = "wasm32")]
+                        gloo_timers::callback::Timeout::new(2000, move || {
+                            set_save_success.set(false);
+                        }).forget();
 
                         // Update URL without full navigation
                         #[cfg(target_arch = "wasm32")]
@@ -586,7 +598,7 @@ fn DashboardEditorInner(
                                         if history_open.get() {
                                             format!("{base} bg-primary/10 text-primary")
                                         } else {
-                                            format!("{base} bg-accent text-foreground hover:bg-accent/80")
+                                            format!("{base} bg-accent text-foreground hover:bg-accent")
                                         }
                                     }
                                     on:click=move |_| {
@@ -617,7 +629,7 @@ fn DashboardEditorInner(
                                         if copilot_open.get() {
                                             format!("{base} bg-primary/10 text-primary")
                                         } else {
-                                            format!("{base} bg-accent text-foreground hover:bg-accent/80")
+                                            format!("{base} bg-accent text-foreground hover:bg-accent")
                                         }
                                     }
                                     on:click=move |_| {
@@ -631,7 +643,7 @@ fn DashboardEditorInner(
                                     }
                                     aria-label="Toggle copilot"
                                 >
-                                    <SparklesIcon class="w-4 h-4 flex-shrink-0" />
+                                    <ChatBubbleIcon class="w-4 h-4 flex-shrink-0" />
                                     <span class="hidden sm:inline">"Copilot"</span>
                                 </button>
                             }
@@ -641,7 +653,7 @@ fn DashboardEditorInner(
                     // Close button — navigates back to dashboard or list
                     <a
                         href=move || back_href.get()
-                        class="flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-accent/80 rounded-lg transition-colors"
+                        class="flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-accent rounded-lg transition-colors"
                     >
                         // X icon
                         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -650,11 +662,15 @@ fn DashboardEditorInner(
                         <span class="hidden sm:inline">"Close"</span>
                     </a>
 
-                    // Save button
+                    // Save button — matches React: success state (green + checkmark for 2s)
                     <button
                         class=move || {
-                            let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium text-primary-foreground rounded-lg transition-colors disabled:opacity-50";
-                            format!("{base} bg-primary hover:bg-primary/90")
+                            let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50";
+                            if save_success.get() {
+                                format!("{base} bg-success-foreground")
+                            } else {
+                                format!("{base} bg-primary hover:bg-primary/90")
+                            }
                         }
                         on:click=save_on_click
                         disabled=move || saving.get() || !has_unsaved_changes.get()
@@ -663,6 +679,12 @@ fn DashboardEditorInner(
                             if saving.get() {
                                 view! {
                                     <Spinner class="w-4 h-4" />
+                                }.into_any()
+                            } else if save_success.get() {
+                                view! {
+                                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                                    </svg>
                                 }.into_any()
                             } else {
                                 view! {
@@ -673,7 +695,7 @@ fn DashboardEditorInner(
                             }
                         }}
                         <span class="hidden sm:inline">
-                            {move || if saving.get() { "Saving..." } else { "Save" }}
+                            {move || if saving.get() { "Saving..." } else if save_success.get() { "Saved!" } else { "Save" }}
                         </span>
                     </button>
                 </div>
@@ -689,8 +711,15 @@ fn DashboardEditorInner(
                         // Source mode: sub-toolbar + code editor + live preview
                         view! {
                             <div class="flex flex-col flex-1 min-h-0">
-                                // Sub-toolbar: "Markdown" label + mode toggle (matches React)
-                                <div class="flex items-center gap-2 p-3 border-b border-border bg-muted/50 flex-shrink-0">
+                                // Sub-toolbar: "Markdown" label + mode toggle
+                                // Yellow bg when previewing version (matches React DashboardEditor.jsx:849)
+                                <div class=move || {
+                                    if is_previewing_version.get() {
+                                        "flex items-center gap-2 p-3 border-b border-warning-border bg-warning flex-shrink-0"
+                                    } else {
+                                        "flex items-center gap-2 p-3 border-b border-border bg-muted/50 flex-shrink-0"
+                                    }
+                                }>
                                     {move || {
                                         if is_previewing_version.get() {
                                             view! {
@@ -783,30 +812,30 @@ fn DashboardEditorInner(
                                 </svg>
                             }.into_any()),
                             ToolbarItem::Separator,
-                            // Add Chart — secondary style
+                            // Add Chart — matches React: responsive icon+text, secondary style
                             ToolbarItem::Custom(CustomToolbarButton {
                                 label: view! {
-                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <svg class="w-4 h-4 sm:w-3 sm:h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                                     </svg>
-                                    <span>"Add Chart"</span>
+                                    <span class="hidden sm:inline">"Add Chart"</span>
                                 }.into_any(),
                                 title: "Add Chart".to_string(),
                                 on_click: Arc::new(move || set_chart_open.set(true)),
-                                class: Some("kode-toolbar-button kode-toolbar-button-secondary".to_string()),
+                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded bg-secondary text-secondary-foreground hover:bg-secondary/90 flex items-center gap-1 flex-shrink-0".to_string()),
                             }),
-                            // Link
+                            // Link — matches React: responsive icon+text
                             ToolbarItem::Custom(CustomToolbarButton {
                                 label: view! {
-                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+                                    <svg class="w-4 h-4 sm:w-3 sm:h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
                                     </svg>
-                                    <span>"Link"</span>
+                                    <span class="hidden sm:inline">"Link"</span>
                                 }.into_any(),
                                 title: "Link to Dashboard".to_string(),
                                 on_click: Arc::new(move || set_link_open.set(true)),
-                                class: None,
+                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded text-foreground hover:bg-accent flex items-center gap-1 flex-shrink-0".to_string()),
                             }),
                             // Push mode toggle to far right
                             ToolbarItem::Spacer,
