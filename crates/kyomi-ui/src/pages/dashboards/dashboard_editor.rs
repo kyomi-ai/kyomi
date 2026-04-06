@@ -254,6 +254,9 @@ fn DashboardEditorInner(
     // ── Insert link modal ────────────────────────────────────────────────
     let (insert_link_open, set_insert_link_open) = signal(false);
 
+    // ── Inject content at cursor (used by modals to insert at cursor position) ──
+    let inject = RwSignal::new(Option::<kode_leptos::InjectCommand>::None);
+
     // ── Copilot sidebar ──────────────────────────────────────────────────
     let (copilot_open, set_copilot_open) = signal(false);
 
@@ -851,6 +854,7 @@ fn DashboardEditorInner(
                                         on_change=on_editor_change.clone()
                                         chart_colors=kyomi_palette(&chart_palette.get().unwrap_or_else(|| "balanced".to_string()))
                                         toolbar_items=items
+                                        inject=inject
                                     />
                                 </div>
                             </div>
@@ -922,12 +926,16 @@ fn DashboardEditorInner(
                 open=Signal::derive(move || insert_link_open.get())
                 on_close=Callback::new(move |()| set_insert_link_open.set(false))
                 on_insert=Callback::new(move |link: String| {
-                    // Append markdown link to editor content
-                    let current = editor_content.get_untracked();
-                    let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
-                    let new_content = format!("{current}{separator}{link}\n");
-                    set_editor_content.set(new_content.clone());
-                    set_preview_content.set(new_content);
+                    // Parse the markdown link [text](url) and insert at cursor
+                    if let (Some(text), Some(url)) = (
+                        link.strip_prefix('[').and_then(|s| s.split("](").next()),
+                        link.split("](").nth(1).and_then(|s| s.strip_suffix(')')),
+                    ) {
+                        inject.set(Some(kode_leptos::InjectCommand::Link {
+                            text: text.to_string(),
+                            url: url.to_string(),
+                        }));
+                    }
                     set_insert_link_open.set(false);
                 })
             />
@@ -991,6 +999,9 @@ fn DashboardWysiwygEditor(
     chart_colors: Option<Vec<String>>,
     #[prop(optional)]
     toolbar_items: Option<Vec<kode_leptos::ToolbarItem>>,
+    /// Signal for injecting text at the cursor position from outside the editor.
+    #[prop(optional)]
+    inject: Option<RwSignal<Option<kode_leptos::InjectCommand>>>,
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
@@ -1008,29 +1019,35 @@ fn DashboardWysiwygEditor(
             Arc::new(extension),
         ];
 
-        if let Some(items) = toolbar_items {
-            view! {
+
+        match (toolbar_items, inject) {
+            (Some(items), Some(inj)) => view! {
                 <TreeWysiwygEditor
-                    content=content
-                    on_change=on_change
-                    theme=editor_theme
-                    extensions=extensions
-                    container_max_width="100%"
+                    content=content on_change=on_change theme=editor_theme
+                    extensions=extensions container_max_width="100%"
+                    toolbar_items=items inject=inj
+                />
+            }.into_any(),
+            (Some(items), None) => view! {
+                <TreeWysiwygEditor
+                    content=content on_change=on_change theme=editor_theme
+                    extensions=extensions container_max_width="100%"
                     toolbar_items=items
                 />
-            }
-            .into_any()
-        } else {
-            view! {
+            }.into_any(),
+            (None, Some(inj)) => view! {
                 <TreeWysiwygEditor
-                    content=content
-                    on_change=on_change
-                    theme=editor_theme
-                    extensions=extensions
-                    container_max_width="100%"
+                    content=content on_change=on_change theme=editor_theme
+                    extensions=extensions container_max_width="100%"
+                    inject=inj
                 />
-            }
-            .into_any()
+            }.into_any(),
+            (None, None) => view! {
+                <TreeWysiwygEditor
+                    content=content on_change=on_change theme=editor_theme
+                    extensions=extensions container_max_width="100%"
+                />
+            }.into_any(),
         }
     }
 
@@ -1040,6 +1057,7 @@ fn DashboardWysiwygEditor(
         let _ = on_change;
         let _ = chart_colors;
         let _ = toolbar_items;
+        let _ = inject;
 
         view! {
             <div class="flex-1 bg-muted p-4 text-muted-foreground">
