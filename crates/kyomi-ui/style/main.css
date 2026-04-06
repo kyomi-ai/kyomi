@@ -100,6 +100,16 @@ html {
   --chartml-annotation: #9ca3af !important;
 }
 
+/* Interactive element defaults */
+button, [role="button"] {
+  cursor: pointer;
+}
+
+button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}
+
 /* Text selection */
 ::selection {
   background-color: var(--color-secondary);

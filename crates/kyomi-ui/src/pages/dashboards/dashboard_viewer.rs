@@ -122,13 +122,13 @@ fn InlineEditableTitle(
                     }.into_any()
                 } else {
                     view! {
-                        <h1
-                            class="text-lg font-semibold text-foreground truncate cursor-pointer hover:text-primary transition-colors"
+                        <span
+                            class="text-lg font-semibold text-foreground truncate cursor-pointer hover:text-primary transition-colors block"
                             on:click=start_editing
                             title="Click to edit title"
                         >
                             {move || value.get()}
-                        </h1>
+                        </span>
                     }.into_any()
                 }
             }}
