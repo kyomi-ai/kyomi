@@ -23,7 +23,7 @@ use crate::components::select::DynSelect;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
-use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
+use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_OUTLINE, BTN_SIZE};
 
 /// Label classes — matches the project's design system.
 const LABEL_CLASS: &str = "text-sm font-medium text-foreground";
@@ -558,15 +558,16 @@ pub fn ChartBuilderModal(
                                     />
                                 </div>
 
-                                // Run Query button
+                                // Run Query button (disabled — query execution not yet implemented)
                                 <div class="flex justify-end flex-shrink-0">
                                     <button
                                         type="button"
-                                        class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
+                                        class=format!("{BTN_BASE} {BTN_OUTLINE} {BTN_SIZE}")
                                         disabled=true
                                         title="Query execution coming soon"
                                     >
                                         "Run Query"
+                                        <span class="text-xs text-muted-foreground ml-1">"(coming soon)"</span>
                                     </button>
                                 </div>
                             </div>
@@ -754,7 +755,7 @@ pub fn ChartBuilderModal(
                                         <label class=LABEL_CLASS>"Series (Y Axis)"</label>
                                         <button
                                             type="button"
-                                            class="text-xs text-primary hover:text-primary/80 font-medium transition-colors"
+                                            class="text-sm text-primary hover:text-primary/80 font-medium transition-colors px-2 py-1.5 -mr-2 rounded hover:bg-primary/5"
                                             on:click=add_series
                                         >
                                             "+ Add Series"
@@ -811,7 +812,7 @@ pub fn ChartBuilderModal(
                                                         view! {
                                                             <button
                                                                 type="button"
-                                                                class="mt-1.5 p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                                class="mt-1 p-2 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                                                 on:click=move |_| remove_series(idx)
                                                                 title="Remove series"
                                                             >
