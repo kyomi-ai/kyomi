@@ -747,13 +747,41 @@ fn DashboardEditorInner(
                             // Formatting
                             ToolbarItem::Builtin(BuiltinButton::Bold),
                             ToolbarItem::Builtin(BuiltinButton::Italic),
-                            ToolbarItem::Builtin(BuiltinButton::InlineCode),
+                            ToolbarItem::BuiltinWithView(BuiltinButton::InlineCode, view! {
+                                // Lucide Code icon
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="m16 18 6-6-6-6" /><path d="m8 6-6 6 6 6" />
+                                </svg>
+                            }.into_any()),
                             ToolbarItem::Separator,
                             // Lists + blocks
-                            ToolbarItem::Builtin(BuiltinButton::BulletList),
-                            ToolbarItem::Builtin(BuiltinButton::OrderedList),
-                            ToolbarItem::Builtin(BuiltinButton::Blockquote),
-                            ToolbarItem::Builtin(BuiltinButton::CodeBlock),
+                            ToolbarItem::BuiltinWithView(BuiltinButton::BulletList, view! {
+                                // Lucide List icon
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M3 12h.01" /><path d="M3 18h.01" /><path d="M3 6h.01" />
+                                    <path d="M8 12h13" /><path d="M8 18h13" /><path d="M8 6h13" />
+                                </svg>
+                            }.into_any()),
+                            ToolbarItem::BuiltinWithView(BuiltinButton::OrderedList, view! {
+                                // Lucide ListOrdered icon
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M10 12h11" /><path d="M10 18h11" /><path d="M10 6h11" />
+                                    <path d="M4 10h2" /><path d="M4 6h1v4" /><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1" />
+                                </svg>
+                            }.into_any()),
+                            ToolbarItem::BuiltinWithView(BuiltinButton::Blockquote, view! {
+                                // Lucide TextQuote icon
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M17 6H3" /><path d="M21 12H8" /><path d="M21 18H8" /><path d="M3 12v6" />
+                                </svg>
+                            }.into_any()),
+                            ToolbarItem::BuiltinWithView(BuiltinButton::CodeBlock, view! {
+                                // Lucide FileCode icon
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M10 12.5 8 15l2 2.5" /><path d="m14 12.5 2 2.5-2 2.5" />
+                                    <path d="M14 2v4a2 2 0 0 0 2 2h4" /><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z" />
+                                </svg>
+                            }.into_any()),
                             ToolbarItem::Separator,
                             // Add Chart — secondary style
                             ToolbarItem::Custom(CustomToolbarButton {
