@@ -572,7 +572,7 @@ pub fn WatchesPage() -> impl IntoView {
                         <div class="flex items-center justify-between px-6 py-4 border-b border-border">
                             <div class="flex items-center gap-3">
                                 <Icon icon=icondata_lu::LuEye attr:class="h-6 w-6 text-primary" />
-                                <h1 class="text-xl font-semibold text-foreground">"Kyomi Watch"</h1>
+                                <h1 class="text-xl font-semibold font-display text-foreground">"Kyomi Watch"</h1>
                             </div>
                         </div>
                         <div class="flex-1 flex items-center justify-center p-6">
@@ -630,7 +630,7 @@ pub fn WatchesPage() -> impl IntoView {
                         <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
                             <div class="flex items-center gap-3">
                                 <Icon icon=icondata_lu::LuEye attr:class="h-6 w-6 text-primary hidden sm:block" />
-                                <h1 class="text-lg sm:text-xl font-semibold text-foreground">"Kyomi Watch"</h1>
+                                <h1 class="text-lg sm:text-xl font-semibold font-display text-foreground">"Kyomi Watch"</h1>
                             </div>
                             <div class="flex items-center gap-2">
                                 // View toggle — Alerts first since it's the inbox

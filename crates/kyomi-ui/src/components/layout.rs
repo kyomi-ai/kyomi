@@ -455,13 +455,14 @@ fn Sidebar(
                         };
 
                         let initial = if user.is_personal_mode {
-                            "⚙".to_string()
+                            None
                         } else {
-                            user.name.as_deref()
+                            Some(user.name.as_deref()
                                 .or(Some(&user.email))
                                 .map(|s| s.chars().next().unwrap_or('U').to_string())
-                                .unwrap_or_else(|| "U".to_string())
+                                .unwrap_or_else(|| "U".to_string()))
                         };
+                        let is_personal_avatar = user.is_personal_mode;
 
                         let display_name = if user.is_personal_mode {
                             "Settings".to_string()
@@ -483,7 +484,11 @@ fn Sidebar(
                                     )
                                 >
                                     <div class="w-6 h-6 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
-                                        <span class="text-xs font-medium text-primary-foreground">{initial.clone()}</span>
+                                        {if is_personal_avatar {
+                                            view! { <span class="text-primary-foreground"><Icon icon=icondata_lu::LuSettings width="14" height="14"/></span> }.into_any()
+                                        } else {
+                                            view! { <span class="text-xs font-medium text-primary-foreground">{initial.clone()}</span> }.into_any()
+                                        }}
                                     </div>
                                     <div
                                         class="flex-1 min-w-0 text-left overflow-hidden transition-all duration-300"

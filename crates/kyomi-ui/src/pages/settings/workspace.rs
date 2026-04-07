@@ -24,7 +24,7 @@ pub fn WorkspacePage() -> impl IntoView {
 
     view! {
         <div class="p-4 sm:p-6">
-            <h2 class="text-xl font-semibold text-foreground mb-4">"Workspace Settings"</h2>
+            <h2 class="text-xl font-semibold font-display text-foreground mb-4">"Workspace Settings"</h2>
             <p class="text-muted-foreground mb-6">
                 "Configure workspace-wide preferences (admin only)."
             </p>

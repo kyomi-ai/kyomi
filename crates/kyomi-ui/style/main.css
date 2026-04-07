@@ -124,6 +124,11 @@ html {
              slide-in-from-right var(--duration-slow) var(--ease-out);
 }
 
+/* Display font utility — Instrument Serif for page headings & section titles */
+.font-display {
+  font-family: var(--font-display);
+}
+
 /* Accessibility: respect reduced motion preferences */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -131,6 +136,44 @@ html {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* === ChartML Theme Overrides ===
+ * chartml is a generic library with cool-gray defaults.
+ * Kyomi overrides these to match the warm design system.
+ * See DESIGN.md "Chart Design System" section. */
+
+:root {
+  --chartml-text: #1C1917;
+  --chartml-text-secondary: #6B6660;
+  --chartml-text-strong: #1C1917;
+  --chartml-grid: #E8E5DE;
+  --chartml-axis-line: #6B6660;
+  --chartml-bg: #FFFFFF;
+  --chartml-annotation: #9C9790;
+}
+
+/* Chart typography: override chartml's hardcoded Inter with Kyomi fonts */
+svg text {
+  font-family: 'DM Sans', 'Inter', sans-serif;
+}
+
+/* Numeric tick labels: monospace for aligned numbers */
+.tick-label {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+}
+
+/* Legend labels: 12px to match design system xs scale (chartml defaults to 11px) */
+.legend-label {
+  font-size: 12px;
+}
+
+/* Chart tooltip: warm dark background, Kyomi font */
+.chartml-tooltip {
+  background: rgba(15, 23, 42, 0.95);
+  font-family: 'DM Sans', sans-serif;
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(28, 25, 23, 0.15);
 }
 
 /* === Dark Mode Color Overrides === */
@@ -169,14 +212,14 @@ html {
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
-  /* ChartML theme — match React's dark mode chart colors.
-   * Uses !important to override chartml's auto-injected @media defaults. */
-  --chartml-text: #e5e7eb !important;
-  --chartml-text-secondary: #e5e7eb !important;
-  --chartml-text-strong: #f3f4f6 !important;
-  --chartml-grid: #383838 !important;
-  --chartml-axis-line: #9ca3af !important;
-  --chartml-annotation: #9ca3af !important;
+  /* ChartML dark theme — warm values matching Kyomi dark mode */
+  --chartml-text: #F5F3EF;
+  --chartml-text-secondary: #94A3B8;
+  --chartml-text-strong: #F5F3EF;
+  --chartml-grid: #334155;
+  --chartml-axis-line: #94A3B8;
+  --chartml-bg: #1E293B;
+  --chartml-annotation: #64748B;
 }
 
 /* Interactive element defaults */

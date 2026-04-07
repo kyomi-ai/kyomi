@@ -118,7 +118,7 @@ pub fn SettingsShell() -> impl IntoView {
         <div class="w-full space-y-8" style:display="block">
             // Settings Header — matches React SettingsContent.jsx
             <div class="mb-8">
-                <h1 class="text-3xl font-bold text-foreground">"Settings"</h1>
+                <h1 class="text-3xl font-bold font-display text-foreground">"Settings"</h1>
                 <p class="text-muted-foreground mt-2">"Manage your workspace configuration and billing settings"</p>
             </div>
 

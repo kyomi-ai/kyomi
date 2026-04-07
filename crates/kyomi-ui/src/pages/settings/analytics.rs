@@ -60,7 +60,7 @@ pub fn AnalyticsPage() -> impl IntoView {
 
     view! {
         <div class="p-4 sm:p-6">
-            <h2 class="text-xl font-semibold text-foreground mb-6">"Analytics"</h2>
+            <h2 class="text-xl font-semibold font-display text-foreground mb-6">"Analytics"</h2>
 
             // If the user context indicates self-hosted mode, show an informational
             // message instead of making ClickHouse-backed server calls.

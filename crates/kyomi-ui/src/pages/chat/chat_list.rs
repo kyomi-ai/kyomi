@@ -489,7 +489,7 @@ pub fn ChatsListPage() -> impl IntoView {
         <div class="flex flex-col h-full bg-muted" style="flex-direction: column;">
             // Header
             <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
-                <h1 class="text-xl font-semibold text-foreground">"Chats"</h1>
+                <h1 class="text-xl font-semibold font-display text-foreground">"Chats"</h1>
 
                 // New Chat Button
                 <a

@@ -306,7 +306,7 @@ pub fn KnowledgePage() -> impl IntoView {
                             <Icon icon=icondata_lu::LuX attr:class="h-4 w-4"/>
                         </Show>
                     </button>
-                    <h1 class="text-2xl font-semibold text-foreground">"Knowledge"</h1>
+                    <h1 class="text-2xl font-semibold font-display text-foreground">"Knowledge"</h1>
                 </div>
                 <div class="flex items-center gap-2">
                     <Button

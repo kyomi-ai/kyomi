@@ -330,7 +330,7 @@ fn TeamPageInner() -> impl IntoView {
             // Header
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4 mb-6">
                 <div class="min-w-0">
-                    <h2 class="text-lg sm:text-xl font-semibold text-foreground mb-1 sm:mb-2">
+                    <h2 class="text-lg sm:text-xl font-semibold font-display text-foreground mb-1 sm:mb-2">
                         "Team Members"
                     </h2>
                     <p class="text-xs sm:text-sm text-muted-foreground">

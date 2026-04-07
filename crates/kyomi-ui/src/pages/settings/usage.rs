@@ -89,7 +89,7 @@ pub fn UsagePage() -> impl IntoView {
 
     view! {
         <div class="p-4 sm:p-6">
-            <h2 class="text-xl font-semibold text-foreground mb-6">"Usage"</h2>
+            <h2 class="text-xl font-semibold font-display text-foreground mb-6">"Usage"</h2>
             <Transition fallback=move || view! { <UsageLoadingSkeleton/> }>
                 {move || Suspend::new(async move {
                     match usage_resource.await {

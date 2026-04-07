@@ -17,6 +17,7 @@
 //! - The `?q=` query parameter supports auto-submission from the marketing site.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use leptos_router::hooks::use_query_map;
 
 use crate::components::dashboard::MarkdownRenderer;
@@ -95,23 +96,23 @@ fn SignupPromptModal(
                     // Feature bullets
                     <ul class="text-sm text-muted-foreground space-y-2 mb-6">
                         <li class="flex items-start gap-2">
-                            <span class="text-primary mt-0.5">"✓"</span>
+                            <span class="text-primary mt-0.5"><Icon icon=icondata_lu::LuCheck width="16" height="16"/></span>
                             <span>"Connect your own databases and data warehouses"</span>
                         </li>
                         <li class="flex items-start gap-2">
-                            <span class="text-primary mt-0.5">"✓"</span>
+                            <span class="text-primary mt-0.5"><Icon icon=icondata_lu::LuCheck width="16" height="16"/></span>
                             <span>"Unlimited AI-powered data analysis"</span>
                         </li>
                         <li class="flex items-start gap-2">
-                            <span class="text-primary mt-0.5">"✓"</span>
+                            <span class="text-primary mt-0.5"><Icon icon=icondata_lu::LuCheck width="16" height="16"/></span>
                             <span>"Interactive dashboards and visualizations"</span>
                         </li>
                         <li class="flex items-start gap-2">
-                            <span class="text-primary mt-0.5">"✓"</span>
+                            <span class="text-primary mt-0.5"><Icon icon=icondata_lu::LuCheck width="16" height="16"/></span>
                             <span>"Automated data watches and alerts"</span>
                         </li>
                         <li class="flex items-start gap-2">
-                            <span class="text-primary mt-0.5">"✓"</span>
+                            <span class="text-primary mt-0.5"><Icon icon=icondata_lu::LuCheck width="16" height="16"/></span>
                             <span>"Team collaboration and sharing"</span>
                         </li>
                     </ul>
