@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::knowledge::tree_types::{
     build_tree, flatten_tree, get_descendant_ids, get_folder_targets,
@@ -22,146 +23,6 @@ use crate::components::knowledge::tree_types::{
 use crate::server_fns::knowledge::search_knowledge_files;
 use crate::types::{KnowledgeSearchResult, KnowledgeTreeEntry};
 
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-/// ChevronRight icon (Lucide).
-#[component]
-fn ChevronRightIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m9 18 6-6-6-6"/>
-        </svg>
-    }
-}
-
-/// ChevronDown icon (Lucide).
-#[component]
-fn ChevronDownIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m6 9 6 6 6-6"/>
-        </svg>
-    }
-}
-
-/// FolderOpen icon (Lucide).
-#[component]
-fn FolderOpenIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>
-        </svg>
-    }
-}
-
-/// Folder icon (Lucide).
-#[component]
-fn FolderIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>
-        </svg>
-    }
-}
-
-/// FileText icon (Lucide).
-#[component]
-fn FileTextIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
-            <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
-            <path d="M10 9H8"/>
-            <path d="M16 13H8"/>
-            <path d="M16 17H8"/>
-        </svg>
-    }
-}
-
-/// Search icon (Lucide).
-#[component]
-fn SearchIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="8"/>
-            <path d="m21 21-4.3-4.3"/>
-        </svg>
-    }
-}
-
-/// Plus icon (Lucide).
-#[component]
-fn PlusIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14"/>
-            <path d="M12 5v14"/>
-        </svg>
-    }
-}
-
-/// GripVertical icon (Lucide).
-#[component]
-fn GripVerticalIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="9" cy="12" r="1"/>
-            <circle cx="9" cy="5" r="1"/>
-            <circle cx="9" cy="19" r="1"/>
-            <circle cx="15" cy="12" r="1"/>
-            <circle cx="15" cy="5" r="1"/>
-            <circle cx="15" cy="19" r="1"/>
-        </svg>
-    }
-}
-
-/// Pencil icon (Lucide).
-#[component]
-fn PencilIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
-            <path d="m15 5 4 4"/>
-        </svg>
-    }
-}
-
-/// FolderInput icon (Lucide).
-#[component]
-fn FolderInputIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"/>
-            <path d="M2 13h10"/>
-            <path d="m9 16 3-3-3-3"/>
-        </svg>
-    }
-}
-
-/// Trash2 icon (Lucide).
-#[component]
-fn Trash2Icon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h18"/>
-            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/>
-            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
-            <line x1="10" x2="10" y1="11" y2="17"/>
-            <line x1="14" x2="14" y1="11" y2="17"/>
-        </svg>
-    }
-}
-
-/// XMark icon (Lucide) for search clear.
-#[component]
-fn XMarkIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 6 6 18"/>
-            <path d="m6 6 12 12"/>
-        </svg>
-    }
-}
 
 // ─── Context Menu ───────────────────────────────────────────────────────────
 
@@ -325,7 +186,7 @@ fn TreeContextMenu(
                     on_close_rename.run(());
                 }
             >
-                <PencilIcon class="w-3.5 h-3.5".to_string() />
+                <Icon icon=icondata_lu::LuPencil attr:class="w-3.5 h-3.5" />
                 "Rename"
             </button>
 
@@ -339,10 +200,10 @@ fn TreeContextMenu(
                     class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground justify-between"
                 >
                     <span class="flex items-center gap-2">
-                        <FolderInputIcon class="w-3.5 h-3.5".to_string() />
+                        <Icon icon=icondata_lu::LuFolderInput attr:class="w-3.5 h-3.5" />
                         "Move to"
                     </span>
-                    <ChevronRightIcon class="w-3 h-3".to_string() />
+                    <Icon icon=icondata_lu::LuChevronRight attr:class="w-3 h-3" />
                 </button>
                 <Show when=move || show_move_submenu.get()>
                     <div class="absolute left-full top-0 ml-1 min-w-[140px] rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-md">
@@ -371,7 +232,7 @@ fn TreeContextMenu(
                                                 on_close.run(());
                                             }
                                         >
-                                            <FolderIcon class="w-3.5 h-3.5 text-warning-foreground".to_string() />
+                                            <Icon icon=icondata_lu::LuFolder attr:class="w-3.5 h-3.5 text-warning-foreground" />
                                             {name.clone()}
                                         </button>
                                     }
@@ -393,7 +254,7 @@ fn TreeContextMenu(
                     on_close_delete.run(());
                 }
             >
-                <Trash2Icon class="w-3.5 h-3.5".to_string() />
+                <Icon icon=icondata_lu::LuTrash2 attr:class="w-3.5 h-3.5" />
                 "Delete"
             </button>
         </div>
@@ -627,14 +488,14 @@ pub fn KnowledgeFileTree(
                         title="New File"
                         on:click=move |_| on_create_file.run(None)
                     >
-                        <PlusIcon class="w-3.5 h-3.5".to_string() />
+                        <Icon icon=icondata_lu::LuPlus attr:class="w-3.5 h-3.5" />
                     </button>
                     <button
                         class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground h-6 w-6"
                         title="New Folder"
                         on:click=move |_| on_create_folder.run(None)
                     >
-                        <FolderIcon class="w-3.5 h-3.5".to_string() />
+                        <Icon icon=icondata_lu::LuFolder attr:class="w-3.5 h-3.5" />
                     </button>
                 </div>
             </div>
@@ -642,7 +503,7 @@ pub fn KnowledgeFileTree(
             // Search
             <div class="px-3 py-2">
                 <div class="relative">
-                    <SearchIcon class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground".to_string() />
+                    <Icon icon=icondata_lu::LuSearch attr:class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
                     <input
                         type="text"
                         placeholder="Search files..."
@@ -657,7 +518,7 @@ pub fn KnowledgeFileTree(
                             class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                             on:click=move |_| set_search_filter.set(String::new())
                         >
-                            <XMarkIcon class="w-3 h-3".to_string() />
+                            <Icon icon=icondata_lu::LuX attr:class="w-3 h-3" />
                         </button>
                     </Show>
                 </div>
@@ -774,7 +635,7 @@ pub fn KnowledgeFileTree(
                                                 }
                                             >
                                                 // Drag handle (visible on hover)
-                                                <GripVerticalIcon class="w-3 h-3 flex-shrink-0 text-muted-foreground/50 opacity-0 group-hover:opacity-100 cursor-grab".to_string() />
+                                                <Icon icon=icondata_lu::LuGripVertical attr:class="w-3 h-3 flex-shrink-0 text-muted-foreground/50 opacity-0 group-hover:opacity-100 cursor-grab" />
 
                                                 {if is_folder {
                                                     let entry_id_expand = entry.id.clone();
@@ -783,24 +644,24 @@ pub fn KnowledgeFileTree(
                                                         <Show
                                                             when=move || is_expanded.get()
                                                             fallback=move || view! {
-                                                                <ChevronRightIcon class="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground".to_string() />
+                                                                <Icon icon=icondata_lu::LuChevronRight attr:class="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground" />
                                                             }
                                                         >
-                                                            <ChevronDownIcon class="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground".to_string() />
+                                                            <Icon icon=icondata_lu::LuChevronDown attr:class="w-3.5 h-3.5 flex-shrink-0 text-muted-foreground" />
                                                         </Show>
                                                         <Show
                                                             when=move || is_expanded.get()
                                                             fallback=move || view! {
-                                                                <FolderIcon class="w-4 h-4 flex-shrink-0 text-warning-foreground".to_string() />
+                                                                <Icon icon=icondata_lu::LuFolder attr:class="w-4 h-4 flex-shrink-0 text-warning-foreground" />
                                                             }
                                                         >
-                                                            <FolderOpenIcon class="w-4 h-4 flex-shrink-0 text-warning-foreground".to_string() />
+                                                            <Icon icon=icondata_lu::LuFolderOpen attr:class="w-4 h-4 flex-shrink-0 text-warning-foreground" />
                                                         </Show>
                                                     }.into_any()
                                                 } else {
                                                     view! {
                                                         <span class="w-3.5" />
-                                                        <FileTextIcon class="w-4 h-4 flex-shrink-0 text-muted-foreground".to_string() />
+                                                        <Icon icon=icondata_lu::LuFileText attr:class="w-4 h-4 flex-shrink-0 text-muted-foreground" />
                                                     }.into_any()
                                                 }}
 
@@ -888,9 +749,9 @@ pub fn KnowledgeFileTree(
                                             }
                                         >
                                             {if result_is_folder {
-                                                view! { <FolderIcon class="w-4 h-4 flex-shrink-0 text-warning-foreground".to_string() /> }.into_any()
+                                                view! { <Icon icon=icondata_lu::LuFolder attr:class="w-4 h-4 flex-shrink-0 text-warning-foreground" /> }.into_any()
                                             } else {
-                                                view! { <FileTextIcon class="w-4 h-4 flex-shrink-0 text-muted-foreground".to_string() /> }.into_any()
+                                                view! { <Icon icon=icondata_lu::LuFileText attr:class="w-4 h-4 flex-shrink-0 text-muted-foreground" /> }.into_any()
                                             }}
                                             <div class="flex flex-col min-w-0 flex-1">
                                                 <span class="truncate">{result_name}</span>

@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::toast::toast_error;
@@ -337,7 +338,7 @@ pub fn KnowledgeFileEditor(
                     when=move || !is_loading.get()
                     fallback=|| view! {
                         <div class="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                            <Loader2Icon class="w-4 h-4 animate-spin mr-2" />
+                            <span class="w-4 h-4 animate-spin mr-2"><Icon icon=icondata_lu::LuLoader width="16" height="16" /></span>
                             "Loading..."
                         </div>
                     }
@@ -363,21 +364,21 @@ pub fn KnowledgeFileEditor(
                                     if status == SaveStatus::Saving {
                                         Some(view! {
                                             <span class="flex items-center gap-1 text-xs text-muted-foreground">
-                                                <Loader2Icon class="w-3 h-3 animate-spin" />
+                                                <span class="w-3 h-3 animate-spin"><Icon icon=icondata_lu::LuLoader width="12" height="12" /></span>
                                                 "Saving..."
                                             </span>
                                         }.into_any())
                                     } else if status == SaveStatus::Saved {
                                         Some(view! {
                                             <span class="flex items-center gap-1 text-xs text-success-foreground">
-                                                <CheckIcon class="w-3 h-3" />
+                                                <span class="w-3 h-3"><Icon icon=icondata_lu::LuCheck width="12" height="12" /></span>
                                                 "Saved"
                                             </span>
                                         }.into_any())
                                     } else if status == SaveStatus::Conflict {
                                         Some(view! {
                                             <span class="flex items-center gap-1 text-xs text-destructive">
-                                                <AlertTriangleIcon class="w-3 h-3" />
+                                                <span class="w-3 h-3"><Icon icon=icondata_lu::LuTriangleAlert width="12" height="12" /></span>
                                                 "Conflict!"
                                             </span>
                                         }.into_any())
@@ -416,7 +417,7 @@ pub fn KnowledgeFileEditor(
                                         }
                                         on:click=move |_| set_mode.set(EditorMode::Visual)
                                     >
-                                        <EyeIcon class="w-3.5 h-3.5 mr-1" />
+                                        <span class="w-3.5 h-3.5 mr-1"><Icon icon=icondata_lu::LuEye width="14" height="14" /></span>
                                         "Visual"
                                     </button>
                                     <button
@@ -430,7 +431,7 @@ pub fn KnowledgeFileEditor(
                                         }
                                         on:click=move |_| set_mode.set(EditorMode::Source)
                                     >
-                                        <CodeIcon class="w-3.5 h-3.5 mr-1" />
+                                        <span class="w-3.5 h-3.5 mr-1"><Icon icon=icondata_lu::LuCode width="14" height="14" /></span>
                                         "Source"
                                     </button>
                                 </div>
@@ -441,7 +442,7 @@ pub fn KnowledgeFileEditor(
                         {move || {
                             (save_status.get() == SaveStatus::Conflict).then(|| view! {
                                 <div class="flex items-center gap-2 p-3 border-b border-warning-border bg-warning flex-shrink-0">
-                                    <AlertTriangleIcon class="w-4 h-4 text-warning-foreground flex-shrink-0" />
+                                    <span class="w-4 h-4 text-warning-foreground flex-shrink-0"><Icon icon=icondata_lu::LuTriangleAlert width="16" height="16" /></span>
                                     <span class="text-sm font-medium text-warning-foreground flex-1">
                                         "This file was modified by another user."
                                     </span>
@@ -481,7 +482,7 @@ pub fn KnowledgeFileEditor(
                                 view! {
                                     <div class="flex-1 flex items-center justify-center bg-muted">
                                         <div class="text-center max-w-md px-6">
-                                            <EyeIcon class="w-12 h-12 mx-auto text-muted-foreground mb-4" />
+                                            <span class="w-12 h-12 mx-auto text-muted-foreground mb-4"><Icon icon=icondata_lu::LuEye width="48" height="48" /></span>
                                             <h3 class="text-lg font-semibold text-foreground mb-2">
                                                 "Visual editing coming soon"
                                             </h3>
@@ -550,73 +551,6 @@ fn KnowledgeCodeEditor(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Inline SVG icons
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Code icon (two angle-bracket polylines).
-#[component]
-fn CodeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" class=class>
-            <polyline points="16 18 22 12 16 6" />
-            <polyline points="8 6 2 12 8 18" />
-        </svg>
-    }
-}
-
-/// Eye icon (vision path + pupil circle).
-#[component]
-fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" class=class>
-            <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
-            <circle cx="12" cy="12" r="3" />
-        </svg>
-    }
-}
-
-/// Check icon (checkmark path).
-#[component]
-fn CheckIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" class=class>
-            <path d="M20 6 9 17l-5-5" />
-        </svg>
-    }
-}
-
-/// Alert triangle icon (warning triangle with exclamation).
-#[component]
-fn AlertTriangleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" class=class>
-            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
-            <path d="M12 9v4" />
-            <path d="M12 17h.01" />
-        </svg>
-    }
-}
-
-/// Loader2 icon (spinning arc).
-#[component]
-fn Loader2Icon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
-            fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" class=class>
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-        </svg>
-    }
-}
 
 #[cfg(test)]
 mod tests {

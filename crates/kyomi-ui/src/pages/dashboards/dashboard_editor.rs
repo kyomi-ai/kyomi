@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use leptos_router::hooks::use_params_map;
 
 use crate::components::dashboard::{
@@ -41,50 +42,6 @@ use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dash
 enum EditorMode {
     Source,
     Visual,
-}
-
-// ─── SVG Icons ───────────────────────────────────────────────────────────────
-
-/// Clock icon (Heroicons outline) for the History button.
-#[component]
-fn ClockIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-        </svg>
-    }
-}
-
-/// Code bracket icon for Source mode toggle.
-#[component]
-fn CodeBracketIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-        </svg>
-    }
-}
-
-/// Eye icon for Visual mode toggle.
-#[component]
-fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-        </svg>
-    }
-}
-
-/// Chat bubble icon (Heroicons outline) for the "Copilot" button.
-/// Matches React's ChatBubbleLeftRightIcon from @heroicons/react/24/outline.
-#[component]
-fn ChatBubbleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
-        </svg>
-    }
 }
 
 // ─── Top-level page component ────────────────────────────────────────────────
@@ -195,7 +152,7 @@ fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<Editor
                 on:click=move |_| set_mode.set(EditorMode::Source)
                 aria-label="Source editor"
             >
-                <CodeBracketIcon class="w-3.5 h-3.5" />
+                <Icon icon=icondata_lu::LuCode attr:class="w-3.5 h-3.5" />
                 <span class="hidden sm:inline">"Source"</span>
             </button>
             <button
@@ -210,7 +167,7 @@ fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<Editor
                 on:click=move |_| set_mode.set(EditorMode::Visual)
                 aria-label="Visual editor"
             >
-                <EyeIcon class="w-3.5 h-3.5" />
+                <Icon icon=icondata_lu::LuEye attr:class="w-3.5 h-3.5" />
                 <span class="hidden sm:inline">"Visual"</span>
             </button>
         </div>
@@ -615,7 +572,7 @@ fn DashboardEditorInner(
                                     }
                                     aria-label="Toggle version history"
                                 >
-                                    <ClockIcon class="w-4 h-4 flex-shrink-0" />
+                                    <Icon icon=icondata_lu::LuClock attr:class="w-4 h-4 flex-shrink-0" />
                                     <span class="hidden sm:inline">"History"</span>
                                 </button>
                             }
@@ -646,7 +603,7 @@ fn DashboardEditorInner(
                                     }
                                     aria-label="Toggle copilot"
                                 >
-                                    <ChatBubbleIcon class="w-4 h-4 flex-shrink-0" />
+                                    <Icon icon=icondata_lu::LuMessagesSquare attr:class="w-4 h-4 flex-shrink-0" />
                                     <span class="hidden sm:inline">"Copilot"</span>
                                 </button>
                             }

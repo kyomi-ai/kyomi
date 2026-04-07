@@ -8,6 +8,7 @@
 //! web component layout.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use send_wrapper::SendWrapper;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,67 +32,11 @@ const CHART_TYPES: &[(&str, &str)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Icons (inline SVG, Heroicons 24/outline subset)
+// Icons — chart-type SVGs (kept inline; action icons use icondata_lu)
 // ---------------------------------------------------------------------------
 
 mod icons {
     use leptos::prelude::*;
-
-    #[component]
-    pub fn RefreshIcon() -> impl IntoView {
-        view! {
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182M21.015 4.356v4.992" />
-            </svg>
-        }
-    }
-
-    /// Save to dashboard — SquaresPlusIcon (grid with plus, matches React)
-    #[component]
-    pub fn SquaresPlusIcon() -> impl IntoView {
-        view! {
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z" />
-            </svg>
-        }
-    }
-
-    /// Ask about this chart — ChatBubbleLeftRightIcon (matches React)
-    #[component]
-    pub fn ChatBubbleIcon() -> impl IntoView {
-        view! {
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
-            </svg>
-        }
-    }
-
-    #[component]
-    pub fn InfoCircleIcon() -> impl IntoView {
-        view! {
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
-            </svg>
-        }
-    }
-
-    #[component]
-    pub fn DotsVerticalIcon() -> impl IntoView {
-        view! {
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-            </svg>
-        }
-    }
-
-    #[component]
-    pub fn ChevronDownIcon() -> impl IntoView {
-        view! {
-            <svg class="h-3 w-3" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
-            </svg>
-        }
-    }
 
     /// Return the SVG view for a chart type icon.
     pub fn chart_type_icon(chart_type: &str) -> impl IntoView + use<> {
@@ -265,7 +210,7 @@ fn ChartTypeSelector(
                 on:click=move |_| set_open.update(|v| *v = !*v)
             >
                 {icons::chart_type_icon(&current.get_value())}
-                <icons::ChevronDownIcon />
+                <Icon icon=icondata_lu::LuChevronDown width="12" height="12" />
             </button>
 
             <Show when=move || open.get()>
@@ -557,7 +502,7 @@ pub fn ChartHeaderBar(
                             title="Refresh"
                             on:click=move |_| on_ref.run(())
                         >
-                            <icons::RefreshIcon />
+                            <Icon icon=icondata_lu::LuRefreshCw width="16" height="16" />
                         </button>
                     }
                 })}
@@ -571,7 +516,7 @@ pub fn ChartHeaderBar(
                             title="Save to Dashboard"
                             on:click=move |_| cb.run(())
                         >
-                            <icons::SquaresPlusIcon />
+                            <Icon icon=icondata_lu::LuGrid2x2Plus width="16" height="16" />
                         </button>
                     }
                 })}
@@ -585,7 +530,7 @@ pub fn ChartHeaderBar(
                             title="Ask about this chart"
                             on:click=move |_| cb.run(())
                         >
-                            <icons::ChatBubbleIcon />
+                            <Icon icon=icondata_lu::LuMessagesSquare width="16" height="16" />
                         </button>
                     }
                 })}
@@ -599,7 +544,7 @@ pub fn ChartHeaderBar(
                             title="Chart Info"
                             on:click=move |_| cb.run(())
                         >
-                            <icons::InfoCircleIcon />
+                            <Icon icon=icondata_lu::LuInfo width="16" height="16" />
                         </button>
                     }
                 })}
@@ -616,7 +561,7 @@ pub fn ChartHeaderBar(
                                 title="Actions"
                                 on:click=move |_| set_menu_open.update(|v| *v = !*v)
                             >
-                                <icons::DotsVerticalIcon />
+                                <Icon icon=icondata_lu::LuEllipsisVertical width="16" height="16" />
                             </button>
 
                             <Show when=move || menu_open.get()>
