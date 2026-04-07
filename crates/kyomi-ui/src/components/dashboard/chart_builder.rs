@@ -482,8 +482,7 @@ pub fn ChartBuilderModal(
             footer=footer_view
         >
             // Full-height flex column so content fills the modal.
-            // Use explicit min-height so the SQL editor gets real space.
-            <div class="flex flex-col min-h-[70vh] -m-4 sm:-m-6">
+            <div class="flex flex-col -m-4 sm:-m-6">
                 // ── Tab bar — underlined style matching React ────────────
                 // React: border-b border-border px-6 flex gap-8
                 <div class="border-b border-border px-6 flex gap-8 flex-shrink-0">
@@ -512,7 +511,8 @@ pub fn ChartBuilderModal(
                 {move || {
                     (active_tab.get() == "sql").then(|| view! {
                         // Horizontal layout: editor area + optional catalog sidebar
-                        <div class="flex flex-1 min-h-0">
+                        // min-h-[70vh] gives the SQL code editor real vertical space.
+                        <div class="flex flex-1 min-h-[70vh]">
                             // Main editor column
                             <div class="px-6 py-4 flex-1 min-h-0 min-w-0 flex flex-col gap-4">
                                 // Datasource selector row with catalog toggle
