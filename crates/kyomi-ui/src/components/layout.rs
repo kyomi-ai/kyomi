@@ -254,6 +254,10 @@ fn Sidebar(
     let unread_alerts = LocalResource::new(get_unread_alerts_count);
     let (user_menu_open, set_user_menu_open) = signal(false);
 
+    // Active state for "New Chat" — exact match on /chat only (not /chats or /chat/xxx).
+    let pathname = leptos_router::hooks::use_location().pathname;
+    let new_chat_active = Memo::new(move |_| pathname.get() == "/chat");
+
     // Logout action — calls POST /leptos-api/logout to revoke the current session
     // and clear HTTPOnly cookies, then navigates to /login.
     // Matches React: AuthContext.jsx `logout()` + Sidebar.jsx `handleLogout()`.
@@ -297,7 +301,7 @@ fn Sidebar(
     // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {
         <div
-            class="bg-background border-r border-border text-foreground flex-col z-30 absolute left-0 shadow-lg transition-all duration-300 ease-in-out"
+            class="bg-[#0F172A] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-all duration-300 ease-in-out"
             style=move || {
                 let width = if is_mobile.get() {
                     "width: 20rem"
@@ -321,14 +325,14 @@ fn Sidebar(
         >
             // ── Header: collapse toggle + logo (hidden on mobile) ──────────
             // React: "hidden md:flex px-3 h-16 border-b border-border items-center justify-between"
-            <div class="hidden md:flex px-3 h-16 border-b border-border items-center justify-between">
+            <div class="hidden md:flex px-3 h-16 border-b border-white/10 items-center justify-between">
                 <div class="flex items-center">
                     // Collapse toggle — React places this FIRST (left side)
                     <button
                         on:click=move |_| set_collapsed.update(|c| *c = !*c)
-                        class="p-2.5 hover:bg-accent rounded-md transition-colors flex-shrink-0"
+                        class="p-2.5 hover:bg-white/5 rounded-md transition-colors flex-shrink-0"
                     >
-                        <span class="text-muted-foreground"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
+                        <span class="text-slate-400"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
                     </button>
                     // Logo — to the right of the toggle, fades when collapsed
                     <div
@@ -337,10 +341,10 @@ fn Sidebar(
                             if collapsed.get() { "opacity: 0; width: 0; margin-left: 0" } else { "opacity: 1; margin-left: 0.5rem" }
                         }
                     >
-                        // Light mode logo
-                        <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-12 dark:hidden"/>
-                        // Dark mode logo
-                        <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-12 hidden dark:block"/>
+                        // Small starburst icon (always visible on sidebar)
+                        <img src="/kyomi_small_logo.svg" alt="" class="h-6 w-6 mr-2"/>
+                        // "KYOMI" text — DESIGN.md: font-body weight 700, letter-spacing 0.04em
+                        <span class="font-sans font-bold tracking-[0.04em] text-white text-sm">"KYOMI"</span>
                     </div>
                 </div>
             </div>
@@ -350,18 +354,23 @@ fn Sidebar(
             <div class="flex-1 flex flex-col px-3 py-4 min-h-0 overflow-hidden">
                 <div class="space-y-1 mb-4">
                     // New Chat — special styling with amber circle + plus icon
+                    // Active state: amber accent when path is exactly /chat
                     <a
                         href="/chat"
-                        class=move || format!(
-                            "w-full h-10 flex items-center rounded-lg hover:bg-accent transition-colors {}",
-                            if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" }
-                        )
+                        class=move || {
+                            let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
+                            if new_chat_active.get() {
+                                format!("w-full h-10 flex items-center rounded-lg transition-colors bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                            } else {
+                                format!("w-full h-10 flex items-center rounded-lg hover:bg-white/5 transition-colors {spacing}")
+                            }
+                        }
                     >
                         <div class="w-5 h-5 rounded-full flex items-center justify-center bg-primary flex-shrink-0">
                             <span class="text-primary-foreground"><Icon icon=icondata_lu::LuPlus width="12" height="12"/></span>
                         </div>
                         <span
-                            class="text-sm font-medium text-foreground whitespace-nowrap overflow-hidden transition-opacity duration-300"
+                            class="text-sm font-medium text-slate-200 whitespace-nowrap overflow-hidden transition-opacity duration-300"
                             style=move || if collapsed.get() { "opacity: 0" } else { "opacity: 1" }
                         >
                             "New chat"
@@ -390,15 +399,15 @@ fn Sidebar(
                 // ── Recent Chats ───────────────────────────────────────────
                 // React: "border-t border-border pt-4 flex-1 flex flex-col min-h-0"
                 <div
-                    class="border-t border-border pt-4 flex-1 flex flex-col min-h-0 transition-opacity duration-300"
+                    class="border-t border-white/10 pt-4 flex-1 flex flex-col min-h-0 transition-opacity duration-300"
                     style=move || if collapsed.get() { "opacity: 0; pointer-events: none" } else { "opacity: 1" }
                 >
                     <div class="flex items-center justify-between px-3 mb-2">
-                        <div class="text-xs text-muted-foreground font-medium">"Recent Chats"</div>
+                        <div class="text-xs text-slate-500 font-medium">"Recent Chats"</div>
                     </div>
                     <div class="space-y-1 overflow-y-auto">
                         <Transition fallback=|| view! {
-                            <div class="text-xs text-muted-foreground px-3 py-2 italic">"Loading..."</div>
+                            <div class="text-xs text-slate-500 px-3 py-2 italic">"Loading..."</div>
                         }>
                             {move || sessions.get().map(|result| match result {
                                 Ok(sessions) if sessions.is_empty() => view! {
@@ -416,7 +425,7 @@ fn Sidebar(
                                     >
                                         <a
                                             href=format!("/chat/{}", session.session_id)
-                                            class="block px-3 py-2 rounded-lg cursor-pointer transition-all duration-300 text-sm text-foreground hover:bg-accent truncate"
+                                            class="block px-3 py-2 rounded-lg cursor-pointer transition-all duration-300 text-sm text-slate-300 hover:bg-white/5 truncate"
                                         >
                                             {session.title.clone()}
                                         </a>
@@ -437,7 +446,7 @@ fn Sidebar(
 
             // ── User Account Section ───────────────────────────────────────
             // React: "border-t border-border px-3 py-4 relative"
-            <div class="border-t border-border px-3 py-4 relative">
+            <div class="border-t border-white/10 px-3 py-4 relative">
                 <Transition fallback=|| ()>
                     {move || user_info.get().map(|result| {
                         let user = match result {
@@ -469,7 +478,7 @@ fn Sidebar(
                                 <button
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
-                                        "flex items-center w-full h-10 hover:bg-accent rounded-lg transition-colors {}",
+                                        "flex items-center w-full h-10 hover:bg-white/5 rounded-lg transition-colors {}",
                                         if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-2.5" }
                                     )
                                 >
@@ -480,15 +489,15 @@ fn Sidebar(
                                         class="flex-1 min-w-0 text-left overflow-hidden transition-all duration-300"
                                         style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
                                     >
-                                        <div class="text-sm font-medium text-foreground truncate">{display_name.clone()}</div>
+                                        <div class="text-sm font-medium text-slate-200 truncate">{display_name.clone()}</div>
                                         {if !is_personal {
-                                            Some(view! { <div class="text-xs text-muted-foreground truncate">{workspace.clone()}</div> })
+                                            Some(view! { <div class="text-xs text-slate-500 truncate">{workspace.clone()}</div> })
                                         } else {
                                             None
                                         }}
                                     </div>
                                     <span
-                                        class="text-muted-foreground flex-shrink-0 transition-all duration-300"
+                                        class="text-slate-400 flex-shrink-0 transition-all duration-300"
                                         style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
                                     >
                                         <Icon icon=icondata_lu::LuChevronDown width="16" height="16"/>
@@ -554,11 +563,12 @@ fn Sidebar(
 
 /// A single navigation item in the sidebar.
 ///
-/// Matches React sidebar button classes exactly:
-/// - `w-full h-10 flex items-center rounded-lg hover:bg-accent transition-colors`
+/// Navy sidebar styling:
+/// - Default: `text-slate-300`, `hover:bg-white/5`
+/// - Active: amber accent background `bg-[rgba(217,119,6,0.12)]` with `text-amber-500`
 /// - Collapsed: `gap-3 px-2.5`, Expanded: `gap-3 pl-2.5 pr-3 py-2.5`
-/// - Icon: `w-5 h-5 text-muted-foreground flex-shrink-0`
-/// - Label: `text-sm font-medium text-foreground whitespace-nowrap overflow-hidden transition-opacity duration-300`
+/// - Icon: inherits text color from parent `<a>`
+/// - Label: `text-sm font-medium whitespace-nowrap overflow-hidden transition-opacity duration-300`
 #[component]
 fn NavItem(
     href: &'static str,
@@ -571,17 +581,35 @@ fn NavItem(
     badge_count: Option<Signal<i64>>,
 ) -> impl IntoView {
     let count = badge_count.unwrap_or_else(|| Signal::derive(|| 0));
+    let pathname = leptos_router::hooks::use_location().pathname;
+
+    // Active when the current path starts with this nav item's href.
+    // Special-case "/chat" so it doesn't match "/chats".
+    let is_active = Memo::new(move |_| {
+        let path = pathname.get();
+        if href == "/chat" {
+            // Exact match only — /chat but not /chats or /chat/xxx
+            path == "/chat"
+        } else {
+            path.starts_with(href)
+        }
+    });
 
     view! {
         <a
             href=href
-            class=move || format!(
-                "w-full h-10 flex items-center rounded-lg hover:bg-accent transition-colors {}",
-                if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" }
-            )
+            class=move || {
+                let active = is_active.get();
+                let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
+                if active {
+                    format!("w-full h-10 flex items-center rounded-lg transition-colors bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                } else {
+                    format!("w-full h-10 flex items-center rounded-lg transition-colors hover:bg-white/5 text-slate-300 {spacing}")
+                }
+            }
         >
             <div class="relative flex-shrink-0">
-                <span class="w-5 h-5 text-muted-foreground flex items-center justify-center">
+                <span class="w-5 h-5 flex items-center justify-center">
                     <Icon icon=icon width="20" height="20"/>
                 </span>
                 // Collapsed dot indicator — React: "absolute -top-1 -right-1 h-2 w-2 rounded-full bg-primary"
@@ -590,7 +618,7 @@ fn NavItem(
                 })}
             </div>
             <span
-                class="text-sm font-medium text-foreground whitespace-nowrap overflow-hidden transition-opacity duration-300"
+                class="text-sm font-medium whitespace-nowrap overflow-hidden transition-opacity duration-300"
                 style=move || if collapsed.get() { "opacity: 0" } else { "opacity: 1" }
             >
                 {label}
