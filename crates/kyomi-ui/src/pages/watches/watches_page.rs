@@ -14,6 +14,7 @@
 //! - Execution log modal for viewing watch run history
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
 use crate::components::toast::{toast_error, toast_success};
@@ -39,165 +40,6 @@ const BTN_GHOST: &str = "text-foreground hover:bg-accent hover:text-accent-foreg
 const BTN_DEFAULT_SIZE: &str = "h-9 px-4 py-2";
 const BTN_SM: &str = "h-8 rounded-md px-3 text-xs";
 
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-/// Eye icon (Heroicons outline).
-#[component]
-fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-        </svg>
-    }
-}
-
-/// Plus icon (Lucide).
-#[component]
-fn PlusIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14" />
-            <path d="M12 5v14" />
-        </svg>
-    }
-}
-
-/// Bell icon (Lucide).
-#[component]
-fn BellIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-            <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-        </svg>
-    }
-}
-
-/// Clock icon (Lucide).
-#[component]
-fn ClockIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-        </svg>
-    }
-}
-
-/// Play icon (Lucide).
-#[component]
-fn PlayIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polygon points="6 3 20 12 6 21 6 3" />
-        </svg>
-    }
-}
-
-/// Settings icon (Lucide).
-#[component]
-fn SettingsIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-            <circle cx="12" cy="12" r="3" />
-        </svg>
-    }
-}
-
-/// Trash2 icon (Lucide).
-#[component]
-fn TrashIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h18" />
-            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-            <line x1="10" x2="10" y1="11" y2="17" />
-            <line x1="14" x2="14" y1="11" y2="17" />
-        </svg>
-    }
-}
-
-/// Sparkles icon (Lucide).
-#[component]
-fn SparklesIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
-        </svg>
-    }
-}
-
-/// FileText icon (Lucide).
-#[component]
-fn FileTextIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
-            <path d="M14 2v4a2 2 0 0 0 2 2h4" />
-            <path d="M10 9H8" />
-            <path d="M16 13H8" />
-            <path d="M16 17H8" />
-        </svg>
-    }
-}
-
-/// CheckCircle icon (Lucide).
-#[component]
-fn CheckCircleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-            <path d="m9 11 3 3L22 4" />
-        </svg>
-    }
-}
-
-/// XCircle icon (Lucide).
-#[component]
-fn XCircleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <path d="m15 9-6 6" />
-            <path d="m9 9 6 6" />
-        </svg>
-    }
-}
-
-/// Loader2 icon (Lucide) — used for spinning animation.
-#[component]
-fn Loader2Icon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-        </svg>
-    }
-}
-
-/// AlertCircle icon (Lucide).
-#[component]
-fn AlertCircleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <line x1="12" x2="12" y1="8" y2="12" />
-            <line x1="12" x2="12.01" y1="16" y2="16" />
-        </svg>
-    }
-}
-
-/// ChartBar icon (Heroicons outline) — used for report mode badge.
-#[component]
-fn ChartBarIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-        </svg>
-    }
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -329,9 +171,9 @@ fn WatchCard(
                     <div class="flex-1 min-w-0">
                         <CardTitle class="text-base truncate flex items-center gap-2".to_string()>
                             {if watch_mode == "report" {
-                                view! { <ChartBarIcon class="h-4 w-4 shrink-0 text-muted-foreground".to_string() /> }.into_any()
+                                view! { <Icon icon=icondata_lu::LuChartBar attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
                             } else {
-                                view! { <BellIcon class="h-4 w-4 shrink-0 text-muted-foreground".to_string() /> }.into_any()
+                                view! { <Icon icon=icondata_lu::LuBell attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
                             }}
                             {watch_name}
                         </CardTitle>
@@ -351,7 +193,7 @@ fn WatchCard(
             <CardContent class="space-y-3".to_string()>
                 // Schedule
                 <div class="flex items-center text-sm text-muted-foreground">
-                    <ClockIcon class="h-4 w-4 mr-2".to_string() />
+                    <Icon icon=icondata_lu::LuClock attr:class="h-4 w-4 mr-2" />
                     {cron_desc.description}
                 </div>
 
@@ -362,13 +204,13 @@ fn WatchCard(
                         view! {
                             <StatusBadge variant=variant class="gap-1">
                                 {if status == "success" || status == "no_alert" {
-                                    view! { <CheckCircleIcon class="h-3 w-3".to_string() /> }.into_any()
+                                    view! { <Icon icon=icondata_lu::LuCircleCheck attr:class="h-3 w-3" /> }.into_any()
                                 } else if status == "error" {
-                                    view! { <XCircleIcon class="h-3 w-3".to_string() /> }.into_any()
+                                    view! { <Icon icon=icondata_lu::LuCircleX attr:class="h-3 w-3" /> }.into_any()
                                 } else if status == "running" {
-                                    view! { <Loader2Icon class="h-3 w-3 animate-spin".to_string() /> }.into_any()
+                                    view! { <Icon icon=icondata_lu::LuLoader attr:class="h-3 w-3 animate-spin" /> }.into_any()
                                 } else {
-                                    view! { <CheckCircleIcon class="h-3 w-3".to_string() /> }.into_any()
+                                    view! { <Icon icon=icondata_lu::LuCircleCheck attr:class="h-3 w-3" /> }.into_any()
                                 }}
                                 {label}
                             </StatusBadge>
@@ -399,7 +241,7 @@ fn WatchCard(
                         on:click=move |_| on_run.run(wid_run.clone())
                         disabled=move || run_pending.get()
                     >
-                        <PlayIcon class="h-4 w-4".to_string() />
+                        <Icon icon=icondata_lu::LuPlay attr:class="h-4 w-4" />
                     </button>
                     {has_last_run.then(|| {
                         let w = watch_for_log.clone();
@@ -408,7 +250,7 @@ fn WatchCard(
                                 class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM}")
                                 on:click=move |_| on_view_log.run(w.clone())
                             >
-                                <FileTextIcon class="h-4 w-4".to_string() />
+                                <Icon icon=icondata_lu::LuFileText attr:class="h-4 w-4" />
                             </button>
                         }
                     })}
@@ -421,7 +263,7 @@ fn WatchCard(
                         disabled=!ai_enabled
                         title=if !ai_enabled { "AI features not available" } else { "Edit with AI" }
                     >
-                        <SparklesIcon class="h-4 w-4".to_string() />
+                        <Icon icon=icondata_lu::LuSparkles attr:class="h-4 w-4" />
                     </button>
                     <button
                         class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM}")
@@ -430,7 +272,7 @@ fn WatchCard(
                             move |_| on_edit.run(w.clone())
                         }
                     >
-                        <SettingsIcon class="h-4 w-4".to_string() />
+                        <Icon icon=icondata_lu::LuSettings attr:class="h-4 w-4" />
                     </button>
                     <button
                         class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM} text-destructive hover:text-destructive")
@@ -439,7 +281,7 @@ fn WatchCard(
                             move |_| on_delete.run(w.clone())
                         }
                     >
-                        <TrashIcon class="h-4 w-4".to_string() />
+                        <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4" />
                     </button>
                 </div>
             </CardContent>
@@ -729,7 +571,7 @@ pub fn WatchesPage() -> impl IntoView {
                     <div class="h-full flex flex-col bg-background">
                         <div class="flex items-center justify-between px-6 py-4 border-b border-border">
                             <div class="flex items-center gap-3">
-                                <EyeIcon class="h-6 w-6 text-primary".to_string() />
+                                <Icon icon=icondata_lu::LuEye attr:class="h-6 w-6 text-primary" />
                                 <h1 class="text-xl font-semibold text-foreground">"Kyomi Watch"</h1>
                             </div>
                         </div>
@@ -737,7 +579,7 @@ pub fn WatchesPage() -> impl IntoView {
                             <Card class="max-w-lg".to_string()>
                                 <CardHeader class="text-center".to_string()>
                                     <div class="mx-auto mb-4 h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center">
-                                        <EyeIcon class="h-8 w-8 text-primary".to_string() />
+                                        <Icon icon=icondata_lu::LuEye attr:class="h-8 w-8 text-primary" />
                                     </div>
                                     <CardTitle class="text-xl".to_string()>"Proactive Data Monitoring"</CardTitle>
                                     <p class="text-base text-muted-foreground">
@@ -747,15 +589,15 @@ pub fn WatchesPage() -> impl IntoView {
                                 <CardContent class="space-y-4".to_string()>
                                     <ul class="space-y-3 text-sm text-muted-foreground">
                                         <li class="flex items-start gap-2">
-                                            <CheckCircleIcon class="h-5 w-5 text-success-foreground mt-0.5 shrink-0".to_string() />
+                                            <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
                                             <span>"Monitor data with plain English instructions"</span>
                                         </li>
                                         <li class="flex items-start gap-2">
-                                            <CheckCircleIcon class="h-5 w-5 text-success-foreground mt-0.5 shrink-0".to_string() />
+                                            <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
                                             <span>"Get alerts when metrics change or anomalies occur"</span>
                                         </li>
                                         <li class="flex items-start gap-2">
-                                            <CheckCircleIcon class="h-5 w-5 text-success-foreground mt-0.5 shrink-0".to_string() />
+                                            <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
                                             <span>"Schedule checks hourly, daily, or custom intervals"</span>
                                         </li>
                                     </ul>
@@ -787,7 +629,7 @@ pub fn WatchesPage() -> impl IntoView {
                         // Header
                         <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
                             <div class="flex items-center gap-3">
-                                <EyeIcon class="h-6 w-6 text-primary hidden sm:block".to_string() />
+                                <Icon icon=icondata_lu::LuEye attr:class="h-6 w-6 text-primary hidden sm:block" />
                                 <h1 class="text-lg sm:text-xl font-semibold text-foreground">"Kyomi Watch"</h1>
                             </div>
                             <div class="flex items-center gap-2">
@@ -803,7 +645,7 @@ pub fn WatchesPage() -> impl IntoView {
                                             }
                                         }
                                     >
-                                        <BellIcon class="h-4 w-4".to_string() />
+                                        <Icon icon=icondata_lu::LuBell attr:class="h-4 w-4" />
                                         <span class="hidden sm:inline">"Alerts"</span>
                                     </button>
                                     <button
@@ -816,7 +658,7 @@ pub fn WatchesPage() -> impl IntoView {
                                             }
                                         }
                                     >
-                                        <EyeIcon class="h-4 w-4".to_string() />
+                                        <Icon icon=icondata_lu::LuEye attr:class="h-4 w-4" />
                                         <span class="hidden sm:inline">"Watches"</span>
                                     </button>
                                 </div>
@@ -829,7 +671,7 @@ pub fn WatchesPage() -> impl IntoView {
                                         else { "AI features are not available" }
                                     } else { "" }
                                 >
-                                    <PlusIcon class="h-4 w-4".to_string() />
+                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4" />
                                     <span class="hidden sm:inline">"Create Watch"</span>
                                 </button>
                             </div>
@@ -840,7 +682,7 @@ pub fn WatchesPage() -> impl IntoView {
                             view! {
                                 <div class="px-6 pt-4">
                                     <Alert variant=AlertVariant::Warning>
-                                        <AlertCircleIcon class="h-4 w-4".to_string() />
+                                        <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4" />
                                         <AlertDescription>
                                             "Your AI budget is exhausted for this billing period. Existing watches will not run until your budget resets. "
                                             <a href="/settings/billing" class="underline transition-colors hover:text-foreground">"Upgrade your plan"</a>
@@ -866,7 +708,7 @@ pub fn WatchesPage() -> impl IntoView {
                                             match result {
                                                 Err(e) => view! {
                                                     <Alert variant=AlertVariant::Error>
-                                                        <AlertCircleIcon class="h-4 w-4".to_string() />
+                                                        <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4" />
                                                         <AlertDescription>
                                                             {format!("Failed to load watches: {e}")}
                                                         </AlertDescription>
@@ -880,7 +722,7 @@ pub fn WatchesPage() -> impl IntoView {
                                                     };
                                                     view! {
                                                         <EmptyState
-                                                            icon=std::sync::Arc::new(|| view! { <EyeIcon class="h-12 w-12".to_string() /> }.into_any())
+                                                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuEye attr:class="h-12 w-12" /> }.into_any())
                                                             title="No watches yet"
                                                             description=desc.to_string()
                                                             action=std::sync::Arc::new(move || view! {
@@ -892,7 +734,7 @@ pub fn WatchesPage() -> impl IntoView {
                                                                     }
                                                                     disabled=!is_ai_enabled
                                                                 >
-                                                                    <PlusIcon class="h-4 w-4 mr-2".to_string() />
+                                                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4 mr-2" />
                                                                     "Create Watch"
                                                                 </button>
                                                             }.into_any())

@@ -15,6 +15,7 @@
 //! - Right side: cursor position (line and column)
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::Spinner;
 use crate::server_fns::sql_editor::DryRunResult;
@@ -30,28 +31,6 @@ pub enum DryRunStatus {
     Complete(DryRunResult),
     /// No dry run has been performed yet (e.g. empty query, no datasource).
     Idle,
-}
-
-// ─── SVG Icons ───────────────────────────────────────────────────────────────
-
-/// Checkmark circle icon (Heroicons outline) for valid dry run status.
-#[component]
-fn CheckCircleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-        </svg>
-    }
-}
-
-/// Exclamation triangle icon (Heroicons outline) for error/warning dry run status.
-#[component]
-fn ExclamationTriangleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-        </svg>
-    }
 }
 
 // ─── Status Bar component ────────────────────────────────────────────────────
@@ -99,7 +78,7 @@ pub fn StatusBar(
                             if result.valid {
                                 view! {
                                     <div class="flex items-center gap-2 text-xs" style="min-height: 20px">
-                                        <CheckCircleIcon class="h-5 w-5 text-success-foreground" />
+                                        <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground" />
                                         <span class="text-muted-foreground">{result.message}</span>
                                     </div>
                                 }.into_any()
@@ -117,7 +96,7 @@ pub fn StatusBar(
                                 if is_auth_error {
                                     view! {
                                         <div class="flex items-center gap-2 text-xs" style="min-height: 20px">
-                                            <ExclamationTriangleIcon class="h-5 w-5 text-warning-foreground flex-shrink-0" />
+                                            <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-5 w-5 text-warning-foreground flex-shrink-0" />
                                             <span class="text-warning-foreground text-xs truncate">
                                                 "Authentication required - check datasource credentials in Settings"
                                             </span>
@@ -126,7 +105,7 @@ pub fn StatusBar(
                                 } else {
                                     view! {
                                         <div class="flex items-center gap-2 text-xs" style="min-height: 20px">
-                                            <ExclamationTriangleIcon class="h-5 w-5 text-error-foreground flex-shrink-0" />
+                                            <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-5 w-5 text-error-foreground flex-shrink-0" />
                                             <span class="text-error-foreground text-xs truncate">
                                                 {message}
                                             </span>

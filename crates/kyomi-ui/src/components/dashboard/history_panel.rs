@@ -10,6 +10,7 @@
 //! - Mobile: slide-in panel with backdrop overlay
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -107,57 +108,6 @@ fn DiffViewer(diff_lines: Vec<DiffLine>) -> impl IntoView {
     }
 }
 
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-/// Clock icon (Heroicons outline) — matches `ClockIcon` in React.
-#[component]
-fn ClockIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-        </svg>
-    }
-}
-
-/// X icon (Heroicons outline) — matches `XMarkIcon` in React.
-#[component]
-fn XIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
-        </svg>
-    }
-}
-
-/// ArrowUturnLeft icon (Heroicons outline) — matches `ArrowUturnLeftIcon` in React.
-#[component]
-fn RestoreIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
-        </svg>
-    }
-}
-
-/// DocumentArrowDown icon (Heroicons outline) — "Compare with previous".
-#[component]
-fn CompareDownIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m.75 12 3 3m0 0 3-3m-3 3v-6m-1.5-9H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-        </svg>
-    }
-}
-
-/// DocumentArrowUp icon (Heroicons outline) — "Compare with current".
-#[component]
-fn CompareUpIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m6.75 12-3-3m0 0-3 3m3-3v6m-1.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
-        </svg>
-    }
-}
 
 // ─── Main component ─────────────────────────────────────────────────────────
 
@@ -441,7 +391,7 @@ pub fn HistoryPanel(
                 // React: `flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0`
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
-                        <ClockIcon class="w-5 h-5 text-primary" />
+                        <Icon icon=icondata_lu::LuClock attr:class="w-5 h-5 text-primary" />
                         <span class="font-medium text-foreground">"Version History"</span>
                     </div>
                     <button
@@ -449,7 +399,7 @@ pub fn HistoryPanel(
                         aria-label="Close history"
                         on:click=move |_| on_close.run(())
                     >
-                        <XIcon class="w-5 h-5" />
+                        <Icon icon=icondata_lu::LuX attr:class="w-5 h-5" />
                     </button>
                 </div>
 
@@ -532,7 +482,7 @@ pub fn HistoryPanel(
                                                 }.into_any(),
                                                 Ok(items) if items.is_empty() => view! {
                                                     <EmptyState
-                                                        icon=std::sync::Arc::new(|| view! { <ClockIcon class="w-12 h-12" /> }.into_any())
+                                                        icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuClock attr:class="w-12 h-12" /> }.into_any())
                                                         title="No version history yet"
                                                         description="Versions are created when you save changes"
                                                         class="p-4 border-0"
@@ -645,7 +595,7 @@ pub fn HistoryPanel(
                                                                                         disabled=move || is_diff_loading.get()
                                                                                         on:click=move |_| handle_view_diff_clone(prev_ver, cv_ver)
                                                                                     >
-                                                                                        <CompareDownIcon class="w-4 h-4" />
+                                                                                        <Icon icon=icondata_lu::LuFileDown attr:class="w-4 h-4" />
                                                                                     </button>
                                                                                 </div>
                                                                             }
@@ -732,7 +682,7 @@ pub fn HistoryPanel(
                                                                                     disabled=move || is_diff_loading.get()
                                                                                     on:click=move |_| handle_view_diff_clone(pv, ver_num)
                                                                                 >
-                                                                                    <CompareDownIcon class="w-4 h-4" />
+                                                                                    <Icon icon=icondata_lu::LuFileDown attr:class="w-4 h-4" />
                                                                                 </button>
                                                                             })}
 
@@ -744,7 +694,7 @@ pub fn HistoryPanel(
                                                                                     disabled=move || is_diff_loading.get()
                                                                                     on:click=move |_| handle_view_diff_clone2(ver_num, cv)
                                                                                 >
-                                                                                    <CompareUpIcon class="w-4 h-4" />
+                                                                                    <Icon icon=icondata_lu::LuFileUp attr:class="w-4 h-4" />
                                                                                 </button>
                                                                             })}
 
@@ -760,7 +710,7 @@ pub fn HistoryPanel(
                                                                                     // (confirm_version is cleared when restore starts)
                                                                                     view! { <Spinner class="text-primary" /> }.into_any()
                                                                                 } else {
-                                                                                    view! { <RestoreIcon class="w-4 h-4" /> }.into_any()
+                                                                                    view! { <Icon icon=icondata_lu::LuUndo2 attr:class="w-4 h-4" /> }.into_any()
                                                                                 }}
                                                                             </button>
                                                                         </div>

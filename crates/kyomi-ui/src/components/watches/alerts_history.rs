@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
@@ -30,151 +31,6 @@ use crate::types::{AlertItem, WatchListItem};
 
 const ALERTS_PER_PAGE: i64 = 20;
 
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-/// Bell icon (Lucide).
-#[component]
-fn BellIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-            <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-        </svg>
-    }
-}
-
-/// ChartBar icon (Heroicons outline).
-#[component]
-fn ChartBarIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-        </svg>
-    }
-}
-
-/// Clock icon (Lucide).
-#[component]
-fn ClockIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-        </svg>
-    }
-}
-
-/// ChevronDown icon (Lucide).
-#[component]
-fn ChevronDownIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m6 9 6 6 6-6" />
-        </svg>
-    }
-}
-
-/// ChevronUp icon (Lucide).
-#[component]
-fn ChevronUpIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="m18 15-6-6-6 6" />
-        </svg>
-    }
-}
-
-/// Trash2 icon (Lucide).
-#[component]
-fn TrashIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h18" />
-            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-            <line x1="10" x2="10" y1="11" y2="17" />
-            <line x1="14" x2="14" y1="11" y2="17" />
-        </svg>
-    }
-}
-
-/// Undo2 icon (Lucide).
-#[component]
-fn UndoIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 14 4 9l5-5" />
-            <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" />
-        </svg>
-    }
-}
-
-/// MailOpen icon (Lucide).
-#[component]
-fn MailOpenIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6Z" />
-            <path d="m22 10-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10" />
-        </svg>
-    }
-}
-
-/// Mail icon (Lucide).
-#[component]
-fn MailIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect width="20" height="16" x="2" y="4" rx="2" />
-            <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
-        </svg>
-    }
-}
-
-/// MoreVertical icon (Lucide).
-#[component]
-fn MoreVerticalIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="1" />
-            <circle cx="12" cy="5" r="1" />
-            <circle cx="12" cy="19" r="1" />
-        </svg>
-    }
-}
-
-/// X icon (Lucide).
-#[component]
-fn XIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 6 6 18" />
-            <path d="m6 6 12 12" />
-        </svg>
-    }
-}
-
-/// ChatBubbleLeftRight icon (Heroicons outline).
-#[component]
-fn ChatBubbleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 0 1-.825-.242m9.345-8.334a2.126 2.126 0 0 0-.476-.095 48.64 48.64 0 0 0-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0 0 11.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" />
-        </svg>
-    }
-}
-
-/// AlertCircle icon (Lucide).
-#[component]
-fn AlertCircleIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <line x1="12" x2="12" y1="8" y2="12" />
-            <line x1="12" x2="12.01" y1="16" y2="16" />
-        </svg>
-    }
-}
 
 // ─── Dropdown Menu ──────────────────────────────────────────────────────────
 
@@ -318,7 +174,7 @@ fn AlertDropdownMenu(
                 on:click=move |_| set_is_open.update(|v| *v = !*v)
                 disabled=action_pending
             >
-                <MoreVerticalIcon class="h-4 w-4" />
+                <Icon icon=icondata_lu::LuEllipsisVertical attr:class="h-4 w-4" />
             </button>
 
             // Dropdown content
@@ -330,7 +186,7 @@ fn AlertDropdownMenu(
                             class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground sm:hidden"
                             on:click=handle_continue_chat
                         >
-                            <ChatBubbleIcon class="h-4 w-4 mr-2" />
+                            <Icon icon=icondata_lu::LuMessagesSquare attr:class="h-4 w-4 mr-2" />
                             "Continue in Chat"
                         </button>
 
@@ -340,7 +196,7 @@ fn AlertDropdownMenu(
                                 class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
                                 on:click=handle_mark_unread
                             >
-                                <MailOpenIcon class="h-4 w-4 mr-2" />
+                                <Icon icon=icondata_lu::LuMailOpen attr:class="h-4 w-4 mr-2" />
                                 "Mark as unread"
                             </button>
                         })}
@@ -352,7 +208,7 @@ fn AlertDropdownMenu(
                                     class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
                                     on:click=handle_restore
                                 >
-                                    <UndoIcon class="h-4 w-4 mr-2" />
+                                    <Icon icon=icondata_lu::LuUndo2 attr:class="h-4 w-4 mr-2" />
                                     "Restore"
                                 </button>
                             }.into_any()
@@ -362,7 +218,7 @@ fn AlertDropdownMenu(
                                     class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-accent hover:text-accent-foreground"
                                     on:click=handle_delete
                                 >
-                                    <TrashIcon class="h-4 w-4 mr-2" />
+                                    <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4 mr-2" />
                                     "Delete"
                                 </button>
                             }.into_any()
@@ -703,7 +559,7 @@ pub fn AlertsHistory(
                     Some(Err(e)) => {
                         return view! {
                             <div class="rounded-lg border border-error-border bg-error text-error-foreground p-4 flex items-center gap-2">
-                                <AlertCircleIcon class="h-4 w-4" />
+                                <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4" />
                                 <span>{format!("Failed to load alerts: {e}")}</span>
                             </div>
                         }.into_any();
@@ -794,7 +650,7 @@ pub fn AlertsHistory(
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_mark_read
                                         >
-                                            <MailOpenIcon class="h-4 w-4 sm:mr-1.5" />
+                                            <Icon icon=icondata_lu::LuMailOpen attr:class="h-4 w-4 sm:mr-1.5" />
                                             <span class="hidden sm:inline">"Mark Read"</span>
                                         </Button>
                                         <Button
@@ -803,7 +659,7 @@ pub fn AlertsHistory(
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_mark_unread
                                         >
-                                            <MailIcon class="h-4 w-4 sm:mr-1.5" />
+                                            <Icon icon=icondata_lu::LuMail attr:class="h-4 w-4 sm:mr-1.5" />
                                             <span class="hidden sm:inline">"Mark Unread"</span>
                                         </Button>
                                         <Button
@@ -813,7 +669,7 @@ pub fn AlertsHistory(
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_delete
                                         >
-                                            <TrashIcon class="h-4 w-4 sm:mr-1.5" />
+                                            <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4 sm:mr-1.5" />
                                             <span class="hidden sm:inline">"Delete"</span>
                                         </Button>
                                     </div>
@@ -823,7 +679,7 @@ pub fn AlertsHistory(
                                         class="ml-auto"
                                         on:click=handle_clear_selection
                                     >
-                                        <XIcon class="h-4 w-4 sm:mr-1.5" />
+                                        <Icon icon=icondata_lu::LuX attr:class="h-4 w-4 sm:mr-1.5" />
                                         <span class="hidden sm:inline">"Cancel"</span>
                                     </Button>
                                 }.into_any()
@@ -872,7 +728,7 @@ pub fn AlertsHistory(
                             view! {
                                 <div class="flex flex-col items-center justify-center py-12 text-center">
                                     <div class="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
-                                        <BellIcon class="h-8 w-8 text-muted-foreground" />
+                                        <Icon icon=icondata_lu::LuBell attr:class="h-8 w-8 text-muted-foreground" />
                                     </div>
                                     <h3 class="text-lg font-medium text-foreground mb-2">"No alerts yet"</h3>
                                     <p class="text-muted-foreground max-w-md">
@@ -956,13 +812,13 @@ pub fn AlertsHistory(
                                                                     "h-5 w-5 shrink-0 hidden sm:block {}",
                                                                     if is_unread { "text-primary" } else { "text-muted-foreground" }
                                                                 );
-                                                                view! { <ChartBarIcon class=icon_class /> }.into_any()
+                                                                view! { <Icon icon=icondata_lu::LuChartBar attr:class=icon_class /> }.into_any()
                                                             } else {
                                                                 let icon_class = format!(
                                                                     "h-5 w-5 shrink-0 hidden sm:block {}",
                                                                     if is_unread { "text-primary" } else { "text-muted-foreground" }
                                                                 );
-                                                                view! { <BellIcon class=icon_class /> }.into_any()
+                                                                view! { <Icon icon=icondata_lu::LuBell attr:class=icon_class /> }.into_any()
                                                             }}
                                                             <div class="min-w-0 flex-1">
                                                                 <div class="flex items-center gap-2">
@@ -986,7 +842,7 @@ pub fn AlertsHistory(
                                                                 <div class="flex items-center gap-2 text-xs text-muted-foreground mt-0.5 min-w-0">
                                                                     <span class="truncate">{watch_name}</span>
                                                                     <span class="shrink-0">{"\u{2022}"}</span>
-                                                                    <ClockIcon class="h-3 w-3 shrink-0" />
+                                                                    <Icon icon=icondata_lu::LuClock attr:class="h-3 w-3 shrink-0" />
                                                                     <span class="shrink-0">{started_at}</span>
                                                                 </div>
                                                             </div>
@@ -994,9 +850,9 @@ pub fn AlertsHistory(
                                                         // Expand chevron
                                                         {move || {
                                                             if expanded_alerts.get().contains(&alert_id) {
-                                                                view! { <ChevronUpIcon class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
+                                                                view! { <Icon icon=icondata_lu::LuChevronUp attr:class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
                                                             } else {
-                                                                view! { <ChevronDownIcon class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
+                                                                view! { <Icon icon=icondata_lu::LuChevronDown attr:class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
                                                             }
                                                         }}
                                                     </button>
@@ -1028,7 +884,7 @@ pub fn AlertsHistory(
                                                                 if continue_chat_alert_id.get() == Some(alert_id) {
                                                                     view! { <Spinner /> }.into_any()
                                                                 } else {
-                                                                    view! { <ChatBubbleIcon class="h-4 w-4" /> }.into_any()
+                                                                    view! { <Icon icon=icondata_lu::LuMessagesSquare attr:class="h-4 w-4" /> }.into_any()
                                                                 }
                                                             }}
                                                         </button>

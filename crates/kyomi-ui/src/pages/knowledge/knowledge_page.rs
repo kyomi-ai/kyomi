@@ -19,6 +19,7 @@
 //! a menu button in the header. Selecting a file auto-closes the sidebar.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::confirm_dialog::ConfirmDialog;
 use crate::components::knowledge::{
@@ -30,54 +31,6 @@ use crate::server_fns::knowledge::{
     create_knowledge_file, delete_knowledge_file, list_knowledge_tree, update_knowledge_file,
 };
 use crate::types::KnowledgeTreeEntry;
-
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-/// Plus icon (Lucide) — used for "New File" button.
-#[component]
-fn PlusIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14"/>
-            <path d="M12 5v14"/>
-        </svg>
-    }
-}
-
-/// FolderPlus icon (Lucide) — used for "New Folder" button.
-#[component]
-fn FolderPlusIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 10v6"/>
-            <path d="M9 13h6"/>
-            <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/>
-        </svg>
-    }
-}
-
-/// Menu icon (Lucide) — used for mobile sidebar toggle.
-#[component]
-fn MenuIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="4" x2="20" y1="12" y2="12"/>
-            <line x1="4" x2="20" y1="6" y2="6"/>
-            <line x1="4" x2="20" y1="18" y2="18"/>
-        </svg>
-    }
-}
-
-/// X icon (Lucide) — used for closing the mobile sidebar overlay.
-#[component]
-fn XIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M18 6 6 18"/>
-            <path d="m6 6 12 12"/>
-        </svg>
-    }
-}
 
 // ─── Modal state ────────────────────────────────────────────────────────────
 
@@ -348,9 +301,9 @@ pub fn KnowledgePage() -> impl IntoView {
                     >
                         <Show
                             when=move || sidebar_open.get()
-                            fallback=|| view! { <MenuIcon class="h-4 w-4"/> }
+                            fallback=|| view! { <Icon icon=icondata_lu::LuMenu attr:class="h-4 w-4"/> }
                         >
-                            <XIcon class="h-4 w-4"/>
+                            <Icon icon=icondata_lu::LuX attr:class="h-4 w-4"/>
                         </Show>
                     </button>
                     <h1 class="text-2xl font-semibold text-foreground">"Knowledge"</h1>
@@ -361,7 +314,7 @@ pub fn KnowledgePage() -> impl IntoView {
                         size=ButtonSize::Sm
                         on:click=move |_| on_create_file.run(None)
                     >
-                        <PlusIcon class="h-4 w-4 mr-1"/>
+                        <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4 mr-1"/>
                         <span class="hidden md:inline">"New File"</span>
                     </Button>
                     <Button
@@ -369,7 +322,7 @@ pub fn KnowledgePage() -> impl IntoView {
                         size=ButtonSize::Sm
                         on:click=move |_| on_create_folder.run(None)
                     >
-                        <FolderPlusIcon class="h-4 w-4 mr-1"/>
+                        <Icon icon=icondata_lu::LuFolderPlus attr:class="h-4 w-4 mr-1"/>
                         <span class="hidden md:inline">"New Folder"</span>
                     </Button>
                 </div>

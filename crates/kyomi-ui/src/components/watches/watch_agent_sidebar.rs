@@ -14,6 +14,7 @@
 //! Resize pattern follows `dashboard/copilot_sidebar.rs`.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::dashboard::shared::use_is_mobile;
 use crate::types::WatchListItem;
@@ -25,39 +26,6 @@ const MIN_WIDTH: f64 = 320.0;
 #[cfg(feature = "hydrate")]
 const MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 420.0;
-
-// ─── SVG Icons ──────────────────────────────────────────────────────────────
-
-/// Eye icon (Heroicons outline) — watch icon.
-#[component]
-fn EyeIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-        </svg>
-    }
-}
-
-/// X icon (Heroicons outline) — close button.
-#[component]
-fn XMarkIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
-        </svg>
-    }
-}
-
-/// Paper airplane icon (Heroicons solid) — send button.
-#[component]
-fn SendIcon(#[prop(into, optional)] class: String) -> impl IntoView {
-    view! {
-        <svg class=class xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
-        </svg>
-    }
-}
 
 // ─── Main component ─────────────────────────────────────────────────────────
 
@@ -255,7 +223,7 @@ pub fn WatchAgentSidebar(
                 // React: `flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0`
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
-                        <EyeIcon class="w-5 h-5 text-primary" />
+                        <Icon icon=icondata_lu::LuEye attr:class="w-5 h-5 text-primary" />
                         <span class="font-medium text-foreground">
                             {header_title}
                         </span>
@@ -265,7 +233,7 @@ pub fn WatchAgentSidebar(
                         aria-label="Close"
                         on:click=move |_| handle_close_clone()
                     >
-                        <XMarkIcon class="w-5 h-5" />
+                        <Icon icon=icondata_lu::LuX attr:class="w-5 h-5" />
                     </button>
                 </div>
 
@@ -274,7 +242,7 @@ pub fn WatchAgentSidebar(
                 // copilot session management and WebSocket streaming.
                 <div class="flex-1 overflow-y-auto p-4 space-y-4">
                     <div class="flex flex-col items-center justify-center h-full text-center px-4">
-                        <EyeIcon class="w-12 h-12 text-muted-foreground/50 mb-3" />
+                        <Icon icon=icondata_lu::LuEye attr:class="w-12 h-12 text-muted-foreground/50 mb-3" />
                         <p class="text-muted-foreground text-sm font-medium">
                             {empty_state_message.clone()}
                         </p>
@@ -304,7 +272,7 @@ pub fn WatchAgentSidebar(
                             aria-label="Send message"
                             title="Chat integration coming soon"
                         >
-                            <SendIcon class="w-4 h-4" />
+                            <Icon icon=icondata_lu::LuSend attr:class="w-4 h-4" />
                         </button>
                     </div>
                 </div>
