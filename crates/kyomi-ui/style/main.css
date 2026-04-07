@@ -132,19 +132,31 @@ html {
   font-weight: 400;
 }
 
+/* Dashboard prose headings: Instrument Serif per DESIGN.md */
+.prose h1, .prose h2, .prose h3 {
+  font-family: var(--font-display);
+  font-weight: 400;
+}
+
+/* Dashboard prose body: 15px, line-height 1.8 per DESIGN.md */
+.prose {
+  font-size: 15px;
+  line-height: 1.8;
+}
+
 /* ── Layout: one continuous warm surface ────────────────────────────
  * DESIGN.md: "No visual separation between header and content."
  * The only hard border is between the navy sidebar and content area. */
 
 /* Page headers: same bg as content, no bottom border */
 .page-header {
-  background-color: var(--color-muted);
+  background-color: var(--color-background);
   border-bottom: none;
 }
 
-/* Footer metadata bar: warm surface, no border */
+/* Footer metadata bar: same bg as content */
 .metadata-footer {
-  background-color: var(--color-muted);
+  background-color: var(--color-background);
 }
 
 /* ── Chart containers: white card treatment ─────────────────────────

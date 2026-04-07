@@ -252,7 +252,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
     view! {
         <Transition fallback=move || view! {
-            <div class="flex h-full items-center justify-center bg-muted">
+            <div class="flex h-full items-center justify-center bg-background">
                 <Spinner class="h-8 w-8 text-muted-foreground" />
             </div>
         }>
@@ -285,7 +285,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 Some(match dashboard_result {
                     Err(e) => {
                         view! {
-                            <div class="flex h-full items-center justify-center bg-muted">
+                            <div class="flex h-full items-center justify-center bg-background">
                                 <div class="text-center">
                                     <h2 class="text-lg font-semibold text-foreground mb-4">
                                         "Dashboard Not Found"
@@ -685,9 +685,9 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         let updated_date = format_date(&updated_at);
 
                         view! {
-                            <div class="flex flex-col h-full bg-muted overflow-hidden" style:flex-direction="column">
+                            <div class="flex flex-col h-full bg-background overflow-hidden" style:flex-direction="column">
                                 // ─── Header / Toolbar ───────────────────
-                                <div class="page-header h-16 bg-muted px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                                <div class="page-header h-16 bg-background px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                                     // Left: back button + editable title
                                     <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
                                         <ButtonLink href="/dashboards" variant=ButtonVariant::Ghost size=ButtonSize::Icon class="flex-shrink-0 text-muted-foreground hover:text-foreground" aria_label="Back to dashboards">
@@ -830,7 +830,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 // ─── Content area with optional History panel ───
                                 <div class="flex-1 overflow-hidden flex">
                                     // Main content
-                                    <div class="flex-1 overflow-y-auto p-4 md:p-6 bg-muted">
+                                    <div class="flex-1 overflow-y-auto p-4 md:p-6 bg-background">
                                         // Dashboard parameters (above content card)
                                         {has_params.then(|| {
                                             view! {
@@ -914,7 +914,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 </div>
 
                                 // ─── Footer with metadata ───────────────
-                                <div class="metadata-footer bg-muted px-4 md:px-6 py-3 flex-shrink-0">
+                                <div class="metadata-footer bg-background px-4 md:px-6 py-3 flex-shrink-0">
                                     <div class="flex items-center justify-between text-xs text-muted-foreground">
                                         <div class="flex items-center gap-4">
                                             <div class="flex items-center gap-1">
