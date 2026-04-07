@@ -285,6 +285,19 @@ html {
   pointer-events: none;
 }
 
+/* ── History panel slide animations ──────────────────────────────
+ * Driven by data-anim attribute to avoid Leptos view re-creation. */
+
+.history-panel-mobile[data-anim="in"],
+.history-panel-desktop[data-anim="in"] {
+  animation: sidebar-enter 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.history-panel-mobile[data-anim="out"],
+.history-panel-desktop[data-anim="out"] {
+  animation: sidebar-exit 300ms cubic-bezier(0.7, 0, 0.84, 0) forwards;
+}
+
 /* ── Sidebar slide animations ───────────────────────────────────── */
 
 .sidebar-slide-in {

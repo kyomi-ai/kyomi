@@ -148,14 +148,20 @@ pub fn HistoryPanel(
     let (version_counter, set_version_counter) = signal(0u32);
 
     // Resource that fetches versions when panel opens or counter bumps.
+    // Only re-fetch when open transitions to true — don't clear data on close
+    // so the content stays visible during the slide-out animation.
+    let (fetch_trigger, set_fetch_trigger) = signal(0u32);
+    Effect::new(move |_| {
+        if open.get() {
+            set_fetch_trigger.update(|n| *n += 1);
+        }
+    });
+
     let versions_resource = Resource::new(
-        move || (open.get(), version_counter.get()),
-        move |(is_open, _counter)| {
+        move || (fetch_trigger.get(), version_counter.get()),
+        move |(_trigger, _counter)| {
             let did = dashboard_id.get_value();
             async move {
-                if !is_open {
-                    return Ok(Vec::<VersionSummary>::new());
-                }
                 list_versions(did).await
             }
         },
@@ -732,25 +738,62 @@ pub fn HistoryPanel(
         }
     };
 
+    // ── Animation lifecycle ────────────────────────────────────────────
+    // Keep the panel mounted during the exit animation, then unmount after 300ms.
+    let (is_mounted, set_is_mounted) = signal(false);
+    let (is_animating_out, set_is_animating_out) = signal(false);
+
+    Effect::new(move |_| {
+        if open.get() {
+            set_is_animating_out.set(false);
+            set_is_mounted.set(true);
+        } else if is_mounted.get_untracked() {
+            set_is_animating_out.set(true);
+            #[cfg(feature = "hydrate")]
+            {
+                use send_wrapper::SendWrapper;
+                let cb = SendWrapper::new(move || {
+                    set_is_mounted.set(false);
+                    set_is_animating_out.set(false);
+                });
+                leptos::task::spawn_local(async move {
+                    gloo_timers::future::TimeoutFuture::new(300).await;
+                    cb.take()();
+                });
+            }
+            #[cfg(not(feature = "hydrate"))]
+            {
+                set_is_mounted.set(false);
+                set_is_animating_out.set(false);
+            }
+        }
+    });
+
     // ── Render ───────────────────────────────────────────────────────────
 
     view! {
-        <Show when=move || open.get()>
+        <Show when=move || is_mounted.get()>
             {move || {
                 let confirm_msg = confirm_message();
                 let confirm_open_sig: Signal<bool> = confirm_open;
 
+                // Animation state as a data attribute — avoids re-rendering the view tree
+                let anim_state = move || {
+                    if is_animating_out.get() { "out" } else { "in" }
+                };
+
                 if is_mobile.get() {
                     // Mobile: Slide-in panel with backdrop
-                    // React: `fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
-                    // React: `fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl`
                     view! {
                         <div>
                             <div
                                 class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| on_close.run(())
                             />
-                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-muted flex flex-col shadow-xl sidebar-slide-in">
+                            <div
+                                class="history-panel-mobile fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-muted flex flex-col shadow-xl"
+                                data-anim=anim_state
+                            >
                                 {panel_content()}
                             </div>
                             <ConfirmDialog
@@ -766,13 +809,12 @@ pub fn HistoryPanel(
                     }.into_any()
                 } else {
                     // Desktop: Resizable inline sidebar
-                    // React: `border-l border-border bg-card flex h-full overflow-hidden`
                     let width_style = move || format!("width: {}px", panel_width.get());
                     let panel_class = move || {
                         if is_resizing.get() {
-                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 select-none"
+                            "history-panel-desktop border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 select-none"
                         } else {
-                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 transition-all duration-slow ease-in-out"
+                            "history-panel-desktop border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0"
                         }
                     };
 
@@ -781,6 +823,7 @@ pub fn HistoryPanel(
                             <div
                                 class=panel_class
                                 style=width_style
+                                data-anim=anim_state
                             >
                                 // Resize Handle
                                 // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
