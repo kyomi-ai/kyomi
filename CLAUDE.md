@@ -23,19 +23,33 @@ All commits require a cryptographically signed approval from the **code-review-a
 
 The Leptos frontend has THREE separate build artifacts (Tailwind CSS, WASM, server binary) that must ALL be current. The #1 source of wasted time is testing against a stale binary.
 
-Quick reference:
-```bash
-# Full rebuild chain (in order — MUST use nightly for WASM):
-cd crates/kyomi-ui && tailwindcss --input style/main.css --output style/output.css --content "src/**/*.rs"
-cd crates/kyomi-ui && RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
-cd /home/jason/repos/kyomi && cargo build --release -p kyomi-server
-# Then restart the server
+**Use `dev-server` profile for development.** It reads `dist/` from disk — no server restart for frontend changes.
+
+Quick reference — what to rebuild per change type:
+```
+CSS only (main.css):      trunk build → refresh browser
+Frontend Rust (.rs):      trunk build → refresh browser
+Path dep (chartml etc):   trunk build → refresh browser
+Server-side Rust:         cargo build --profile dev-server → restart server
 ```
 
-**NEVER run `cargo build` before `trunk build` — the server embeds WASM from `dist/` at compile time.**
+Start dev.kyomi.ai (SaaS mode):
+```bash
+kill $(lsof -ti:3000); cd /home/jason/repos/kyomi
+set -a; source .env; set +a
+PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
+```
+
+**dev.kyomi.ai = SaaS mode (Postgres + Redis) on port 3000. NEVER use SELF_HOSTED=true.**
+
+**NEVER run `tailwindcss` manually.** Trunk runs it as a pre-build hook. Running it separately breaks content hashes in `index.html`.
 
 ## Lint Suppression Policy
 
 Lint suppressions (`#[allow(...)]` in .rs files, `= "allow"` in Cargo.toml) are blocked by the pre-commit hook and CI. Fix the underlying lint warning instead of suppressing it.
 
 Workspace lints are enforced in `Cargo.toml [workspace.lints]` at `deny` level. The pre-commit hook and CI independently verify no new suppressions are added.
+
+## Design System
+
+Always read `DESIGN.md` before making any visual or UI decisions. All font choices, colors, spacing, icons, and aesthetic direction are defined there. Do not deviate without explicit user approval. In QA mode, flag any code that doesn't match DESIGN.md. This file supersedes `docs/DESIGN_SYSTEM.md`.
