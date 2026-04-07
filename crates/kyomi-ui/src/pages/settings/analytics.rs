@@ -769,7 +769,7 @@ fn CopyButton(text: String) -> impl IntoView {
 
     view! {
         <button
-            class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
             on:click=on_click
             title="Copy to clipboard"
         >

@@ -890,7 +890,7 @@ fn TeamSizeCard(
                         <div class="flex items-center gap-3">
                             // Minus button — uses raw <button> for reactive disabled
                             <button
-                                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                                 disabled=move || desired_team_size.get() <= 5 || team_size_loading.get()
                                 on:click=move |_| {
                                     set_desired_team_size.update(|v| *v = (*v - 1).max(5));
@@ -914,7 +914,7 @@ fn TeamSizeCard(
                             />
                             // Plus button — uses raw <button> for reactive disabled
                             <button
-                                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                                 disabled=move || team_size_loading.get()
                                 on:click=move |_| {
                                     set_desired_team_size.update(|v| *v += 1);

@@ -180,7 +180,7 @@ fn TreeContextMenu(
         >
             // Rename
             <button
-                class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-secondary hover:text-accent-foreground"
                 on:click=move |_| {
                     on_rename.run(entry_for_rename.clone());
                     on_close_rename.run(());
@@ -197,7 +197,7 @@ fn TreeContextMenu(
                 on:mouseleave=move |_| set_show_move_submenu.set(false)
             >
                 <button
-                    class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground justify-between"
+                    class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-secondary hover:text-accent-foreground justify-between"
                 >
                     <span class="flex items-center gap-2">
                         <Icon icon=icondata_lu::LuFolderInput attr:class="w-3.5 h-3.5" />
@@ -226,7 +226,7 @@ fn TreeContextMenu(
                                     let on_close = on_close;
                                     view! {
                                         <button
-                                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+                                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-secondary hover:text-accent-foreground"
                                             on:click=move |_| {
                                                 on_move.run((entry_id.clone(), folder_id.clone(), 0));
                                                 on_close.run(());
@@ -484,14 +484,14 @@ pub fn KnowledgeFileTree(
                 <span class="text-sm font-medium text-foreground">"Files"</span>
                 <div class="flex items-center gap-1">
                     <button
-                        class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground h-6 w-6"
+                        class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-secondary hover:text-accent-foreground h-6 w-6"
                         title="New File"
                         on:click=move |_| on_create_file.run(None)
                     >
                         <Icon icon=icondata_lu::LuPlus attr:class="w-3.5 h-3.5" />
                     </button>
                     <button
-                        class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground h-6 w-6"
+                        class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-secondary hover:text-accent-foreground h-6 w-6"
                         title="New Folder"
                         on:click=move |_| on_create_folder.run(None)
                     >
@@ -588,7 +588,7 @@ pub fn KnowledgeFileTree(
                                                 cls.push_str(" opacity-40");
                                             }
 
-                                            cls.push_str(" transition-colors hover:bg-accent/50");
+                                            cls.push_str(" transition-colors hover:bg-secondary/50");
                                             cls
                                         };
 
@@ -705,9 +705,9 @@ pub fn KnowledgeFileTree(
                                     let row_class = move || {
                                         let sel = selected_id.get();
                                         if sel.as_deref() == Some(result_id.as_str()) {
-                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded-md text-sm transition-colors hover:bg-accent/50 bg-accent text-accent-foreground"
+                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded-md text-sm transition-colors hover:bg-secondary/50 bg-accent text-accent-foreground"
                                         } else {
-                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded-md text-sm transition-colors hover:bg-accent/50 text-foreground"
+                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded-md text-sm transition-colors hover:bg-secondary/50 text-foreground"
                                         }
                                     };
 

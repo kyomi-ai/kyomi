@@ -296,7 +296,7 @@ fn cursor_tab(mcp_url: &str) -> impl IntoView {
                     href=deep_link
                     target="_blank"
                     rel="noopener noreferrer"
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2"
+                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-9 px-4 py-2"
                 >
                     <Icon icon=icondata_lu::LuExternalLink/>
                     "Connect with Cursor"
@@ -353,7 +353,7 @@ fn CodeBlock(text: String) -> impl IntoView {
                 {text}
             </pre>
             <button
-                class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                 on:click=on_click
                 title="Copy to clipboard"
             >

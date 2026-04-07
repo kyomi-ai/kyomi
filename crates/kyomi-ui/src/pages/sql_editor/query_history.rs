@@ -351,7 +351,7 @@ pub fn QueryHistory(
 
                                     view! {
                                         <div
-                                            class="px-3 py-2 border-b border-border cursor-pointer transition-colors hover:bg-accent"
+                                            class="px-3 py-2 border-b border-border cursor-pointer transition-colors hover:bg-secondary"
                                             on:click=move |_| {
                                                 on_query_select.run((query_text_select.clone(), datasource.clone()));
                                             }

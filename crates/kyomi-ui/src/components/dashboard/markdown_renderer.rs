@@ -450,7 +450,7 @@ fn CodeBlockView(
             // Copy button
             <button
                 on:click=on_copy
-                class="absolute top-2 right-2 p-1.5 rounded-md bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                class="absolute top-2 right-2 p-1.5 rounded-md bg-accent hover:bg-secondary/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
                 title=move || if copied.get() { "Copied!" } else { "Copy code" }
             >
                 {move || {

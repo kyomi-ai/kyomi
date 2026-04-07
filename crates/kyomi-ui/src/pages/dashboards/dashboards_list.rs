@@ -373,7 +373,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                             if collections_open.get() {
                                 "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-primary/10 text-primary"
                             } else {
-                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
+                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-secondary/80"
                             }
                         }
                         aria-label="Toggle Collections"
@@ -714,7 +714,7 @@ fn DashboardCard(
                         // Hamburger menu (3-dot)
                         <div node_ref=menu_container_ref class="relative">
                             <button
-                                class="flex-shrink-0 p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                                class="flex-shrink-0 p-2 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors"
                                 aria-label="Dashboard actions"
                                 on:click=move |_| set_menu_open.update(|v| *v = !*v)
                             >
@@ -730,7 +730,7 @@ fn DashboardCard(
                                     // Edit
                                     <a
                                         href=edit_href_menu.clone()
-                                        class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+                                        class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm hover:bg-secondary hover:text-accent-foreground transition-colors"
                                     >
                                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
@@ -742,7 +742,7 @@ fn DashboardCard(
                                         let dashboard_for_add = dashboard_for_add.clone();
                                         view! {
                                             <button
-                                                class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+                                                class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm hover:bg-secondary hover:text-accent-foreground transition-colors"
                                                 on:click=move |_| {
                                                     set_menu_open.set(false);
                                                     on_add_to_collection.run(dashboard_for_add.clone());

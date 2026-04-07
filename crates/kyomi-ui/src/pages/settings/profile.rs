@@ -656,7 +656,7 @@ fn McpConnectionCard(is_personal: bool) -> impl IntoView {
                                     <a
                                         href=cursor_url
                                         target="_blank"
-                                        class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                                        class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-secondary transition-colors"
                                     >
                                         <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
                                         "Connect with Cursor"
@@ -668,7 +668,7 @@ fn McpConnectionCard(is_personal: bool) -> impl IntoView {
                                 view! {
                                     <a
                                         href="#"
-                                        class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-accent transition-colors"
+                                        class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-secondary transition-colors"
                                     >
                                         <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
                                         "Connect with Cursor"
@@ -715,7 +715,7 @@ fn CopyButton(text: String) -> impl IntoView {
 
     view! {
         <button
-            class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+            class="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
             on:click=on_click
             title="Copy to clipboard"
         >

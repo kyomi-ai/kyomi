@@ -144,7 +144,7 @@ pub fn Modal(
                         // Close button
                         // React: Button variant="ghost" size="icon" → ghost icon button classes
                         <button
-                            class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 w-9 hover:bg-accent hover:text-accent-foreground text-muted-foreground hover:text-foreground"
+                            class="inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 w-9 hover:bg-secondary hover:text-accent-foreground text-muted-foreground hover:text-foreground"
                             on:click=move |_| on_close.run(())
                             aria-label="Close"
                         >

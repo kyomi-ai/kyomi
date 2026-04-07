@@ -395,7 +395,7 @@ pub fn HistoryPanel(
                         <span class="font-medium text-foreground">"Version History"</span>
                     </div>
                     <button
-                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-accent"
+                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-secondary"
                         aria-label="Close history"
                         on:click=move |_| on_close.run(())
                     >
@@ -410,7 +410,7 @@ pub fn HistoryPanel(
                         <div class="p-4 text-center">
                             <p class="text-error-foreground mb-2">{err}</p>
                             <button
-                                class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground h-8 px-3"
+                                class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background text-foreground shadow-sm transition-colors hover:bg-secondary hover:text-accent-foreground h-8 px-3"
                                 on:click=move |_| {
                                     set_error.set(None);
                                     set_version_counter.update(|c| *c += 1);
@@ -473,7 +473,7 @@ pub fn HistoryPanel(
                                                     <div class="p-4 text-center">
                                                         <p class="text-error-foreground mb-2">{e.to_string()}</p>
                                                         <button
-                                                            class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground h-8 px-3"
+                                                            class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background text-foreground shadow-sm transition-colors hover:bg-secondary hover:text-accent-foreground h-8 px-3"
                                                             on:click=move |_| set_version_counter.update(|c| *c += 1)
                                                         >
                                                             "Retry"
@@ -539,7 +539,7 @@ pub fn HistoryPanel(
                                                                             if is_current_previewing {
                                                                                 "px-4 py-3 transition-colors cursor-pointer bg-warning"
                                                                             } else {
-                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-accent"
+                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-secondary"
                                                                             }
                                                                         }
                                                                         on:click=move |_| {
@@ -590,7 +590,7 @@ pub fn HistoryPanel(
                                                                                     on:click=move |ev| ev.stop_propagation()
                                                                                 >
                                                                                     <button
-                                                                                        class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                                                                                        class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors"
                                                                                         title="Compare with previous"
                                                                                         disabled=move || is_diff_loading.get()
                                                                                         on:click=move |_| handle_view_diff_clone(prev_ver, cv_ver)
@@ -626,7 +626,7 @@ pub fn HistoryPanel(
                                                                             if is_this_previewing {
                                                                                 "px-4 py-3 transition-colors cursor-pointer bg-warning"
                                                                             } else {
-                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-accent"
+                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-secondary"
                                                                             }
                                                                         }
                                                                         on:click=move |_| {
@@ -677,7 +677,7 @@ pub fn HistoryPanel(
                                                                             // Compare with previous historical version
                                                                             {prev_ver_num.map(|pv| view! {
                                                                                 <button
-                                                                                    class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                                                                                    class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors"
                                                                                     title="Compare with previous"
                                                                                     disabled=move || is_diff_loading.get()
                                                                                     on:click=move |_| handle_view_diff_clone(pv, ver_num)
@@ -689,7 +689,7 @@ pub fn HistoryPanel(
                                                                             // Compare with current version
                                                                             {current_ver_num.map(|cv| view! {
                                                                                 <button
-                                                                                    class="p-1.5 text-muted-foreground hover:text-primary hover:bg-accent rounded-md transition-colors"
+                                                                                    class="p-1.5 text-muted-foreground hover:text-primary hover:bg-secondary rounded-md transition-colors"
                                                                                     title="Compare with current"
                                                                                     disabled=move || is_diff_loading.get()
                                                                                     on:click=move |_| handle_view_diff_clone2(ver_num, cv)
@@ -750,7 +750,7 @@ pub fn HistoryPanel(
                                 class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| on_close.run(())
                             />
-                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl transition-all duration-slow ease-in-out">
+                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-muted flex flex-col shadow-xl sidebar-slide-in">
                                 {panel_content()}
                             </div>
                             <ConfirmDialog
@@ -770,9 +770,9 @@ pub fn HistoryPanel(
                     let width_style = move || format!("width: {}px", panel_width.get());
                     let panel_class = move || {
                         if is_resizing.get() {
-                            "border-l border-border bg-muted flex h-full overflow-hidden select-none"
+                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 select-none"
                         } else {
-                            "border-l border-border bg-muted flex h-full overflow-hidden transition-all duration-slow ease-in-out"
+                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 transition-all duration-slow ease-in-out"
                         }
                     };
 

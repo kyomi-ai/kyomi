@@ -130,7 +130,7 @@ pub fn App() -> impl IntoView {
                                     // Close button — matches React SettingsPage.jsx positioning
                                     <a
                                         href="/"
-                                        class="absolute top-4 right-4 md:top-6 md:right-6 p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors z-10"
+                                        class="absolute top-4 right-4 md:top-6 md:right-6 p-2 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors z-10"
                                         aria-label="Close settings"
                                     >
                                         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

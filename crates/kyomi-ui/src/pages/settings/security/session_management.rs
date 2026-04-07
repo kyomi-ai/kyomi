@@ -270,7 +270,7 @@ pub fn SessionManagement() -> impl IntoView {
                         <CardDescription>"Manage your active login sessions across different devices."</CardDescription>
                     </div>
                     <button
-                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground h-9 w-9"
+                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-9 w-9"
                         on:click=handle_refresh
                         disabled=move || loading.get()
                         title="Refresh sessions"
@@ -518,7 +518,7 @@ fn SessionRow(
                     let session_clone = session_for_revoke.clone();
                     view! {
                         <button
-                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                             on:click=move |_| on_revoke.run(session_clone.clone())
                             disabled=move || is_revoking.get()
                             title="Disconnect this session"

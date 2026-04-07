@@ -106,7 +106,7 @@ pub fn InlineEditableTitle(
                     // Display mode — clickable title with pencil icon on hover
                     <button
                         on:click=start_editing
-                        class="flex items-center gap-2 group hover:bg-accent/50 rounded-md px-2 py-1 transition-colors min-w-0"
+                        class="flex items-center gap-2 group hover:bg-secondary/50 rounded-md px-2 py-1 transition-colors min-w-0"
                     >
                         <span class="text-base font-semibold text-foreground truncate">
                             {move || {

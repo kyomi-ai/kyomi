@@ -407,7 +407,7 @@ pub fn ChartBuilderModal(
     // ── Footer ──────────────────────────────────────────────────────────
 
     // React: Cancel = ghost style, Save = primary style
-    let cancel_class = format!("{BTN_BASE} text-foreground hover:text-foreground hover:bg-accent {BTN_SIZE}");
+    let cancel_class = format!("{BTN_BASE} text-foreground hover:text-foreground hover:bg-secondary {BTN_SIZE}");
     let insert_class = format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}");
 
     let cancel_class_clone = cancel_class.clone();
@@ -547,7 +547,7 @@ pub fn ChartBuilderModal(
                                             if catalog_open.get() {
                                                 "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full bg-primary/10 text-primary border border-primary/30 transition-colors flex-shrink-0"
                                             } else {
-                                                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border border-input text-muted-foreground hover:text-foreground hover:bg-accent transition-colors flex-shrink-0"
+                                                "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border border-input text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors flex-shrink-0"
                                             }
                                         }
                                         on:click=move |_| set_catalog_open.update(|v| *v = !*v)
@@ -685,7 +685,7 @@ pub fn ChartBuilderModal(
                                             <div class="flex items-center gap-1">
                                                 <button
                                                     type="button"
-                                                    class="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                    class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Refresh catalog"
                                                 >
                                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -694,7 +694,7 @@ pub fn ChartBuilderModal(
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    class="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                    class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Close catalog"
                                                     on:click=move |_| set_catalog_open.set(false)
                                                 >
@@ -882,7 +882,7 @@ pub fn ChartBuilderModal(
                                                         view! {
                                                             <button
                                                                 type="button"
-                                                                class="mt-1 p-2 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                                class="mt-1 p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                                                                 on:click=move |_| remove_series(idx)
                                                                 title="Remove series"
                                                             >

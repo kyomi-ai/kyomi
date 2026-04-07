@@ -34,7 +34,7 @@ pub fn GoogleSignInButton(
             type="button"
             on:click=handle_click
             disabled=is_disabled
-            class="w-full flex justify-center items-center px-4 py-3.5 border border-input rounded-lg shadow bg-card text-foreground font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50"
+            class="w-full flex justify-center items-center px-4 py-3.5 border border-input rounded-lg shadow bg-card text-foreground font-medium hover:bg-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-50"
         >
             {move || {
                 if loading.get() {

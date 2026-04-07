@@ -196,7 +196,7 @@ fn SingleTab(
     let container_class = if is_active {
         "flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-all relative group min-w-0 bg-card"
     } else {
-        "flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-all relative group min-w-0 bg-muted hover:bg-accent"
+        "flex items-center gap-2 px-3 py-2 border-r border-border cursor-pointer transition-all relative group min-w-0 bg-muted hover:bg-secondary"
     };
 
     // Circle opacity varies by active state
@@ -218,9 +218,9 @@ fn SingleTab(
 
     // Close button visibility
     let close_class = if is_active {
-        "p-0.5 rounded-md hover:bg-accent transition-colors flex-shrink-0 opacity-100"
+        "p-0.5 rounded-md hover:bg-secondary transition-colors flex-shrink-0 opacity-100"
     } else {
-        "p-0.5 rounded-md hover:bg-accent transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
+        "p-0.5 rounded-md hover:bg-secondary transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
     };
 
     view! {

@@ -283,7 +283,7 @@ pub fn TwoFactorAuth() -> impl IntoView {
                                             />
                                             <button
                                                 type="button"
-                                                class="h-9 w-9 inline-flex items-center justify-center rounded-md text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                                                class="h-9 w-9 inline-flex items-center justify-center rounded-md text-foreground hover:bg-secondary hover:text-accent-foreground transition-colors"
                                                 on:click=handle_copy_secret
                                                 aria-label="Copy to clipboard"
                                             >

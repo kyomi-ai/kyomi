@@ -412,7 +412,7 @@ pub fn KnowledgeFileEditor(
                                             if mode.get() == EditorMode::Visual {
                                                 format!("{base} bg-secondary text-secondary-foreground")
                                             } else {
-                                                format!("{base} bg-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground")
+                                                format!("{base} bg-transparent text-muted-foreground hover:bg-secondary hover:text-accent-foreground")
                                             }
                                         }
                                         on:click=move |_| set_mode.set(EditorMode::Visual)
@@ -426,7 +426,7 @@ pub fn KnowledgeFileEditor(
                                             if mode.get() == EditorMode::Source {
                                                 format!("{base} bg-secondary text-secondary-foreground")
                                             } else {
-                                                format!("{base} bg-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground")
+                                                format!("{base} bg-transparent text-muted-foreground hover:bg-secondary hover:text-accent-foreground")
                                             }
                                         }
                                         on:click=move |_| set_mode.set(EditorMode::Source)

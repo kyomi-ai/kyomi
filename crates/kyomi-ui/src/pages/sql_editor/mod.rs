@@ -352,7 +352,7 @@ pub fn SqlEditorPage() -> impl IntoView {
                             if sidebar_open.get() {
                                 "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-primary/10 text-primary"
                             } else {
-                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-accent"
+                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-secondary"
                             }
                         }
                         aria-label="Toggle sidebar"

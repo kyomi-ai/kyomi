@@ -170,7 +170,7 @@ fn AlertDropdownMenu(
         <div node_ref=container_ref class="relative">
             // Trigger button
             <button
-                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                 on:click=move |_| set_is_open.update(|v| *v = !*v)
                 disabled=action_pending
             >
@@ -183,7 +183,7 @@ fn AlertDropdownMenu(
                     <div class="absolute right-0 top-full mt-1 z-[1100] min-w-[10rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1">
                         // Continue in Chat — visible in dropdown on mobile
                         <button
-                            class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground sm:hidden"
+                            class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground sm:hidden"
                             on:click=handle_continue_chat
                         >
                             <Icon icon=icondata_lu::LuMessagesSquare attr:class="h-4 w-4 mr-2" />
@@ -193,7 +193,7 @@ fn AlertDropdownMenu(
                         // Mark as unread (only for read, non-deleted alerts)
                         {(!is_unread && !is_deleted).then(|| view! {
                             <button
-                                class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
+                                class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
                                 on:click=handle_mark_unread
                             >
                                 <Icon icon=icondata_lu::LuMailOpen attr:class="h-4 w-4 mr-2" />
@@ -205,7 +205,7 @@ fn AlertDropdownMenu(
                         {if is_deleted {
                             view! {
                                 <button
-                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
+                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
                                     on:click=handle_restore
                                 >
                                     <Icon icon=icondata_lu::LuUndo2 attr:class="h-4 w-4 mr-2" />
@@ -215,7 +215,7 @@ fn AlertDropdownMenu(
                         } else {
                             view! {
                                 <button
-                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-accent hover:text-accent-foreground"
+                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-secondary hover:text-accent-foreground"
                                     on:click=handle_delete
                                 >
                                     <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4 mr-2" />
@@ -861,7 +861,7 @@ pub fn AlertsHistory(
                                                     <div class="pr-2 sm:pr-3 flex items-center shrink-0">
                                                         // Continue in Chat button — hidden on mobile, shown in dropdown instead
                                                         <button
-                                                            class="hidden sm:inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                                                            class="hidden sm:inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                                                             disabled=move || continue_chat_alert_id.get() == Some(alert_id)
                                                             title="Continue in Chat"
                                                             on:click=move |_| {

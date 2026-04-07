@@ -402,7 +402,7 @@ fn DatasourceRow(
 
                 // Delete button
                 <button
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-8 rounded-md px-3 text-xs text-foreground hover:bg-accent hover:text-accent-foreground"
+                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-8 rounded-md px-3 text-xs text-foreground hover:bg-secondary hover:text-accent-foreground"
                     on:click=on_delete_click
                 >
                     <span class="h-4 w-4 text-error-foreground inline-flex items-center justify-center">
@@ -1274,7 +1274,7 @@ pub fn DatasourceModal(
                                             <div class="flex items-center gap-3">
                                                 <button
                                                     type="button"
-                                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
                                                     disabled=move || testing.get()
                                                     on:click=move |_| do_test_and_discover()
                                                 >
@@ -1446,7 +1446,7 @@ fn BigQueryAuthModeSection(
                         href="/api/v1/auth/google-oauth/connect"
                         target="_blank"
                         rel="noopener noreferrer"
-                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
+                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
                     >
                         <Icon icon=icondata_lu::LuLink attr:class="h-4 w-4"/>
                         "Connect Google Account"
@@ -1527,7 +1527,7 @@ fn BigQueryAuthModeSection(
                                     href=oauth_url
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
+                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
                                 >
                                     <Icon icon=icondata_lu::LuLink attr:class="h-4 w-4"/>
                                     "Connect BigQuery"

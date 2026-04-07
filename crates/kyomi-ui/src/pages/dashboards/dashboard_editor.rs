@@ -558,7 +558,7 @@ fn DashboardEditorInner(
                                         if history_open.get() {
                                             format!("{base} bg-primary/10 text-primary")
                                         } else {
-                                            format!("{base} bg-accent text-foreground hover:bg-accent")
+                                            format!("{base} bg-accent text-foreground hover:bg-secondary")
                                         }
                                     }
                                     on:click=move |_| {
@@ -589,7 +589,7 @@ fn DashboardEditorInner(
                                         if copilot_open.get() {
                                             format!("{base} bg-primary/10 text-primary")
                                         } else {
-                                            format!("{base} bg-accent text-foreground hover:bg-accent")
+                                            format!("{base} bg-accent text-foreground hover:bg-secondary")
                                         }
                                     }
                                     on:click=move |_| {
@@ -613,7 +613,7 @@ fn DashboardEditorInner(
                     // Close button — navigates back to dashboard or list
                     <a
                         href=move || back_href.get()
-                        class="flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-accent rounded-lg transition-colors"
+                        class="flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-secondary rounded-lg transition-colors"
                     >
                         // X icon
                         <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -795,7 +795,7 @@ fn DashboardEditorInner(
                                 }.into_any(),
                                 title: "Link to Dashboard".to_string(),
                                 on_click: Arc::new(move || set_link_open.set(true)),
-                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded-md text-foreground transition-colors hover:bg-accent flex items-center gap-1 flex-shrink-0".to_string()),
+                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded-md text-foreground transition-colors hover:bg-secondary flex items-center gap-1 flex-shrink-0".to_string()),
                             }),
                             // Push mode toggle to far right
                             ToolbarItem::Spacer,

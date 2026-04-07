@@ -184,7 +184,7 @@ pub fn Layout(children: Children) -> impl IntoView {
                     <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
                         <button
                             on:click=move |_| set_mobile_open.update(|o| *o = !*o)
-                            class="p-2 hover:bg-accent rounded-lg transition-colors relative z-10"
+                            class="p-2 hover:bg-secondary rounded-lg transition-colors relative z-10"
                             aria-label="Toggle menu"
                         >
                             <svg class="w-5 h-5 text-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -525,7 +525,7 @@ fn Sidebar(
                                         }}
                                         <a
                                             href="/settings"
-                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-accent flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuSettings width="16" height="16"/>
                                             <span>"Settings"</span>
@@ -534,7 +534,7 @@ fn Sidebar(
                                             href="https://kyomi.ai/docs"
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-accent flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuBookOpen width="16" height="16"/>
                                             <span>"Help & Docs"</span>

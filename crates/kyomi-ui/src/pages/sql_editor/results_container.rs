@@ -418,7 +418,7 @@ pub fn ResultsContainer(
 
             view! {
                 <button
-                    class="px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground bg-background border border-input rounded-md hover:bg-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                    class="px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground bg-background border border-input rounded-md hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
                     disabled=move || generating.get()
                     aria-label="Create chart from results"
                     on:click=move |_| create_chart.run(())

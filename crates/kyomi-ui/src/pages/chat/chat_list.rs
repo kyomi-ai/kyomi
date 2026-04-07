@@ -563,7 +563,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             if show_pinned_only.get() {
                                 "p-2 rounded-lg transition-colors bg-accent text-foreground"
                             } else {
-                                "p-2 rounded-lg transition-colors bg-card border border-border text-muted-foreground hover:text-foreground hover:bg-accent"
+                                "p-2 rounded-lg transition-colors bg-card border border-border text-muted-foreground hover:text-foreground hover:bg-secondary"
                             }
                         }
                         aria-label=move || {
@@ -615,7 +615,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                         if chat_filter.get() == ChatFilter::Slack {
                                             "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground"
                                         } else {
-                                            "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-accent text-foreground hover:bg-accent/80"
+                                            "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-accent text-foreground hover:bg-secondary/80"
                                         }
                                     }
                                 >
@@ -644,7 +644,7 @@ pub fn ChatsListPage() -> impl IntoView {
                         </button>
                         <button
                             on:click=move |_| set_selected_chats.set(Vec::new())
-                            class="ml-auto px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors"
+                            class="ml-auto px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors"
                         >
                             "Cancel"
                         </button>
@@ -937,7 +937,7 @@ fn FilterButton(
                 if active.get() {
                     "px-3 py-1.5 text-sm rounded-lg transition-colors bg-primary text-primary-foreground"
                 } else {
-                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-accent text-foreground hover:bg-accent/80"
+                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-accent text-foreground hover:bg-secondary/80"
                 }
             }
         >

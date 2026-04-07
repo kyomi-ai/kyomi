@@ -211,13 +211,13 @@ fn CollectionRow(
     let coll_for_edit = collection.clone();
     let coll_for_delete = collection;
 
-    // React: `group relative ${activeCollectionId === collection.id ? 'bg-primary/10' : 'hover:bg-accent'}`
+    // React: `group relative ${activeCollectionId === collection.id ? 'bg-primary/10' : 'hover:bg-secondary'}`
     let outer_class = move || {
         let active = active_collection_id.get().as_deref() == Some(coll_id_for_outer.as_str());
         if active {
             "group relative bg-primary/10"
         } else {
-            "group relative hover:bg-accent transition-colors"
+            "group relative hover:bg-secondary transition-colors"
         }
     };
 
@@ -302,7 +302,7 @@ fn CollectionList(
         if active_collection_id.get().is_none() {
             "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors bg-warning text-foreground font-medium"
         } else {
-            "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors text-foreground hover:bg-accent"
+            "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors text-foreground hover:bg-secondary"
         }
     };
 
@@ -576,7 +576,7 @@ fn CollectionModal(
             // React: `flex gap-3 pt-4` — but we're inside the modal footer area so just provide the buttons
             <button
                 type="button"
-                class="flex-1 px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-accent/80 rounded-lg transition-colors"
+                class="flex-1 px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-secondary/80 rounded-lg transition-colors"
                 on:click=move |_| on_close.run(())
             >
                 "Cancel"
@@ -930,8 +930,43 @@ pub fn CollectionsSidebar(
 
     // ── Render ───────────────────────────────────────────────────────────
 
+    // ── Animated open/close ───────────────────────────────────────────
+    // Instead of <Show> which unmounts instantly (no exit animation),
+    // we keep the element mounted while the closing animation plays,
+    // then unmount after the animation duration (300ms).
+    let (is_mounted, set_is_mounted) = signal(false);
+    let (is_animating_out, set_is_animating_out) = signal(false);
+
+    // Mount when open becomes true
+    Effect::new(move |_| {
+        if open.get() {
+            set_is_animating_out.set(false);
+            set_is_mounted.set(true);
+        } else if is_mounted.get_untracked() {
+            // Start exit animation, then unmount after 300ms
+            set_is_animating_out.set(true);
+            #[cfg(feature = "hydrate")]
+            {
+                use send_wrapper::SendWrapper;
+                let cb = SendWrapper::new(move || {
+                    set_is_mounted.set(false);
+                    set_is_animating_out.set(false);
+                });
+                leptos::task::spawn_local(async move {
+                    gloo_timers::future::TimeoutFuture::new(300).await;
+                    cb.take()();
+                });
+            }
+            #[cfg(not(feature = "hydrate"))]
+            {
+                set_is_mounted.set(false);
+                set_is_animating_out.set(false);
+            }
+        }
+    });
+
     view! {
-        <Show when=move || open.get()>
+        <Show when=move || is_mounted.get()>
             {move || {
                 let collections = collections_resource.get()
                     .and_then(|r| r.ok())
@@ -990,13 +1025,19 @@ pub fn CollectionsSidebar(
                     }.into_any()
                 } else {
                     // Desktop: Inline resizable sidebar
-                    // React: `border-l border-border bg-card flex h-full overflow-hidden flex-shrink-0`
                     let width_style = move || format!("width: {}px", sidebar_width.get());
+                    let sidebar_class = move || {
+                        if is_animating_out.get() {
+                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 sidebar-slide-out"
+                        } else {
+                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 sidebar-slide-in"
+                        }
+                    };
 
                     view! {
                         <div>
                             <div
-                                class="border-l border-border bg-card flex h-full overflow-hidden flex-shrink-0"
+                                class=sidebar_class
                                 style=width_style
                             >
                                 // Resize Handle

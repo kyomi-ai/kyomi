@@ -1827,7 +1827,7 @@ pub fn ChatPage() -> impl IntoView {
                                 </a>
                                 <a
                                     href="/setup"
-                                    class="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
+                                    class="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-secondary hover:text-accent-foreground transition-colors"
                                 >
                                     "Learn about MCP"
                                 </a>
@@ -1972,7 +1972,7 @@ pub fn ChatPage() -> impl IntoView {
                                                         view! {
                                                             <button
                                                                 on:click=handle_unshare
-                                                                class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors border border-border"
+                                                                class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors border border-border"
                                                                 title="Make this conversation private"
                                                             >
                                                                 // Lock icon
@@ -1987,7 +1987,7 @@ pub fn ChatPage() -> impl IntoView {
                                                     view! {
                                                         <button
                                                             on:click=handle_share
-                                                            class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors border border-border"
+                                                            class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors border border-border"
                                                             title="Share this conversation with your workspace"
                                                         >
                                                             // Share icon
@@ -2011,7 +2011,7 @@ pub fn ChatPage() -> impl IntoView {
                                                     if show_pinned_only.get() {
                                                         "bg-accent text-foreground"
                                                     } else {
-                                                        "text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                                                        "text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
                                                     }
                                                 )
                                                 aria-label=move || if show_pinned_only.get() { "Show all messages" } else { "Show only pinned messages" }

@@ -86,7 +86,7 @@ pub(crate) const BTN_DEFAULT: &str =
     "bg-primary text-primary-foreground shadow hover:bg-primary/90";
 
 /// Outline button variant classes.
-pub(crate) const BTN_OUTLINE: &str = "border border-input bg-background text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground";
+pub(crate) const BTN_OUTLINE: &str = "border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground";
 
 /// Default button size classes.
 pub(crate) const BTN_SIZE: &str = "h-9 px-4 py-2";
@@ -182,7 +182,7 @@ pub(crate) fn DashboardListEntry(
                 if selected {
                     "border-2 rounded-lg p-4 cursor-pointer transition-all border-primary bg-primary/10"
                 } else {
-                    "border-2 rounded-lg p-4 cursor-pointer transition-all border-border hover:border-input hover:bg-accent"
+                    "border-2 rounded-lg p-4 cursor-pointer transition-all border-border hover:border-input hover:bg-secondary"
                 }
             }
         >

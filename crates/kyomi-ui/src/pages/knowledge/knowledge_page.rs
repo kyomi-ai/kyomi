@@ -296,7 +296,7 @@ pub fn KnowledgePage() -> impl IntoView {
                 <div class="flex items-center gap-3">
                     // Mobile sidebar toggle button
                     <button
-                        class="md:hidden inline-flex items-center justify-center rounded-md text-sm font-medium h-8 w-8 border border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                        class="md:hidden inline-flex items-center justify-center rounded-md text-sm font-medium h-8 w-8 border border-input bg-background text-foreground hover:bg-secondary hover:text-accent-foreground transition-colors"
                         on:click=move |_| set_sidebar_open.update(|v| *v = !*v)
                     >
                         <Show

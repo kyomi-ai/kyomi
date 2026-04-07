@@ -35,7 +35,7 @@ const TRIGGER_CLASS: &str = "flex h-9 w-full items-center justify-between whites
 const CONTENT_CLASS: &str = "absolute left-0 top-full mt-1 z-[1100] max-h-96 min-w-[8rem] w-full overflow-y-auto overflow-x-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1 animate-slide-fade-in";
 
 /// SelectItem classes from React source.
-const ITEM_CLASS: &str = "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground";
+const ITEM_CLASS: &str = "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground";
 
 /// Check icon positioning (absolute right-2).
 const CHECK_CLASS: &str = "absolute right-2 flex h-3.5 w-3.5 items-center justify-center";

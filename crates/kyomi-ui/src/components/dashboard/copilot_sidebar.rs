@@ -721,7 +721,7 @@ pub fn CopilotSidebar(
                         <span class="font-medium text-foreground">"Dashboard Copilot"</span>
                     </div>
                     <button
-                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-accent"
+                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-secondary"
                         aria-label="Close copilot"
                         on:click=move |_| handle_close_clone()
                     >

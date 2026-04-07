@@ -229,7 +229,7 @@ pub fn WatchAgentSidebar(
                         </span>
                     </div>
                     <button
-                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-accent"
+                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-secondary"
                         aria-label="Close"
                         on:click=move |_| handle_close_clone()
                     >

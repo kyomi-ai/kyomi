@@ -274,7 +274,7 @@ pub fn SqlEditorSidebar(
                         // Refresh button (catalog tab only)
                         <Show when=move || active_tab.get() == SidebarTab::Catalog>
                             <button
-                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-accent rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-secondary rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 aria-label=move || {
                                     if refreshing_catalog.get() {
                                         "Refreshing catalog..."
