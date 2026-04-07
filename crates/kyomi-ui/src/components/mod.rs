@@ -6,7 +6,7 @@
 //! `apps/frontend/src/components/ui/` exactly. Classes are copied
 //! from the React source, not approximated.
 //!
-//! Design system: `docs/DESIGN_SYSTEM.md`
+//! Design system: `DESIGN.md`
 
 pub mod action_status;
 pub mod alert;
@@ -38,7 +38,7 @@ pub mod watches;
 pub use action_status::ActionStatus;
 pub use alert::{Alert, AlertDescription, AlertTitle, AlertVariant};
 pub use badge::{Badge, BadgeVariant};
-pub use button::{Button, ButtonSize, ButtonVariant};
+pub use button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 pub use card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle};
 pub use checkbox::Checkbox;
 pub use confirm_dialog::ConfirmDialog;

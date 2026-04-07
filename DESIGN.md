@@ -153,7 +153,7 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 | Modal Content | `p-6` | - |
 | Modal Footer | `px-6 py-4` | `gap-2` |
 | Status Bars | `px-6 py-3.5` | `gap-4` |
-| Buttons | `px-5 py-2.5` (default), `px-3.5 py-1.5` (small) | `gap-2` |
+| Buttons | `px-5 py-2.5` (default), `px-3.5 py-[7px]` (small) | `gap-1.5` |
 | Input Fields | `px-3.5 py-2.5` | - |
 | Section Spacing | - | `gap-4` or `gap-6` |
 | Chart containers | `p-6` content, `px-5 py-4` header | - |
@@ -164,14 +164,35 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 - **Grid:** 12 columns on desktop (lg+), 1 column on mobile
 - **Max content width:** 1120px for marketing, 860px for dashboard prose, full-width for app shell
 - **Sidebar:** 220px fixed width, deep navy (#0F172A)
-- **Content area:** Fills remaining width, scrollable
+- **Content area:** Fills remaining width, scrollable, `bg-muted` (#FAFAF8)
+
+### Page Layout Pattern
+
+The content area is one continuous warm surface. No visual separation between header and content.
+
+```
+┌──────────┬──────────────────────────────────────────┐
+│          │ Page Title     [actions]    [primary btn] │  ← same bg-muted, no border
+│  NAVY    │                                          │
+│  SIDEBAR │ [filters / tabs / toolbar]               │  ← same bg-muted, no border
+│          │                                          │
+│          │ Content cards / list items / data         │  ← same bg-muted
+│          │                                          │
+└──────────┴──────────────────────────────────────────┘
+```
+
+**Rules:**
+- Header background: `bg-muted` (same as content). NOT `bg-card`.
+- No `border-b` between header and content area.
+- Toggle buttons: selected state gets `ButtonVariant::Active` (amber tint: `bg-primary/10 text-primary border-primary/20`). Unselected state uses `ButtonVariant::Secondary`.
+- The only hard border is between the navy sidebar and the content area.
 
 ### Border Radius
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| `--radius-sm` | 4px | Inputs, buttons, chips, chart legend swatches |
-| `--radius-md` | 8px | Cards, dropdowns, panels, alerts, chart containers |
+| `--radius-sm` | 4px | Inputs, chips, chart legend swatches |
+| `--radius-md` | 8px | Buttons, cards, dropdowns, panels, alerts, chart containers |
 | `--radius-lg` | 12px | Modals, dialogs, large containers, dashboard mockup frame |
 | `rounded-full` | 9999px | Avatars, status dots, badges, pill shapes |
 
@@ -209,11 +230,18 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 
 ## Component Patterns
 
-Components follow the shadcn/ui pattern. Shared components live in:
-- **Leptos:** `crates/kyomi-ui/src/components/`
-- **React (legacy):** `apps/frontend/src/components/ui/`
+Components follow the shadcn/ui pattern. Shared components live in `crates/kyomi-ui/src/components/`.
 
-### Key Components
+### MANDATORY: Use Components, Not Raw HTML
+
+**Every agent MUST follow these rules for UI code:**
+
+1. **Use the Leptos component, never raw HTML.** Write `<Button>` not `<button>`, `<Alert>` not `<div class="alert ...">`. If a component exists, use it.
+2. **Never inline Tailwind classes for styled components.** The component owns its styles. Callers pass `variant`, `size`, and optional `class` for layout (e.g., `"hidden md:flex"`) — never for colors, padding, radius, or fonts.
+3. **Styles live in the component definition, not in the caller.** If a button needs different padding, update `button.rs`, not the page that uses it.
+4. **If no component exists, create one** before duplicating styles across pages.
+
+### Available Components
 
 | Component | Variants | Usage |
 |-----------|----------|-------|
@@ -228,6 +256,20 @@ Components follow the shadcn/ui pattern. Shared components live in:
 | ConfirmDialog | default, destructive | Yes/no confirmations |
 | Toast (Sonner) | success, error, warning, info, loading | Brief auto-dismiss notifications |
 | Skeleton | - | Loading placeholders |
+
+### Button Variants
+
+All buttons share: DM Sans 14px weight 600, `rounded-md` (8px), `px-5 py-2.5`, `gap-1.5`, `transition-all duration-200`.
+
+| Variant | Background | Text | Border | Hover |
+|---------|-----------|------|--------|-------|
+| Primary | `--accent` (#D97706) | white | none | `--accent-hover` (#B45309) |
+| Secondary | `--secondary` (#F5F3EF) | `--foreground` (#1C1917) | `1px solid --border` (#E8E5DE) | border → `--border-strong` (#D4D0C8) |
+| Ghost | transparent | `--accent` | none | `--accent-light` (#FEF3C7) |
+| Destructive | `--error-foreground` (#DC2626) | white | none | darken 10% |
+| Outline | transparent | `--text` | `1px solid --border` | `--surface-alt` |
+
+Small buttons: 13px font, `px-3.5 py-[7px]`.
 
 ### Overlay Decision Tree
 

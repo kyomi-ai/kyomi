@@ -916,9 +916,9 @@ pub fn CopilotSidebar(
                     // Apply `select-none` during resize to prevent text selection.
                     let outer_class = move || {
                         if is_resizing.get() {
-                            "border-l border-border bg-card flex h-full overflow-hidden select-none"
+                            "border-l border-border bg-muted flex h-full overflow-hidden select-none"
                         } else {
-                            "border-l border-border bg-card flex h-full overflow-hidden transition-all duration-slow ease-in-out"
+                            "border-l border-border bg-muted flex h-full overflow-hidden transition-all duration-slow ease-in-out"
                         }
                     };
 

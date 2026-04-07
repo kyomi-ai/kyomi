@@ -22,9 +22,10 @@ use leptos_router::hooks::use_params_map;
 use crate::components::dashboard::{
     ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters, SaveDashboardModal,
 };
-use crate::components::Spinner;
+use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
+use leptos_icons::Icon;
 use crate::parser::parse_markdown_chartml;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -113,7 +114,7 @@ fn InlineEditableTitle(
                         <input
                             node_ref=input_ref
                             type="text"
-                            class="text-lg font-display text-foreground bg-transparent border-b-2 border-primary outline-none w-full"
+                            class="text-2xl font-display text-foreground bg-transparent border-b-2 border-primary outline-none w-full"
                             prop:value=move || draft.get()
                             on:input=move |ev| set_draft.set(event_target_value(&ev))
                             on:blur=on_blur
@@ -123,7 +124,7 @@ fn InlineEditableTitle(
                 } else {
                     view! {
                         <span
-                            class="text-lg font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block"
+                            class="text-2xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block"
                             on:click=start_editing
                             title="Click to edit title"
                         >
@@ -292,12 +293,9 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     <p class="text-muted-foreground mb-6">
                                         {e.to_string()}
                                     </p>
-                                    <a
-                                        href="/dashboards"
-                                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                                    >
+                                    <ButtonLink href="/dashboards">
                                         "Back to Dashboards"
-                                    </a>
+                                    </ButtonLink>
                                 </div>
                             </div>
                         }.into_any()
@@ -689,23 +687,12 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         view! {
                             <div class="flex flex-col h-full bg-muted overflow-hidden" style:flex-direction="column">
                                 // ─── Header / Toolbar ───────────────────
-                                <div class="h-16 bg-card border-b border-border px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                                <div class="page-header h-16 bg-muted px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                                     // Left: back button + editable title
                                     <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
-                                        <a
-                                            href="/dashboards"
-                                            class="p-2 text-muted-foreground hover:text-foreground hover:bg-accent rounded-lg transition-colors flex-shrink-0"
-                                            aria-label="Back to dashboards"
-                                        >
-                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path
-                                                    stroke-linecap="round"
-                                                    stroke-linejoin="round"
-                                                    stroke-width="2"
-                                                    d="M15 19l-7-7 7-7"
-                                                />
-                                            </svg>
-                                        </a>
+                                        <ButtonLink href="/dashboards" variant=ButtonVariant::Ghost size=ButtonSize::Icon class="flex-shrink-0 text-muted-foreground hover:text-foreground" aria_label="Back to dashboards">
+                                            <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+                                        </ButtonLink>
 
                                         <InlineEditableTitle
                                             value=title_signal
@@ -716,136 +703,75 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     // Right: action buttons
                                     <div class="flex items-center gap-1 xl:gap-2 flex-shrink-0">
                                         // Refresh All
-                                        <button
-                                            class="flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium text-foreground bg-card border border-border hover:bg-accent rounded-lg transition-colors"
-                                            aria-label="Refresh all charts"
-                                            on:click=on_refresh_all
-                                        >
-                                            // ArrowPathIcon
-                                            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182" />
-                                            </svg>
+                                        <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Refresh all charts" on:click=on_refresh_all>
+                                            <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
                                             <span class="hidden xl:inline whitespace-nowrap">"Refresh All"</span>
-                                        </button>
+                                        </Button>
 
                                         // Download PDF — desktop only
                                         {pdf_export_enabled.then(|| {
                                             let on_download = on_download_pdf;
                                             view! {
-                                                <button
-                                                    class=move || format!(
-                                                        "hidden md:flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium text-foreground bg-card border border-border hover:bg-accent rounded-lg transition-colors {}",
-                                                        if is_exporting.get() { "opacity-50 cursor-not-allowed" } else { "" }
-                                                    )
-                                                    aria-label="Download PDF"
-                                                    disabled=move || is_exporting.get()
-                                                    on:click=on_download
-                                                >
-                                                    // ArrowDownTrayIcon
-                                                    <svg class=move || format!("w-4 h-4 flex-shrink-0 {}", if is_exporting.get() { "animate-pulse" } else { "" }) fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                                                    </svg>
+                                                <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm class="hidden md:flex" aria_label="Download PDF" disabled=Signal::derive(move || is_exporting.get()) on:click=on_download>
+                                                    <Icon icon=icondata_lu::LuDownload width="14" height="14" />
                                                     <span class="hidden xl:inline whitespace-nowrap">
                                                         {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
                                                     </span>
-                                                </button>
+                                                </Button>
                                             }
                                         })}
 
                                         // History — desktop only
-                                        <button
-                                            class=move || format!(
-                                                "hidden md:flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium rounded-lg transition-colors {}",
-                                                if history_open.get() {
-                                                    "bg-primary/10 text-primary border border-primary/20"
-                                                } else {
-                                                    "text-foreground bg-card border border-border hover:bg-accent"
-                                                }
-                                            )
-                                            aria-label="Toggle version history"
+                                        <ToggleButton
+                                            variant=Signal::derive(move || if history_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                            size=ButtonSize::Sm
+                                            class="hidden md:flex"
+                                            aria_label="Toggle version history"
                                             on:click=move |_| set_history_open.update(|o| *o = !*o)
                                         >
-                                            // ClockIcon
-                                            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                            </svg>
+                                            <Icon icon=icondata_lu::LuClock width="14" height="14" />
                                             <span class="hidden xl:inline whitespace-nowrap">"History"</span>
-                                        </button>
+                                        </ToggleButton>
 
                                         // Set as My Default — desktop only
-                                        <button
-                                            class=move || format!(
-                                                "hidden md:flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium rounded-lg transition-colors {} {}",
-                                                if is_user_default.get() {
-                                                    "bg-primary/10 text-primary border border-primary/20"
-                                                } else {
-                                                    "text-foreground bg-card border border-border hover:bg-accent"
-                                                },
-                                                if setting_user_default.get() { "opacity-50 cursor-not-allowed" } else { "" }
-                                            )
-                                            aria-label=move || if is_user_default.get() { "Remove as my default" } else { "Set as my default" }
-                                            disabled=move || setting_user_default.get()
+                                        <ToggleButton
+                                            variant=Signal::derive(move || if is_user_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                            size=ButtonSize::Sm
+                                            class="hidden md:flex"
+                                            aria_label=Signal::derive(move || if is_user_default.get() { "Remove as my default".to_string() } else { "Set as my default".to_string() })
+                                            disabled=Signal::derive(move || setting_user_default.get())
                                             on:click=toggle_user_default
                                         >
-                                            // Star icon
-                                            <svg
-                                                class="w-4 h-4 flex-shrink-0"
-                                                fill=move || if is_user_default.get() { "currentColor" } else { "none" }
-                                                stroke="currentColor"
-                                                viewBox="0 0 24 24"
-                                            >
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                                            </svg>
+                                            <Icon icon=icondata_lu::LuStar width="14" height="14" />
                                             <span class="hidden xl:inline whitespace-nowrap">
                                                 {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
                                             </span>
-                                        </button>
+                                        </ToggleButton>
 
                                         // Set Workspace Default — desktop only, admin only
                                         {is_admin.then(|| {
                                             view! {
-                                                <button
-                                                    class=move || format!(
-                                                        "hidden md:flex items-center gap-2 px-2 xl:px-4 py-2 text-sm font-medium rounded-lg transition-colors {} {}",
-                                                        if is_workspace_default.get() {
-                                                            "bg-primary/10 text-primary border border-primary/20"
-                                                        } else {
-                                                            "text-foreground bg-card border border-border hover:bg-accent"
-                                                        },
-                                                        if setting_ws_default.get() { "opacity-50 cursor-not-allowed" } else { "" }
-                                                    )
-                                                    aria-label=move || if is_workspace_default.get() { "Remove as workspace default" } else { "Set as workspace default" }
-                                                    disabled=move || setting_ws_default.get()
+                                                <ToggleButton
+                                                    variant=Signal::derive(move || if is_workspace_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                                    size=ButtonSize::Sm
+                                                    class="hidden md:flex"
+                                                    aria_label=Signal::derive(move || if is_workspace_default.get() { "Remove as workspace default".to_string() } else { "Set as workspace default".to_string() })
+                                                    disabled=Signal::derive(move || setting_ws_default.get())
                                                     on:click=toggle_ws_default
                                                 >
-                                                    // Home icon
-                                                    <svg
-                                                        class="w-4 h-4 flex-shrink-0"
-                                                        fill=move || if is_workspace_default.get() { "currentColor" } else { "none" }
-                                                        stroke="currentColor"
-                                                        viewBox="0 0 24 24"
-                                                    >
-                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-                                                    </svg>
+                                                    <Icon icon=icondata_lu::LuHouse width="14" height="14" />
                                                     <span class="hidden xl:inline whitespace-nowrap">
                                                         {move || if is_workspace_default.get() { "Workspace Default" } else { "Set Workspace Default" }}
                                                     </span>
-                                                </button>
+                                                </ToggleButton>
                                             }
                                         })}
 
                                         // ─── Mobile overflow menu ───────
                                         <div class="relative flex md:hidden">
-                                            <button
-                                                class="flex items-center justify-center p-2 text-foreground bg-card border border-border hover:bg-accent rounded-lg transition-colors"
-                                                aria-label="More actions"
-                                                on:click=move |_| set_overflow_open.update(|o| *o = !*o)
-                                            >
-                                                // EllipsisVerticalIcon
-                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" />
-                                                </svg>
-                                            </button>
+                                            <Button variant=ButtonVariant::Ghost size=ButtonSize::Icon class="text-muted-foreground hover:text-foreground" aria_label="More actions" on:click=move |_| set_overflow_open.update(|o| *o = !*o)>
+                                                <Icon icon=icondata_lu::LuEllipsisVertical width="14" height="14" />
+                                            </Button>
 
                                             {move || overflow_open.get().then(|| {
                                                 let on_download_pdf_m = on_download_pdf_mobile;
@@ -853,78 +779,39 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                 let toggle_ws_m = toggle_ws_default_mobile.clone();
 
                                                 view! {
-                                                    <div class="absolute right-0 top-full mt-1 w-56 bg-popover border border-border rounded-lg shadow-lg z-50">
+                                                    <div class="absolute right-0 top-full mt-1 w-56 bg-popover border border-border rounded-md shadow-lg z-50">
                                                         // Download PDF (mobile)
                                                         {pdf_export_enabled.then(|| {
                                                             view! {
-                                                                <button
-                                                                    class="flex items-center w-full px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                                                                    disabled=move || is_exporting.get()
-                                                                    on:click=move |ev| {
-                                                                        set_overflow_open.set(false);
-                                                                        on_download_pdf_m(ev);
-                                                                    }
-                                                                >
-                                                                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                                                                    </svg>
+                                                                <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" disabled=Signal::derive(move || is_exporting.get()) on:click=move |ev| { set_overflow_open.set(false); on_download_pdf_m(ev); }>
+                                                                    <Icon icon=icondata_lu::LuDownload width="14" height="14" attr:class="mr-2" />
                                                                     {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
-                                                                </button>
+                                                                </Button>
                                                             }
                                                         })}
 
                                                         // History (mobile)
-                                                        <button
-                                                            class="flex items-center w-full px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                                                            on:click=move |_| {
-                                                                set_overflow_open.set(false);
-                                                                set_history_open.update(|o| *o = !*o);
-                                                            }
-                                                        >
-                                                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                            </svg>
+                                                        <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" on:click=move |_| { set_overflow_open.set(false); set_history_open.update(|o| *o = !*o); }>
+                                                            <Icon icon=icondata_lu::LuClock width="14" height="14" attr:class="mr-2" />
                                                             {move || if history_open.get() { "Close History" } else { "Version History" }}
-                                                        </button>
+                                                        </Button>
 
                                                         <div class="border-t border-border my-1" />
 
                                                         // Set as My Default (mobile)
-                                                        <button
-                                                            class="flex items-center w-full px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                                                            disabled=move || setting_user_default.get()
-                                                            on:click=toggle_user_m
-                                                        >
-                                                            <svg
-                                                                class="w-4 h-4 mr-2"
-                                                                fill=move || if is_user_default.get() { "currentColor" } else { "none" }
-                                                                stroke="currentColor"
-                                                                viewBox="0 0 24 24"
-                                                            >
-                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                                                            </svg>
+                                                        <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" disabled=Signal::derive(move || setting_user_default.get()) on:click=toggle_user_m>
+                                                            <Icon icon=icondata_lu::LuStar width="14" height="14" attr:class="mr-2" />
                                                             {move || if is_user_default.get() { "Remove My Default" } else { "Set as My Default" }}
-                                                        </button>
+                                                        </Button>
 
                                                         // Set Workspace Default (mobile, admin only)
                                                         {is_admin.then(|| {
                                                             view! {
                                                                 <div class="border-t border-border my-1" />
-                                                                <button
-                                                                    class="flex items-center w-full px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                                                                    disabled=move || setting_ws_default.get()
-                                                                    on:click=toggle_ws_m
-                                                                >
-                                                                    <svg
-                                                                        class="w-4 h-4 mr-2"
-                                                                        fill=move || if is_workspace_default.get() { "currentColor" } else { "none" }
-                                                                        stroke="currentColor"
-                                                                        viewBox="0 0 24 24"
-                                                                    >
-                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-                                                                    </svg>
+                                                                <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" disabled=Signal::derive(move || setting_ws_default.get()) on:click=toggle_ws_m>
+                                                                    <Icon icon=icondata_lu::LuHouse width="14" height="14" attr:class="mr-2" />
                                                                     {move || if is_workspace_default.get() { "Remove Workspace Default" } else { "Set Workspace Default" }}
-                                                                </button>
+                                                                </Button>
                                                             }
                                                         })}
                                                     </div>
@@ -933,15 +820,10 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         </div>
 
                                         // Edit Dashboard — always visible (primary action)
-                                        <a
-                                            href=edit_href
-                                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                                        >
-                                            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                            </svg>
+                                        <ButtonLink href=edit_href size=ButtonSize::Sm>
+                                            <Icon icon=icondata_lu::LuPencil width="14" height="14" />
                                             <span class="hidden xl:inline whitespace-nowrap">"Edit Dashboard"</span>
-                                        </a>
+                                        </ButtonLink>
                                     </div>
                                 </div>
 
@@ -960,7 +842,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             }
                                         })}
 
-                                        <div class="bg-card rounded-lg border border-border shadow min-h-full">
+                                        <div class="dashboard-content min-h-full">
                                             // Preview banner
                                             {move || preview_content.get().is_some().then(|| {
                                                 view! {
@@ -983,29 +865,19 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                     if content_str.trim().is_empty() {
                                                         view! {
                                                             <div class="w-full text-center py-16">
-                                                                <svg class="w-24 h-24 mx-auto text-muted-foreground mb-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                    <path
-                                                                        stroke-linecap="round"
-                                                                        stroke-linejoin="round"
-                                                                        stroke-width="1.5"
-                                                                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                                                                    />
-                                                                </svg>
+                                                                <div class="w-24 h-24 mx-auto text-muted-foreground mb-6 flex items-center justify-center">
+                                                                    <Icon icon=icondata_lu::LuFileText width="64" height="64" />
+                                                                </div>
                                                                 <h3 class="text-xl font-semibold text-foreground mb-2">
                                                                     "This dashboard is empty"
                                                                 </h3>
                                                                 <p class="text-muted-foreground mb-6">
                                                                     "Click \"Edit Dashboard\" to add content and charts"
                                                                 </p>
-                                                                <a
-                                                                    href=edit_href_empty.clone()
-                                                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                                                                >
-                                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                                                    </svg>
+                                                                <ButtonLink href=edit_href_empty.clone()>
+                                                                    <Icon icon=icondata_lu::LuPencil width="14" height="14" />
                                                                     "Edit Dashboard"
-                                                                </a>
+                                                                </ButtonLink>
                                                             </div>
                                                         }.into_any()
                                                     } else if params_initialized.get() || is_previewing {
@@ -1042,19 +914,15 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 </div>
 
                                 // ─── Footer with metadata ───────────────
-                                <div class="bg-card border-t border-border px-4 md:px-6 py-3 flex-shrink-0">
+                                <div class="metadata-footer bg-muted px-4 md:px-6 py-3 flex-shrink-0">
                                     <div class="flex items-center justify-between text-xs text-muted-foreground">
                                         <div class="flex items-center gap-4">
                                             <div class="flex items-center gap-1">
-                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                </svg>
+                                                <Icon icon=icondata_lu::LuClock width="14" height="14" />
                                                 "Created " {created_date}
                                             </div>
                                             <div class="flex items-center gap-1">
-                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                                </svg>
+                                                <Icon icon=icondata_lu::LuPencil width="14" height="14" />
                                                 "Last updated " {updated_date}
                                             </div>
                                         </div>
