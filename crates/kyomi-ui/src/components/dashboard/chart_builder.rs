@@ -20,10 +20,14 @@ use leptos_icons::Icon;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::DynSelect;
+use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
+use crate::pages::sql_editor::results_table::ResultsTable;
+use crate::pages::sql_editor::types::QueryResult;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
+use crate::server_fns::sql_editor::execute_sql_query;
 
-use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_OUTLINE, BTN_SIZE};
+use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 
 /// Label classes — matches the project's design system.
 const LABEL_CLASS: &str = "text-sm font-medium text-foreground";
@@ -456,6 +460,11 @@ pub fn ChartBuilderModal(
     let (catalog_search, set_catalog_search) = signal(String::new());
     let (catalog_refresh_trigger, _set_catalog_refresh_trigger) = signal(0u32);
 
+    // ── Query execution state ─────────────────────────────────────────
+    let (query_running, set_query_running) = signal(false);
+    let (query_result, set_query_result) = signal(None::<QueryResult>);
+    let (query_error, set_query_error) = signal(None::<String>);
+
     // ── View ────────────────────────────────────────────────────────────
 
     let modal_title = if is_edit_mode {
@@ -558,18 +567,79 @@ pub fn ChartBuilderModal(
                                     />
                                 </div>
 
-                                // Run Query button (disabled — query execution not yet implemented)
-                                <div class="flex justify-end flex-shrink-0">
+                                // Run Query button
+                                <div class="flex items-center justify-between flex-shrink-0">
+                                    // Query status (row count / error indicator)
+                                    <div class="text-xs text-muted-foreground">
+                                        {move || {
+                                            if query_running.get() {
+                                                view! { <span class="flex items-center gap-1.5"><Spinner class="text-primary".to_string() />" Running..."</span> }.into_any()
+                                            } else if let Some(ref err) = query_error.get() {
+                                                view! { <span class="text-error-foreground" title=err.clone()>"Query failed"</span> }.into_any()
+                                            } else if let Some(ref result) = query_result.get() {
+                                                let total = result.total_rows.unwrap_or(result.row_count);
+                                                view! { <span>{format!("{total} rows")}</span> }.into_any()
+                                            } else {
+                                                view! { <span></span> }.into_any()
+                                            }
+                                        }}
+                                    </div>
                                     <button
                                         type="button"
-                                        class=format!("{BTN_BASE} {BTN_OUTLINE} {BTN_SIZE}")
-                                        disabled=true
-                                        title="Query execution coming soon"
+                                        class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
+                                        disabled=move || query_running.get() || datasource_slug.get().is_empty() || sql.get().trim().is_empty()
+                                        on:click=move |_| {
+                                            let ds_slug = datasource_slug.get_untracked();
+                                            let query_text = sql.get_untracked();
+                                            if ds_slug.is_empty() || query_text.trim().is_empty() {
+                                                return;
+                                            }
+                                            set_query_running.set(true);
+                                            set_query_error.set(None);
+                                            set_query_result.set(None);
+                                            leptos::task::spawn_local(async move {
+                                                match execute_sql_query(ds_slug, query_text, 50, 1).await {
+                                                    Ok(result) => {
+                                                        set_query_result.set(Some(result));
+                                                    }
+                                                    Err(e) => {
+                                                        set_query_error.set(Some(e.to_string()));
+                                                    }
+                                                }
+                                                set_query_running.set(false);
+                                            });
+                                        }
                                     >
                                         "Run Query"
-                                        <span class="text-xs text-muted-foreground ml-1">"(coming soon)"</span>
                                     </button>
                                 </div>
+
+                                // Query error display
+                                {move || {
+                                    let err = query_error.get();
+                                    err.map(|msg| view! {
+                                        <div class="flex-shrink-0 max-h-[200px] overflow-auto border border-error-border rounded-md bg-error p-3">
+                                            <p class="text-sm text-error-foreground font-medium">"Query Error"</p>
+                                            <p class="text-sm text-error-foreground mt-1">{msg}</p>
+                                        </div>
+                                    })
+                                }}
+
+                                // Query results table
+                                {move || {
+                                    let result = query_result.get();
+                                    result.map(|r| view! {
+                                        <div class="flex-shrink-0 max-h-[250px] overflow-auto border border-border rounded-md">
+                                            <ResultsTable
+                                                result=r
+                                                current_page=1
+                                                page_size=50
+                                                on_page_change=Callback::new(|_| {})
+                                                on_page_size_change=Callback::new(|_| {})
+                                            />
+                                        </div>
+                                    })
+                                }}
                             </div>
 
                             // Catalog sidebar (280px, shown when catalog_open is true)
