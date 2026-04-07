@@ -274,7 +274,7 @@ pub fn SqlEditorSidebar(
                         // Refresh button (catalog tab only)
                         <Show when=move || active_tab.get() == SidebarTab::Catalog>
                             <button
-                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-accent rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-accent rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 aria-label=move || {
                                     if refreshing_catalog.get() {
                                         "Refreshing catalog..."
@@ -308,7 +308,7 @@ pub fn SqlEditorSidebar(
                         </Show>
                         // Close button
                         <button
-                            class="p-1 text-muted-foreground hover:text-foreground rounded transition-colors"
+                            class="p-1 text-muted-foreground hover:text-foreground rounded-md transition-colors"
                             aria-label="Close"
                             on:click=close_sidebar
                         >
@@ -457,7 +457,7 @@ pub fn SqlEditorSidebar(
                                 aria-label="Drag to resize sidebar"
                                 tabindex="0"
                             >
-                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground rounded transition-colors" />
+                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground rounded-md transition-colors" />
                             </div>
 
                             {panel_content()}

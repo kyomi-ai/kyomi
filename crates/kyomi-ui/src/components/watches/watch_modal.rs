@@ -423,7 +423,7 @@ pub fn WatchModal(
                         let qs = queries.get();
                         if qs.is_empty() {
                             view! {
-                                <div class="text-sm text-muted-foreground italic p-3 bg-muted/50 rounded">
+                                <div class="text-sm text-muted-foreground italic p-3 bg-muted/50 rounded-lg">
                                     "No reference queries configured"
                                 </div>
                             }.into_any()
@@ -480,7 +480,7 @@ pub fn WatchModal(
                                                     }
                                                     placeholder="SELECT ..."
                                                     rows=4
-                                                    class="w-full font-mono text-xs p-2 border border-input rounded bg-background"
+                                                    class="w-full font-mono text-xs p-2 border border-input rounded-md bg-background"
                                                 />
                                             </div>
 
@@ -539,7 +539,7 @@ pub fn WatchModal(
                                                 <p class="text-xs text-muted-foreground font-mono mt-1 truncate">{sql}</p>
                                                 {datasource.map(|ds| view! {
                                                     <div class="mt-2">
-                                                        <span class="inline-block px-2 py-1 rounded text-xs bg-secondary text-secondary-foreground">
+                                                        <span class="inline-block px-2 py-1 rounded-md text-xs bg-secondary text-secondary-foreground">
                                                             {ds}
                                                         </span>
                                                     </div>

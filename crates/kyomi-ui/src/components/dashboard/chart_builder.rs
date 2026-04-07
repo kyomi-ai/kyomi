@@ -685,7 +685,7 @@ pub fn ChartBuilderModal(
                                             <div class="flex items-center gap-1">
                                                 <button
                                                     type="button"
-                                                    class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                    class="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Refresh catalog"
                                                 >
                                                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -694,7 +694,7 @@ pub fn ChartBuilderModal(
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    class="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                    class="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Close catalog"
                                                     on:click=move |_| set_catalog_open.set(false)
                                                 >
@@ -825,7 +825,7 @@ pub fn ChartBuilderModal(
                                         <label class=LABEL_CLASS>"Series (Y Axis)"</label>
                                         <button
                                             type="button"
-                                            class="text-sm text-primary hover:text-primary/80 font-medium transition-colors px-2 py-1.5 -mr-2 rounded hover:bg-primary/5"
+                                            class="text-sm text-primary hover:text-primary/80 font-medium transition-colors px-2 py-1.5 -mr-2 rounded-md hover:bg-primary/5"
                                             on:click=add_series
                                         >
                                             "+ Add Series"
@@ -882,7 +882,7 @@ pub fn ChartBuilderModal(
                                                         view! {
                                                             <button
                                                                 type="button"
-                                                                class="mt-1 p-2 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                                                class="mt-1 p-2 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                                                 on:click=move |_| remove_series(idx)
                                                                 title="Remove series"
                                                             >

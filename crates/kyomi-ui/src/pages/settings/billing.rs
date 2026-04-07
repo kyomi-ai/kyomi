@@ -17,8 +17,8 @@ use leptos::prelude::*;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, ConfirmDialog, Modal, ModalSize, Skeleton, StatusBadge,
-    StatusBadgeVariant,
+    CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton,
+    StatusBadge, StatusBadgeVariant,
 };
 use crate::server_fns::billing::*;
 use crate::server_fns::context::UserContext;
@@ -1168,13 +1168,10 @@ fn InvoicesSection(
                                 })}
                                 {if inv_list.is_empty() {
                                     view! {
-                                        <Card>
-                                            <CardContent class="pt-6">
-                                                <p class="text-sm text-muted-foreground text-center">
-                                                    "No invoices yet. Invoices will appear here after your first billing cycle."
-                                                </p>
-                                            </CardContent>
-                                        </Card>
+                                        <EmptyState
+                                            title="No invoices yet"
+                                            description="Invoices will appear here after your first billing cycle."
+                                        />
                                     }.into_any()
                                 } else {
                                     view! {

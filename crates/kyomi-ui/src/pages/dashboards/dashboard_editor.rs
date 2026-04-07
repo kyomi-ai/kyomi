@@ -185,7 +185,7 @@ fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<Editor
         <div class="flex items-center bg-accent rounded-md p-0.5 flex-shrink-0">
             <button
                 class=move || {
-                    let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
+                    let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1";
                     if mode.get() == EditorMode::Source {
                         format!("{base} bg-card text-foreground shadow-sm")
                     } else {
@@ -200,7 +200,7 @@ fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<Editor
             </button>
             <button
                 class=move || {
-                    let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded transition-colors flex items-center gap-1";
+                    let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1";
                     if mode.get() == EditorMode::Visual {
                         format!("{base} bg-card text-foreground shadow-sm")
                     } else {
@@ -825,7 +825,7 @@ fn DashboardEditorInner(
                                 }.into_any(),
                                 title: "Add Chart".to_string(),
                                 on_click: Arc::new(move || set_chart_open.set(true)),
-                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded bg-secondary text-secondary-foreground hover:bg-secondary/90 flex items-center gap-1 flex-shrink-0".to_string()),
+                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded-md bg-secondary text-secondary-foreground transition-colors hover:bg-secondary/90 flex items-center gap-1 flex-shrink-0".to_string()),
                             }),
                             // Link — matches React: responsive icon+text
                             ToolbarItem::Custom(CustomToolbarButton {
@@ -838,7 +838,7 @@ fn DashboardEditorInner(
                                 }.into_any(),
                                 title: "Link to Dashboard".to_string(),
                                 on_click: Arc::new(move || set_link_open.set(true)),
-                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded text-foreground hover:bg-accent flex items-center gap-1 flex-shrink-0".to_string()),
+                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded-md text-foreground transition-colors hover:bg-accent flex items-center gap-1 flex-shrink-0".to_string()),
                             }),
                             // Push mode toggle to far right
                             ToolbarItem::Spacer,

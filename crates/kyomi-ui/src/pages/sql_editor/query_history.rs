@@ -290,7 +290,7 @@ pub fn QueryHistory(
                                 {(!sq.is_empty()).then(|| {
                                     view! {
                                         <button
-                                            class="mt-2 text-xs text-primary hover:text-info-foreground"
+                                            class="mt-2 text-xs text-primary transition-colors hover:text-info-foreground"
                                             on:click=move |_| on_search_change.run(String::new())
                                         >
                                             "Clear search"
@@ -300,7 +300,7 @@ pub fn QueryHistory(
                                 {(so && sq.is_empty()).then(|| {
                                     view! {
                                         <button
-                                            class="mt-2 text-xs text-primary hover:text-info-foreground"
+                                            class="mt-2 text-xs text-primary transition-colors hover:text-info-foreground"
                                             on:click=move |_| set_show_saved_only.set(false)
                                         >
                                             "Show all queries"
@@ -368,9 +368,9 @@ pub fn QueryHistory(
                                                     <button
                                                         class=move || {
                                                             if is_saved.get() {
-                                                                "p-1 rounded hover:bg-muted transition-colors text-primary"
+                                                                "p-1 rounded-md hover:bg-muted transition-colors text-primary"
                                                             } else {
-                                                                "p-1 rounded hover:bg-muted transition-colors text-muted-foreground"
+                                                                "p-1 rounded-md hover:bg-muted transition-colors text-muted-foreground"
                                                             }
                                                         }
                                                         aria-label=move || if is_saved.get() { "Unsave query" } else { "Save query" }
@@ -390,7 +390,7 @@ pub fn QueryHistory(
                                                     </button>
                                                     // Delete button
                                                     <button
-                                                        class="p-1 rounded hover:bg-error/10 text-muted-foreground hover:text-error-foreground transition-colors"
+                                                        class="p-1 rounded-md hover:bg-error/10 text-muted-foreground hover:text-error-foreground transition-colors"
                                                         aria-label="Delete query"
                                                         on:click=move |ev: web_sys::MouseEvent| {
                                                             ev.stop_propagation();

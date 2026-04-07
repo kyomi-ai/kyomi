@@ -14,7 +14,7 @@ use leptos::prelude::*;
 
 use crate::components::{
     Button, ButtonVariant, Card, CardContent, CardFooter, CardHeader, CardTitle,
-    ConfirmDialog, Spinner, StyledSelect,
+    ConfirmDialog, EmptyState, Spinner, StyledSelect,
 };
 use super::collections_sidebar::CollectionsSidebar;
 use crate::server_fns::collections::{
@@ -339,7 +339,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                         // Clear button
                         <Show when=move || !search_input.get().is_empty()>
                             <button
-                                class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                                 aria-label="Clear search"
                                 on:click=move |_| set_search_input.set(String::new())
                             >
@@ -428,7 +428,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                                             let create_cb = Callback::new(handle_create);
                                             let has_active_collection = active_collection_id.get().is_some();
                                             view! {
-                                                <EmptyState
+                                                <DashboardsEmptyState
                                                     has_search=Signal::derive(move || query_signal.get().is_some())
                                                     has_active_collection=has_active_collection
                                                     on_create=create_cb
@@ -507,10 +507,30 @@ pub fn DashboardsListPage() -> impl IntoView {
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Empty state when no dashboards exist, search returns nothing, or active
-/// collection is empty.
+/// Dashboard chart SVG icon for empty states.
 #[component]
-fn EmptyState(
+fn DashboardChartIcon() -> impl IntoView {
+    view! {
+        <svg
+            class="w-12 h-12"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+        >
+            <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="1.5"
+                d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+            />
+        </svg>
+    }
+}
+
+/// Empty state when no dashboards exist, search returns nothing, or active
+/// collection is empty. Delegates to the shared `EmptyState` component.
+#[component]
+fn DashboardsEmptyState(
     /// Whether the user has an active search query.
     has_search: Signal<bool>,
     /// Whether filtering by a collection.
@@ -520,53 +540,41 @@ fn EmptyState(
     on_create: Callback<leptos::ev::MouseEvent>,
 ) -> impl IntoView {
     view! {
-        <div class="text-center py-16 bg-card rounded-lg shadow border border-border">
-            <div class="max-w-md mx-auto">
-                <svg
-                    class="w-24 h-24 mx-auto text-muted-foreground/50 mb-6"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                >
-                    <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="1.5"
-                        d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+        {move || {
+            if has_search.get() {
+                view! {
+                    <EmptyState
+                        icon=std::sync::Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
+                        title="No matching dashboards"
+                        description="No dashboards found for your search. Try a different search term."
                     />
-                </svg>
-                <h3 class="text-xl font-semibold text-foreground mb-2">
-                    {move || {
-                        if has_search.get() {
-                            "No matching dashboards"
-                        } else if has_active_collection {
-                            "No dashboards in this collection"
-                        } else {
-                            "No dashboards yet"
-                        }
-                    }}
-                </h3>
-                <p class="text-muted-foreground mb-6">
-                    {move || {
-                        if has_search.get() {
-                            "No dashboards found for your search. Try a different search term.".to_string()
-                        } else if has_active_collection {
-                            "Add dashboards to this collection using the + icon on dashboard cards".to_string()
-                        } else {
-                            "Get started by creating your first markdown dashboard with embedded charts".to_string()
-                        }
-                    }}
-                </p>
-                <Show when=move || !has_search.get() && !has_active_collection>
-                    <Button on:click=move |ev| on_create.run(ev)>
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                        </svg>
-                        "Create Your First Dashboard"
-                    </Button>
-                </Show>
-            </div>
-        </div>
+                }.into_any()
+            } else if has_active_collection {
+                view! {
+                    <EmptyState
+                        icon=std::sync::Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
+                        title="No dashboards in this collection"
+                        description="Add dashboards to this collection using the + icon on dashboard cards"
+                    />
+                }.into_any()
+            } else {
+                view! {
+                    <EmptyState
+                        icon=std::sync::Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
+                        title="No dashboards yet"
+                        description="Get started by creating your first markdown dashboard with embedded charts"
+                        action=std::sync::Arc::new(move || view! {
+                            <Button on:click=move |ev| on_create.run(ev)>
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                                </svg>
+                                "Create Your First Dashboard"
+                            </Button>
+                        }.into_any())
+                    />
+                }.into_any()
+            }
+        }}
     }
 }
 
@@ -981,7 +989,7 @@ fn AddToCollectionModal(
                                                         <h3 class="font-medium text-foreground">{coll_name}</h3>
                                                         {if is_public {
                                                             view! {
-                                                                <div class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-success/10 text-success-foreground">
+                                                                <div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs bg-success/10 text-success-foreground">
                                                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                                                                     </svg>
@@ -990,7 +998,7 @@ fn AddToCollectionModal(
                                                             }.into_any()
                                                         } else {
                                                             view! {
-                                                                <div class="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-muted text-muted-foreground">
+                                                                <div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs bg-muted text-muted-foreground">
                                                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                                                                     </svg>

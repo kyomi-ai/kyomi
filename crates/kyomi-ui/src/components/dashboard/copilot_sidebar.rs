@@ -25,7 +25,7 @@ use crate::components::chat::{
 };
 #[cfg(feature = "hydrate")]
 use crate::components::chat::{ThinkingEvent, TokenUsage, process_thinking_event};
-use crate::components::Spinner;
+use crate::components::{EmptyState, Spinner};
 use crate::server_fns::copilot::{
     create_copilot_session, delete_copilot_session, send_copilot_message,
 };
@@ -752,7 +752,7 @@ pub fn CopilotSidebar(
                         <span class="font-medium text-foreground">"Dashboard Copilot"</span>
                     </div>
                     <button
-                        class="p-1 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent"
+                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-accent"
                         aria-label="Close copilot"
                         on:click=move |_| handle_close_clone()
                     >
@@ -775,15 +775,12 @@ pub fn CopilotSidebar(
                 >
                     // Empty state
                     <Show when=move || messages.get().is_empty() && !is_loading.get()>
-                        <div class="flex flex-col items-center justify-center h-full text-center px-4">
-                            <ChatBubbleIcon class="w-12 h-12 text-muted-foreground/50 mb-3" />
-                            <p class="text-muted-foreground text-sm font-medium">
-                                "Ask me anything about your dashboard!"
-                            </p>
-                            <p class="text-muted-foreground/70 text-xs mt-1">
-                                "I can help you improve charts, suggest changes, or make edits directly."
-                            </p>
-                        </div>
+                        <EmptyState
+                            icon=std::sync::Arc::new(|| view! { <ChatBubbleIcon class="w-12 h-12" /> }.into_any())
+                            title="Ask me anything about your dashboard!"
+                            description="I can help you improve charts, suggest changes, or make edits directly."
+                            class="p-4 border-0"
+                        />
                     </Show>
 
                     // Messages
@@ -859,7 +856,7 @@ pub fn CopilotSidebar(
                                                 .unwrap_or_else(|| full_message.clone());
                                             view! {
                                                 <button
-                                                    class="mt-2 text-xs text-primary hover:text-primary/80 font-medium"
+                                                    class="mt-2 text-xs text-primary font-medium transition-colors hover:text-primary/80"
                                                     on:click=move |_| {
                                                         on_apply_content.run(apply_content.clone());
                                                     }
@@ -937,7 +934,7 @@ pub fn CopilotSidebar(
                                 class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| handle_close_backdrop()
                             />
-                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl">
+                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl transition-all duration-slow ease-in-out">
                                 {panel_content()}
                             </div>
                         </div>
@@ -952,7 +949,7 @@ pub fn CopilotSidebar(
                         if is_resizing.get() {
                             "border-l border-border bg-card flex h-full overflow-hidden select-none"
                         } else {
-                            "border-l border-border bg-card flex h-full overflow-hidden"
+                            "border-l border-border bg-card flex h-full overflow-hidden transition-all duration-slow ease-in-out"
                         }
                     };
 
@@ -969,7 +966,7 @@ pub fn CopilotSidebar(
                                 aria-label="Drag to resize"
                             >
                                 // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`
-                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors" />
+                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded-md transition-colors" />
                             </div>
 
                             {panel_content()}

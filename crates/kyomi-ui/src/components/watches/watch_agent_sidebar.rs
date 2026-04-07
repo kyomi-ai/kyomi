@@ -261,7 +261,7 @@ pub fn WatchAgentSidebar(
                         </span>
                     </div>
                     <button
-                        class="p-1 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent"
+                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-accent"
                         aria-label="Close"
                         on:click=move |_| handle_close_clone()
                     >
@@ -359,7 +359,7 @@ pub fn WatchAgentSidebar(
                                 aria-label="Drag to resize"
                             >
                                 // React: `w-1 h-12 bg-border hover:bg-muted-foreground rounded transition-colors`
-                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground rounded transition-colors" />
+                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground rounded-md transition-colors" />
                             </div>
 
                             {panel_content()}

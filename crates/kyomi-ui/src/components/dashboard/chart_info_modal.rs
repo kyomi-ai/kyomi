@@ -119,7 +119,7 @@ pub fn ChartInfoModal(
                             <div class="relative group">
                                 <button
                                     on:click=on_sql_copy
-                                    class="absolute top-2 right-2 p-2 rounded bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                                    class="absolute top-2 right-2 p-2 rounded-md bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
                                     title=move || if sql_copied.get() { "Copied!" } else { "Copy code" }
                                 >
                                     {move || if sql_copied.get() {
@@ -138,7 +138,7 @@ pub fn ChartInfoModal(
                                 </button>
                                 <pre
                                     class="bg-muted rounded-md p-4 overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto"
-                                    style="margin: 0; border-radius: 6px; border: none; font-size: 0.929rem; padding: 16px;"
+                                    style="margin: 0; border: none; font-size: 0.929rem; padding: 16px;"
                                 >
                                     <code style="font-family: var(--font-mono); background-color: transparent;">
                                         {sql_text}
@@ -156,7 +156,7 @@ pub fn ChartInfoModal(
                     <div class="relative group">
                         <button
                             on:click=on_copy
-                            class="absolute top-2 right-2 p-2 rounded bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                            class="absolute top-2 right-2 p-2 rounded-md bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
                             title=move || if copied.get() { "Copied!" } else { "Copy code" }
                         >
                             {move || if copied.get() {
@@ -175,7 +175,7 @@ pub fn ChartInfoModal(
                         </button>
                         <pre
                             class="bg-muted rounded-md overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto"
-                            style="margin: 0; border-radius: 6px; border: none; font-size: 0.929rem; background-color: var(--color-muted); padding: 16px;"
+                            style="margin: 0; border: none; font-size: 0.929rem; background-color: var(--color-muted); padding: 16px;"
                         >
                             <code style="font-family: var(--font-mono); background-color: transparent;">
                                 {move || yaml.get()}

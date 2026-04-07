@@ -191,7 +191,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                 </Button>
                                                 <p class="text-xs text-muted-foreground">
                                                     "Or type "
-                                                    <code class="px-1 py-0.5 bg-muted rounded text-xs">"/kyomi connect"</code>
+                                                    <code class="px-1 py-0.5 bg-muted rounded-md text-xs">"/kyomi connect"</code>
                                                     " in Slack"
                                                 </p>
                                             </div>

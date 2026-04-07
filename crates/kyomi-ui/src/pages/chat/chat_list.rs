@@ -547,7 +547,7 @@ pub fn ChatsListPage() -> impl IntoView {
                         <Show when=move || !search_input.get().is_empty() && !is_searching.get()>
                             <button
                                 on:click=move |_| set_search_input.set(String::new())
-                                class="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                class="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                             >
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />

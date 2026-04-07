@@ -508,7 +508,7 @@ fn ResizeHandle() -> impl IntoView {
             aria-label="Drag to resize editor and results panels"
             tabindex="0"
         >
-            <div class="h-1 w-12 bg-border hover:bg-muted-foreground rounded transition-colors"/>
+            <div class="h-1 w-12 bg-border hover:bg-muted-foreground rounded-md transition-colors"/>
         </div>
     }
 }

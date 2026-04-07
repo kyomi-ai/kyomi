@@ -10,7 +10,7 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
-    Card, ConfirmDialog, Modal, ModalSize, Skeleton, Switch,
+    Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, Switch,
 };
 use crate::components::DynSelect;
 use crate::server_fns::datasources::*;
@@ -202,23 +202,21 @@ fn DatasourcesContent(
                     <Show
                         when=move || !datasources.get().is_empty()
                         fallback=move || view! {
-                            <div class="text-center py-12">
-                                <span class="mx-auto h-12 w-12 text-muted-foreground flex items-center justify-center">
+                            <EmptyState
+                                icon=std::sync::Arc::new(|| view! {
                                     <Icon icon=icondata_lu::LuDatabase width="48" height="48"/>
-                                </span>
-                                <p class="mt-4 text-sm text-muted-foreground">
-                                    "No datasources configured"
-                                </p>
-                                <Button
-                                    class="mt-4".to_string()
-                                    on:click=move |_| set_modal_datasource_id.set(Some(None))
-                                >
-                                    <span class="h-4 w-4 inline-flex items-center justify-center">
-                                        <Icon icon=icondata_lu::LuPlus/>
-                                    </span>
-                                    "Add Datasource"
-                                </Button>
-                            </div>
+                                }.into_any())
+                                title="No datasources configured"
+                                description="Connect a data source to start querying your data"
+                                action=std::sync::Arc::new(move || view! {
+                                    <Button on:click=move |_| set_modal_datasource_id.set(Some(None))>
+                                        <span class="h-4 w-4 inline-flex items-center justify-center">
+                                            <Icon icon=icondata_lu::LuPlus/>
+                                        </span>
+                                        "Add Datasource"
+                                    </Button>
+                                }.into_any())
+                            />
                         }
                     >
                         <div class="divide-y divide-border">
@@ -1741,7 +1739,7 @@ fn ProviderConnectionFields(
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input
                                 type="checkbox"
-                                class="h-4 w-4 rounded border-input"
+                                class="h-4 w-4 rounded-md border-input"
                                 prop:checked=move || cfg_secure.get()
                                 on:change=move |ev| {
                                     let checked = event_target_checked(&ev);
@@ -1865,7 +1863,7 @@ fn ProviderConnectionFields(
                             <label class="flex items-center gap-2 cursor-pointer">
                                 <input
                                     type="checkbox"
-                                    class="h-4 w-4 rounded border-input"
+                                    class="h-4 w-4 rounded-md border-input"
                                     prop:checked=move || cfg_encrypt.get()
                                     on:change=move |ev| {
                                         set_cfg_encrypt.set(event_target_checked(&ev));
@@ -1876,7 +1874,7 @@ fn ProviderConnectionFields(
                             <label class="flex items-center gap-2 cursor-pointer">
                                 <input
                                     type="checkbox"
-                                    class="h-4 w-4 rounded border-input"
+                                    class="h-4 w-4 rounded-md border-input"
                                     prop:checked=move || cfg_trust_cert.get()
                                     on:change=move |ev| {
                                         set_cfg_trust_cert.set(event_target_checked(&ev));
@@ -1968,7 +1966,7 @@ fn ProviderCredentialsFields(
                         <label class="flex items-center gap-2 cursor-pointer text-xs text-muted-foreground">
                             <input
                                 type="checkbox"
-                                class="h-4 w-4 rounded border-input"
+                                class="h-4 w-4 rounded-md border-input"
                                 prop:checked=move || cfg_shared_credentials.get()
                                 on:change=move |ev| {
                                     set_cfg_shared_credentials.set(event_target_checked(&ev));

@@ -11,7 +11,7 @@ use leptos::prelude::*;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
-    ButtonVariant, ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
+    ButtonVariant, ConfirmDialog, EmptyState, Modal, ModalSize, INPUT_CLASS,
 };
 use crate::components::select::SELECT_CLASS;
 use crate::server_fns::context::UserContext;
@@ -404,9 +404,11 @@ fn TeamPageInner() -> impl IntoView {
                         invitations.get().map(|result| match result {
                             Ok(invs) if invs.is_empty() => {
                                 view! {
-                                    <div class="text-center py-8 bg-muted rounded-lg border-2 border-dashed border-border">
-                                        <p class="text-muted-foreground">"No pending invitations"</p>
-                                    </div>
+                                    <EmptyState
+                                        title="No pending invitations"
+                                        description="Invitations you send will appear here"
+                                        class="border-2 border-dashed bg-muted"
+                                    />
                                 }.into_any()
                             },
                             Ok(invs) => {
@@ -483,9 +485,10 @@ fn TeamPageInner() -> impl IntoView {
                         members.get().map(|result| match result {
                             Ok(m) if m.is_empty() => {
                                 view! {
-                                    <div class="text-center py-8 bg-muted rounded-lg border-2 border-dashed border-border">
-                                        <p class="text-muted-foreground">"No members found"</p>
-                                    </div>
+                                    <EmptyState
+                                        title="No members found"
+                                        description="Team members will appear here"
+                                    />
                                 }.into_any()
                             },
                             Ok(m) => {

@@ -35,11 +35,11 @@ const MULTISELECT_TRIGGER_CLASS: &str = "w-full px-3 py-2 text-left bg-backgroun
 const MULTISELECT_DROPDOWN_CLASS: &str = "absolute z-10 mt-1 w-full bg-popover border border-border rounded-md shadow-lg max-h-60 overflow-auto";
 
 /// Multiselect option row — from React `MultiSelectDropdown`.
-const MULTISELECT_OPTION_CLASS: &str = "flex items-center px-3 py-2 hover:bg-accent cursor-pointer";
+const MULTISELECT_OPTION_CLASS: &str = "flex items-center px-3 py-2 cursor-pointer transition-colors hover:bg-accent";
 
 /// Multiselect checkbox — from React `MultiSelectDropdown`.
 const MULTISELECT_CHECKBOX_CLASS: &str =
-    "w-4 h-4 rounded border-input text-primary focus:ring-ring mr-2";
+    "w-4 h-4 rounded-md border-input text-primary focus:ring-ring mr-2";
 
 /// Chevron icon classes — from React `MultiSelectDropdown`.
 const MULTISELECT_CHEVRON_CLASS: &str = "w-4 h-4 ml-2 text-muted-foreground";

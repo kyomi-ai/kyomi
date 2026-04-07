@@ -211,16 +211,16 @@ fn SingleTab(
 
     // Pin button visibility
     let pin_class = if pinned || is_active {
-        "p-0.5 rounded hover:bg-muted transition-colors flex-shrink-0 opacity-100"
+        "p-0.5 rounded-md hover:bg-muted transition-colors flex-shrink-0 opacity-100"
     } else {
-        "p-0.5 rounded hover:bg-muted transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
+        "p-0.5 rounded-md hover:bg-muted transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
     };
 
     // Close button visibility
     let close_class = if is_active {
-        "p-0.5 rounded hover:bg-accent transition-colors flex-shrink-0 opacity-100"
+        "p-0.5 rounded-md hover:bg-accent transition-colors flex-shrink-0 opacity-100"
     } else {
-        "p-0.5 rounded hover:bg-accent transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
+        "p-0.5 rounded-md hover:bg-accent transition-colors flex-shrink-0 opacity-0 group-hover:opacity-100"
     };
 
     view! {

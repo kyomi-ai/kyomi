@@ -261,7 +261,7 @@ fn ChartTypeSelector(
     view! {
         <div class="relative" node_ref=menu_ref>
             <button
-                class="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                class="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                 on:click=move |_| set_open.update(|v| *v = !*v)
             >
                 {icons::chart_type_icon(&current.get_value())}
@@ -280,7 +280,7 @@ fn ChartTypeSelector(
                                 class=if is_active {
                                     "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-foreground bg-accent"
                                 } else {
-                                    "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-popover-foreground hover:bg-accent"
+                                    "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-popover-foreground transition-colors hover:bg-accent"
                                 }
                                 on:click=move |_| {
                                     on_select.run(ct_for_click.clone());
@@ -546,9 +546,9 @@ pub fn ChartHeaderBar(
                             .map(|s| s.get())
                             .unwrap_or(false);
                         if spinning {
-                            "p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors animate-spin"
+                            "p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors animate-spin"
                         } else {
-                            "p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                            "p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                         }
                     };
                     view! {
@@ -567,7 +567,7 @@ pub fn ChartHeaderBar(
                     let cb = on_save_to_dashboard.unwrap();
                     view! {
                         <button
-                            class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                            class="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                             title="Save to Dashboard"
                             on:click=move |_| cb.run(())
                         >
@@ -581,7 +581,7 @@ pub fn ChartHeaderBar(
                     let cb = on_ask_about.unwrap();
                     view! {
                         <button
-                            class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                            class="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                             title="Ask about this chart"
                             on:click=move |_| cb.run(())
                         >
@@ -595,7 +595,7 @@ pub fn ChartHeaderBar(
                     let cb = on_info.unwrap();
                     view! {
                         <button
-                            class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                            class="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                             title="Chart Info"
                             on:click=move |_| cb.run(())
                         >
@@ -612,7 +612,7 @@ pub fn ChartHeaderBar(
                     view! {
                         <div class="relative" node_ref=menu_ref>
                             <button
-                                class="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                                class="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
                                 title="Actions"
                                 on:click=move |_| set_menu_open.update(|v| *v = !*v)
                             >
@@ -625,7 +625,7 @@ pub fn ChartHeaderBar(
                                         let cb = edit_cb.get_value();
                                         cb.map(|cb| view! {
                                             <button
-                                                class="w-full text-left px-3 py-2 text-sm text-popover-foreground hover:bg-accent"
+                                                class="w-full text-left px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-accent"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
                                             >"Edit"</button>
                                         })
@@ -634,7 +634,7 @@ pub fn ChartHeaderBar(
                                         let cb = delete_cb.get_value();
                                         cb.map(|cb| view! {
                                             <button
-                                                class="w-full text-left px-3 py-2 text-sm text-destructive hover:bg-destructive/10"
+                                                class="w-full text-left px-3 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
                                             >"Delete"</button>
                                         })

@@ -20,7 +20,7 @@ use crate::components::toast::{toast_error, toast_success};
 use crate::components::watches::{AlertsHistory, ExecutionLogViewer, WatchAgentSidebar, WatchModal};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Card, CardContent, CardHeader, CardTitle, ConfirmDialog,
-    Modal, ModalSize, Spinner, StatusBadge, StatusBadgeVariant, Switch,
+    EmptyState, Modal, ModalSize, Spinner, StatusBadge, StatusBadgeVariant, Switch,
 };
 use crate::server_fns::context::get_user_context;
 use crate::server_fns::watches::{
@@ -843,7 +843,7 @@ pub fn WatchesPage() -> impl IntoView {
                                         <AlertCircleIcon class="h-4 w-4".to_string() />
                                         <AlertDescription>
                                             "Your AI budget is exhausted for this billing period. Existing watches will not run until your budget resets. "
-                                            <a href="/settings/billing" class="underline hover:text-foreground">"Upgrade your plan"</a>
+                                            <a href="/settings/billing" class="underline transition-colors hover:text-foreground">"Upgrade your plan"</a>
                                         </AlertDescription>
                                     </Alert>
                                 </div>
@@ -872,31 +872,32 @@ pub fn WatchesPage() -> impl IntoView {
                                                         </AlertDescription>
                                                     </Alert>
                                                 }.into_any(),
-                                                Ok(watches) if watches.is_empty() => view! {
-                                                    <div class="flex flex-col items-center justify-center py-12 text-center">
-                                                        <div class="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
-                                                            <EyeIcon class="h-8 w-8 text-muted-foreground".to_string() />
-                                                        </div>
-                                                        <h3 class="text-lg font-medium text-foreground mb-2">"No watches yet"</h3>
-                                                        <p class="text-muted-foreground mb-4 max-w-md">
-                                                            {if is_credits_exhausted {
-                                                                "Your AI budget is exhausted. Wait for it to reset or upgrade your plan to create watches."
-                                                            } else {
-                                                                "Create your first watch to start monitoring your data proactively."
-                                                            }}
-                                                        </p>
-                                                        <button
-                                                            class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_DEFAULT_SIZE}")
-                                                            on:click=move |_| {
-                                                                set_agent_editing_watch.set(None);
-                                                                set_show_agent_sidebar.set(true);
-                                                            }
-                                                            disabled=!is_ai_enabled
-                                                        >
-                                                            <PlusIcon class="h-4 w-4 mr-2".to_string() />
-                                                            "Create Watch"
-                                                        </button>
-                                                    </div>
+                                                Ok(watches) if watches.is_empty() => {
+                                                    let desc = if is_credits_exhausted {
+                                                        "Your AI budget is exhausted. Wait for it to reset or upgrade your plan to create watches."
+                                                    } else {
+                                                        "Create your first watch to start monitoring your data proactively."
+                                                    };
+                                                    view! {
+                                                        <EmptyState
+                                                            icon=std::sync::Arc::new(|| view! { <EyeIcon class="h-12 w-12".to_string() /> }.into_any())
+                                                            title="No watches yet"
+                                                            description=desc.to_string()
+                                                            action=std::sync::Arc::new(move || view! {
+                                                                <button
+                                                                    class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_DEFAULT_SIZE}")
+                                                                    on:click=move |_| {
+                                                                        set_agent_editing_watch.set(None);
+                                                                        set_show_agent_sidebar.set(true);
+                                                                    }
+                                                                    disabled=!is_ai_enabled
+                                                                >
+                                                                    <PlusIcon class="h-4 w-4 mr-2".to_string() />
+                                                                    "Create Watch"
+                                                                </button>
+                                                            }.into_any())
+                                                        />
+                                                    }
                                                 }.into_any(),
                                                 Ok(watches) => {
                                                     let cards = watches.into_iter().map(|watch| {

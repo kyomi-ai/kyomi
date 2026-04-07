@@ -429,7 +429,7 @@ fn ChartPaletteCard(data: ProfileData) -> impl IntoView {
                                     {colors.iter().map(|color| {
                                         view! {
                                             <div
-                                                class="w-8 h-8 rounded border border-border"
+                                                class="w-8 h-8 rounded-md border border-border"
                                                 style=format!("background-color: {color}")
                                             />
                                         }

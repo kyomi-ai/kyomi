@@ -279,7 +279,7 @@ fn CatalogNodeView(
     view! {
         <div style=margin_left>
             <div
-                class="flex items-center gap-1 px-2 py-0.5 hover:bg-accent rounded cursor-pointer transition-colors group"
+                class="flex items-center gap-1 px-2 py-0.5 hover:bg-accent rounded-md cursor-pointer transition-colors group"
                 on:click=handle_click
             >
                 // Expand/collapse arrow

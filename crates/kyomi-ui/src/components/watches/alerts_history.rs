@@ -327,7 +327,7 @@ fn AlertDropdownMenu(
                     <div class="absolute right-0 top-full mt-1 z-[1100] min-w-[10rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1">
                         // Continue in Chat — visible in dropdown on mobile
                         <button
-                            class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground sm:hidden"
+                            class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground sm:hidden"
                             on:click=handle_continue_chat
                         >
                             <ChatBubbleIcon class="h-4 w-4 mr-2" />
@@ -337,7 +337,7 @@ fn AlertDropdownMenu(
                         // Mark as unread (only for read, non-deleted alerts)
                         {(!is_unread && !is_deleted).then(|| view! {
                             <button
-                                class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
+                                class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
                                 on:click=handle_mark_unread
                             >
                                 <MailOpenIcon class="h-4 w-4 mr-2" />
@@ -349,7 +349,7 @@ fn AlertDropdownMenu(
                         {if is_deleted {
                             view! {
                                 <button
-                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground"
+                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
                                     on:click=handle_restore
                                 >
                                     <UndoIcon class="h-4 w-4 mr-2" />
@@ -359,7 +359,7 @@ fn AlertDropdownMenu(
                         } else {
                             view! {
                                 <button
-                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none hover:bg-accent hover:text-accent-foreground text-destructive"
+                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-accent hover:text-accent-foreground"
                                     on:click=handle_delete
                                 >
                                     <TrashIcon class="h-4 w-4 mr-2" />

@@ -252,7 +252,7 @@ fn CollectionRow(
             // React: `absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1`
             <div class="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
                 <button
-                    class="p-1 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded transition-colors"
+                    class="p-1 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors"
                     aria-label="Edit collection"
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();
@@ -262,7 +262,7 @@ fn CollectionRow(
                     {icon_edit_4()}
                 </button>
                 <button
-                    class="p-1 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded transition-colors"
+                    class="p-1 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded-md transition-colors"
                     aria-label="Delete collection"
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();
@@ -393,7 +393,7 @@ fn SidebarHeader(
         <div class="p-4 border-b border-border flex items-center justify-between flex-shrink-0">
             <h3 class="font-semibold text-foreground">"Collections"</h3>
             <button
-                class="p-1 text-muted-foreground hover:text-foreground rounded transition-colors"
+                class="p-1 text-muted-foreground hover:text-foreground rounded-md transition-colors"
                 aria-label="Close"
                 on:click=move |_| on_close.run(())
             >
@@ -1007,7 +1007,7 @@ pub fn CollectionsSidebar(
                                     aria-label="Drag to resize"
                                 >
                                     // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`
-                                    <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors" />
+                                    <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded-md transition-colors" />
                                 </div>
 
                                 // Main Content

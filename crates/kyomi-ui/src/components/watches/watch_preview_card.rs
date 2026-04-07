@@ -228,14 +228,14 @@ pub fn WatchPreviewCard(
                     let sql = q.sql.clone();
                     let datasource = q.datasource.clone();
                     view! {
-                        <div class="flex items-start gap-2 p-2 rounded bg-muted border border-border">
+                        <div class="flex items-start gap-2 p-2 rounded-lg bg-muted border border-border">
                             <span class="text-muted-foreground mt-0.5 shrink-0 text-xs w-4">{"\u{2699}\u{FE0F}"}</span>
                             <div class="flex-1 min-w-0">
                                 <p class="text-xs font-medium text-foreground break-words">{comment}</p>
                                 <p class="text-xs text-muted-foreground font-mono mt-1 truncate">{sql}</p>
                                 {datasource.map(|ds| view! {
                                     <div class="mt-1">
-                                        <span class="inline-block px-1.5 py-0.5 rounded text-xs bg-accent text-foreground">
+                                        <span class="inline-block px-1.5 py-0.5 rounded-md text-xs bg-accent text-foreground">
                                             {ds}
                                         </span>
                                     </div>
@@ -303,7 +303,7 @@ pub fn WatchPreviewCard(
 
                 // Error message
                 {move || error.get().map(|msg| view! {
-                    <div class="text-sm text-error-foreground bg-error p-2 rounded">
+                    <div class="text-sm text-error-foreground bg-error p-2 rounded-lg">
                         {msg}
                     </div>
                 })}

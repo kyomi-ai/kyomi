@@ -17,6 +17,7 @@ use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 
 use crate::components::chat::WebSocketProvider;
+use crate::components::EmptyState;
 use crate::server_fns::security::logout;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 use crate::server_fns::watches::get_unread_alerts_count;
@@ -401,7 +402,11 @@ fn Sidebar(
                         }>
                             {move || sessions.get().map(|result| match result {
                                 Ok(sessions) if sessions.is_empty() => view! {
-                                    <div class="text-xs text-muted-foreground px-3 py-2 italic">"No chats yet"</div>
+                                    <EmptyState
+                                        title="No chats yet"
+                                        description="Start a conversation to see it here"
+                                        class="py-4 px-2 border-0"
+                                    />
                                 }.into_any(),
                                 Ok(sessions) => view! {
                                     <For
@@ -418,7 +423,11 @@ fn Sidebar(
                                     </For>
                                 }.into_any(),
                                 Err(_) => view! {
-                                    <div class="text-xs text-muted-foreground px-3 py-2 italic">"No chats yet"</div>
+                                    <EmptyState
+                                        title="No chats yet"
+                                        description="Start a conversation to see it here"
+                                        class="py-4 px-2 border-0"
+                                    />
                                 }.into_any(),
                             })}
                         </Transition>
@@ -502,7 +511,7 @@ fn Sidebar(
                                         }}
                                         <a
                                             href="/settings"
-                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground hover:bg-accent flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-accent flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuSettings width="16" height="16"/>
                                             <span>"Settings"</span>
@@ -511,7 +520,7 @@ fn Sidebar(
                                             href="https://kyomi.ai/docs"
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground hover:bg-accent flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-accent flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuBookOpen width="16" height="16"/>
                                             <span>"Help & Docs"</span>
@@ -523,7 +532,7 @@ fn Sidebar(
                                                         set_user_menu_open.set(false);
                                                         logout_action.dispatch(());
                                                     }
-                                                    class="w-full text-left px-4 py-2 text-sm text-error-foreground hover:bg-error/10 flex items-center space-x-3"
+                                                    class="w-full text-left px-4 py-2 text-sm text-error-foreground transition-colors hover:bg-error/10 flex items-center space-x-3"
                                                 >
                                                     <Icon icon=icondata_lu::LuLogOut width="16" height="16"/>
                                                     <span>"Logout"</span>

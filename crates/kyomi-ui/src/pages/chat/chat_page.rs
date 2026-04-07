@@ -2199,7 +2199,7 @@ pub fn ChatPage() -> impl IntoView {
                                                 let _ = ev;
                                             }
                                         }
-                                        class="h-4 w-4 rounded border-input text-primary focus:ring-ring"
+                                        class="h-4 w-4 rounded-md border-input text-primary focus:ring-ring"
                                     />
                                     <label for="skip-ai-checkbox" class="text-sm text-muted-foreground">
                                         "Post as comment (skip AI response)"

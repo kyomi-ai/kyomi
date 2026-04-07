@@ -141,7 +141,7 @@ fn ToastItem(toast: Toast, state: ToastState) -> impl IntoView {
 
     view! {
         <div class=format!(
-            "flex items-center gap-2 px-4 py-3 rounded-lg border shadow-lg animate-in slide-in-from-right {bg} {border} {text_color}"
+            "flex items-center gap-2 px-4 py-3 rounded-lg border shadow-lg animate-slide-in-right {bg} {border} {text_color}"
         )>
             <p class="text-sm font-medium flex-1">{toast.message.clone()}</p>
             <button

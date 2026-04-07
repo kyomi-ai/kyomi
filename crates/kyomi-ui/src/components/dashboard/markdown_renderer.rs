@@ -450,7 +450,7 @@ fn CodeBlockView(
             // Copy button
             <button
                 on:click=on_copy
-                class="absolute top-2 right-2 p-1.5 rounded bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                class="absolute top-2 right-2 p-1.5 rounded-md bg-accent hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
                 title=move || if copied.get() { "Copied!" } else { "Copy code" }
             >
                 {move || {
@@ -601,7 +601,7 @@ fn WatchPreviewCardView(
                 .map(String::from);
 
             view! {
-                <div class="flex items-start gap-2 p-2 rounded bg-muted border border-border">
+                <div class="flex items-start gap-2 p-2 rounded-lg bg-muted border border-border">
                     <span class="text-muted-foreground mt-0.5 shrink-0 text-xs w-4">"\u{2699}\u{fe0f}"</span>
                     <div class="flex-1 min-w-0">
                         <p class="text-xs font-medium text-foreground break-words">{comment}</p>
@@ -609,7 +609,7 @@ fn WatchPreviewCardView(
                         {datasource.map(|ds| {
                             view! {
                                 <div class="mt-1">
-                                    <span class="inline-block px-1.5 py-0.5 rounded text-xs bg-accent text-foreground">
+                                    <span class="inline-block px-1.5 py-0.5 rounded-md text-xs bg-accent text-foreground">
                                         {ds}
                                     </span>
                                 </div>
@@ -1219,7 +1219,7 @@ fn ChartBlock(
                                                 <p class="text-sm text-destructive/90">{err}</p>
                                                 <button
                                                     on:click=move |_| set_refresh_count.update(|c| *c += 1)
-                                                    class="mt-2 text-xs text-primary hover:text-primary/80 underline"
+                                                    class="mt-2 text-xs text-primary underline transition-colors hover:text-primary/80"
                                                 >
                                                     "Retry"
                                                 </button>

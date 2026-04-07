@@ -18,7 +18,7 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, ConfirmDialog, Modal, ModalSize, INPUT_CLASS,
+    CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, INPUT_CLASS,
 };
 use crate::server_fns::security::{
     complete_passkey_registration, delete_passkey, list_passkeys, rename_passkey,
@@ -622,20 +622,24 @@ pub fn PasskeyManager() -> impl IntoView {
                             when=move || !passkeys.get().is_empty()
                             fallback=move || {
                                 view! {
-                                    <div class="text-center py-8 bg-muted rounded-lg border-2 border-dashed border-border">
-                                        <span class="h-12 w-12 text-muted-foreground mx-auto mb-4 flex justify-center">
+                                    <EmptyState
+                                        icon=std::sync::Arc::new(|| view! {
                                             <Icon icon=icondata_lu::LuKeyRound width="48" height="48"/>
-                                        </span>
-                                        <p class="text-muted-foreground mb-4">"No passkeys registered yet"</p>
-                                        <Show when=move || is_supported.get()>
-                                            <Button on:click=move |_| add_modal_open.set(true)>
-                                                <span class="mr-2">
-                                                    <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
-                                                </span>
-                                                "Add Your First Passkey"
-                                            </Button>
-                                        </Show>
-                                    </div>
+                                        }.into_any())
+                                        title="No passkeys registered yet"
+                                        description="Add a passkey for passwordless sign-in"
+                                        action=std::sync::Arc::new(move || view! {
+                                            <Show when=move || is_supported.get()>
+                                                <Button on:click=move |_| add_modal_open.set(true)>
+                                                    <span class="mr-2">
+                                                        <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
+                                                    </span>
+                                                    "Add Your First Passkey"
+                                                </Button>
+                                            </Show>
+                                        }.into_any())
+                                        class="border-2 border-dashed bg-muted"
+                                    />
                                 }
                             }
                         >

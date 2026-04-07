@@ -273,7 +273,7 @@ fn claude_desktop_tab(mcp_url: &str) -> impl IntoView {
         <div class="space-y-2">
             <h4 class="font-medium text-foreground text-sm">
                 "Add to "
-                <code class="text-xs bg-muted px-1 py-0.5 rounded">"claude_desktop_config.json"</code>
+                <code class="text-xs bg-muted px-1 py-0.5 rounded-md">"claude_desktop_config.json"</code>
                 ":"
             </h4>
             <CodeBlock text=config_json/>
@@ -305,7 +305,7 @@ fn cursor_tab(mcp_url: &str) -> impl IntoView {
             <div class="space-y-2">
                 <h4 class="font-medium text-foreground text-sm">
                     "Or add manually to "
-                    <code class="text-xs bg-muted px-1 py-0.5 rounded">".cursor/mcp.json"</code>
+                    <code class="text-xs bg-muted px-1 py-0.5 rounded-md">".cursor/mcp.json"</code>
                     ":"
                 </h4>
                 <CodeBlock text=manual_config/>

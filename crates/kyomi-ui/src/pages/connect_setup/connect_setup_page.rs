@@ -766,7 +766,7 @@ fn CopyButton(
         <button
             type="button"
             on:click=on_click
-            class="shrink-0 p-1 rounded hover:bg-muted/50 transition-colors text-muted-foreground hover:text-foreground"
+            class="shrink-0 p-1 rounded-md hover:bg-muted/50 transition-colors text-muted-foreground hover:text-foreground"
             title="Copy to clipboard"
         >
             {move || {

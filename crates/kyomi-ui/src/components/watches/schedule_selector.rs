@@ -832,7 +832,7 @@ pub fn ScheduleSelector(
                                             {if cm {
                                                 let ci = cron_input.get();
                                                 view! {
-                                                    <span>"Cron: "<code class="bg-muted px-1 rounded">{ci}</code>" (UTC)"</span>
+                                                    <span>"Cron: "<code class="bg-muted px-1 rounded-md">{ci}</code>" (UTC)"</span>
                                                 }.into_any()
                                             } else {
                                                 view! {

@@ -319,7 +319,7 @@ fn TreeContextMenu(
         >
             // Rename
             <button
-                class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
                 on:click=move |_| {
                     on_rename.run(entry_for_rename.clone());
                     on_close_rename.run(());
@@ -336,7 +336,7 @@ fn TreeContextMenu(
                 on:mouseleave=move |_| set_show_move_submenu.set(false)
             >
                 <button
-                    class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground justify-between"
+                    class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground justify-between"
                 >
                     <span class="flex items-center gap-2">
                         <FolderInputIcon class="w-3.5 h-3.5".to_string() />
@@ -365,7 +365,7 @@ fn TreeContextMenu(
                                     let on_close = on_close;
                                     view! {
                                         <button
-                                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground"
+                                            class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
                                             on:click=move |_| {
                                                 on_move.run((entry_id.clone(), folder_id.clone(), 0));
                                                 on_close.run(());
@@ -387,7 +387,7 @@ fn TreeContextMenu(
 
             // Delete
             <button
-                class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10"
+                class="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-destructive transition-colors hover:bg-destructive/10"
                 on:click=move |_| {
                     on_delete.run(entry_id.clone());
                     on_close_delete.run(());
@@ -654,7 +654,7 @@ pub fn KnowledgeFileTree(
                     />
                     <Show when=move || !search_filter.get().is_empty()>
                         <button
-                            class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                            class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                             on:click=move |_| set_search_filter.set(String::new())
                         >
                             <XMarkIcon class="w-3 h-3".to_string() />
@@ -711,7 +711,7 @@ pub fn KnowledgeFileTree(
                                             let is_drag_over = drag_over_id.get().as_deref() == Some(entry_clone.id.as_str()) && entry_clone.is_folder;
                                             let is_dragging = dragged_id.get().as_deref() == Some(entry_clone.id.as_str());
 
-                                            let mut cls = String::from("flex items-center gap-1 px-2 py-1 cursor-pointer rounded text-sm group");
+                                            let mut cls = String::from("flex items-center gap-1 px-2 py-1 cursor-pointer rounded-md text-sm group");
 
                                             if is_selected {
                                                 cls.push_str(" bg-accent text-accent-foreground");
@@ -727,7 +727,7 @@ pub fn KnowledgeFileTree(
                                                 cls.push_str(" opacity-40");
                                             }
 
-                                            cls.push_str(" hover:bg-accent/50");
+                                            cls.push_str(" transition-colors hover:bg-accent/50");
                                             cls
                                         };
 
@@ -844,9 +844,9 @@ pub fn KnowledgeFileTree(
                                     let row_class = move || {
                                         let sel = selected_id.get();
                                         if sel.as_deref() == Some(result_id.as_str()) {
-                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded text-sm hover:bg-accent/50 bg-accent text-accent-foreground"
+                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded-md text-sm transition-colors hover:bg-accent/50 bg-accent text-accent-foreground"
                                         } else {
-                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded text-sm hover:bg-accent/50 text-foreground"
+                                            "flex items-center gap-1 px-3 py-1.5 cursor-pointer rounded-md text-sm transition-colors hover:bg-accent/50 text-foreground"
                                         }
                                     };
 

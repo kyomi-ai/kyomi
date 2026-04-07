@@ -99,7 +99,7 @@ pub fn Modal(
     // React: `modal-content ${sizeClasses[size]} w-full mx-2 sm:mx-4 max-h-[95vh] sm:max-h-[90vh] flex flex-col`
     // Expanded: `bg-background text-foreground rounded-lg shadow-xl` (from .modal-content in index.css)
     let content_class = format!(
-        "bg-background text-foreground rounded-lg shadow-xl {} w-full mx-2 sm:mx-4 max-h-[95vh] sm:max-h-[90vh] flex flex-col",
+        "bg-background text-foreground rounded-lg shadow-xl animate-zoom-fade-in {} w-full mx-2 sm:mx-4 max-h-[95vh] sm:max-h-[90vh] flex flex-col",
         size.class()
     );
 
@@ -116,7 +116,7 @@ pub fn Modal(
             // React: className="modal-overlay" → `fixed inset-0 flex items-center justify-center z-[1000] font-sans`
             //   + `background-color: var(--color-overlay)` which is `rgba(0,0,0,0.5)` → `bg-[var(--color-overlay)]`
             <div
-                class="fixed inset-0 flex items-center justify-center z-[1000] font-sans bg-[var(--color-overlay)]"
+                class="fixed inset-0 flex items-center justify-center z-[1000] font-sans bg-[var(--color-overlay)] animate-fade-in-fast"
                 on:click=move |ev: web_sys::MouseEvent| {
                     // Only close if click is directly on the backdrop, not bubbled from modal content.
                     // React uses mousedown tracking; here we rely on stopPropagation on the content div.

@@ -509,7 +509,7 @@ fn PaginationControls(
                 <div class="flex items-center gap-1 flex-shrink-0">
                     // First page
                     <button
-                        class="p-1 rounded text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                         disabled=is_first
                         aria-label="First page"
                         on:click=move |_| on_page_change.run(1)
@@ -521,7 +521,7 @@ fn PaginationControls(
 
                     // Previous page
                     <button
-                        class="p-1 rounded text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                         disabled=is_first
                         aria-label="Previous page"
                         on:click=move |_| {
@@ -540,7 +540,7 @@ fn PaginationControls(
 
                     // Next page
                     <button
-                        class="p-1 rounded text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                         disabled=is_last
                         aria-label="Next page"
                         on:click=move |_| {
@@ -554,7 +554,7 @@ fn PaginationControls(
 
                     // Last page
                     <button
-                        class="p-1 rounded text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                         disabled=is_last
                         aria-label="Last page"
                         on:click=move |_| on_page_change.run(total_pages)

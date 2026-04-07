@@ -19,7 +19,7 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonVariant,
-    Card, CardContent, CardDescription, CardHeader, CardTitle, ConfirmDialog,
+    Card, CardContent, CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState,
 };
 use crate::server_fns::security::{
     get_sessions, logout_all_sessions, revoke_session, SessionEntry,
@@ -308,9 +308,11 @@ pub fn SessionManagement() -> impl IntoView {
                         <Show
                             when=move || !sessions.get().is_empty()
                             fallback=|| view! {
-                                <div class="text-center py-8 bg-muted rounded-lg border-2 border-dashed border-border">
-                                    <p class="text-muted-foreground">"No active sessions found"</p>
-                                </div>
+                                <EmptyState
+                                    title="No active sessions found"
+                                    description="Your active sessions will appear here"
+                                    class="border-2 border-dashed bg-muted"
+                                />
                             }
                         >
                             // Sessions table
@@ -527,7 +529,7 @@ fn SessionRow(
                                     <span class="animate-spin h-4 w-4 border-2 border-current border-t-transparent rounded-full"/>
                                 }
                             >
-                                <span class="text-muted-foreground hover:text-destructive"><Icon icon=icondata_lu::LuX width="16" height="16"/></span>
+                                <span class="text-muted-foreground transition-colors hover:text-destructive"><Icon icon=icondata_lu::LuX width="16" height="16"/></span>
                             </Show>
                         </button>
                     }

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use leptos::prelude::*;
 
 use crate::components::alert::{Alert, AlertVariant};
+use crate::components::empty_state::EmptyState;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::spinner::Spinner;
@@ -314,11 +315,10 @@ pub fn SaveDashboardModal(
                                     {move || {
                                         if dashboards_len == 0 && !is_creating_new.get() {
                                             Some(view! {
-                                                <div class="text-center py-8">
-                                                    <p class="text-sm text-muted-foreground">
-                                                        "No existing dashboards yet"
-                                                    </p>
-                                                </div>
+                                                <EmptyState
+                                                    title="No existing dashboards yet"
+                                                    description="Create your first dashboard to get started"
+                                                />
                                             })
                                         } else {
                                             None

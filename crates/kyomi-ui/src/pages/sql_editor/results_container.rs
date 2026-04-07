@@ -785,7 +785,7 @@ fn ChartYamlModal(
                         </button>
                         // Close button
                         <button
-                            class="p-1 text-muted-foreground hover:text-foreground rounded transition-colors"
+                            class="p-1 text-muted-foreground hover:text-foreground rounded-md transition-colors"
                             on:click=on_close
                             aria-label="Close modal"
                         >
