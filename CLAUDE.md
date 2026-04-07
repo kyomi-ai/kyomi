@@ -17,6 +17,23 @@ All commits require a cryptographically signed approval from the **code-review-a
 - **Implementation agents cannot sign their own reviews** — only the code-review-architect agent has signing authority
 - **Do NOT tell the reviewer how to sign the approval** — the code-review-architect has its own signing instructions built into its prompt. Providing alternative signing instructions, workarounds, or "if you don't have the key" fallbacks will cause invalid signatures and block the commit. Just ask it to review and let it handle the signing process itself.
 
+## Build & Testing — READ THIS FIRST
+
+**Before verifying ANY UI change, read `docs/BUILD_AND_TESTING.md`.**
+
+The Leptos frontend has THREE separate build artifacts (Tailwind CSS, WASM, server binary) that must ALL be current. The #1 source of wasted time is testing against a stale binary.
+
+Quick reference:
+```bash
+# Full rebuild chain (in order — MUST use nightly for WASM):
+cd crates/kyomi-ui && tailwindcss --input style/main.css --output style/output.css --content "src/**/*.rs"
+cd crates/kyomi-ui && RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
+cd /home/jason/repos/kyomi && cargo build --release -p kyomi-server
+# Then restart the server
+```
+
+**NEVER run `cargo build` before `trunk build` — the server embeds WASM from `dist/` at compile time.**
+
 ## Lint Suppression Policy
 
 Lint suppressions (`#[allow(...)]` in .rs files, `= "allow"` in Cargo.toml) are blocked by the pre-commit hook and CI. Fix the underlying lint warning instead of suppressing it.
