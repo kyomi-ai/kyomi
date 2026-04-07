@@ -10,49 +10,50 @@ html {
 }
 
 @theme {
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
+  --font-display: 'Instrument Serif', Georgia, serif;
 
   /* === Design System Color Tokens ===
-   * Reference: docs/DESIGN_SYSTEM.md */
+   * Reference: DESIGN.md */
 
   --color-primary: #d97706;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #cbd5e1;
-  --color-secondary-foreground: #334155;
-  --color-accent: #f1f5f9;
-  --color-accent-foreground: #0f172a;
+  --color-secondary: #F5F3EF;
+  --color-secondary-foreground: #3D3835;
+  --color-accent: #FEF3C7;
+  --color-accent-foreground: #1C1917;
   --color-destructive: #ef4444;
   --color-destructive-foreground: #ffffff;
-  --color-muted: #f9fafb;
-  --color-muted-foreground: #64748b;
-  --color-background: #ffffff;
-  --color-foreground: #0f172a;
+  --color-muted: #F5F3EF;
+  --color-muted-foreground: #6B6660;
+  --color-background: #FAFAF8;
+  --color-foreground: #1C1917;
   --color-card: #ffffff;
-  --color-card-foreground: #0f172a;
+  --color-card-foreground: #1C1917;
   --color-popover: #ffffff;
-  --color-popover-foreground: #0f172a;
-  --color-border: #e2e8f0;
-  --color-input: #e2e8f0;
+  --color-popover-foreground: #1C1917;
+  --color-border: #E8E5DE;
+  --color-input: #E8E5DE;
   --color-ring: #d97706;
   --color-overlay: rgba(0, 0, 0, 0.5);
 
   /* Status Colors */
-  --color-warning: #fef8e7;
-  --color-warning-border: #fae29f;
-  --color-warning-foreground: #947600;
-  --color-error: #fce8e6;
-  --color-error-border: #f1aaa3;
-  --color-error-foreground: #cd2b31;
-  --color-success: #e3f8f0;
-  --color-success-border: #a8e0d0;
-  --color-success-foreground: #008060;
-  --color-info: #f0f5fa;
-  --color-info-border: #c2d9ed;
-  --color-info-foreground: #0073e6;
+  --color-success: #F0FDF4;
+  --color-success-border: #BBF7D0;
+  --color-success-foreground: #15803D;
+  --color-warning: #FEFCE8;
+  --color-warning-border: #FDE68A;
+  --color-warning-foreground: #CA8A04;
+  --color-error: #FEF2F2;
+  --color-error-border: #FECDD3;
+  --color-error-foreground: #DC2626;
+  --color-info: #EFF6FF;
+  --color-info-border: #BFDBFE;
+  --color-info-foreground: #2563EB;
 
   --radius: 0.5rem;
-  --radius-sm: 0.375rem;  /* 6px — inputs, buttons, chips */
+  --radius-sm: 0.25rem;  /* 4px — inputs, buttons, chips */
   --radius-md: 0.5rem;    /* 8px — cards, dropdowns, panels */
   --radius-lg: 0.75rem;   /* 12px — modals, dialogs, large containers */
 
@@ -200,6 +201,9 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
  * the correct override mechanism (no specificity war needed). */
 
 :root {
+  --navy: #1E3A5F;
+  --navy-deep: #0F172A;
+
   --kode-bg: var(--color-card);
   --kode-fg: var(--color-foreground);
   --kode-fg-bright: var(--color-foreground);
