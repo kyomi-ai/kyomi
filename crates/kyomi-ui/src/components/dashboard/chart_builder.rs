@@ -519,7 +519,7 @@ pub fn ChartBuilderModal(
                                 <div class="flex items-center gap-3 flex-shrink-0">
                                     // Database icon before dropdown
                                     <Icon icon=icondata_lu::LuDatabase attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                                    <div class="w-[240px] flex-shrink-0">
+                                    <div class="w-full sm:w-[240px] min-w-0 sm:flex-shrink-0">
                                         <Suspense fallback=move || view! {
                                             <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
                                         }>
