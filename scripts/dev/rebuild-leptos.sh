@@ -1,51 +1,38 @@
 #!/usr/bin/env bash
-# rebuild-leptos.sh — Full Leptos frontend rebuild + server restart
+# rebuild-leptos.sh — Build and serve the Leptos frontend
 #
-# Runs in SaaS mode (Postgres + Redis) so the Leptos server shares the same
-# database as the React server — required for E2E regression testing.
-#
-# Steps:
-#   1. trunk build --release (compiles WASM frontend → crates/kyomi-ui/dist/)
-#   2. cargo build --profile dev-server -p kyomi-server (release without LTO)
-#   3. Kills old server on port 3000
-#   4. Starts new server in SaaS mode on port 3000
-#
-# The dev-server profile inherits from release (opt-level=z, strip, panic=abort)
-# but disables LTO and uses 16 codegen units for fast incremental builds.
-# Use --release for production-identical builds.
+# DEFAULT: Debug builds (fast compile, slow runtime). This is what you use
+# for development. Do NOT change this default without explicit approval.
 #
 # Usage:
-#   bash scripts/dev/rebuild-leptos.sh                 # fast dev build (no LTO)
-#   bash scripts/dev/rebuild-leptos.sh --release       # full production build
-#   bash scripts/dev/rebuild-leptos.sh --skip-trunk    # skip trunk if only Rust changed
-#   bash scripts/dev/rebuild-leptos.sh --skip-server   # skip server if only WASM changed
+#   bash scripts/dev/rebuild-leptos.sh                 # debug build (DEFAULT)
+#   bash scripts/dev/rebuild-leptos.sh --release       # production build (slow, rare)
+#   bash scripts/dev/rebuild-leptos.sh --skip-trunk    # skip WASM if only server Rust changed
+#   bash scripts/dev/rebuild-leptos.sh --skip-server   # skip server if only frontend changed
 
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 SKIP_TRUNK=false
 SKIP_SERVER=false
-PROFILE="dev-server"
-TARGET_DIR="target/dev-server"
+RELEASE=false
 for arg in "$@"; do
   case "$arg" in
     --skip-trunk) SKIP_TRUNK=true ;;
     --skip-server) SKIP_SERVER=true ;;
-    --release) PROFILE="release"; TARGET_DIR="target/release" ;;
+    --release) RELEASE=true ;;
   esac
 done
 
-# Step 1: Build Leptos WASM frontend
+# Step 1: Build WASM frontend
 if [ "$SKIP_TRUNK" = false ]; then
   cd crates/kyomi-ui
-  if [ "$PROFILE" = "release" ]; then
-    # Release: enable build-std for size optimization (requires nightly)
-    echo "==> Step 1/4: trunk build --release (with build-std)"
+  if [ "$RELEASE" = true ]; then
+    echo "==> Step 1/4: trunk build --release (with build-std, slow)"
     CARGO_UNSTABLE_BUILD_STD="std,panic_abort,core,alloc" \
     RUSTFLAGS="--cfg=has_std -Zunstable-options -Cpanic=immediate-abort" \
     RUSTUP_TOOLCHAIN=nightly trunk build --release
   else
-    # Dev: standard debug build (no build-std, fast iteration)
     echo "==> Step 1/4: trunk build (debug)"
     trunk build
   fi
@@ -57,11 +44,23 @@ fi
 
 # Step 2: Build server binary
 if [ "$SKIP_SERVER" = false ]; then
-  echo "==> Step 2/4: cargo build --profile $PROFILE -p kyomi-server"
-  cargo build --profile "$PROFILE" -p kyomi-server
+  if [ "$RELEASE" = true ]; then
+    echo "==> Step 2/4: cargo build --profile dev-server -p kyomi-server"
+    cargo build --profile dev-server -p kyomi-server
+  else
+    echo "==> Step 2/4: cargo build -p kyomi-server (debug)"
+    cargo build -p kyomi-server
+  fi
   echo "    Done."
 else
   echo "==> Step 2/4: cargo build SKIPPED (--skip-server)"
+fi
+
+# Determine binary path
+if [ "$RELEASE" = true ]; then
+  BINARY="target/dev-server/kyomi"
+else
+  BINARY="target/debug/kyomi"
 fi
 
 # Step 3: Kill old server
@@ -69,21 +68,21 @@ echo "==> Step 3/4: Stopping old server on port 3000"
 kill $(lsof -ti:3000) 2>/dev/null || true
 sleep 1
 
-# Step 4: Start new server in SaaS mode (Postgres + Redis)
-echo "==> Step 4/4: Starting server (SaaS mode, profile=$PROFILE)"
+# Step 4: Start new server in SaaS mode
+echo "==> Step 4/4: Starting server (SaaS mode)"
 set -a
 source .env 2>/dev/null || true
 set +a
 
-PORT=3000 FRONTEND_URL=http://localhost:3000 \
+PORT=3000 FRONTEND_URL=https://dev.kyomi.ai \
   DATABASE_URL="${DATABASE_URL:-postgresql://kyomi:password@localhost:5433/kyomi}" \
   REDIS_URL="${REDIS_URL:-redis://localhost:6380/0}" \
   ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
-  ./$TARGET_DIR/kyomi > /tmp/kyomi-leptos.log 2>&1 &
+  ./$BINARY > /tmp/kyomi-leptos.log 2>&1 &
 
 sleep 3
 if grep -q "listening" /tmp/kyomi-leptos.log 2>/dev/null; then
-  echo "==> Server started on http://localhost:3000 (SaaS mode)"
+  echo "==> Server started on https://dev.kyomi.ai (SaaS mode)"
   grep -E "LLM:|Edition:|Database:" /tmp/kyomi-leptos.log 2>/dev/null || true
 else
   echo "==> ERROR: Server failed to start. Check /tmp/kyomi-leptos.log"
