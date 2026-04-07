@@ -292,7 +292,7 @@ pub fn DashboardsListPage() -> impl IntoView {
         <div class="flex flex-col h-full bg-muted">
             // Header
             <div class="h-16 border-b border-border bg-card px-6 py-4 flex-shrink-0 flex flex-col sm:flex-row sm:items-center gap-3">
-                <h1 class="text-xl font-semibold font-display text-foreground flex-shrink-0">
+                <h1 class="text-xl font-display text-foreground flex-shrink-0">
                     {move || {
                         if let Some(ref coll_id) = active_collection_id.get() {
                             // Find collection name

@@ -66,7 +66,7 @@ pub fn ProfilePage() -> impl IntoView {
 
     view! {
         <div class="p-4 sm:p-6">
-            <h2 class="text-xl font-semibold font-display text-foreground mb-6">"Profile Settings"</h2>
+            <h2 class="text-xl font-display text-foreground mb-6">"Profile Settings"</h2>
 
             <Transition fallback=move || view! {
                 <div class="flex items-center justify-center py-12">

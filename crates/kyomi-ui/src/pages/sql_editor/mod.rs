@@ -337,7 +337,7 @@ pub fn SqlEditorPage() -> impl IntoView {
             <div class="h-14 sm:h-16 border-b border-border bg-card px-4 sm:px-6 flex-shrink-0 flex items-center justify-between">
                 // Left: title + datasource selector
                 <div class="flex items-center gap-2 sm:gap-4 min-w-0">
-                    <h1 class="text-lg sm:text-xl font-semibold font-display text-foreground shrink-0">
+                    <h1 class="text-lg sm:text-xl font-display text-foreground shrink-0">
                         "SQL Editor"
                     </h1>
                     <DatasourceSelector/>

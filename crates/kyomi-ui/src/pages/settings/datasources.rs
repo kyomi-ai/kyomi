@@ -65,7 +65,7 @@ pub fn DatasourcesPage() -> impl IntoView {
                     Err(e) => view! {
                         <div class="p-4 sm:p-6 space-y-6">
                             <div>
-                                <h2 class="text-xl font-semibold font-display text-foreground">"Datasources"</h2>
+                                <h2 class="text-xl font-display text-foreground">"Datasources"</h2>
                                 <p class="text-sm text-muted-foreground">
                                     "Manage database connections"
                                 </p>
@@ -181,7 +181,7 @@ fn DatasourcesContent(
             // Header
             <div class="flex items-center justify-between">
                 <div>
-                    <h2 class="text-xl font-semibold font-display text-foreground">"Datasources"</h2>
+                    <h2 class="text-xl font-display text-foreground">"Datasources"</h2>
                     <p class="text-sm text-muted-foreground">
                         "Manage database connections"
                     </p>

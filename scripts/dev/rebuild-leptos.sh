@@ -37,9 +37,18 @@ done
 
 # Step 1: Build Leptos WASM frontend
 if [ "$SKIP_TRUNK" = false ]; then
-  echo "==> Step 1/4: trunk build --release"
   cd crates/kyomi-ui
-  trunk build --release
+  if [ "$PROFILE" = "release" ]; then
+    # Release: enable build-std for size optimization (requires nightly)
+    echo "==> Step 1/4: trunk build --release (with build-std)"
+    CARGO_UNSTABLE_BUILD_STD="std,panic_abort,core,alloc" \
+    RUSTFLAGS="--cfg=has_std -Zunstable-options -Cpanic=immediate-abort" \
+    RUSTUP_TOOLCHAIN=nightly trunk build --release
+  else
+    # Dev: standard debug build (no build-std, fast iteration)
+    echo "==> Step 1/4: trunk build (debug)"
+    trunk build
+  fi
   cd ../..
   echo "    Done."
 else

@@ -20,7 +20,7 @@ use super::passkey_manager::PasskeyManager;
 pub fn SecurityTab() -> impl IntoView {
     view! {
         <div class="p-6">
-            <h2 class="text-xl font-semibold font-display text-foreground mb-6">"Security"</h2>
+            <h2 class="text-xl font-display text-foreground mb-6">"Security"</h2>
             <div class="space-y-6">
                 <PasswordManager/>
                 <TwoFactorAuth/>
