@@ -108,7 +108,7 @@ pub fn Button(
     );
 
     view! {
-        <button class=classes disabled=move || disabled.get().unwrap_or(false) aria-label=aria_label>
+        <button class=classes disabled=move || disabled.get().unwrap_or(false) aria-label=aria_label.clone() title=aria_label>
             {children()}
         </button>
     }
@@ -146,6 +146,7 @@ pub fn ToggleButton(
             )
             disabled=move || disabled.get().unwrap_or(false)
             aria-label=move || aria_label.get()
+            title=move || aria_label.get()
         >
             {children()}
         </button>
@@ -176,7 +177,7 @@ pub fn ButtonLink(
     );
 
     view! {
-        <a href=href class=classes aria-label=aria_label>
+        <a href=href class=classes aria-label=aria_label.clone() title=aria_label>
             {children()}
         </a>
     }

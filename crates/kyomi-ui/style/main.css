@@ -14,6 +14,10 @@ html {
   --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
   --font-display: 'Instrument Serif', Georgia, serif;
 
+  /* Container query breakpoints for toolbar button visibility */
+  --container-5xl: 64rem;  /* 1024px — show secondary action buttons */
+  --container-6xl: 80rem;  /* 1280px — show button text labels */
+
   /* === Design System Color Tokens ===
    * Reference: DESIGN.md */
 
@@ -244,6 +248,42 @@ html {
 
 /* Button styles are in the <Button> Leptos component (button.rs).
  * Do NOT add .btn classes here — use the component instead. */
+
+/* ── Dropdown menu items ────────────────────────────────────────────
+ * DESIGN.md: text-foreground, hover bg-secondary, 14px, full-width.
+ * These are NOT buttons — they're menu actions inside a dropdown. */
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--color-foreground);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.1s ease-out;
+}
+
+.menu-item:hover {
+  background: var(--color-secondary);
+}
+
+.menu-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-ring);
+}
+
+.menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 /* ── Sidebar slide animations ───────────────────────────────────── */
 

@@ -408,7 +408,7 @@ pub fn ChartHeaderBar(
     on_cleanup(move || { remove_menu_esc(); remove_menu_click(); });
 
     view! {
-        <div class="flex items-center justify-between px-4 py-2 bg-muted/50 border-b border-border">
+        <div class="flex items-center justify-between px-4 py-1 bg-secondary border-b border-border">
             // ── Left side: before slot + "Last refreshed ..." ──
             <div class="flex items-center gap-2 min-w-0">
                 {before.map(|children| children())}

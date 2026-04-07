@@ -55,50 +55,36 @@ PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
 
 ### Per-change rebuild: depends on what changed
 
-#### CSS-only change (`main.css`, Tailwind classes) — ~2-5 min
+#### CSS or frontend Rust change — ~1 min incremental
 
 ```bash
 cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release
-gzip -9 -k dist/*_bg.wasm
+trunk build -v
 # Refresh browser. Done.
 ```
 
-Trunk runs tailwindcss as a pre-build hook and generates `index.html` with matching content hashes. Do NOT run tailwindcss manually — it creates a hash mismatch with `index.html` and the page loads unstyled.
+This covers: `main.css` changes, Tailwind class changes in `.rs` files, any Rust source in `crates/kyomi-ui/src/`, and path dependency changes (chartml, kode, etc).
 
-#### Frontend Rust change (`crates/kyomi-ui/src/`) — ~2-5 min
+No server restart needed. The debug server binary reads `dist/` from disk.
+
+Trunk runs tailwindcss as a pre-build hook. Do NOT run tailwindcss manually — it creates a hash mismatch with `index.html` and the page loads unstyled.
+
+**CRITICAL: Never pipe trunk build to `tail` or truncate output.** Trunk's post-processing (wasm-bindgen, file copy from `.stage/` to `dist/`) happens after compilation. If the process is interrupted during this stage, `dist/` will contain only `index.html` with no WASM file (the 2.8KB problem). Always let trunk build run to full completion.
+
+**CRITICAL: Never use `--release` for development builds.** Debug WASM builds are fast (~1 min incremental). Release builds take 5+ minutes and require nightly. Use `scripts/dev/rebuild-leptos.sh --release` only for production deploys.
+
+#### Server-side Rust change (routes, server functions, DB)
 
 ```bash
-cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release
-gzip -9 -k dist/*_bg.wasm
-# Refresh browser. Done.
+bash scripts/dev/rebuild-leptos.sh --skip-trunk
 ```
 
-No server restart. The dev-server binary reads the new WASM from disk.
-
-**NOTE:** `RUSTUP_TOOLCHAIN=nightly` is required — `build-std` in `.cargo/config.toml` requires it.
-
-#### Path dependency change (chartml, other local crates used by kyomi-ui) — ~2-5 min
-
-Same as frontend Rust change. Trunk recompiles all dependencies into the WASM:
-
+Or manually:
 ```bash
-cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release
-gzip -9 -k dist/*_bg.wasm
-# Refresh browser. Done.
-```
-
-**This is the one that bit us.** Chartml is a path dependency at `../chartml/`. Changes to chartml CSS or Rust code require a trunk rebuild because they compile into the WASM. But they do NOT require a server rebuild when using `dev-server` profile.
-
-#### Server-side Rust change (routes, server functions, DB) — ~5-8 min
-
-```bash
-cargo build --profile dev-server -p kyomi-server
+cargo build -p kyomi-server
 kill $(lsof -ti:3000) 2>/dev/null
 cd /home/jason/repos/kyomi && set -a; source .env; set +a
-PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
+PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/debug/kyomi &
 ```
 
 Only time you need to restart the server.

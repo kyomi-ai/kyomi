@@ -685,7 +685,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         let updated_date = format_date(&updated_at);
 
                         view! {
-                            <div class="flex flex-col h-full bg-background overflow-hidden" style:flex-direction="column">
+                            <div class="flex flex-col h-full bg-background overflow-hidden @container" style:flex-direction="column">
                                 // ─── Header / Toolbar ───────────────────
                                 <div class="page-header h-16 bg-background px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                                     // Left: back button + editable title
@@ -701,75 +701,80 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     </div>
 
                                     // Right: action buttons
-                                    <div class="flex items-center gap-1 xl:gap-2 flex-shrink-0">
+                                    <div class="flex items-center gap-1 @6xl:gap-2 flex-shrink-0">
                                         // Refresh All
                                         <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Refresh all charts" on:click=on_refresh_all>
                                             <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
-                                            <span class="hidden xl:inline whitespace-nowrap">"Refresh All"</span>
+                                            <span class="hidden @6xl:inline whitespace-nowrap">"Refresh All"</span>
                                         </Button>
 
                                         // Download PDF — desktop only
                                         {pdf_export_enabled.then(|| {
                                             let on_download = on_download_pdf;
                                             view! {
-                                                <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm class="hidden md:flex" aria_label="Download PDF" disabled=Signal::derive(move || is_exporting.get()) on:click=on_download>
-                                                    <Icon icon=icondata_lu::LuDownload width="14" height="14" />
-                                                    <span class="hidden xl:inline whitespace-nowrap">
-                                                        {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
-                                                    </span>
-                                                </Button>
+                                                <div class="hidden @5xl:flex">
+                                                    <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Download PDF" disabled=Signal::derive(move || is_exporting.get()) on:click=on_download>
+                                                        <Icon icon=icondata_lu::LuDownload width="14" height="14" />
+                                                        <span class="hidden @6xl:inline whitespace-nowrap">
+                                                            {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
+                                                        </span>
+                                                    </Button>
+                                                </div>
                                             }
                                         })}
 
                                         // History — desktop only
-                                        <ToggleButton
-                                            variant=Signal::derive(move || if history_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
-                                            size=ButtonSize::Sm
-                                            class="hidden md:flex"
-                                            aria_label="Toggle version history"
-                                            on:click=move |_| set_history_open.update(|o| *o = !*o)
-                                        >
-                                            <Icon icon=icondata_lu::LuClock width="14" height="14" />
-                                            <span class="hidden xl:inline whitespace-nowrap">"History"</span>
-                                        </ToggleButton>
+                                        <div class="hidden @5xl:flex">
+                                            <ToggleButton
+                                                variant=Signal::derive(move || if history_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                                size=ButtonSize::Sm
+                                                aria_label="Toggle version history"
+                                                on:click=move |_| set_history_open.update(|o| *o = !*o)
+                                            >
+                                                <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                                                <span class="hidden @6xl:inline whitespace-nowrap">"History"</span>
+                                            </ToggleButton>
+                                        </div>
 
                                         // Set as My Default — desktop only
-                                        <ToggleButton
-                                            variant=Signal::derive(move || if is_user_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
-                                            size=ButtonSize::Sm
-                                            class="hidden md:flex"
-                                            aria_label=Signal::derive(move || if is_user_default.get() { "Remove as my default".to_string() } else { "Set as my default".to_string() })
-                                            disabled=Signal::derive(move || setting_user_default.get())
-                                            on:click=toggle_user_default
-                                        >
-                                            <Icon icon=icondata_lu::LuStar width="14" height="14" />
-                                            <span class="hidden xl:inline whitespace-nowrap">
-                                                {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
-                                            </span>
-                                        </ToggleButton>
+                                        <div class="hidden @5xl:flex">
+                                            <ToggleButton
+                                                variant=Signal::derive(move || if is_user_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                                size=ButtonSize::Sm
+                                                aria_label=Signal::derive(move || if is_user_default.get() { "Remove as my default".to_string() } else { "Set as my default".to_string() })
+                                                disabled=Signal::derive(move || setting_user_default.get())
+                                                on:click=toggle_user_default
+                                            >
+                                                <Icon icon=icondata_lu::LuStar width="14" height="14" />
+                                                <span class="hidden @6xl:inline whitespace-nowrap">
+                                                    {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
+                                                </span>
+                                            </ToggleButton>
+                                        </div>
 
                                         // Set Workspace Default — desktop only, admin only
                                         {is_admin.then(|| {
                                             view! {
-                                                <ToggleButton
-                                                    variant=Signal::derive(move || if is_workspace_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
-                                                    size=ButtonSize::Sm
-                                                    class="hidden md:flex"
-                                                    aria_label=Signal::derive(move || if is_workspace_default.get() { "Remove as workspace default".to_string() } else { "Set as workspace default".to_string() })
-                                                    disabled=Signal::derive(move || setting_ws_default.get())
-                                                    on:click=toggle_ws_default
-                                                >
-                                                    <Icon icon=icondata_lu::LuHouse width="14" height="14" />
-                                                    <span class="hidden xl:inline whitespace-nowrap">
-                                                        {move || if is_workspace_default.get() { "Workspace Default" } else { "Set Workspace Default" }}
-                                                    </span>
-                                                </ToggleButton>
+                                                <div class="hidden @5xl:flex">
+                                                    <ToggleButton
+                                                        variant=Signal::derive(move || if is_workspace_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                                        size=ButtonSize::Sm
+                                                        aria_label=Signal::derive(move || if is_workspace_default.get() { "Remove as workspace default".to_string() } else { "Set as workspace default".to_string() })
+                                                        disabled=Signal::derive(move || setting_ws_default.get())
+                                                        on:click=toggle_ws_default
+                                                    >
+                                                        <Icon icon=icondata_lu::LuHouse width="14" height="14" />
+                                                        <span class="hidden @6xl:inline whitespace-nowrap">
+                                                            {move || if is_workspace_default.get() { "Workspace Default" } else { "Set Workspace Default" }}
+                                                        </span>
+                                                    </ToggleButton>
+                                                </div>
                                             }
                                         })}
 
                                         // ─── Mobile overflow menu ───────
-                                        <div class="relative flex md:hidden">
-                                            <Button variant=ButtonVariant::Ghost size=ButtonSize::Icon class="text-muted-foreground hover:text-foreground" aria_label="More actions" on:click=move |_| set_overflow_open.update(|o| *o = !*o)>
+                                        <div class="relative flex @5xl:hidden">
+                                            <Button variant=ButtonVariant::Secondary size=ButtonSize::Icon aria_label="More actions" on:click=move |_| set_overflow_open.update(|o| *o = !*o)>
                                                 <Icon icon=icondata_lu::LuEllipsisVertical width="14" height="14" />
                                             </Button>
 
@@ -783,35 +788,50 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         // Download PDF (mobile)
                                                         {pdf_export_enabled.then(|| {
                                                             view! {
-                                                                <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" disabled=Signal::derive(move || is_exporting.get()) on:click=move |ev| { set_overflow_open.set(false); on_download_pdf_m(ev); }>
-                                                                    <Icon icon=icondata_lu::LuDownload width="14" height="14" attr:class="mr-2" />
+                                                                <button
+                                                                    class="menu-item"
+                                                                    disabled=move || is_exporting.get()
+                                                                    on:click=move |ev| { set_overflow_open.set(false); on_download_pdf_m(ev); }
+                                                                >
+                                                                    <Icon icon=icondata_lu::LuDownload width="14" height="14" />
                                                                     {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
-                                                                </Button>
+                                                                </button>
                                                             }
                                                         })}
 
                                                         // History (mobile)
-                                                        <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" on:click=move |_| { set_overflow_open.set(false); set_history_open.update(|o| *o = !*o); }>
-                                                            <Icon icon=icondata_lu::LuClock width="14" height="14" attr:class="mr-2" />
+                                                        <button
+                                                            class="menu-item"
+                                                            on:click=move |_| { set_overflow_open.set(false); set_history_open.update(|o| *o = !*o); }
+                                                        >
+                                                            <Icon icon=icondata_lu::LuClock width="14" height="14" />
                                                             {move || if history_open.get() { "Close History" } else { "Version History" }}
-                                                        </Button>
+                                                        </button>
 
                                                         <div class="border-t border-border my-1" />
 
                                                         // Set as My Default (mobile)
-                                                        <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" disabled=Signal::derive(move || setting_user_default.get()) on:click=toggle_user_m>
-                                                            <Icon icon=icondata_lu::LuStar width="14" height="14" attr:class="mr-2" />
+                                                        <button
+                                                            class="menu-item"
+                                                            disabled=move || setting_user_default.get()
+                                                            on:click=toggle_user_m
+                                                        >
+                                                            <Icon icon=icondata_lu::LuStar width="14" height="14" />
                                                             {move || if is_user_default.get() { "Remove My Default" } else { "Set as My Default" }}
-                                                        </Button>
+                                                        </button>
 
                                                         // Set Workspace Default (mobile, admin only)
                                                         {is_admin.then(|| {
                                                             view! {
                                                                 <div class="border-t border-border my-1" />
-                                                                <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm class="w-full justify-start" disabled=Signal::derive(move || setting_ws_default.get()) on:click=toggle_ws_m>
-                                                                    <Icon icon=icondata_lu::LuHouse width="14" height="14" attr:class="mr-2" />
+                                                                <button
+                                                                    class="menu-item"
+                                                                    disabled=move || setting_ws_default.get()
+                                                                    on:click=toggle_ws_m
+                                                                >
+                                                                    <Icon icon=icondata_lu::LuHouse width="14" height="14" />
                                                                     {move || if is_workspace_default.get() { "Remove Workspace Default" } else { "Set Workspace Default" }}
-                                                                </Button>
+                                                                </button>
                                                             }
                                                         })}
                                                     </div>
@@ -822,7 +842,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         // Edit Dashboard — always visible (primary action)
                                         <ButtonLink href=edit_href size=ButtonSize::Sm>
                                             <Icon icon=icondata_lu::LuPencil width="14" height="14" />
-                                            <span class="hidden xl:inline whitespace-nowrap">"Edit Dashboard"</span>
+                                            <span class="hidden @6xl:inline whitespace-nowrap">"Edit Dashboard"</span>
                                         </ButtonLink>
                                     </div>
                                 </div>

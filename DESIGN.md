@@ -271,6 +271,23 @@ All buttons share: DM Sans 14px weight 600, `rounded-md` (8px), `px-5 py-2.5`, `
 
 Small buttons: 13px font, `px-3.5 py-[7px]`.
 
+### Dropdown Menus
+
+Dropdown menus appear from overflow buttons and context actions. Menu items are NOT buttons — they have their own styling.
+
+| Property | Value |
+|----------|-------|
+| Container | `bg-popover`, `border border-border`, `rounded-md`, `shadow-lg` |
+| Item text | `--foreground`, 14px, weight 400 |
+| Item padding | `8px 12px` |
+| Item gap | `8px` (between icon and text) |
+| Item hover | `--secondary` background |
+| Item icon | 14px, `currentColor` |
+| Divider | `border-t border-border my-1` |
+| Disabled | `opacity-50`, `cursor-not-allowed` |
+
+Use the `.menu-item` CSS class in `main.css`. Do NOT use `<Button variant=Ghost>` for menu items — ghost buttons use accent (amber) text, menu items use foreground (grey) text.
+
 ### Overlay Decision Tree
 
 - Complex form or multi-step workflow: **Modal**
