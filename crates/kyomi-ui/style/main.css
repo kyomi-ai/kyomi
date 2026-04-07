@@ -137,22 +137,22 @@ html {
 .dark {
   --color-primary: #d97706;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #383838;
-  --color-secondary-foreground: #cbd5e1;
-  --color-accent: #262626;
-  --color-accent-foreground: #f1f5f9;
+  --color-secondary: #1E293B;
+  --color-secondary-foreground: #94A3B8;
+  --color-accent: #451A03;
+  --color-accent-foreground: #F5F3EF;
   --color-destructive: #ef4444;
   --color-destructive-foreground: #ffffff;
-  --color-muted: #262626;
-  --color-muted-foreground: #94a3b8;
-  --color-background: #1e1e1e;
-  --color-foreground: #f1f5f9;
-  --color-card: #262626;
-  --color-card-foreground: #f1f5f9;
-  --color-popover: #262626;
-  --color-popover-foreground: #f1f5f9;
-  --color-border: #383838;
-  --color-input: #383838;
+  --color-muted: #162036;
+  --color-muted-foreground: #94A3B8;
+  --color-background: #0F172A;
+  --color-foreground: #F5F3EF;
+  --color-card: #1E293B;
+  --color-card-foreground: #F5F3EF;
+  --color-popover: #1E293B;
+  --color-popover-foreground: #F5F3EF;
+  --color-border: #334155;
+  --color-input: #334155;
   --color-ring: #d97706;
   --color-overlay: rgba(0, 0, 0, 0.7);
 
