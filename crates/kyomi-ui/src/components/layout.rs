@@ -17,6 +17,7 @@ use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 
 use crate::components::chat::WebSocketProvider;
+use crate::components::empty_state::EmptyStateVariant;
 use crate::components::EmptyState;
 use crate::server_fns::security::logout;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
@@ -29,7 +30,22 @@ use crate::server_fns::watches::get_unread_alerts_count;
 /// - Desktop (768px+): sidebar always visible (collapsed/expanded)
 #[component]
 pub fn Layout(children: Children) -> impl IntoView {
-    let (collapsed, set_collapsed) = signal(false);
+    // Restore collapsed state from localStorage so it persists across navigation.
+    // Each route creates its own Layout instance, so without persistence the
+    // sidebar always resets to expanded on page change.
+    let initial_collapsed = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+                .and_then(|s| s.get_item("sidebar_collapsed").ok().flatten())
+                .map(|v| v == "true")
+                .unwrap_or(false)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        { false }
+    };
+    let (collapsed, set_collapsed) = signal(initial_collapsed);
     let (is_mobile, set_is_mobile) = signal(false);
     #[cfg(not(target_arch = "wasm32"))]
     let _ = set_is_mobile;
@@ -99,6 +115,19 @@ pub fn Layout(children: Children) -> impl IntoView {
             .and_then(|r| r.ok())
             .and_then(|u| u.workspace_id)
     });
+
+    // Persist collapsed state to localStorage whenever it changes.
+    #[cfg(target_arch = "wasm32")]
+    {
+        Effect::new(move |_| {
+            let val = collapsed.get();
+            if let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item("sidebar_collapsed", if val { "true" } else { "false" });
+            }
+        });
+    }
 
     // Detect mobile on mount + resize
     #[cfg(target_arch = "wasm32")]
@@ -334,17 +363,15 @@ fn Sidebar(
                     >
                         <span class="text-slate-400"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
                     </button>
-                    // Logo — to the right of the toggle, fades when collapsed
+                    // Logo — full logo to the right of the toggle, fades when collapsed.
+                    // React: kyomi_full_logo_white.svg at h-12 in expanded mode.
                     <div
                         class="flex items-center overflow-hidden transition-[width,opacity] duration-300"
                         style=move || {
                             if collapsed.get() { "opacity: 0; width: 0; margin-left: 0" } else { "opacity: 1; margin-left: 0.5rem" }
                         }
                     >
-                        // Small starburst icon (always visible on sidebar)
-                        <img src="/kyomi_small_logo.svg" alt="" class="h-6 w-6 mr-2"/>
-                        // "KYOMI" text — DESIGN.md: font-body weight 700, letter-spacing 0.04em
-                        <span class="font-sans font-bold tracking-[0.04em] text-white text-sm">"KYOMI"</span>
+                        <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-12"/>
                     </div>
                 </div>
             </div>
@@ -412,6 +439,7 @@ fn Sidebar(
                             {move || sessions.get().map(|result| match result {
                                 Ok(sessions) if sessions.is_empty() => view! {
                                     <EmptyState
+                                        variant=EmptyStateVariant::Sidebar
                                         title="No chats yet"
                                         description="Start a conversation to see it here"
                                         class="py-4 px-2 border-0"
@@ -433,6 +461,7 @@ fn Sidebar(
                                 }.into_any(),
                                 Err(_) => view! {
                                     <EmptyState
+                                        variant=EmptyStateVariant::Sidebar
                                         title="No chats yet"
                                         description="Start a conversation to see it here"
                                         class="py-4 px-2 border-0"

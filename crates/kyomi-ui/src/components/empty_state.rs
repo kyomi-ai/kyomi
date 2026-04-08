@@ -38,6 +38,8 @@ pub enum EmptyStateVariant {
     Error,
     Success,
     Info,
+    /// Transparent background with slate text — for use inside the dark navy sidebar.
+    Sidebar,
 }
 
 impl EmptyStateVariant {
@@ -50,6 +52,7 @@ impl EmptyStateVariant {
             Self::Error => "bg-error border-error-border",
             Self::Success => "bg-success border-success-border",
             Self::Info => "bg-info border-info-border",
+            Self::Sidebar => "bg-transparent border-transparent",
         }
     }
 
@@ -62,6 +65,7 @@ impl EmptyStateVariant {
             Self::Error => "text-error-foreground",
             Self::Success => "text-success-foreground",
             Self::Info => "text-info-foreground",
+            Self::Sidebar => "text-slate-500",
         }
     }
 
@@ -70,6 +74,7 @@ impl EmptyStateVariant {
     fn title_class(self) -> &'static str {
         match self {
             Self::Default => "text-foreground",
+            Self::Sidebar => "text-slate-300",
             other => other.text_class(),
         }
     }

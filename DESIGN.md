@@ -27,7 +27,7 @@
   - `kyomi_full_logo.svg` - Dark text (#1f2937), for light backgrounds
   - `kyomi_small_logo.svg` - Icon only, amber fill
 - **Logo clear space:** Minimum 1x icon width on all sides
-- **Logo on sidebar:** Small icon + "KYOMI" in font-body, weight 700, letter-spacing 0.04em
+- **Logo on sidebar:** `kyomi_full_logo_white.svg` at `h-12` (full starburst + lettering)
 
 ## Typography
 
@@ -163,7 +163,7 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 - **Approach:** Hybrid. Grid-disciplined for the application, creative-editorial for marketing/landing.
 - **Grid:** 12 columns on desktop (lg+), 1 column on mobile
 - **Max content width:** 1120px for marketing, 860px for dashboard prose, full-width for app shell
-- **Sidebar:** 220px fixed width, deep navy (#0F172A)
+- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, deep navy (#0F172A)
 - **Content area:** Fills remaining width, scrollable, `bg-muted` (#FAFAF8)
 
 ### Page Layout Pattern
@@ -471,7 +471,7 @@ Use the `.menu-item` CSS class in `main.css`. Do NOT use `<Button variant=Ghost>
 The primary Kyomi interface. A markdown document rendered with ChartML charts inline.
 
 ### Structure
-- Left sidebar (220px, navy) with nav
+- Left sidebar (20rem, navy) with nav
 - Content area with rendered markdown
 - Dashboard headings in Instrument Serif
 - Body text in DM Sans at 15px, line-height 1.8
