@@ -255,8 +255,9 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
                                     move |_| {
                                         // Update local UI state
                                         set_local.set(value_for_click.clone());
-                                        // Apply theme to DOM immediately
+                                        // Apply theme to DOM + localStorage immediately
                                         crate::components::theme::set_theme(&value_for_click);
+                                        crate::components::theme::save_theme_to_local_storage(&value_for_click);
                                         // Persist to server
                                         action.dispatch(value_for_click.clone());
                                     }

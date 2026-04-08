@@ -75,8 +75,10 @@ pub fn Layout(children: Children) -> impl IntoView {
         Effect::new(move || {
             match user_info_for_effect.get() {
                 Some(Ok(user)) => {
-                    // Apply the user's saved theme preference
+                    // Apply the user's saved theme preference and sync to localStorage.
+                    // Server is source of truth for cross-device consistency.
                     crate::components::theme::set_theme(&user.theme_preference);
+                    crate::components::theme::save_theme_to_local_storage(&user.theme_preference);
                     // Auth succeeded — allow layout to render
                     set_auth_confirmed.set(true);
                 }

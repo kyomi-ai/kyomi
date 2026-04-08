@@ -28,8 +28,8 @@ pub fn AuthLayout(
     children: Children,
 ) -> impl IntoView {
     view! {
-        // Outer container — React: className="min-h-screen bg-background flex force-light"
-        <div class="min-h-screen bg-background flex force-light">
+        // Outer container — theme-aware, respects user's localStorage preference
+        <div class="min-h-screen bg-background flex">
 
             // ── Left side — Branding (desktop only) ─────────────────────────
             // React: className="hidden lg:flex lg:w-1/2 relative overflow-hidden"

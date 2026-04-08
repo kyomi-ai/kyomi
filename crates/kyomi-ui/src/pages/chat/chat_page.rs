@@ -2060,7 +2060,7 @@ pub fn ChatPage() -> impl IntoView {
                                                             </g>
                                                         </svg>
                                                     </div>
-                                                    <h1 class="text-3xl md:text-4xl font-serif font-normal text-foreground mb-8">
+                                                    <h1 class="text-3xl md:text-4xl font-display font-normal text-foreground mb-8">
                                                         {greeting}
                                                     </h1>
                                                 </div>

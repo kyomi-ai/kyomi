@@ -7,15 +7,31 @@
     <link rel="icon" type="image/svg+xml" href="/kyomi_small_logo.svg"/>
     <link rel="apple-touch-icon" href="/kyomi_icon_192.png"/>
 
-    <!-- Detect theme before CSS loads — prevents flash of wrong theme -->
+    <!-- Detect theme before CSS loads — prevents flash of wrong theme.
+         Reads kyomi-theme from localStorage (light|dark|system).
+         Migrates old theme-preference key if present. -->
     <script>
         (function() {
             var d = document.documentElement;
             try {
-                var stored = localStorage.getItem('theme-preference');
-                if (stored === 'dark' || (!stored && matchMedia('(prefers-color-scheme:dark)').matches)) {
-                    d.classList.add('dark');
+                var stored = localStorage.getItem('kyomi-theme');
+                if (!stored) {
+                    stored = localStorage.getItem('theme-preference');
+                    if (stored) {
+                        localStorage.setItem('kyomi-theme', stored);
+                        localStorage.removeItem('theme-preference');
+                    }
                 }
+                var isDark;
+                if (stored === 'dark') {
+                    isDark = true;
+                } else if (stored === 'light') {
+                    isDark = false;
+                } else {
+                    isDark = matchMedia('(prefers-color-scheme:dark)').matches;
+                }
+                if (isDark) d.classList.add('dark');
+                else d.classList.remove('dark');
             } catch(e) {}
         })();
     </script>

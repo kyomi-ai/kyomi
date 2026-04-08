@@ -227,7 +227,7 @@ pub fn ChatInput(
                     on:input=on_input
                     on:keydown=on_keydown
                     placeholder=effective_placeholder
-                    class="w-full pr-12 resize-none border border-input focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-background rounded-xl px-4 py-3 shadow-sm min-h-[52px]"
+                    class="w-full pr-12 resize-none border border-input focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-card rounded-xl px-4 py-3 shadow-sm text-foreground"
                     style=format!("max-height: {}px", max_height)
                     rows="1"
                     disabled=move || credits_exhausted || !can_send.get()

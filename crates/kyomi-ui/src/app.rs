@@ -49,7 +49,7 @@ use crate::pages::welcome::WelcomePage;
 pub fn Shell(#[prop(optional)] children: Option<Children>) -> impl IntoView {
     view! {
         <!DOCTYPE html>
-        <html lang="en" class="dark">
+        <html lang="en">
             <head>
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
