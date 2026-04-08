@@ -163,7 +163,7 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 - **Approach:** Hybrid. Grid-disciplined for the application, creative-editorial for marketing/landing.
 - **Grid:** 12 columns on desktop (lg+), 1 column on mobile
 - **Max content width:** 1120px for marketing, 860px for dashboard prose, full-width for app shell
-- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, deep navy (#0F172A)
+- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, navy (#1E3A5F)
 - **Content area:** Fills remaining width, scrollable, `bg-muted` (#FAFAF8)
 
 ### Page Layout Pattern

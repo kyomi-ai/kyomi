@@ -330,7 +330,7 @@ fn Sidebar(
     // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {
         <div
-            class="bg-[#0F172A] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
+            class="bg-[#1E3A5F] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
             style=move || {
                 let width = if is_mobile.get() {
                     "width: 20rem"
@@ -445,19 +445,36 @@ fn Sidebar(
                                         class="py-4 px-2 border-0"
                                     />
                                 }.into_any(),
-                                Ok(sessions) => view! {
-                                    <For
-                                        each=move || sessions.clone()
-                                        key=|s| s.session_id.clone()
-                                        let:session
-                                    >
-                                        <a
-                                            href=format!("/chat/{}", session.session_id)
-                                            class="block px-3 py-2.5 rounded-lg cursor-pointer transition-colors duration-300 text-sm text-slate-300 hover:bg-white/5 truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                Ok(sessions) => {
+                                    let current_path = pathname;
+                                    view! {
+                                        <For
+                                            each=move || sessions.clone()
+                                            key=|s| s.session_id.clone()
+                                            let:session
                                         >
-                                            {session.title.clone()}
-                                        </a>
-                                    </For>
+                                            {
+                                                let session_href = format!("/chat/{}", session.session_id);
+                                                let session_href_cmp = session_href.clone();
+                                                let title = session.title.clone();
+                                                view! {
+                                                    <a
+                                                        href=session_href
+                                                        class=move || {
+                                                            let active = current_path.get() == session_href_cmp;
+                                                            if active {
+                                                                "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-amber-500 bg-[rgba(217,119,6,0.12)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                                            } else {
+                                                                "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-slate-300 hover:bg-white/5 truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                                            }
+                                                        }
+                                                    >
+                                                        {title}
+                                                    </a>
+                                                }
+                                            }
+                                        </For>
+                                    }
                                 }.into_any(),
                                 Err(_) => view! {
                                     <EmptyState
@@ -531,22 +548,27 @@ fn Sidebar(
                                         }}
                                     </div>
                                     <span
-                                        class="text-slate-400 flex-shrink-0 transition-[opacity,width] duration-300"
-                                        style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
+                                        class="text-slate-400 flex-shrink-0 transition-[opacity,width,transform] duration-300"
+                                        style=move || {
+                                            let visibility = if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" };
+                                            let rotation = if user_menu_open.get() { "; transform: rotate(180deg)" } else { "; transform: rotate(0deg)" };
+                                            format!("{visibility}{rotation}")
+                                        }
                                     >
                                         <Icon icon=icondata_lu::LuChevronDown width="16" height="16"/>
                                     </span>
                                 </button>
 
-                                // User menu dropdown
+                                // User menu dropdown — dark theme to match sidebar context.
+                                // React: dark popover with border-white/10, bg matching sidebar.
                                 <Show when=move || user_menu_open.get()>
-                                    <div class="absolute bottom-full left-0 mb-2 bg-popover border border-border rounded-lg shadow-lg py-1 z-50 min-w-48">
+                                    <div class="absolute bottom-full left-0 mb-2 bg-[--navy-deep] border border-white/10 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 z-50 min-w-48">
                                         // User info header — hide in personal mode
                                         {if !is_personal {
                                             Some(view! {
-                                                <div class="px-4 py-3 border-b border-border">
-                                                    <div class="text-sm font-medium text-popover-foreground">{display_name.clone()}</div>
-                                                    <div class="text-xs text-muted-foreground truncate">{email.clone()}</div>
+                                                <div class="px-4 py-3 border-b border-white/10">
+                                                    <div class="text-sm font-medium text-slate-200">{display_name.clone()}</div>
+                                                    <div class="text-xs text-slate-500 truncate">{email.clone()}</div>
                                                 </div>
                                             })
                                         } else {
@@ -554,7 +576,7 @@ fn Sidebar(
                                         }}
                                         <a
                                             href="/settings"
-                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-slate-300 transition-colors hover:bg-white/5 flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuSettings width="16" height="16"/>
                                             <span>"Settings"</span>
@@ -563,7 +585,7 @@ fn Sidebar(
                                             href="https://kyomi.ai/docs"
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            class="w-full text-left px-4 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-slate-300 transition-colors hover:bg-white/5 flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuBookOpen width="16" height="16"/>
                                             <span>"Help & Docs"</span>
