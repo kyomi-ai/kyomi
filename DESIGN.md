@@ -187,6 +187,37 @@ The content area is one continuous warm surface. No visual separation between he
 - Toggle buttons: selected state gets `ButtonVariant::Active` (amber tint: `bg-primary/10 text-primary border-primary/20`). Unselected state uses `ButtonVariant::Secondary`.
 - The only hard border is between the navy sidebar and the content area.
 
+### Responsive Toolbar Pattern
+
+Page header action buttons use container queries with three tiers. The container is the content area (uses `@container`), so breakpoints are relative to content width, not viewport.
+
+| Tier | Container width | What shows | Tailwind class |
+|------|----------------|------------|----------------|
+| 1. Full buttons | `@5xl` (1024px+) | Icon + text label | `@5xl:inline` on label span |
+| 2. Icon-only buttons | `@3xl` (768px+) | Icon only, no labels | `hidden @3xl:flex` on button wrapper |
+| 3. Overflow menu | Below `@3xl` | Primary action + overflow kebab menu | `flex @3xl:hidden` on overflow menu |
+
+The `@3xl` breakpoint (768px content) aligns with the sidebar collapse point. When the sidebar collapses on narrower viewports, the freed space lets toolbar buttons appear.
+
+**Structure:**
+```
+<!-- Always visible: primary action (e.g. Edit) + Refresh -->
+<Button size=Sm>icon + <span class="hidden @5xl:inline">label</span></Button>
+
+<!-- Show at @3xl, labels at @5xl -->
+<div class="hidden @3xl:flex">
+  <Button size=Sm>icon + <span class="hidden @5xl:inline">label</span></Button>
+</div>
+
+<!-- Overflow: visible below @3xl only -->
+<div class="flex @3xl:hidden">
+  <Button size=Icon>kebab</Button>
+  <!-- dropdown with all actions -->
+</div>
+```
+
+All pages with toolbar actions MUST follow this pattern.
+
 ### Border Radius
 
 | Token | Value | Usage |

@@ -15,8 +15,8 @@ html {
   --font-display: 'Instrument Serif', Georgia, serif;
 
   /* Container query breakpoints for toolbar button visibility */
-  --container-5xl: 64rem;  /* 1024px — show secondary action buttons */
-  --container-6xl: 80rem;  /* 1280px — show button text labels */
+  /* @3xl (768px) — show toolbar buttons (matches sidebar collapse point) */
+  /* @5xl (1024px) — show button text labels */
 
   /* === Design System Color Tokens ===
    * Reference: DESIGN.md */
