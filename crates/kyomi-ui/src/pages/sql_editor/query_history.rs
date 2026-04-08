@@ -231,8 +231,8 @@ pub fn QueryHistory(
             // Delete confirmation dialog
             <ConfirmDialog
                 open=Signal::from(delete_dialog_open)
-                title="Delete query?"
-                message="This query will be permanently removed from your history."
+                title="Delete Query?"
+                message="Delete this query from history?"
                 confirm_text="Delete"
                 on_confirm=on_delete_confirm
                 on_cancel=on_delete_cancel

@@ -244,7 +244,7 @@ pub fn DashboardsListPage() -> impl IntoView {
     let confirm_title = move || {
         deleting_dashboard
             .get_untracked()
-            .map(|(_, title)| format!("Delete \"{title}\"?"))
+            .map(|(_, _title)| "Delete Dashboard?".to_string())
             .unwrap_or_else(|| "Delete Dashboard?".to_string())
     };
     let confirm_message = move || {

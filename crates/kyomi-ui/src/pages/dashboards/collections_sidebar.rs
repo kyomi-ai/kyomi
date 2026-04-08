@@ -693,7 +693,7 @@ pub fn CollectionsSidebar(
     });
 
     let handle_delete = Callback::new(move |coll: CollectionItem| {
-        set_confirm_title.set("Delete collection?".to_string());
+        set_confirm_title.set("Delete Collection?".to_string());
         set_confirm_message.set(format!(
             "Are you sure you want to delete \"{}\"? Dashboards will not be deleted.",
             coll.name
@@ -962,7 +962,7 @@ pub fn CollectionsSidebar(
                                 open=confirm_open_sig
                                 title=confirm_title_val
                                 message=confirm_message_val
-                                confirm_text="Delete"
+                                confirm_text="Delete Collection"
                                 on_confirm=on_confirm_delete
                                 on_cancel=on_cancel_delete
                             />
@@ -1023,7 +1023,7 @@ pub fn CollectionsSidebar(
                                 open=confirm_open_sig
                                 title=confirm_title_val
                                 message=confirm_message_val
-                                confirm_text="Delete"
+                                confirm_text="Delete Collection"
                                 on_confirm=on_confirm_delete
                                 on_cancel=on_cancel_delete
                             />
