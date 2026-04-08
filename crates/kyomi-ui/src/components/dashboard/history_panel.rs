@@ -14,7 +14,9 @@ use leptos_icons::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
-use crate::components::{ConfirmDialog, EmptyState, Spinner};
+use crate::components::{
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, Tooltip,
+};
 use crate::server_fns::dashboards::{
     diff_versions, get_version, list_versions, restore_version, DiffLine, VersionDiff,
     VersionDetail, VersionSummary,
@@ -394,19 +396,19 @@ pub fn HistoryPanel(
         view! {
             <div class="flex flex-col flex-1 min-w-0 h-full">
                 // Header
-                // React: `flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0`
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
                         <Icon icon=icondata_lu::LuClock attr:class="w-5 h-5 text-primary" />
                         <span class="font-medium text-foreground">"Version History"</span>
                     </div>
-                    <button
-                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-secondary"
-                        aria-label="Close history"
+                    <Button
+                        variant=ButtonVariant::GhostMuted
+                        size=ButtonSize::Icon
+                        aria_label="Close history"
                         on:click=move |_| on_close.run(())
                     >
-                        <Icon icon=icondata_lu::LuX attr:class="w-5 h-5" />
-                    </button>
+                        <Icon icon=icondata_lu::LuX width="20" height="20" />
+                    </Button>
                 </div>
 
                 // Content area
@@ -415,15 +417,16 @@ pub fn HistoryPanel(
                     {current_error.clone().map(|err| view! {
                         <div class="p-4 text-center">
                             <p class="text-error-foreground mb-2">{err}</p>
-                            <button
-                                class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background text-foreground shadow-sm transition-colors hover:bg-secondary hover:text-accent-foreground h-8 px-3"
+                            <Button
+                                variant=ButtonVariant::Outline
+                                size=ButtonSize::Sm
                                 on:click=move |_| {
                                     set_error.set(None);
                                     set_version_counter.update(|c| *c += 1);
                                 }
                             >
                                 "Retry"
-                            </button>
+                            </Button>
                         </div>
                     })}
 
@@ -442,12 +445,13 @@ pub fn HistoryPanel(
                                                 <h3 class="text-sm font-medium text-foreground">
                                                     {format!("Changes: v{} → v{}", diff.from_version, diff.to_version)}
                                                 </h3>
-                                                <button
-                                                    class="text-sm text-primary transition-colors hover:text-primary/80"
+                                                <Button
+                                                    variant=ButtonVariant::Link
+                                                    size=ButtonSize::Sm
                                                     on:click=move |_| set_show_diff.set(false)
                                                 >
                                                     "Back to list"
-                                                </button>
+                                                </Button>
                                             </div>
                                             <div class="bg-muted rounded-lg p-3 mb-4">
                                                 <div class="flex items-center gap-4 text-sm">
@@ -478,12 +482,13 @@ pub fn HistoryPanel(
                                                 Err(e) => view! {
                                                     <div class="p-4 text-center">
                                                         <p class="text-error-foreground mb-2">{e.to_string()}</p>
-                                                        <button
-                                                            class="inline-flex items-center justify-center rounded-md text-sm font-medium border border-input bg-background text-foreground shadow-sm transition-colors hover:bg-secondary hover:text-accent-foreground h-8 px-3"
+                                                        <Button
+                                                            variant=ButtonVariant::Outline
+                                                            size=ButtonSize::Sm
                                                             on:click=move |_| set_version_counter.update(|c| *c += 1)
                                                         >
                                                             "Retry"
-                                                        </button>
+                                                        </Button>
                                                     </div>
                                                 }.into_any(),
                                                 Ok(items) if items.is_empty() => view! {
@@ -518,12 +523,14 @@ pub fn HistoryPanel(
                                                                                 "Click \"Exit Preview\" to return to current version"
                                                                             </p>
                                                                         </div>
-                                                                        <button
-                                                                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-8 px-3 text-warning-foreground border border-warning-border hover:bg-warning"
+                                                                        <Button
+                                                                            variant=ButtonVariant::Outline
+                                                                            size=ButtonSize::Sm
+                                                                            class="text-warning-foreground border-warning-border hover:bg-warning"
                                                                             on:click=move |_| handle_exit_preview()
                                                                         >
                                                                             "Exit Preview"
-                                                                        </button>
+                                                                        </Button>
                                                                     </div>
                                                                 </div>
                                                             })}
@@ -545,7 +552,7 @@ pub fn HistoryPanel(
                                                                             if is_current_previewing {
                                                                                 "px-4 py-3 transition-colors cursor-pointer bg-warning"
                                                                             } else {
-                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-secondary"
+                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-accent"
                                                                             }
                                                                         }
                                                                         on:click=move |_| {
@@ -565,14 +572,13 @@ pub fn HistoryPanel(
                                                                                     <span class="text-sm font-medium text-foreground">
                                                                                         {format!("Version {cv_ver}")}
                                                                                     </span>
-                                                                                    // React: `px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded-md font-medium`
-                                                                                    <span class="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded-md font-medium">
+                                                                                    <span class="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded font-medium">
                                                                                         "Latest"
                                                                                     </span>
                                                                                     {move || previewing.get()
                                                                                         .filter(|pv| pv.version_number == cv_ver)
                                                                                         .map(|_| view! {
-                                                                                            <span class="px-1.5 py-0.5 bg-warning text-warning-foreground text-xs rounded-md">
+                                                                                            <span class="px-1.5 py-0.5 bg-warning text-warning-foreground text-xs rounded">
                                                                                                 "Previewing"
                                                                                             </span>
                                                                                         })
@@ -595,14 +601,17 @@ pub fn HistoryPanel(
                                                                                     class="flex items-center gap-2 mt-2"
                                                                                     on:click=move |ev| ev.stop_propagation()
                                                                                 >
-                                                                                    <button
-                                                                                        class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                                                                        title="Compare with previous"
-                                                                                        disabled=move || is_diff_loading.get()
-                                                                                        on:click=move |_| handle_view_diff_clone(prev_ver, cv_ver)
-                                                                                    >
-                                                                                        <Icon icon=icondata_lu::LuFileDown attr:class="w-4 h-4" />
-                                                                                    </button>
+                                                                                    <Tooltip content="Compare with previous">
+                                                                                        <Button
+                                                                                            variant=ButtonVariant::GhostMuted
+                                                                                            size=ButtonSize::IconSm
+                                                                                            aria_label="Compare with previous"
+                                                                                            disabled=is_diff_loading
+                                                                                            on:click=move |_| handle_view_diff_clone(prev_ver, cv_ver)
+                                                                                        >
+                                                                                            <Icon icon=icondata_lu::LuFileDown width="16" height="16" />
+                                                                                        </Button>
+                                                                                    </Tooltip>
                                                                                 </div>
                                                                             }
                                                                         })}
@@ -632,7 +641,7 @@ pub fn HistoryPanel(
                                                                             if is_this_previewing {
                                                                                 "px-4 py-3 transition-colors cursor-pointer bg-warning"
                                                                             } else {
-                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-secondary"
+                                                                                "px-4 py-3 transition-colors cursor-pointer hover:bg-accent"
                                                                             }
                                                                         }
                                                                         on:click=move |_| {
@@ -655,7 +664,7 @@ pub fn HistoryPanel(
                                                                                     {move || previewing.get()
                                                                                         .filter(|pv| pv.version_number == ver_num)
                                                                                         .map(|_| view! {
-                                                                                            <span class="px-1.5 py-0.5 bg-warning text-warning-foreground text-xs rounded-md">
+                                                                                            <span class="px-1.5 py-0.5 bg-warning text-warning-foreground text-xs rounded">
                                                                                                 "Previewing"
                                                                                             </span>
                                                                                         })
@@ -682,43 +691,50 @@ pub fn HistoryPanel(
                                                                         >
                                                                             // Compare with previous historical version
                                                                             {prev_ver_num.map(|pv| view! {
-                                                                                <button
-                                                                                    class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                                                                    title="Compare with previous"
-                                                                                    disabled=move || is_diff_loading.get()
-                                                                                    on:click=move |_| handle_view_diff_clone(pv, ver_num)
-                                                                                >
-                                                                                    <Icon icon=icondata_lu::LuFileDown attr:class="w-4 h-4" />
-                                                                                </button>
+                                                                                <Tooltip content="Compare with previous">
+                                                                                    <Button
+                                                                                        variant=ButtonVariant::GhostMuted
+                                                                                        size=ButtonSize::IconSm
+                                                                                        aria_label="Compare with previous"
+                                                                                        disabled=is_diff_loading
+                                                                                        on:click=move |_| handle_view_diff_clone(pv, ver_num)
+                                                                                    >
+                                                                                        <Icon icon=icondata_lu::LuFileDown width="16" height="16" />
+                                                                                    </Button>
+                                                                                </Tooltip>
                                                                             })}
 
                                                                             // Compare with current version
                                                                             {current_ver_num.map(|cv| view! {
-                                                                                <button
-                                                                                    class="p-1.5 text-muted-foreground hover:text-primary hover:bg-secondary rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                                                                    title="Compare with current"
-                                                                                    disabled=move || is_diff_loading.get()
-                                                                                    on:click=move |_| handle_view_diff_clone2(ver_num, cv)
-                                                                                >
-                                                                                    <Icon icon=icondata_lu::LuFileUp attr:class="w-4 h-4" />
-                                                                                </button>
+                                                                                <Tooltip content="Compare with current">
+                                                                                    <Button
+                                                                                        variant=ButtonVariant::GhostMuted
+                                                                                        size=ButtonSize::IconSm
+                                                                                        aria_label="Compare with current"
+                                                                                        disabled=is_diff_loading
+                                                                                        on:click=move |_| handle_view_diff_clone2(ver_num, cv)
+                                                                                    >
+                                                                                        <Icon icon=icondata_lu::LuFileUp width="16" height="16" />
+                                                                                    </Button>
+                                                                                </Tooltip>
                                                                             })}
 
                                                                             // Restore button
-                                                                            <button
-                                                                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                                title="Restore this version"
-                                                                                disabled=move || is_restoring.get()
-                                                                                on:click=move |_| set_confirm_version.set(Some(ver_num))
-                                                                            >
-                                                                                {move || if is_restoring.get() && confirm_version.get_untracked().is_none() {
-                                                                                    // Show spinner only on the version being restored
-                                                                                    // (confirm_version is cleared when restore starts)
-                                                                                    view! { <Spinner class="text-primary" /> }.into_any()
-                                                                                } else {
-                                                                                    view! { <Icon icon=icondata_lu::LuUndo2 attr:class="w-4 h-4" /> }.into_any()
-                                                                                }}
-                                                                            </button>
+                                                                            <Tooltip content="Restore this version">
+                                                                                <Button
+                                                                                    variant=ButtonVariant::GhostMuted
+                                                                                    size=ButtonSize::IconSm
+                                                                                    aria_label="Restore this version"
+                                                                                    disabled=is_restoring
+                                                                                    on:click=move |_| set_confirm_version.set(Some(ver_num))
+                                                                                >
+                                                                                    {move || if is_restoring.get() && confirm_version.get_untracked().is_none() {
+                                                                                        view! { <Spinner class="text-primary" /> }.into_any()
+                                                                                    } else {
+                                                                                        view! { <Icon icon=icondata_lu::LuUndo2 width="16" height="16" /> }.into_any()
+                                                                                    }}
+                                                                                </Button>
+                                                                            </Tooltip>
                                                                         </div>
                                                                     </div>
                                                                 }
@@ -826,14 +842,12 @@ pub fn HistoryPanel(
                                 data-anim=anim_state
                             >
                                 // Resize Handle
-                                // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
                                 <div
                                     class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
                                     on:mousedown=handle_resize_start
                                     aria-label="Drag to resize"
                                 >
-                                    // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`
-                                    <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded-md transition-colors" />
+                                    <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors" />
                                 </div>
 
                                 {panel_content()}

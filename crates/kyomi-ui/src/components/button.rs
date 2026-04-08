@@ -16,6 +16,9 @@ pub enum ButtonVariant {
     Outline,
     Secondary,
     Ghost,
+    /// Ghost button with muted text — for icon actions that should not draw attention.
+    /// Starts `text-muted-foreground`, hovers to `text-foreground` with `bg-accent`.
+    GhostMuted,
     Link,
     /// Active/toggled-on state — amber tint.
     Active,
@@ -29,6 +32,8 @@ pub enum ButtonSize {
     Sm,
     Lg,
     Icon,
+    /// Compact icon-only: 28px square — for dense UI like panel action rows.
+    IconSm,
 }
 
 /// Base classes shared by all button variants.
@@ -49,6 +54,8 @@ fn variant_classes(variant: ButtonVariant) -> &'static str {
         ButtonVariant::Secondary => "bg-secondary text-foreground border border-border hover:border-[--color-border-strong]",
         // Ghost: transparent, accent text, hover accent-light
         ButtonVariant::Ghost => "bg-transparent text-primary hover:bg-accent",
+        // Ghost muted: transparent, muted text, hover foreground + accent bg
+        ButtonVariant::GhostMuted => "bg-transparent text-muted-foreground hover:text-foreground hover:bg-accent",
         // Link: underline style
         ButtonVariant::Link => "text-primary underline-offset-4 hover:underline",
         // Active/toggled: amber tint
@@ -66,6 +73,8 @@ fn size_classes(size: ButtonSize) -> &'static str {
         ButtonSize::Lg => "px-8 py-3",
         // Icon-only: square
         ButtonSize::Icon => "h-9 w-9 p-0",
+        // Compact icon-only: 28px square for dense action rows
+        ButtonSize::IconSm => "h-7 w-7 p-0",
     }
 }
 
