@@ -113,16 +113,9 @@ pub fn ChatMessage(
 
     // ── Render ──────────────────────────────────────────────────────────
 
-    #[cfg(target_arch = "wasm32")]
-    web_sys::console::log_1(&format!("[DEBUG] ChatMessage render: id={} type={}", message.message_id, message.message_type).into());
-
     if is_my_message {
         // ── User message (mine) — right-aligned ─────────────────────────
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&"[DEBUG] ChatMessage: rendering my-user branch".into());
         let ts_display = format_relative_time(&message_timestamp_user);
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&format!("[DEBUG] ChatMessage: my-user ts_display={ts_display}").into());
         view! {
             <div class="flex flex-col items-end">
                 <div
@@ -142,8 +135,6 @@ pub fn ChatMessage(
         .into_any()
     } else if is_user_message {
         // ── User message (someone else's in shared conversation) — left-aligned
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(&"[DEBUG] ChatMessage: rendering other-user branch".into());
         let ts_display = format_relative_time(&message_timestamp_user);
         view! {
             <div class="flex flex-col items-start">

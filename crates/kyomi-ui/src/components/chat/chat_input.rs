@@ -174,7 +174,7 @@ pub fn ChatInput(
     };
 
     view! {
-        <div class=if inline { "" } else { "border-t border-border flex-shrink-0 p-4 bg-card" }>
+        <div class=if inline { "" } else { "flex-shrink-0 p-4 bg-muted" }>
             // Credits exhausted warning banner — shown above the (disabled) textarea.
             // Matches React: Chat.jsx lines 1651-1657 and 1721-1727.
             {if credits_exhausted {

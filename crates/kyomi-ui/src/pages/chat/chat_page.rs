@@ -49,7 +49,7 @@ use crate::components::chat::{
     TokenUsage,
 };
 use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
-use crate::components::{ConfirmDialog, Spinner};
+use crate::components::{ConfirmDialog, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::chat::get_chart_context;
 use crate::server_fns::chat::{
@@ -203,9 +203,6 @@ fn generate_user_message_id() -> String {
 /// messages, streams AI responses via WebSocket, and supports cancellation.
 #[component]
 pub fn ChatPage() -> impl IntoView {
-    #[cfg(target_arch = "wasm32")]
-    web_sys::console::log_1(&"[DEBUG] ChatPage: component function called (mount/remount)".into());
-
     // ── URL parameter parsing ───────────────────────────────────────────
     // NOTE: ChatPage is mounted as a ParentRoute view (path="/chat"). In Leptos
     // router, use_params_map() in a ParentRoute component only sees the PARENT
@@ -1873,8 +1870,7 @@ pub fn ChatPage() -> impl IntoView {
                         // Phase 9 — Chat Header (only shown when messages exist)
                         // Matches React: Chat.jsx lines 1467-1613
                         <Show when=move || !messages.get().is_empty()>
-                            <div class="flex-shrink-0 z-20 bg-card border-b border-border">
-                                <div class="flex justify-between items-center px-4 md:px-6 py-4 gap-4">
+                            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 z-20 flex items-center justify-between gap-4">
                                     // Left side: title + badges
                                     <div class="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
                                         <Show
@@ -2029,7 +2025,6 @@ pub fn ChatPage() -> impl IntoView {
                                             </button>
                                         </Show>
                                     </div>
-                                </div>
                             </div>
                         </Show>
 
@@ -2048,14 +2043,33 @@ pub fn ChatPage() -> impl IntoView {
                                 let greeting = current_greeting.get();
 
                                 if loading && session.is_some() {
-                                    // Loading existing session — spinner shown immediately on navigation.
+                                    // Loading existing session — skeleton placeholders shown immediately.
                                     // Checked FIRST (before msgs.is_empty()) to prevent reactive scope
                                     // disposal panic: old messages stay in the signal while loading,
                                     // so we must not let the <For> render while is_loading=true.
-                                    // Matches React: isLoadingSession && currentSessionId (Chat.jsx line 1618)
+                                    // DESIGN.md: "Never use a bare spinner for page content."
                                     view! {
-                                        <div class="h-full flex items-center justify-center">
-                                            <Spinner class="text-muted-foreground" />
+                                        <div class="p-4 md:p-6 space-y-6">
+                                            // Skeleton: user message (right-aligned)
+                                            <div class="flex flex-col items-end">
+                                                <Skeleton class="h-12 w-48 rounded-2xl" />
+                                                <Skeleton class="h-3 w-24 mt-1" />
+                                            </div>
+                                            // Skeleton: assistant message (full-width card)
+                                            <div class="flex flex-col items-start w-full">
+                                                <div class="w-full rounded-2xl border border-border bg-card shadow p-6 space-y-3">
+                                                    <Skeleton class="h-4 w-3/4" />
+                                                    <Skeleton class="h-4 w-full" />
+                                                    <Skeleton class="h-4 w-2/3" />
+                                                    <Skeleton class="h-32 w-full mt-2" />
+                                                </div>
+                                                <Skeleton class="h-3 w-20 mt-1" />
+                                            </div>
+                                            // Skeleton: another user message
+                                            <div class="flex flex-col items-end">
+                                                <Skeleton class="h-10 w-64 rounded-2xl" />
+                                                <Skeleton class="h-3 w-20 mt-1" />
+                                            </div>
                                         </div>
                                     }.into_any()
                                 } else if msgs.is_empty() {
@@ -2086,7 +2100,7 @@ pub fn ChatPage() -> impl IntoView {
                                                             </g>
                                                         </svg>
                                                     </div>
-                                                    <h1 class="text-3xl md:text-4xl font-normal text-foreground mb-8">
+                                                    <h1 class="text-3xl md:text-4xl font-serif font-normal text-foreground mb-8">
                                                         {greeting}
                                                     </h1>
                                                 </div>
@@ -2179,7 +2193,7 @@ pub fn ChatPage() -> impl IntoView {
                             // M13: React shows this for ALL existing sessions (currentSessionId &&),
                             // not just shared ones.
                             <Show when=move || current_session_id.get().is_some()>
-                                <div class="flex items-center gap-2 px-4 py-2 border-t border-border bg-card">
+                                <div class="flex items-center gap-2 px-4 py-2 bg-muted">
                                     <input
                                         type="checkbox"
                                         id="skip-ai-checkbox"
