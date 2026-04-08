@@ -50,7 +50,7 @@ use crate::components::chat::{
     TokenUsage,
 };
 use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
-use crate::components::button::{Button, ButtonSize, ButtonVariant, ToggleButton};
+use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{ConfirmDialog, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::chat::get_chart_context;
@@ -1815,18 +1815,8 @@ pub fn ChatPage() -> impl IntoView {
                                 "Use Kyomi from Claude Code via MCP, or add your own API key in Settings."
                             </p>
                             <div class="flex flex-col gap-3">
-                                <a
-                                    href="/settings/profile"
-                                    class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-                                >
-                                    "Open Settings"
-                                </a>
-                                <a
-                                    href="/setup"
-                                    class="inline-flex items-center justify-center rounded-md border border-input bg-background px-4 py-2.5 text-sm font-medium hover:bg-secondary hover:text-accent-foreground transition-colors"
-                                >
-                                    "Learn about MCP"
-                                </a>
+                                <ButtonLink href="/settings/profile">"Open Settings"</ButtonLink>
+                                <ButtonLink href="/setup" variant=ButtonVariant::Secondary>"Learn about MCP"</ButtonLink>
                             </div>
                         </div>
                     </div>
@@ -1837,7 +1827,6 @@ pub fn ChatPage() -> impl IntoView {
                 when=move || !no_datasources()
                 fallback=move || {
                     // Phase 12.1 — No datasources empty state
-                    // Matches React: NoDatasourcesEmptyState for context="chat"
                     view! {
                         <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
                             <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
@@ -1850,12 +1839,7 @@ pub fn ChatPage() -> impl IntoView {
                                 <p class="text-muted-foreground mb-6">
                                     "Kyomi needs access to your data warehouse to answer questions about your data."
                                 </p>
-                                <a
-                                    href="/settings/datasources"
-                                    class="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-                                >
-                                    "Connect Data Source"
-                                </a>
+                                <ButtonLink href="/settings/datasources">"Connect Data Source"</ButtonLink>
                             </div>
                         </div>
                     }
