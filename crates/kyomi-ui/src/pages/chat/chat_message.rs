@@ -11,6 +11,7 @@
 //! (lines 35-203). CSS classes are copied verbatim from the React source.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::chat::{AgentThinking, ThinkingState};
 use crate::components::dashboard::MarkdownRenderer;
@@ -262,7 +263,7 @@ pub fn ChatMessage(
                             <Tooltip content="Pin / Unpin message">
                                 <button
                                     class=move || {
-                                        let base = "text-xs transition-colors flex items-center gap-1";
+                                        let base = "text-xs transition-colors flex items-center gap-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded";
                                         if is_pinned.get() {
                                             format!("{base} text-primary hover:text-primary/80")
                                         } else {
@@ -272,20 +273,18 @@ pub fn ChatMessage(
                                     aria-label=move || if is_pinned.get() { "Unpin message" } else { "Pin message" }
                                     on:click=move |_| on_toggle_pin.run(message_id_for_pin.get_value())
                                 >
-                                    <svg class="w-4 h-4" fill=move || if is_pinned.get() { "currentColor" } else { "none" } stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                                    </svg>
+                                    <span class=move || if is_pinned.get() { "[&_svg]:fill-current" } else { "" }>
+                                        <Icon icon=icondata_lu::LuStar width="16" height="16" />
+                                    </span>
                                 </button>
                             </Tooltip>
                             <Tooltip content="Save to Dashboard">
                                 <button
-                                    class="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1"
+                                    class="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
                                     aria-label="Save to Dashboard"
                                     on:click=move |_| on_open_dashboard_modal.run(message_content_for_save.get_value())
                                 >
-                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
-                                    </svg>
+                                    <Icon icon=icondata_lu::LuDownload width="16" height="16" />
                                     <span>"Save to Dashboard"</span>
                                 </button>
                             </Tooltip>
