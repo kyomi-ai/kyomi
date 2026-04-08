@@ -187,6 +187,145 @@ The content area is one continuous warm surface. No visual separation between he
 - Toggle buttons: selected state gets `ButtonVariant::Active` (amber tint: `bg-primary/10 text-primary border-primary/20`). Unselected state uses `ButtonVariant::Secondary`.
 - The only hard border is between the navy sidebar and the content area.
 
+### Page Structure (Gold Standard: Dashboard Viewer)
+
+Every detail/viewer page MUST use this 4-zone vertical layout inside a `@container` wrapper. The dashboard viewer (`dashboard_viewer.rs`) is the reference implementation.
+
+```
+@container (flex flex-col h-full bg-background overflow-hidden @container)
+├── Header bar (page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between)
+│   ├── Left: back button + title (flex items-center gap-4 flex-1 min-w-0 overflow-hidden)
+│   └── Right: toolbar buttons (flex items-center gap-1 @5xl:gap-2 flex-shrink-0)
+├── Content area (flex-1 overflow-hidden flex)
+│   ├── Main scroll area (flex-1 overflow-y-auto p-4 md:p-6 bg-background)
+│   └── Optional: side panel (slides in from right, see Side Panel Pattern)
+├── Footer (metadata-footer bg-background px-4 md:px-6 py-3 flex-shrink-0)
+│   └── Metadata row (flex items-center justify-between text-xs text-muted-foreground)
+└── Modals (rendered outside the flow)
+```
+
+### Back Navigation
+
+Detail/viewer pages navigate back to their parent list using a ghost icon button, always leftmost in the header bar.
+
+```rust
+<ButtonLink href="/parent-list" variant=ButtonVariant::Ghost size=ButtonSize::Icon
+    class="flex-shrink-0 text-muted-foreground hover:text-foreground"
+    aria_label="Back to list">
+    <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+</ButtonLink>
+```
+
+### Content Header Spec
+
+- Height: `h-16` (64px)
+- Padding: `px-4 md:px-6`
+- CSS class: `page-header` (sets `bg-background`, `border-bottom: none`)
+- Left side: back button + page title (inline editable where appropriate)
+- Right side: action buttons following the Responsive Toolbar Pattern
+
+### Metadata Footer Pattern
+
+Every detail/viewer page shows a metadata footer at the bottom with created/updated timestamps.
+
+```rust
+<div class="metadata-footer bg-background px-4 md:px-6 py-3 flex-shrink-0">
+    <div class="flex items-center justify-between text-xs text-muted-foreground">
+        <div class="flex items-center gap-4">
+            <div class="flex items-center gap-1">
+                <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                "Created " {created_date}
+            </div>
+            <div class="flex items-center gap-1">
+                <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                "Last updated " {updated_date}
+            </div>
+        </div>
+    </div>
+</div>
+```
+
+- Text: `text-xs text-muted-foreground`
+- Icons: 14px, inherits muted color
+- Items separated by `gap-4`
+- Padding matches header: `px-4 md:px-6`
+
+### Side Panel Pattern
+
+For secondary contextual content (history, filters, details, comments) that can be shown/hidden. The dashboard viewer's History panel is the reference.
+
+**Desktop (768px+):**
+- Inline resizable sidebar on the right side of the content area
+- Width range: 320-600px, default 384px
+- `border-l border-t border-border`, `bg-muted`
+- Drag handle for resize (4px wide, centered, `bg-border` → `bg-muted-foreground/50` on hover)
+- Width controlled by inline `style` (dynamic from drag), not a Tailwind class
+- Sits inside the `flex-1 overflow-hidden flex` content zone alongside the main scroll area
+- Transition: `transition-[width]` with `duration-slow`
+
+**Mobile (below 768px):**
+- Fixed overlay panel from the right
+- `fixed top-32 right-0 bottom-0`, max-width 85vw
+- Backdrop: `bg-[var(--color-overlay)]`, click to close
+- `bg-muted`, `shadow-xl`
+- Transition: `transition-transform` with `duration-slow`
+
+### Empty State Pattern (In-Page)
+
+When page content is empty (e.g., empty dashboard, no results), show a centered empty state inside the content area.
+
+```rust
+<div class="w-full text-center py-16">
+    <div class="w-24 h-24 mx-auto text-muted-foreground mb-6 flex items-center justify-center">
+        <Icon icon=icondata_lu::LuFileText width="64" height="64" />
+    </div>
+    <h3 class="text-xl font-semibold text-foreground mb-2">
+        "This dashboard is empty"
+    </h3>
+    <p class="text-muted-foreground mb-6">
+        "Click \"Edit Dashboard\" to add content and charts"
+    </p>
+    <ButtonLink href=edit_href>
+        <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+        "Edit Dashboard"
+    </ButtonLink>
+</div>
+```
+
+- Icon: 64px, `text-muted-foreground`, centered in 96px container
+- Heading: `text-xl font-semibold text-foreground`
+- Description: `text-muted-foreground`
+- Primary action button below
+- Vertical padding: `py-16`
+- Use page-appropriate icon and copy, not generic text
+
+### Loading State Pattern
+
+While content loads, show content-shaped skeleton placeholders that match the expected layout. Never use a bare spinner for page content.
+
+```rust
+<div class="space-y-6 max-w-[860px]">
+    <Skeleton class="h-8 w-2/5" />          // Heading
+    <Skeleton class="h-4 w-3/5" />          // Description
+    <div class="border border-border rounded-md">
+        <div class="px-5 py-4 border-b border-border flex items-center justify-between">
+            <Skeleton class="h-4 w-1/4" />  // Chart title
+            <Skeleton class="h-4 w-16" />   // Chart type label
+        </div>
+        <div class="p-6">
+            <Skeleton class="h-48 w-full" /> // Chart area
+        </div>
+    </div>
+    <Skeleton class="h-6 w-1/3" />          // Section heading
+    <Skeleton class="h-4 w-2/5" />          // Section description
+</div>
+```
+
+- Skeleton shapes must approximate the real content layout
+- Use `max-w-[860px]` for prose-width content
+- When real content appears, wrap in `animate-fade-in` for a smooth entrance
+- Spinners are acceptable only for inline actions (button loading state, chart refresh)
+
 ### Responsive Toolbar Pattern
 
 Page header action buttons use container queries with three tiers. The container is the content area (uses `@container`), so breakpoints are relative to content width, not viewport.
