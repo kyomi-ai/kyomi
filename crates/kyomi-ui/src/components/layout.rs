@@ -361,7 +361,7 @@ fn Sidebar(
                     // Collapse toggle — React places this FIRST (left side)
                     <button
                         on:click=move |_| set_collapsed.update(|c| *c = !*c)
-                        class="p-2.5 hover:bg-white/5 rounded-md transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        class="p-3 hover:bg-white/5 rounded-md transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
                         <span class="text-slate-400"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
                     </button>
@@ -389,9 +389,9 @@ fn Sidebar(
                         class=move || {
                             let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                             if new_chat_active.get() {
-                                format!("w-full h-10 flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                                format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                             } else {
-                                format!("w-full h-10 flex items-center rounded-lg hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {spacing}")
+                                format!("w-full min-h-[44px] flex items-center rounded-lg hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {spacing}")
                             }
                         }
                     >
@@ -527,7 +527,7 @@ fn Sidebar(
                                 <button
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
-                                        "flex items-center w-full h-10 hover:bg-white/5 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
+                                        "flex items-center w-full min-h-[44px] hover:bg-white/5 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
                                         if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-2.5" }
                                     )
                                 >
@@ -660,9 +660,9 @@ fn NavItem(
                 let active = is_active.get();
                 let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                 if active {
-                    format!("w-full h-10 flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                    format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                 } else {
-                    format!("w-full h-10 flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring hover:bg-white/5 text-slate-300 {spacing}")
+                    format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring hover:bg-white/5 text-slate-300 {spacing}")
                 }
             }
         >
