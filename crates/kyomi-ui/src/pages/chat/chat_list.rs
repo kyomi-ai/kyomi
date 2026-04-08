@@ -19,7 +19,10 @@
 
 use leptos::prelude::*;
 
-use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, Spinner};
+use leptos_icons::Icon;
+
+use crate::components::button::{ButtonLink, ButtonSize};
+use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, Skeleton, Spinner};
 use crate::server_fns::chat::{
     bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
 };
@@ -488,23 +491,18 @@ pub fn ChatsListPage() -> impl IntoView {
     view! {
         <div class="flex flex-col h-full bg-muted" style="flex-direction: column;">
             // Header
-            <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
-                <h1 class="text-xl font-display text-foreground">"Chats"</h1>
+            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                <h1 class="text-2xl font-display text-foreground">"Chats"</h1>
 
                 // New Chat Button
-                <a
-                    href="/chat"
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                >
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                    </svg>
+                <ButtonLink href="/chat" size=ButtonSize::Sm>
+                    <Icon icon=icondata_lu::LuPlus width="14" height="14" />
                     "New Chat"
-                </a>
+                </ButtonLink>
             </div>
 
             // Search and Filter Toolbar
-            <div class="bg-card border-b border-border px-6 py-3 flex-shrink-0">
+            <div class="bg-background px-4 md:px-6 py-3 flex-shrink-0">
                 // Search Bar and Pinned Filter
                 <div class="flex items-center gap-3">
                     // Select-all checkbox
@@ -522,14 +520,9 @@ pub fn ChatsListPage() -> impl IntoView {
                         <Show
                             when=move || is_searching.get()
                             fallback=|| view! {
-                                <svg
-                                    class="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                >
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                                </svg>
+                                <span class="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground">
+                                    <Icon icon=icondata_lu::LuSearch width="16" height="16" />
+                                </span>
                             }
                         >
                             <Spinner class="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground" />
@@ -549,9 +542,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                 on:click=move |_| set_search_input.set(String::new())
                                 class="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
                             >
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
+                                <Icon icon=icondata_lu::LuX width="16" height="16" />
                             </button>
                         </Show>
                     </div>
@@ -561,7 +552,7 @@ pub fn ChatsListPage() -> impl IntoView {
                         on:click=move |_| set_show_pinned_only.update(|v| *v = !*v)
                         class=move || {
                             if show_pinned_only.get() {
-                                "p-2 rounded-lg transition-colors bg-accent text-foreground"
+                                "p-2 rounded-lg transition-colors bg-primary/10 text-primary border border-primary/20"
                             } else {
                                 "p-2 rounded-lg transition-colors bg-card border border-border text-muted-foreground hover:text-foreground hover:bg-secondary"
                             }
@@ -574,14 +565,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             }
                         }
                     >
-                        <svg
-                            class="w-4 h-4"
-                            fill=move || if show_pinned_only.get() { "currentColor" } else { "none" }
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                        >
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                        </svg>
+                        <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="16" height="16" />
                     </button>
                 </div>
 
@@ -637,9 +621,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             disabled=move || is_bulk_deleting.get()
                             class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-error-foreground bg-error/10 hover:bg-error/20 rounded-lg transition-colors disabled:opacity-50"
                         >
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
+                            <Icon icon=icondata_lu::LuTrash2 width="16" height="16" />
                             {move || if is_bulk_deleting.get() { "Deleting..." } else { "Delete" }}
                         </button>
                         <button
@@ -666,49 +648,42 @@ pub fn ChatsListPage() -> impl IntoView {
 
             // Chats List
             <div class="flex-1 overflow-y-auto p-4 md:p-6">
-                <Transition fallback=move || view! {
-                    <div class="flex items-center justify-center py-12">
-                        <div class="text-muted-foreground">"Loading chats..."</div>
-                    </div>
-                }>
+                <Transition fallback=move || view! { <ChatsLoadingSkeleton /> }>
                     {move || {
                         // Wait for user context to be available
                         let _user_ctx = user_ctx_resource.get();
 
                         if is_loading.get() {
-                            return view! {
-                                <div class="flex items-center justify-center py-12">
-                                    <div class="text-muted-foreground">"Loading chats..."</div>
-                                </div>
-                            }.into_any();
+                            return view! { <ChatsLoadingSkeleton /> }.into_any();
                         }
 
                         let current_sessions = sessions.get();
 
                         if current_sessions.is_empty() {
                             let searching = !search_input.get().is_empty();
-                            return view! {
-                                <div class="flex flex-col items-center justify-center py-12">
-                                    // Chat bubble icon
-                                    <svg class="w-16 h-16 text-muted-foreground/50 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                                    </svg>
-                                    <p class="text-muted-foreground text-lg mb-2">
-                                        {if searching { "No chats found" } else { "No chats yet" }}
-                                    </p>
-                                    <p class="text-muted-foreground text-sm mb-4">
-                                        {if searching { "Try a different search term" } else { "Start a new conversation to get started" }}
-                                    </p>
-                                    <Show when=move || !searching>
-                                        <a
-                                            href="/chat"
-                                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                                        >
-                                            "Start New Chat"
-                                        </a>
-                                    </Show>
-                                </div>
-                            }.into_any();
+                            return if searching {
+                                view! {
+                                    <EmptyState
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                                        title="No chats found"
+                                        description="Try a different search term"
+                                    />
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <EmptyState
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                                        title="No chats yet"
+                                        description="Start a new conversation to get started"
+                                        action=std::sync::Arc::new(|| view! {
+                                            <ButtonLink href="/chat">
+                                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                                "Start New Chat"
+                                            </ButtonLink>
+                                        }.into_any())
+                                    />
+                                }.into_any()
+                            };
                         }
 
                         let filtered = filtered_sessions();
@@ -717,13 +692,11 @@ pub fn ChatsListPage() -> impl IntoView {
 
                         if filtered.is_empty() {
                             return view! {
-                                <div class="flex flex-col items-center justify-center py-12 text-muted-foreground">
-                                    <svg class="w-16 h-16 mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                                    </svg>
-                                    <p class="text-lg font-medium">"No conversations found"</p>
-                                    <p class="text-sm mt-1">"Start a new chat to get started"</p>
-                                </div>
+                                <EmptyState
+                                    icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                                    title="No conversations found"
+                                    description="Try adjusting your filters or start a new chat"
+                                />
                             }.into_any();
                         }
 
@@ -858,9 +831,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                                                 class="opacity-0 group-hover:opacity-100 p-2 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded-lg transition-all"
                                                                 aria-label="Delete chat"
                                                             >
-                                                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                                                </svg>
+                                                                <Icon icon=icondata_lu::LuTrash2 width="18" height="18" />
                                                             </button>
                                                         })
                                                     } else {
@@ -919,6 +890,23 @@ enum PendingDelete {
     Bulk,
 }
 
+/// Loading skeleton matching chat list card layout.
+#[component]
+fn ChatsLoadingSkeleton() -> impl IntoView {
+    view! {
+        <div class="max-w-4xl mx-auto space-y-2">
+            {(0..6).map(|_| view! {
+                <div class="flex items-center gap-3 bg-card border border-border rounded-lg p-4">
+                    <div class="flex-1 min-w-0">
+                        <Skeleton class="h-5 w-2/5 mb-2" />
+                        <Skeleton class="h-4 w-1/4" />
+                    </div>
+                </div>
+            }).collect_view()}
+        </div>
+    }
+}
+
 /// A filter button in the toolbar — matches React's filter button styling.
 #[component]
 fn FilterButton(
@@ -937,7 +925,7 @@ fn FilterButton(
                 if active.get() {
                     "px-3 py-1.5 text-sm rounded-lg transition-colors bg-primary text-primary-foreground"
                 } else {
-                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-accent text-foreground hover:bg-secondary/80"
+                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-secondary text-foreground border border-border hover:bg-secondary/80"
                 }
             }
         >
