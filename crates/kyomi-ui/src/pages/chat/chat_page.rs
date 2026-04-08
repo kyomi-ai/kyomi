@@ -50,6 +50,7 @@ use crate::components::chat::{
     TokenUsage,
 };
 use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
+use crate::components::button::{Button, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{ConfirmDialog, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::chat::get_chart_context;
@@ -1947,37 +1948,40 @@ pub fn ChatPage() -> impl IntoView {
                                                     if is_slack_channel {
                                                         // Slack channel conversations cannot be made private
                                                         view! {
-                                                            <button
-                                                                disabled
-                                                                class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground opacity-50 cursor-not-allowed rounded-lg border border-border"
-                                                                title="Slack channel conversations are always shared with your team"
+                                                            <Button
+                                                                variant=ButtonVariant::Secondary
+                                                                size=ButtonSize::Sm
+                                                                disabled=true
+                                                                aria_label="Slack channel conversations are always shared with your team"
                                                             >
-                                                                <Icon icon=icondata_lu::LuLock width="16" height="16" />
+                                                                <Icon icon=icondata_lu::LuLock width="14" height="14" />
                                                                 <span class="hidden sm:inline">"Make Private"</span>
-                                                            </button>
+                                                            </Button>
                                                         }.into_any()
                                                     } else {
                                                         view! {
-                                                            <button
+                                                            <Button
+                                                                variant=ButtonVariant::Secondary
+                                                                size=ButtonSize::Sm
+                                                                aria_label="Make this conversation private"
                                                                 on:click=handle_unshare
-                                                                class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors border border-border"
-                                                                title="Make this conversation private"
                                                             >
-                                                                <Icon icon=icondata_lu::LuLock width="16" height="16" />
+                                                                <Icon icon=icondata_lu::LuLock width="14" height="14" />
                                                                 <span class="hidden sm:inline">"Make Private"</span>
-                                                            </button>
+                                                            </Button>
                                                         }.into_any()
                                                     }
                                                 } else {
                                                     view! {
-                                                        <button
+                                                        <Button
+                                                            variant=ButtonVariant::Secondary
+                                                            size=ButtonSize::Sm
+                                                            aria_label="Share this conversation with your workspace"
                                                             on:click=handle_share
-                                                            class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors border border-border"
-                                                            title="Share this conversation with your workspace"
                                                         >
-                                                            <Icon icon=icondata_lu::LuShare2 width="16" height="16" />
+                                                            <Icon icon=icondata_lu::LuShare2 width="14" height="14" />
                                                             <span class="hidden sm:inline">"Share"</span>
-                                                        </button>
+                                                        </Button>
                                                     }.into_any()
                                                 }
                                             }}
@@ -1986,21 +1990,15 @@ pub fn ChatPage() -> impl IntoView {
                                         // Pinned messages filter button
                                         // Matches React: Chat.jsx lines 1588-1609
                                         <Show when=move || current_session_id.get().is_some() && has_pinned.get()>
-                                            <button
+                                            <ToggleButton
+                                                variant=Signal::derive(move || if show_pinned_only.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                                size=ButtonSize::Sm
+                                                aria_label=MaybeProp::derive(move || Some(if show_pinned_only.get() { "Show all messages".to_string() } else { "Show only pinned messages".to_string() }))
                                                 on:click=move |_| set_show_pinned_only.update(|v| *v = !*v)
-                                                class=move || format!(
-                                                    "flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm {}",
-                                                    if show_pinned_only.get() {
-                                                        "bg-accent text-foreground"
-                                                    } else {
-                                                        "text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-                                                    }
-                                                )
-                                                aria-label=move || if show_pinned_only.get() { "Show all messages" } else { "Show only pinned messages" }
                                             >
-                                                <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="16" height="16" />
+                                                <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="14" height="14" />
                                                 <span>{move || if show_pinned_only.get() { "Pinned Only" } else { "Pinned" }}</span>
-                                            </button>
+                                            </ToggleButton>
                                         </Show>
                                     </div>
                             </div>
