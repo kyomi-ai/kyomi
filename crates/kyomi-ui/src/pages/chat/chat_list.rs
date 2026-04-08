@@ -816,11 +816,7 @@ pub fn ChatsListPage() -> impl IntoView {
                 </Transition>
             </div>
 
-            // Confirm Dialog — wrapped in a reactive closure so the title and
-            // message re-render with fresh signal values each time they change.
-            // ConfirmDialog accepts `title: String` and `message: String` (owned,
-            // non-reactive), so without this wrapper they would be captured once
-            // at mount time and stay blank forever.
+            // Confirm Dialog
             {move || {
                 let title = confirm_title.get();
                 let message = confirm_message.get();

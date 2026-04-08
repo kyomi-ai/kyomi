@@ -240,24 +240,6 @@ pub fn DashboardsListPage() -> impl IntoView {
         });
     };
 
-    // ── Confirm dialog derived signals ───────────────────────────────────
-    let confirm_title = move || {
-        deleting_dashboard
-            .get_untracked()
-            .map(|(_, _title)| "Delete Dashboard?".to_string())
-            .unwrap_or_else(|| "Delete Dashboard?".to_string())
-    };
-    let confirm_message = move || {
-        deleting_dashboard
-            .get_untracked()
-            .map(|(_, title)| {
-                format!(
-                    "Are you sure you want to delete \"{title}\"? This action cannot be undone."
-                )
-            })
-            .unwrap_or_default()
-    };
-
     // ── Filter dashboards by active collection ───────────────────────────
     let filtered_dashboards = move || -> Option<Result<Vec<DashboardListItem>, ServerFnError>> {
         let result = dashboards_resource.get()?;
@@ -556,31 +538,30 @@ pub fn DashboardsListPage() -> impl IntoView {
             // Confirm dialog for delete
             <ConfirmDialog
                 open=Signal::derive(move || confirm_open.get())
-                title=confirm_title()
-                message=confirm_message()
+                title=Signal::derive(move || "Delete Dashboard?".to_string())
+                message=Signal::derive(move || {
+                    deleting_dashboard.get()
+                        .map(|(_, title)| format!("Are you sure you want to delete \"{title}\"? This action cannot be undone."))
+                        .unwrap_or_default()
+                })
                 confirm_text="Delete"
                 on_confirm=on_confirm_delete
                 on_cancel=on_cancel_delete
             />
 
             // Confirm dialog for remove from collection
-            <Show when=move || remove_confirm_open.get()>
-                {move || {
-                    let msg = removing_info.get()
+            <ConfirmDialog
+                open=Signal::derive(move || remove_confirm_open.get())
+                title=Signal::derive(move || "Remove from Collection?".to_string())
+                message=Signal::derive(move || {
+                    removing_info.get()
                         .map(|(_, _, name)| format!("Remove this dashboard from \"{name}\"?"))
-                        .unwrap_or_default();
-                    view! {
-                        <ConfirmDialog
-                            open=Signal::derive(move || remove_confirm_open.get())
-                            title="Remove from Collection?"
-                            message=msg
-                            confirm_text="Remove"
-                            on_confirm=on_confirm_remove
-                            on_cancel=on_cancel_remove
-                        />
-                    }
-                }}
-            </Show>
+                        .unwrap_or_default()
+                })
+                confirm_text="Remove"
+                on_confirm=on_confirm_remove
+                on_cancel=on_cancel_remove
+            />
 
             // Add to Collection modal
             <AddToCollectionModal

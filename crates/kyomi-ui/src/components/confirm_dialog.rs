@@ -29,6 +29,9 @@
 use leptos::prelude::*;
 
 /// A confirmation dialog overlay.
+///
+/// All text props accept `Signal<String>` (or `String` via `MaybeProp`) so they
+/// re-read reactively when the dialog opens — no stale-render bugs.
 #[component]
 pub fn ConfirmDialog(
     /// Whether the dialog is open.
@@ -36,16 +39,16 @@ pub fn ConfirmDialog(
     open: Signal<bool>,
     /// Dialog title.
     #[prop(into)]
-    title: String,
+    title: MaybeProp<String>,
     /// Dialog message/description.
     #[prop(into)]
-    message: String,
+    message: MaybeProp<String>,
     /// Text for the confirm button.
-    #[prop(default = "Confirm".to_string(), into)]
-    confirm_text: String,
+    #[prop(into, optional)]
+    confirm_text: MaybeProp<String>,
     /// Text for the cancel button.
-    #[prop(default = "Cancel".to_string(), into)]
-    cancel_text: String,
+    #[prop(into, optional)]
+    cancel_text: MaybeProp<String>,
     /// If true, confirm button uses destructive (red) styling.
     #[prop(default = true)]
     destructive: bool,
@@ -81,26 +84,26 @@ pub fn ConfirmDialog(
                         id="confirm-dialog-title"
                         class="text-lg font-semibold text-foreground mb-2"
                     >
-                        {title.clone()}
+                        {move || title.get().unwrap_or_default()}
                     </h3>
                     <p
                         id="confirm-dialog-message"
                         class="text-sm text-muted-foreground mb-6"
                     >
-                        {message.clone()}
+                        {move || message.get().unwrap_or_default()}
                     </p>
                     <div class="flex justify-end gap-3">
                         <button
                             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
                             on:click=move |_| on_cancel.run(())
                         >
-                            {cancel_text.clone()}
+                            {move || cancel_text.get().unwrap_or_else(|| "Cancel".to_string())}
                         </button>
                         <button
                             class=confirm_btn_class
                             on:click=move |_| on_confirm.run(())
                         >
-                            {confirm_text.clone()}
+                            {move || confirm_text.get().unwrap_or_else(|| "Confirm".to_string())}
                         </button>
                     </div>
                 </div>

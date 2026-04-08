@@ -284,9 +284,7 @@ pub fn KnowledgePage() -> impl IntoView {
     // ── Derived signals for child components ────────────────────────────
     let selected_id = Signal::derive(move || selected_file.get().map(|f| f.id));
 
-    // Delete dialog title/message are derived fresh each time the dialog
-    // is shown, because ConfirmDialog takes owned Strings (not Signals).
-    // We wrap the dialog in a Show to re-mount it with correct props.
+    // Delete dialog title/message are derived reactively via MaybeProp<String>.
 
     // ── Render ──────────────────────────────────────────────────────────
     view! {
@@ -414,9 +412,7 @@ pub fn KnowledgePage() -> impl IntoView {
             </Show>
 
             // Delete confirm dialog — outer Show forces re-mount so String
-            // props (title/message) are freshly evaluated from delete_target
-            // each time a new delete is initiated. ConfirmDialog has its own
-            // inner Show for visibility, but String props are static per mount.
+            // Props are freshly evaluated from delete_target each time.
             <Show when=move || delete_open.get()>
                 {move || {
                     let target = delete_target.get();
