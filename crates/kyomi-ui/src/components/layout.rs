@@ -494,7 +494,8 @@ fn Sidebar(
 
             // ── User Account Section ───────────────────────────────────────
             // React: "border-t border-border px-3 py-4 relative"
-            <div class="border-t border-white/10 px-3 py-4 relative">
+            // py-2 (not py-4) — button has min-h-[44px] for touch targets, reduced padding compensates
+            <div class="border-t border-white/10 px-3 py-2 relative">
                 <Transition fallback=|| ()>
                     {move || user_info.get().map(|result| {
                         let user = match result {
@@ -528,7 +529,7 @@ fn Sidebar(
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
                                         "flex items-center w-full min-h-[44px] hover:bg-white/5 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
-                                        if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-2.5" }
+                                        if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-1" }
                                     )
                                 >
                                     <div class="w-6 h-6 bg-primary rounded-full flex items-center justify-center flex-shrink-0">

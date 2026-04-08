@@ -42,18 +42,19 @@
   ```
 - **Scale:**
 
-  | Token | Size | Usage |
-  |-------|------|-------|
-  | xs | 12px | Badges, timestamps, metadata, chart axis labels |
-  | sm | 14px | Labels, nav items, body small, table cells |
-  | base | 16px | Body text, paragraphs, descriptions |
-  | lg | 20px | Subheadings, card titles |
-  | xl | 24px | Section titles, dashboard section headings (Instrument Serif) |
-  | 2xl | 30px | Page titles (Instrument Serif) |
-  | 3xl | 36px | Hero headings (Instrument Serif) |
-  | 4xl | 48px | Display text, landing hero (Instrument Serif) |
-  | 5xl | 60px | Marketing hero (Instrument Serif) |
+  | Token | Size | Tailwind class | Usage |
+  |-------|------|---------------|-------|
+  | xs | 12px | `text-xs` | Badges, timestamps, metadata, chart axis labels |
+  | sm | 14px | `text-sm` | Labels, nav items, body small, table cells |
+  | base | 16px | `text-base` | Body text, paragraphs, descriptions |
+  | lg | 20px | `text-xl` | Subheadings, card titles |
+  | xl | 24px | `text-2xl` | Section titles, dashboard section headings (Instrument Serif) |
+  | 2xl | 30px | `text-3xl` | Page titles (Instrument Serif) |
+  | 3xl | 36px | `text-4xl` | Hero headings (Instrument Serif) |
+  | 4xl | 48px | `text-5xl` | Display text, landing hero (Instrument Serif) |
+  | 5xl | 60px | `text-6xl` | Marketing hero (Instrument Serif) |
 
+- **Tailwind mapping note:** The root font size is 15px (not the browser default 16px). Tailwind's rem-based classes produce smaller pixel values than their names suggest. Use the Tailwind class column above to hit the intended pixel sizes. For example, the design token "2xl = 30px" maps to Tailwind `text-3xl` (1.875rem * 15px = 28.125px, the closest match).
 - **Weight guidelines:** 400 for body, 500 for labels and emphasis, 600 for headings and buttons, 700 for logo text only
 
 ## Color

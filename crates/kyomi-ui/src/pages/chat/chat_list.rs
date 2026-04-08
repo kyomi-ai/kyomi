@@ -21,7 +21,7 @@ use leptos::prelude::*;
 
 use leptos_icons::Icon;
 
-use crate::components::button::{ButtonLink, ButtonSize};
+use crate::components::button::{ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, Skeleton, Spinner};
 use crate::server_fns::chat::{
     bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
@@ -492,7 +492,7 @@ pub fn ChatsListPage() -> impl IntoView {
         <div class="flex flex-col h-full bg-muted" style="flex-direction: column;">
             // Header
             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
-                <h1 class="text-2xl font-display text-foreground">"Chats"</h1>
+                <h1 class="text-3xl font-display text-foreground">"Chats"</h1>
 
                 // New Chat Button
                 <ButtonLink href="/chat" size=ButtonSize::Sm>
@@ -547,26 +547,15 @@ pub fn ChatsListPage() -> impl IntoView {
                         </Show>
                     </div>
 
-                    // Pinned Filter Button
-                    <button
+                    // Pinned Filter Toggle
+                    <ToggleButton
+                        variant=Signal::derive(move || if show_pinned_only.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                        size=ButtonSize::Icon
+                        aria_label=MaybeProp::derive(move || Some(if show_pinned_only.get() { "Show all chats".to_string() } else { "Show only pinned chats".to_string() }))
                         on:click=move |_| set_show_pinned_only.update(|v| *v = !*v)
-                        class=move || {
-                            if show_pinned_only.get() {
-                                "p-2 rounded-lg transition-colors bg-primary/10 text-primary border border-primary/20"
-                            } else {
-                                "p-2 rounded-lg transition-colors bg-card border border-border text-muted-foreground hover:text-foreground hover:bg-secondary"
-                            }
-                        }
-                        aria-label=move || {
-                            if show_pinned_only.get() {
-                                "Show all chats"
-                            } else {
-                                "Show only pinned chats"
-                            }
-                        }
                     >
                         <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="16" height="16" />
-                    </button>
+                    </ToggleButton>
                 </div>
 
                 // Filter Buttons OR Bulk Action Bar
@@ -593,21 +582,16 @@ pub fn ChatsListPage() -> impl IntoView {
                                         on_click=Callback::new(move |()| set_chat_filter.set(ChatFilter::SharedWithMe))
                                     />
                                 </Show>
-                                <button
-                                    on:click=move |_| set_chat_filter.set(ChatFilter::Slack)
-                                    class=move || {
-                                        if chat_filter.get() == ChatFilter::Slack {
-                                            "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground"
-                                        } else {
-                                            "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-accent text-foreground hover:bg-secondary/80"
-                                        }
-                                    }
-                                >
-                                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
-                                        <path d="M6 15a2 2 0 0 1-2 2a2 2 0 0 1-2-2a2 2 0 0 1 2-2h2v2zm1 0a2 2 0 0 1 2-2a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2a2 2 0 0 1-2-2v-5zm2-8a2 2 0 0 1-2-2a2 2 0 0 1 2-2a2 2 0 0 1 2 2v2H9zm0 1a2 2 0 0 1 2 2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2a2 2 0 0 1 2-2h5zm8 2a2 2 0 0 1 2-2a2 2 0 0 1 2 2a2 2 0 0 1-2 2h-2v-2zm-1 0a2 2 0 0 1-2 2a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2a2 2 0 0 1 2 2v5zm-2 8a2 2 0 0 1 2 2a2 2 0 0 1-2 2a2 2 0 0 1-2-2v-2h2zm0-1a2 2 0 0 1-2-2a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2a2 2 0 0 1-2 2h-5z"/>
-                                    </svg>
-                                    "Slack"
-                                </button>
+                                <FilterButton
+                                    label="Slack"
+                                    active=Signal::derive(move || chat_filter.get() == ChatFilter::Slack)
+                                    on_click=Callback::new(move |()| set_chat_filter.set(ChatFilter::Slack))
+                                    icon=std::sync::Arc::new(|| view! {
+                                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M6 15a2 2 0 0 1-2 2a2 2 0 0 1-2-2a2 2 0 0 1 2-2h2v2zm1 0a2 2 0 0 1 2-2a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2a2 2 0 0 1-2-2v-5zm2-8a2 2 0 0 1-2-2a2 2 0 0 1 2-2a2 2 0 0 1 2 2v2H9zm0 1a2 2 0 0 1 2 2a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2a2 2 0 0 1 2-2h5zm8 2a2 2 0 0 1 2-2a2 2 0 0 1 2 2a2 2 0 0 1-2 2h-2v-2zm-1 0a2 2 0 0 1-2 2a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2a2 2 0 0 1 2 2v5zm-2 8a2 2 0 0 1 2 2a2 2 0 0 1-2 2a2 2 0 0 1-2-2v-2h2zm0-1a2 2 0 0 1-2-2a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2a2 2 0 0 1-2 2h-5z"/>
+                                        </svg>
+                                    }.into_any())
+                                />
                             </div>
                         }
                     }
@@ -917,18 +901,22 @@ fn FilterButton(
     active: Signal<bool>,
     /// Called when clicked.
     on_click: Callback<()>,
+    /// Optional icon rendered before the label.
+    #[prop(optional)]
+    icon: Option<ChildrenFn>,
 ) -> impl IntoView {
     view! {
         <button
             on:click=move |_| on_click.run(())
             class=move || {
                 if active.get() {
-                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-primary text-primary-foreground"
+                    "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground"
                 } else {
-                    "px-3 py-1.5 text-sm rounded-lg transition-colors bg-secondary text-foreground border border-border hover:bg-secondary/80"
+                    "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-secondary text-foreground border border-border hover:bg-secondary/80"
                 }
             }
         >
+            {icon.map(|i| i())}
             {label}
         </button>
     }

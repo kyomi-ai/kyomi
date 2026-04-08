@@ -114,7 +114,7 @@ fn InlineEditableTitle(
                         <input
                             node_ref=input_ref
                             type="text"
-                            class="text-2xl font-display text-foreground bg-transparent border-b-2 border-primary outline-none w-full"
+                            class="text-3xl font-display text-foreground bg-transparent border-b-2 border-primary outline-none w-full"
                             prop:value=move || draft.get()
                             on:input=move |ev| set_draft.set(event_target_value(&ev))
                             on:blur=on_blur
@@ -124,7 +124,7 @@ fn InlineEditableTitle(
                 } else {
                     view! {
                         <span
-                            class="text-2xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block"
+                            class="text-3xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block"
                             on:click=start_editing
                             title="Click to edit title"
                         >
