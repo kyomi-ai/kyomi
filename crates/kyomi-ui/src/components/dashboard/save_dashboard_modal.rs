@@ -358,7 +358,7 @@ fn CreateNewOption(
         <div
             on:click=move |_| on_select.run(())
             class=move || {
-                if is_creating_new.get() {
+                if is_creating_new.try_get().unwrap_or_default() {
                     "border-2 rounded-lg p-4 transition-colors border-primary bg-primary/10 cursor-pointer"
                 } else {
                     "border-2 rounded-lg p-4 transition-colors border-border hover:border-input hover:bg-secondary cursor-pointer"
@@ -368,14 +368,14 @@ fn CreateNewOption(
             <div class="flex items-center gap-3">
                 // Icon container
                 <div class=move || {
-                    if is_creating_new.get() {
+                    if is_creating_new.try_get().unwrap_or_default() {
                         "flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center bg-primary"
                     } else {
                         "flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center bg-accent"
                     }
                 }>
                     {move || {
-                        let class = if is_creating_new.get() {
+                        let class = if is_creating_new.try_get().unwrap_or_default() {
                             "w-5 h-5 text-primary-foreground"
                         } else {
                             "w-5 h-5 text-muted-foreground"
@@ -396,7 +396,7 @@ fn CreateNewOption(
 
                 // Checkmark when selected
                 {move || {
-                    if is_creating_new.get() {
+                    if is_creating_new.try_get().unwrap_or_default() {
                         Some(check_circle_icon("w-5 h-5 text-primary flex-shrink-0"))
                     } else {
                         None
@@ -407,12 +407,12 @@ fn CreateNewOption(
             // Title input — shown when creating mode is active
             // React: "mt-4 pl-13" with input field
             {move || {
-                if is_creating_new.get() {
+                if is_creating_new.try_get().unwrap_or_default() {
                     Some(view! {
                         <div class="mt-4 pl-13">
                             <input
                                 type="text"
-                                prop:value=move || new_dashboard_title.get()
+                                prop:value=move || new_dashboard_title.try_get().unwrap_or_default()
                                 on:input=move |ev| {
                                     set_new_dashboard_title.set(event_target_value(&ev));
                                 }
@@ -431,7 +431,7 @@ fn CreateNewOption(
                                 placeholder="Enter dashboard title..."
                                 class=INPUT_CLASS
                                 autofocus=true
-                                disabled=move || is_saving.get()
+                                disabled=move || is_saving.try_get().unwrap_or_default()
                             />
                         </div>
                     })
