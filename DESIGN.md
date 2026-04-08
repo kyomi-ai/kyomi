@@ -54,7 +54,8 @@
   | 4xl | 48px | `text-5xl` | Display text, landing hero (Instrument Serif) |
   | 5xl | 60px | `text-6xl` | Marketing hero (Instrument Serif) |
 
-- **Tailwind mapping note:** The root font size is 15px (not the browser default 16px). Tailwind's rem-based classes produce smaller pixel values than their names suggest. Use the Tailwind class column above to hit the intended pixel sizes. For example, the design token "2xl = 30px" maps to Tailwind `text-3xl` (1.875rem * 15px = 28.125px, the closest match).
+- **Tailwind mapping note:** The root font size is 15px (not the browser default 16px). Tailwind's rem-based classes produce smaller pixel values than their names suggest. Use the Tailwind class column above to hit the intended pixel sizes. For example, the design token "2xl = 30px" maps to Tailwind `text-3xl` (1.875rem × 15px = 28.125px, the closest match).
+- **Rem override principle:** Any Tailwind default that uses rem and must hit a specific pixel value needs its `@theme` variable overridden in `main.css` to compensate for the 15px root. Container query breakpoints (`--container-3xl`, `--container-6xl`) are already overridden. If you add new rem-dependent breakpoints or sizing tokens, recalculate: `desired_px ÷ 15 = correct_rem`.
 - **Weight guidelines:** 400 for body, 500 for labels and emphasis, 600 for headings and buttons, 700 for logo text only
 
 ## Color
@@ -165,7 +166,7 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 - **Grid:** 12 columns on desktop (lg+), 1 column on mobile
 - **Max content width:** 1120px for marketing, 860px for dashboard prose, full-width for app shell
 - **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, navy-deep (#0F172A) background, navy (#1E3A5F) for hover/active states
-- **Content area:** Fills remaining width, scrollable, `bg-muted` (#FAFAF8)
+- **Content area:** Fills remaining width, scrollable, `bg-background` (#FAFAF8)
 
 ### Page Layout Pattern
 
@@ -173,17 +174,20 @@ The content area is one continuous warm surface. No visual separation between he
 
 ```
 ┌──────────┬──────────────────────────────────────────┐
-│          │ Page Title     [actions]    [primary btn] │  ← same bg-muted, no border
+│          │ Page Title     [actions]    [primary btn] │  ← bg-background, no border
 │  NAVY    │                                          │
-│  SIDEBAR │ [filters / tabs / toolbar]               │  ← same bg-muted, no border
+│  SIDEBAR │ [filters / tabs / toolbar]               │  ← bg-background, no border
 │          │                                          │
-│          │ Content cards / list items / data         │  ← same bg-muted
+│          │ Content cards / list items / data         │  ← bg-background
 │          │                                          │
 └──────────┴──────────────────────────────────────────┘
 ```
 
 **Rules:**
-- Header background: `bg-muted` (same as content). NOT `bg-card`.
+- Page wrapper and all content zones: `bg-background`. NOT `bg-muted`, NOT `bg-card`.
+- `bg-muted` is for alternate surfaces only (side panels, input bars, skeleton placeholders).
+- `bg-card` is for elevated surfaces (cards, modals, popovers, empty states).
+- Header uses `page-header` CSS class (sets `bg-background`, no `border-b`).
 - No `border-b` between header and content area.
 - Toggle buttons: selected state gets `ButtonVariant::Active` (amber tint: `bg-primary/10 text-primary border-primary/20`). Unselected state uses `ButtonVariant::Secondary`.
 - The only hard border is between the navy sidebar and the content area.
@@ -204,6 +208,31 @@ Every detail/viewer page MUST use this 4-zone vertical layout inside a `@contain
 │   └── Metadata row (flex items-center justify-between text-xs text-muted-foreground)
 └── Modals (rendered outside the flow)
 ```
+
+### List Page Pattern (Gold Standard: Chats, Dashboards)
+
+Every list/index page MUST use this 3-row header layout. The chats list and dashboards list are the reference implementations.
+
+```
+bg-background (flex flex-col h-full)
+├── Row 1: page-header (h-16 px-4 md:px-6 flex items-center justify-between)
+│   ├── Left: page title (text-3xl font-display)
+│   └── Right: action buttons (ButtonSize::Sm, labels hidden on mobile)
+├── Row 2: toolbar (bg-background px-4 md:px-6 py-3)
+│   ├── SearchInput (flex-1) — shared component
+│   └── Sort/filter controls
+├── Row 3: filter buttons (flex items-center gap-2 mt-3, inside Row 2 div)
+│   ├── "All" button (active = bg-primary text-primary-foreground)
+│   └── Category buttons (active same, inactive = bg-secondary border)
+├── Content area (flex-1 overflow-y-auto p-4 md:p-6)
+│   └── Grid or list of items
+└── Modals (rendered outside the flow)
+```
+
+**Key rules:**
+- `SearchInput` component for all search bars (consistent bg-card, icons, clear button)
+- Filter buttons use the active/inactive pattern from chat_list.rs (to be extracted to shared FilterButton component)
+- Sort preference persisted in localStorage where applicable
 
 ### Back Navigation
 
@@ -335,7 +364,7 @@ Page header action buttons use container queries with three tiers. The container
 |------|----------------|------------|----------------|
 | 1. Full buttons | `@6xl` (1280px+) | Icon + text label | `@6xl:inline` on label span |
 | 2. Icon-only buttons | `@3xl` (768px+) | Icon only, no labels | `hidden @3xl:flex` on button wrapper |
-| 3. Overflow menu | Below `@3xl` | Primary action + overflow kebab menu | `flex @3xl:hidden` on overflow menu |
+| 3. Overflow menu (optional) | Below `@3xl` | Primary action + overflow kebab menu | `flex @3xl:hidden` on overflow menu |
 
 The `@3xl` breakpoint (768px content) aligns with the sidebar collapse point. When the sidebar collapses on narrower viewports, the freed space lets toolbar buttons appear.
 
@@ -349,14 +378,14 @@ The `@3xl` breakpoint (768px content) aligns with the sidebar collapse point. Wh
   <Button size=Sm>icon + <span class="hidden @6xl:inline">label</span></Button>
 </div>
 
-<!-- Overflow: visible below @3xl only -->
+<!-- Overflow: visible below @3xl only (use when 3+ buttons would crowd the header) -->
 <div class="flex @3xl:hidden">
   <Button size=Icon>kebab</Button>
   <!-- dropdown with all actions -->
 </div>
 ```
 
-All pages with toolbar actions MUST follow this pattern.
+Tiers 1 and 2 (label visibility and button visibility) MUST be followed. Tier 3 (overflow menu) is optional — use it when the header has enough actions that icon-only buttons would still crowd the toolbar at narrow widths. For pages with only 1–2 action buttons, keeping them always visible as icon-only is preferred over an overflow menu.
 
 ### Border Radius
 
@@ -442,6 +471,7 @@ Components follow the shadcn/ui pattern. Shared components live in `crates/kyomi
 | ConfirmDialog | default, destructive | Yes/no confirmations |
 | Toast (Sonner) | success, error, warning, info, loading | Brief auto-dismiss notifications |
 | Skeleton | - | Loading placeholders |
+| SearchInput | - | Search bars with icon, clear button, optional spinner |
 
 ### Button Variants
 

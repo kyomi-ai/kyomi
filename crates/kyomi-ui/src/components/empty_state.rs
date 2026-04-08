@@ -47,7 +47,7 @@ impl EmptyStateVariant {
     /// React: `emptyStateVariants` in CVA config.
     fn container_class(self) -> &'static str {
         match self {
-            Self::Default => "bg-background border-border",
+            Self::Default => "bg-card border-border",
             Self::Warning => "bg-warning border-warning-border",
             Self::Error => "bg-error border-error-border",
             Self::Success => "bg-success border-success-border",
@@ -65,7 +65,7 @@ impl EmptyStateVariant {
             Self::Error => "text-error-foreground",
             Self::Success => "text-success-foreground",
             Self::Info => "text-info-foreground",
-            Self::Sidebar => "text-slate-500",
+            Self::Sidebar => "text-[var(--color-sidebar-foreground-secondary)]",
         }
     }
 
@@ -74,7 +74,7 @@ impl EmptyStateVariant {
     fn title_class(self) -> &'static str {
         match self {
             Self::Default => "text-foreground",
-            Self::Sidebar => "text-slate-300",
+            Self::Sidebar => "text-[var(--color-sidebar-foreground)]",
             other => other.text_class(),
         }
     }

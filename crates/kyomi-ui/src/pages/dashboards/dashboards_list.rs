@@ -14,12 +14,13 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{
-    Button, ButtonVariant, Card, CardContent, CardFooter, CardHeader, CardTitle,
-    ConfirmDialog, EmptyState, Spinner, StyledSelect,
+    Button, ButtonLink, ButtonSize, ButtonVariant, Card, CardContent, CardFooter,
+    CardHeader, CardTitle, ConfirmDialog, EmptyState, SearchInput, Skeleton,
+    Spinner, StyledSelect, ToggleButton,
 };
 use super::collections_sidebar::CollectionsSidebar;
 use crate::server_fns::collections::{
-    list_collections, CollectionItem,
+    list_collections, remove_dashboard_from_collection, CollectionItem,
 };
 use crate::server_fns::dashboards::{
     create_dashboard, delete_dashboard, list_dashboards, DashboardListItem,
@@ -131,8 +132,32 @@ pub fn DashboardsListPage() -> impl IntoView {
         });
     }
 
-    // ── Sort ─────────────────────────────────────────────────────────────
-    let (sort_signal, set_sort_signal) = signal("recent".to_string());
+    // ── Sort (persisted in localStorage) ───────────────────────────────
+    let initial_sort = {
+        #[cfg(target_arch = "wasm32")]
+        {
+            web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+                .and_then(|s| s.get_item("kyomi_dashboards_sort").ok().flatten())
+                .unwrap_or_else(|| "recent".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        { "recent".to_string() }
+    };
+    let (sort_signal, set_sort_signal) = signal(initial_sort);
+
+    // Persist sort preference on change
+    #[cfg(target_arch = "wasm32")]
+    {
+        Effect::new(move |_| {
+            let val = sort_signal.get();
+            if let Some(storage) = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item("kyomi_dashboards_sort", &val);
+            }
+        });
+    }
 
     // ── Data fetching ────────────────────────────────────────────────────
     let dashboards_resource = Resource::new(
@@ -171,6 +196,28 @@ pub fn DashboardsListPage() -> impl IntoView {
     // ── Add to collection ────────────────────────────────────────────────
     let (add_to_collection_dashboard, set_add_to_collection_dashboard) =
         signal(Option::<DashboardListItem>::None);
+
+    // ── Remove from collection ──────────────────────────────────────────
+    let (remove_confirm_open, set_remove_confirm_open) = signal(false);
+    let (removing_info, set_removing_info) =
+        signal(Option::<(String, String, String)>::None); // (collection_id, dashboard_id, collection_name)
+
+    let on_confirm_remove = Callback::new(move |()| {
+        set_remove_confirm_open.set(false);
+        if let Some((collection_id, dashboard_id, _)) = removing_info.get_untracked() {
+            leptos::task::spawn_local(async move {
+                if let Err(e) = remove_dashboard_from_collection(collection_id, dashboard_id).await {
+                    leptos::logging::error!("Failed to remove from collection: {e}");
+                }
+                collections_resource.refetch();
+            });
+        }
+    });
+
+    let on_cancel_remove = Callback::new(move |()| {
+        set_remove_confirm_open.set(false);
+        set_removing_info.set(None);
+    });
 
     // ── Create new dashboard ─────────────────────────────────────────────
     let (creating, set_creating) = signal(false);
@@ -289,69 +336,57 @@ pub fn DashboardsListPage() -> impl IntoView {
     }
 
     view! {
-        <div class="flex flex-col h-full bg-muted">
-            // Header
-            <div class="h-16 border-b border-border bg-card px-6 py-4 flex-shrink-0 flex flex-col sm:flex-row sm:items-center gap-3">
-                <h1 class="text-xl font-display text-foreground flex-shrink-0">
-                    {move || {
-                        if let Some(ref coll_id) = active_collection_id.get() {
-                            // Find collection name
-                            let name = collections_resource
-                                .get()
-                                .and_then(|r| r.ok())
-                                .and_then(|colls| {
-                                    colls.iter()
-                                        .find(|c| c.collection_id == *coll_id)
-                                        .map(|c| c.name.clone())
-                                });
-                            name.unwrap_or_else(|| "All Dashboards".to_string())
-                        } else {
-                            "All Dashboards".to_string()
-                        }
-                    }}
-                </h1>
+        <div class="flex flex-col h-full bg-background">
+            // Row 1: Title + action buttons (matches chats page pattern)
+            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                <h1 class="text-3xl font-display text-foreground">"Dashboards"</h1>
 
-                // Search and Sort Controls
-                <div class="flex-1 flex items-center gap-3 justify-start sm:justify-center">
-                    // Search Input
-                    <div class="relative flex-1 max-w-md search-container">
-                        <svg
-                            class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                        >
-                            <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                            />
-                        </svg>
-                        <input
-                            type="text"
-                            placeholder="Search dashboards..."
-                            class="w-full pl-10 pr-4 py-2 text-sm border border-input rounded-lg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-card text-foreground transition-colors"
-                            prop:value=move || search_input.get()
-                            on:input=move |ev| {
-                                set_search_input.set(event_target_value(&ev));
+                <div class="flex items-center gap-2">
+                    // Collections sidebar toggle
+                    <ToggleButton
+                        variant=Signal::derive(move || {
+                            if collections_open.get() {
+                                ButtonVariant::Active
+                            } else {
+                                ButtonVariant::Secondary
                             }
-                        />
-                        // Clear button
-                        <Show when=move || !search_input.get().is_empty()>
-                            <button
-                                class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                                aria-label="Clear search"
-                                on:click=move |_| set_search_input.set(String::new())
-                            >
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                </svg>
-                            </button>
-                        </Show>
-                    </div>
+                        })
+                        size=ButtonSize::Sm
+                        aria_label=MaybeProp::from(Some("Manage Collections".to_string()))
+                        on:click=move |_| set_collections_open.update(|v| *v = !*v)
+                    >
+                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                        </svg>
+                        <span class="hidden sm:inline">"Collections"</span>
+                    </ToggleButton>
 
-                    // Sort Dropdown
+                    // Create Dashboard
+                    <Button
+                        size=ButtonSize::Sm
+                        on:click=handle_create
+                        disabled=Signal::derive(move || creating.get())
+                    >
+                        <Show
+                            when=move || !creating.get()
+                            fallback=|| view! { <Spinner class="text-primary-foreground" /> }
+                        >
+                            <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                        </Show>
+                        <span class="hidden sm:inline whitespace-nowrap">"Create Dashboard"</span>
+                    </Button>
+                </div>
+            </div>
+
+            // Row 2: Search + sort (full-width, matches chats page pattern)
+            <div class="bg-background px-4 md:px-6 py-3 flex-shrink-0">
+                <div class="flex items-center gap-3">
+                    <SearchInput
+                        value=Signal::derive(move || search_input.get())
+                        on_input=Callback::new(move |val: String| set_search_input.set(val))
+                        placeholder="Search dashboards..."
+                        class="flex-1"
+                    />
                     <div class="w-40">
                         <StyledSelect
                             value=sort_signal.get_untracked()
@@ -365,41 +400,60 @@ pub fn DashboardsListPage() -> impl IntoView {
                     </div>
                 </div>
 
-                // Action buttons
-                <div class="flex items-center gap-3 flex-shrink-0">
-                    // Collections toggle button
+                // Row 3: Collection filter buttons
+                <div class="flex items-center gap-2 mt-3">
+                    // "All" filter
                     <button
+                        on:click=move |_| set_active_collection_id.set(None)
                         class=move || {
-                            if collections_open.get() {
-                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-primary/10 text-primary"
+                            if active_collection_id.get().is_none() {
+                                "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground"
                             } else {
-                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-secondary/80"
+                                "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-secondary text-foreground border border-border hover:bg-secondary/80"
                             }
                         }
-                        aria-label="Toggle Collections"
-                        on:click=move |_| set_collections_open.update(|v| *v = !*v)
                     >
-                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                        </svg>
-                        <span class="hidden sm:inline">"Collections"</span>
+                        "All"
                     </button>
 
-                    // Create Dashboard button
-                    <Button
-                        on:click=handle_create
-                        disabled=Signal::derive(move || creating.get())
-                    >
-                        <Show
-                            when=move || !creating.get()
-                            fallback=|| view! { <Spinner class="text-primary-foreground" /> }
-                        >
-                            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                            </svg>
-                        </Show>
-                        <span class="hidden sm:inline whitespace-nowrap">"Create Dashboard"</span>
-                    </Button>
+                    // One button per collection
+                    <Suspense fallback=|| ()>
+                        {move || {
+                            let colls = collections_resource.get()
+                                .and_then(|r| r.ok())
+                                .unwrap_or_default();
+
+                            colls.into_iter().map(|coll| {
+                                let coll_id = coll.collection_id.clone();
+                                let coll_id_check = coll_id.clone();
+                                let color = coll.color.clone().unwrap_or_else(|| "#d97706".to_string());
+                                let dot_style = format!("background-color: {color};");
+                                let name = coll.name.clone();
+
+                                view! {
+                                    <button
+                                        on:click=move |_| {
+                                            if active_collection_id.get_untracked().as_deref() == Some(&coll_id) {
+                                                set_active_collection_id.set(None);
+                                            } else {
+                                                set_active_collection_id.set(Some(coll_id.clone()));
+                                            }
+                                        }
+                                        class=move || {
+                                            if active_collection_id.get().as_deref() == Some(&coll_id_check) {
+                                                "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground"
+                                            } else {
+                                                "px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-secondary text-foreground border border-border hover:bg-secondary/80"
+                                            }
+                                        }
+                                    >
+                                        <div class="w-2 h-2 rounded-full flex-shrink-0" style=dot_style.clone() />
+                                        {name}
+                                    </button>
+                                }
+                            }).collect_view()
+                        }}
+                    </Suspense>
                 </div>
             </div>
 
@@ -409,8 +463,25 @@ pub fn DashboardsListPage() -> impl IntoView {
                 <div class="flex-1 overflow-y-auto">
                     <div class="p-4 md:p-6">
                         <Transition fallback=move || view! {
-                            <div class="flex items-center justify-center py-16">
-                                <Spinner class="h-8 w-8 text-muted-foreground" />
+                            <div class="w-full grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+                                {(0..6).map(|_| view! {
+                                    <Card class="bg-muted">
+                                        <CardHeader>
+                                            <Skeleton class="h-5 w-3/4" />
+                                        </CardHeader>
+                                        <CardContent>
+                                            <Skeleton class="h-4 w-full mb-2" />
+                                            <Skeleton class="h-4 w-2/3 mb-4" />
+                                            <Skeleton class="h-3 w-1/3" />
+                                        </CardContent>
+                                        <CardFooter>
+                                            <div class="flex gap-2 w-full">
+                                                <Skeleton class="h-10 flex-1" />
+                                                <Skeleton class="h-10 flex-1" />
+                                            </div>
+                                        </CardFooter>
+                                    </Card>
+                                }).collect_view()}
                             </div>
                         }>
                             {move || {
@@ -447,6 +518,10 @@ pub fn DashboardsListPage() -> impl IntoView {
                                                     })
                                                     on_add_to_collection=Callback::new(move |dashboard: DashboardListItem| {
                                                         set_add_to_collection_dashboard.set(Some(dashboard));
+                                                    })
+                                                    on_remove_from_collection=Callback::new(move |(coll_id, dash_id, coll_name): (String, String, String)| {
+                                                        set_removing_info.set(Some((coll_id, dash_id, coll_name)));
+                                                        set_remove_confirm_open.set(true);
                                                     })
                                                     on_collection_click=Callback::new(move |coll_id: String| {
                                                         if active_collection_id.get_untracked().as_deref() == Some(&coll_id) {
@@ -487,6 +562,25 @@ pub fn DashboardsListPage() -> impl IntoView {
                 on_confirm=on_confirm_delete
                 on_cancel=on_cancel_delete
             />
+
+            // Confirm dialog for remove from collection
+            <Show when=move || remove_confirm_open.get()>
+                {move || {
+                    let msg = removing_info.get()
+                        .map(|(_, _, name)| format!("Remove this dashboard from \"{name}\"?"))
+                        .unwrap_or_default();
+                    view! {
+                        <ConfirmDialog
+                            open=Signal::derive(move || remove_confirm_open.get())
+                            title="Remove from Collection?"
+                            message=msg
+                            confirm_text="Remove"
+                            on_confirm=on_confirm_remove
+                            on_cancel=on_cancel_remove
+                        />
+                    }
+                }}
+            </Show>
 
             // Add to Collection modal
             <AddToCollectionModal
@@ -554,9 +648,7 @@ fn DashboardsEmptyState(
                         description="Get started by creating your first markdown dashboard with embedded charts"
                         action=std::sync::Arc::new(move || view! {
                             <Button on:click=move |ev| on_create.run(ev)>
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                                </svg>
+                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
                                 "Create Your First Dashboard"
                             </Button>
                         }.into_any())
@@ -574,15 +666,14 @@ fn DashboardGrid(
     collections: Vec<CollectionItem>,
     on_delete: Callback<(String, String)>,
     on_add_to_collection: Callback<DashboardListItem>,
+    on_remove_from_collection: Callback<(String, String, String)>,
     on_collection_click: Callback<String>,
 ) -> impl IntoView {
+    let total_collection_count = collections.len();
     let collections = std::sync::Arc::new(collections);
     let items = dashboards
         .into_iter()
         .map(|dashboard| {
-
-
-
             // Find which collections this dashboard belongs to
             let dashboard_collections: Vec<CollectionItem> = collections
                 .iter()
@@ -594,12 +685,18 @@ fn DashboardGrid(
                 .cloned()
                 .collect();
 
+            // Show + icon only when there are collections the dashboard is NOT yet in
+            let has_available_collections =
+                dashboard_collections.len() < total_collection_count;
+
             view! {
                 <DashboardCard
                     dashboard=dashboard
                     collections=dashboard_collections
+                    has_available_collections=has_available_collections
                     on_delete=on_delete
                     on_add_to_collection=on_add_to_collection
+                    on_remove_from_collection=on_remove_from_collection
                     on_collection_click=on_collection_click
                 />
             }
@@ -613,21 +710,22 @@ fn DashboardGrid(
     }
 }
 
-/// A single dashboard card with hamburger menu.
+/// A single dashboard card with action icons.
 #[component]
 fn DashboardCard(
     dashboard: DashboardListItem,
     collections: Vec<CollectionItem>,
+    /// Whether there are collections the dashboard is NOT yet in.
+    #[prop(default = false)]
+    has_available_collections: bool,
     on_delete: Callback<(String, String)>,
     on_add_to_collection: Callback<DashboardListItem>,
+    on_remove_from_collection: Callback<(String, String, String)>,
     on_collection_click: Callback<String>,
 ) -> impl IntoView {
-    let (menu_open, set_menu_open) = signal(false);
-
     let view_href = format!("/dashboard/{}", dashboard.dashboard_id);
     let view_href_footer = view_href.clone();
     let edit_href = format!("/dashboard/{}/edit", dashboard.dashboard_id);
-    let edit_href_menu = edit_href.clone();
     let title = dashboard.title.clone();
     let delete_id = dashboard.dashboard_id.clone();
     let delete_title = dashboard.title.clone();
@@ -635,150 +733,52 @@ fn DashboardCard(
     let view_count = dashboard.view_count;
     let summary = dashboard.summary.clone();
 
+    let dashboard_id_for_badges = dashboard.dashboard_id.clone();
     let dashboard_for_add = dashboard.clone();
-
-    // Click-outside detection for hamburger menu
-    let menu_container_ref = NodeRef::<leptos::html::Div>::new();
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        use send_wrapper::SendWrapper;
-        use wasm_bindgen::prelude::*;
-
-        let cleanup: StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>> =
-            StoredValue::new(None);
-
-        Effect::new(move |_| {
-            // Clean up any previous listener
-            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
-                teardown.take()();
-            }
-
-            if menu_open.get() {
-                let window = web_sys::window().expect("window");
-                let container_el = menu_container_ref.get();
-
-                let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |ev: web_sys::Event| {
-                    if let Some(target) = ev.target() {
-                        let target_node: web_sys::Node = target.unchecked_into();
-                        if let Some(ref el) = container_el {
-                            let html_el: &web_sys::HtmlElement = el;
-                            let node: &web_sys::Node = html_el.as_ref();
-                            if !node.contains(Some(&target_node)) {
-                                set_menu_open.set(false);
-                            }
-                        } else {
-                            set_menu_open.set(false);
-                        }
-                    }
-                });
-
-                let _ = window.add_event_listener_with_callback_and_bool(
-                    "click",
-                    cb.as_ref().unchecked_ref(),
-                    true,
-                );
-
-                let window_clone = window.clone();
-                let cb_ref: js_sys::Function =
-                    cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-                let teardown: Box<dyn FnOnce()> = Box::new(move || {
-                    let _ = window_clone.remove_event_listener_with_callback_and_bool(
-                        "click",
-                        &cb_ref,
-                        true,
-                    );
-                    drop(cb);
-                });
-                cleanup.set_value(Some(SendWrapper::new(teardown)));
-            }
-        });
-
-        on_cleanup(move || {
-            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
-                teardown.take()();
-            }
-        });
-    }
 
     view! {
         <Card class="hover:border-primary/30 transition-colors duration-200 flex flex-col">
             <CardHeader>
-                <div class="flex items-start justify-between">
+                <div class="flex items-center justify-between">
                     <CardTitle class="text-xl flex-1 pr-2 line-clamp-2">
                         <a href=view_href.clone() class="hover:text-primary transition-colors">
                             {title}
                         </a>
                     </CardTitle>
                     <div class="flex gap-1">
-                        // Hamburger menu (3-dot)
-                        <div node_ref=menu_container_ref class="relative">
-                            <button
-                                class="flex-shrink-0 p-2 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors"
-                                aria-label="Dashboard actions"
-                                on:click=move |_| set_menu_open.update(|v| *v = !*v)
-                            >
-                                // Three-dot vertical icon
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-                                </svg>
-                            </button>
-
-                            // Dropdown menu
-                            <Show when=move || menu_open.get()>
-                                <div class="absolute right-0 top-full mt-1 z-50 min-w-[160px] rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1">
-                                    // Edit
-                                    <a
-                                        href=edit_href_menu.clone()
-                                        class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm hover:bg-secondary hover:text-accent-foreground transition-colors"
-                                    >
-                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                        </svg>
-                                        "Edit"
-                                    </a>
-                                    // Add to Collection
-                                    {
-                                        let dashboard_for_add = dashboard_for_add.clone();
-                                        view! {
-                                            <button
-                                                class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm hover:bg-secondary hover:text-accent-foreground transition-colors"
-                                                on:click=move |_| {
-                                                    set_menu_open.set(false);
-                                                    on_add_to_collection.run(dashboard_for_add.clone());
-                                                }
-                                            >
-                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-                                                </svg>
-                                                "Add to Collection"
-                                            </button>
-                                        }
-                                    }
-                                    // Divider
-                                    <div class="my-1 h-px bg-border" />
-                                    // Delete
-                                    {
-                                        let delete_id = delete_id.clone();
-                                        let delete_title = delete_title.clone();
-                                        view! {
-                                            <button
-                                                class="flex items-center gap-2 w-full px-3 py-2 text-sm rounded-sm text-destructive hover:bg-destructive/10 transition-colors"
-                                                on:click=move |_| {
-                                                    set_menu_open.set(false);
-                                                    on_delete.run((delete_id.clone(), delete_title.clone()));
-                                                }
-                                            >
-                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                                </svg>
-                                                "Delete"
-                                            </button>
-                                        }
-                                    }
-                                </div>
-                            </Show>
-                        </div>
+                        // Add to Collection — only when collections are available
+                        {if has_available_collections {
+                            let dashboard_for_add = dashboard_for_add.clone();
+                            Some(view! {
+                                <Button
+                                    variant=ButtonVariant::Ghost
+                                    size=ButtonSize::Icon
+                                    aria_label="Add to collection"
+                                    class="flex-shrink-0"
+                                    on:click=move |_| on_add_to_collection.run(dashboard_for_add.clone())
+                                >
+                                    <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                </Button>
+                            })
+                        } else {
+                            None
+                        }}
+                        // Delete
+                        {
+                            let delete_id = delete_id.clone();
+                            let delete_title = delete_title.clone();
+                            view! {
+                                <Button
+                                    variant=ButtonVariant::Ghost
+                                    size=ButtonSize::Icon
+                                    aria_label="Delete dashboard"
+                                    class="flex-shrink-0"
+                                    on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
+                                >
+                                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+                                </Button>
+                            }
+                        }
                     </div>
                 </div>
             </CardHeader>
@@ -801,14 +801,32 @@ fn DashboardCard(
                         let dot_color = format!("background-color: {color};");
                         let name = collection.name.clone();
                         let coll_id = collection.collection_id.clone();
+                        let coll_id_for_click = coll_id.clone();
+                        let coll_id_for_remove = coll_id.clone();
+                        let coll_name_for_remove = collection.name.clone();
+                        let dash_id_for_remove = dashboard_id_for_badges.clone();
                         view! {
                             <div
-                                class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium cursor-pointer hover:opacity-80 transition-opacity"
+                                class="group relative inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium cursor-pointer hover:opacity-80 transition-opacity"
                                 style=bg_color
-                                on:click=move |_| on_collection_click.run(coll_id.clone())
+                                on:click=move |_| on_collection_click.run(coll_id_for_click.clone())
                             >
                                 <div class="w-2 h-2 rounded-full" style=dot_color.clone() />
                                 {name}
+                                <button
+                                    class="ml-1 hover:bg-foreground/10 rounded-full p-0.5"
+                                    aria-label="Remove from collection"
+                                    on:click=move |ev: leptos::ev::MouseEvent| {
+                                        ev.stop_propagation();
+                                        on_remove_from_collection.run((
+                                            coll_id_for_remove.clone(),
+                                            dash_id_for_remove.clone(),
+                                            coll_name_for_remove.clone(),
+                                        ));
+                                    }
+                                >
+                                    <Icon icon=icondata_lu::LuX width="12" height="12" />
+                                </button>
                             </div>
                         }
                     }).collect_view();
@@ -825,21 +843,11 @@ fn DashboardCard(
                 // Metadata: time + view count
                 <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-auto">
                     <div class="flex items-center gap-1">
-                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
-                            />
-                        </svg>
+                        <Icon icon=icondata_lu::LuClock width="14" height="14" />
                         <span class="whitespace-nowrap">"Updated " {relative_time}</span>
                     </div>
                     <div class="flex items-center gap-1">
-                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                        </svg>
+                        <Icon icon=icondata_lu::LuEye width="14" height="14" />
                         <span class="whitespace-nowrap">{view_count}</span>
                     </div>
                 </div>
@@ -847,23 +855,14 @@ fn DashboardCard(
 
             <CardFooter>
                 <div class="flex gap-2 w-full">
-                    <a href=view_href_footer class="flex-1">
-                        <Button variant=ButtonVariant::Default class="w-full">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                            </svg>
-                            "View"
-                        </Button>
-                    </a>
-                    <a href=edit_href class="flex-1">
-                        <Button variant=ButtonVariant::Outline class="w-full">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                            </svg>
-                            "Edit"
-                        </Button>
-                    </a>
+                    <ButtonLink href=view_href_footer variant=ButtonVariant::Default class="w-full flex-1">
+                        <Icon icon=icondata_lu::LuEye width="14" height="14" />
+                        "View"
+                    </ButtonLink>
+                    <ButtonLink href=edit_href variant=ButtonVariant::Outline class="w-full flex-1">
+                        <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                        "Edit"
+                    </ButtonLink>
                 </div>
             </CardFooter>
         </Card>
@@ -916,14 +915,14 @@ fn AddToCollectionModal(
                             // Header
                             <div class="flex justify-between items-center p-6 border-b border-border">
                                 <h2 class="text-lg font-semibold text-foreground">"Add to Collection"</h2>
-                                <button
-                                    class="text-muted-foreground hover:text-foreground transition-colors"
+                                <Button
+                                    variant=ButtonVariant::Secondary
+                                    size=ButtonSize::Icon
                                     on:click=move |_| on_close.run(())
+                                    aria_label="Close"
                                 >
-                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                    </svg>
-                                </button>
+                                    <Icon icon=icondata_lu::LuX width="18" height="18" />
+                                </Button>
                             </div>
 
                             // Body
@@ -979,18 +978,14 @@ fn AddToCollectionModal(
                                                         {if is_public {
                                                             view! {
                                                                 <div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs bg-success/10 text-success-foreground">
-                                                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                                    </svg>
+                                                                    <Icon icon=icondata_lu::LuGlobe width="12" height="12" />
                                                                     "Public"
                                                                 </div>
                                                             }.into_any()
                                                         } else {
                                                             view! {
                                                                 <div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs bg-muted text-muted-foreground">
-                                                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                                                                    </svg>
+                                                                    <Icon icon=icondata_lu::LuLock width="12" height="12" />
                                                                     "Private"
                                                                 </div>
                                                             }.into_any()
@@ -1000,9 +995,9 @@ fn AddToCollectionModal(
                                                         view! { <p class="text-sm text-muted-foreground">{desc}</p> }
                                                     })}
                                                 </div>
-                                                <svg class="w-5 h-5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                                                </svg>
+                                                <div class="text-muted-foreground">
+                                                    <Icon icon=icondata_lu::LuChevronRight width="20" height="20" />
+                                                </div>
                                             </button>
                                         }
                                     }).collect_view();

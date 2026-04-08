@@ -14,9 +14,11 @@ html {
   --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
   --font-display: 'Instrument Serif', Georgia, serif;
 
-  /* Container query breakpoints for toolbar button visibility */
-  /* @3xl (768px) — show toolbar buttons (matches sidebar collapse point) */
-  /* @6xl (1280px) — show button text labels */
+  /* Container query breakpoints — adjusted for 15px root font size.
+   * Tailwind defaults are rem-based (designed for 16px root), so we
+   * override to hit the intended pixel widths at 15px root. */
+  --container-3xl: 51.2rem;   /* 768px at 15px root */
+  --container-6xl: 85.333rem; /* 1280px at 15px root */
 
   /* === Design System Color Tokens ===
    * Reference: DESIGN.md */
@@ -56,6 +58,16 @@ html {
   --color-info: #EFF6FF;
   --color-info-border: #BFDBFE;
   --color-info-foreground: #2563EB;
+
+  /* Sidebar — always dark navy, uses dark mode palette.
+   * Separate tokens so the sidebar can be re-skinned independently. */
+  --color-sidebar: #0F172A;
+  --color-sidebar-foreground: #F5F3EF;
+  --color-sidebar-foreground-secondary: #94A3B8;
+  --color-sidebar-foreground-muted: #64748B;
+  --color-sidebar-hover: rgba(255, 255, 255, 0.05);
+  --color-sidebar-active: #1E3A5F;
+  --color-sidebar-border: rgba(255, 255, 255, 0.1);
 
   --radius: 0.5rem;
   --radius-sm: 0.25rem;  /* 4px — inputs, buttons, chips */

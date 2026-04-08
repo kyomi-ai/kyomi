@@ -22,7 +22,7 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::button::{ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
-use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, Skeleton, Spinner};
+use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, SearchInput, Skeleton};
 use crate::server_fns::chat::{
     bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
 };
@@ -489,7 +489,7 @@ pub fn ChatsListPage() -> impl IntoView {
     };
 
     view! {
-        <div class="flex flex-col h-full bg-muted" style="flex-direction: column;">
+        <div class="flex flex-col h-full bg-background" style="flex-direction: column;">
             // Header
             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                 <h1 class="text-3xl font-display text-foreground">"Chats"</h1>
@@ -515,37 +515,13 @@ pub fn ChatsListPage() -> impl IntoView {
                         </div>
                     </Show>
 
-                    <div class="relative flex-1">
-                        // Search icon or spinner
-                        <Show
-                            when=move || is_searching.get()
-                            fallback=|| view! {
-                                <span class="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground">
-                                    <Icon icon=icondata_lu::LuSearch width="16" height="16" />
-                                </span>
-                            }
-                        >
-                            <Spinner class="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground" />
-                        </Show>
-                        <input
-                            type="text"
-                            prop:value=move || search_input.get()
-                            on:input=move |ev| {
-                                set_search_input.set(event_target_value(&ev));
-                            }
-                            placeholder="Search chats..."
-                            class="w-full pl-9 pr-9 py-2 text-sm border border-border rounded-lg bg-card text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        />
-                        // Clear button
-                        <Show when=move || !search_input.get().is_empty() && !is_searching.get()>
-                            <button
-                                on:click=move |_| set_search_input.set(String::new())
-                                class="absolute right-3 top-1/2 transform -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                            >
-                                <Icon icon=icondata_lu::LuX width="16" height="16" />
-                            </button>
-                        </Show>
-                    </div>
+                    <SearchInput
+                        value=Signal::derive(move || search_input.get())
+                        on_input=Callback::new(move |val: String| set_search_input.set(val))
+                        placeholder="Search chats..."
+                        searching=MaybeProp::derive(move || Some(is_searching.get()))
+                        class="flex-1"
+                    />
 
                     // Pinned Filter Toggle
                     <ToggleButton

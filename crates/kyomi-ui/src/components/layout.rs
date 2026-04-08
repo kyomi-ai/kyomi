@@ -332,7 +332,7 @@ fn Sidebar(
     // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {
         <div
-            class="bg-[#0F172A] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
+            class="bg-[var(--color-sidebar)] border-r border-[var(--color-sidebar-border)] text-[var(--color-sidebar-foreground)] flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
             style=move || {
                 let width = if is_mobile.get() {
                     "width: 20rem"
@@ -356,14 +356,14 @@ fn Sidebar(
         >
             // ── Header: collapse toggle + logo (hidden on mobile) ──────────
             // React: "hidden md:flex px-3 h-16 border-b border-border items-center justify-between"
-            <div class="hidden md:flex px-3 h-16 border-b border-white/10 items-center justify-between">
+            <div class="hidden md:flex px-3 h-16 border-b border-[var(--color-sidebar-border)] items-center justify-between">
                 <div class="flex items-center">
                     // Collapse toggle — React places this FIRST (left side)
                     <button
                         on:click=move |_| set_collapsed.update(|c| *c = !*c)
-                        class="p-3 hover:bg-white/5 rounded-md transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        class="p-3 hover:bg-[var(--color-sidebar-hover)] rounded-md transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
-                        <span class="text-slate-400"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
+                        <span class="text-[var(--color-sidebar-foreground-secondary)]"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
                     </button>
                     // Logo — full logo to the right of the toggle, fades when collapsed.
                     // React: kyomi_full_logo_white.svg at h-12 in expanded mode.
@@ -391,7 +391,7 @@ fn Sidebar(
                             if new_chat_active.get() {
                                 format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                             } else {
-                                format!("w-full min-h-[44px] flex items-center rounded-lg hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {spacing}")
+                                format!("w-full min-h-[44px] flex items-center rounded-lg hover:bg-[var(--color-sidebar-hover)] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {spacing}")
                             }
                         }
                     >
@@ -399,7 +399,7 @@ fn Sidebar(
                             <span class="text-primary-foreground"><Icon icon=icondata_lu::LuPlus width="12" height="12"/></span>
                         </div>
                         <span
-                            class="text-sm font-medium text-slate-200 whitespace-nowrap overflow-hidden transition-opacity duration-300"
+                            class="text-sm font-medium text-[var(--color-sidebar-foreground)] whitespace-nowrap overflow-hidden transition-opacity duration-300"
                             style=move || if collapsed.get() { "opacity: 0" } else { "opacity: 1" }
                         >
                             "New chat"
@@ -428,15 +428,15 @@ fn Sidebar(
                 // ── Recent Chats ───────────────────────────────────────────
                 // React: "border-t border-border pt-4 flex-1 flex flex-col min-h-0"
                 <div
-                    class="border-t border-white/10 pt-4 flex-1 flex flex-col min-h-0 transition-opacity duration-300"
+                    class="border-t border-[var(--color-sidebar-border)] pt-4 flex-1 flex flex-col min-h-0 transition-opacity duration-300"
                     style=move || if collapsed.get() { "opacity: 0; pointer-events: none" } else { "opacity: 1" }
                 >
                     <div class="flex items-center justify-between px-3 mb-2">
-                        <div class="text-xs text-slate-500 font-medium">"Recent Chats"</div>
+                        <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] font-medium">"Recent Chats"</div>
                     </div>
                     <div class="space-y-1 overflow-y-auto scrollbar-sidebar">
                         <Transition fallback=|| view! {
-                            <div class="text-xs text-slate-500 px-3 py-2 italic">"Loading..."</div>
+                            <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] px-3 py-2 italic">"Loading..."</div>
                         }>
                             {move || sessions.get().map(|result| match result {
                                 Ok(sessions) if sessions.is_empty() => view! {
@@ -467,7 +467,7 @@ fn Sidebar(
                                                             if active {
                                                                 "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-amber-500 bg-[rgba(217,119,6,0.12)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                             } else {
-                                                                "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-slate-300 hover:bg-white/5 truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                                                "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-[var(--color-sidebar-foreground)] hover:bg-[var(--color-sidebar-hover)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                             }
                                                         }
                                                     >
@@ -495,7 +495,7 @@ fn Sidebar(
             // ── User Account Section ───────────────────────────────────────
             // React: "border-t border-border px-3 py-4 relative"
             // py-2 (not py-4) — button has min-h-[44px] for touch targets, reduced padding compensates
-            <div class="border-t border-white/10 px-3 py-2 relative">
+            <div class="border-t border-[var(--color-sidebar-border)] px-3 py-2 relative">
                 <Transition fallback=|| ()>
                     {move || user_info.get().map(|result| {
                         let user = match result {
@@ -528,7 +528,7 @@ fn Sidebar(
                                 <button
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
-                                        "flex items-center w-full min-h-[44px] hover:bg-white/5 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
+                                        "flex items-center w-full min-h-[44px] hover:bg-[var(--color-sidebar-hover)] rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
                                         if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-1" }
                                     )
                                 >
@@ -543,15 +543,15 @@ fn Sidebar(
                                         class="flex-1 min-w-0 text-left overflow-hidden transition-[width,opacity] duration-300"
                                         style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
                                     >
-                                        <div class="text-sm font-medium text-slate-200 truncate">{display_name.clone()}</div>
+                                        <div class="text-sm font-medium text-[var(--color-sidebar-foreground)] truncate">{display_name.clone()}</div>
                                         {if !is_personal {
-                                            Some(view! { <div class="text-xs text-slate-500 truncate">{workspace.clone()}</div> })
+                                            Some(view! { <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] truncate">{workspace.clone()}</div> })
                                         } else {
                                             None
                                         }}
                                     </div>
                                     <span
-                                        class="text-slate-400 flex-shrink-0 transition-[opacity,width,transform] duration-300"
+                                        class="text-[var(--color-sidebar-foreground-secondary)] flex-shrink-0 transition-[opacity,width,transform] duration-300"
                                         style=move || {
                                             let visibility = if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" };
                                             let rotation = if user_menu_open.get() { "; transform: rotate(180deg)" } else { "; transform: rotate(0deg)" };
@@ -563,15 +563,15 @@ fn Sidebar(
                                 </button>
 
                                 // User menu dropdown — dark theme to match sidebar context.
-                                // React: dark popover with border-white/10, bg matching sidebar.
+                                // React: dark popover with border-[var(--color-sidebar-border)], bg matching sidebar.
                                 <Show when=move || user_menu_open.get()>
-                                    <div class="absolute bottom-full left-0 mb-2 bg-[#0F172A] border border-white/10 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 z-50 min-w-48">
+                                    <div class="absolute bottom-full left-0 mb-2 bg-[var(--color-sidebar)] border border-[var(--color-sidebar-border)] rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 z-50 min-w-48">
                                         // User info header — hide in personal mode
                                         {if !is_personal {
                                             Some(view! {
-                                                <div class="px-4 py-3 border-b border-white/10">
-                                                    <div class="text-sm font-medium text-slate-200">{display_name.clone()}</div>
-                                                    <div class="text-xs text-slate-500 truncate">{email.clone()}</div>
+                                                <div class="px-4 py-3 border-b border-[var(--color-sidebar-border)]">
+                                                    <div class="text-sm font-medium text-[var(--color-sidebar-foreground)]">{display_name.clone()}</div>
+                                                    <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] truncate">{email.clone()}</div>
                                                 </div>
                                             })
                                         } else {
@@ -579,7 +579,7 @@ fn Sidebar(
                                         }}
                                         <a
                                             href="/settings"
-                                            class="w-full text-left px-4 py-2 text-sm text-slate-300 transition-colors hover:bg-white/5 flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuSettings width="16" height="16"/>
                                             <span>"Settings"</span>
@@ -588,7 +588,7 @@ fn Sidebar(
                                             href="https://kyomi.ai/docs"
                                             target="_blank"
                                             rel="noopener noreferrer"
-                                            class="w-full text-left px-4 py-2 text-sm text-slate-300 transition-colors hover:bg-white/5 flex items-center space-x-3"
+                                            class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuBookOpen width="16" height="16"/>
                                             <span>"Help & Docs"</span>
@@ -623,7 +623,7 @@ fn Sidebar(
 /// A single navigation item in the sidebar.
 ///
 /// Navy sidebar styling:
-/// - Default: `text-slate-300`, `hover:bg-white/5`
+/// - Default: `text-[var(--color-sidebar-foreground)]`, `hover:bg-[var(--color-sidebar-hover)]`
 /// - Active: amber accent background `bg-[rgba(217,119,6,0.12)]` with `text-amber-500`
 /// - Collapsed: `gap-3 px-2.5`, Expanded: `gap-3 pl-2.5 pr-3 py-2.5`
 /// - Icon: inherits text color from parent `<a>`
@@ -663,7 +663,7 @@ fn NavItem(
                 if active {
                     format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                 } else {
-                    format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring hover:bg-white/5 text-slate-300 {spacing}")
+                    format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring hover:bg-[var(--color-sidebar-hover)] text-[var(--color-sidebar-foreground)] {spacing}")
                 }
             }
         >

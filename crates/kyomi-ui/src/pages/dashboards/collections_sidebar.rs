@@ -13,7 +13,12 @@ use leptos::prelude::*;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
-use crate::components::{ConfirmDialog, Label, Modal, ModalSize, Switch, INPUT_CLASS};
+use leptos_icons::Icon;
+
+use crate::components::{
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, Label, Modal, ModalSize,
+    Switch, INPUT_CLASS,
+};
 use crate::server_fns::collections::{
     create_collection, delete_collection, list_collections, update_collection, CollectionItem,
 };
@@ -46,73 +51,6 @@ const MAX_WIDTH: f64 = 480.0;
 /// Mobile breakpoint (matches React `window.innerWidth < 768`).
 const MOBILE_BREAKPOINT: f64 = 768.0;
 
-// ─── SVG icon helpers ───────────────────────────────────────────────────────
-
-/// Close X icon (w-5 h-5).
-/// React: `<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />`
-fn icon_close_5() -> impl IntoView {
-    view! {
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-        </svg>
-    }
-}
-
-/// Plus icon (w-4 h-4).
-/// React: `d="M12 4v16m8-8H4"`
-fn icon_plus_4() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-        </svg>
-    }
-}
-
-/// All dashboards icon (w-5 h-5) — grid/columns icon.
-/// React: `d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"`
-fn icon_all_dashboards() -> impl IntoView {
-    view! {
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2" />
-        </svg>
-    }
-}
-
-/// Globe icon (w-3 h-3) — public collections section header.
-fn icon_globe_3() -> impl IntoView {
-    view! {
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-    }
-}
-
-/// Lock icon (w-3 h-3) — private collections section header.
-fn icon_lock_3() -> impl IntoView {
-    view! {
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-        </svg>
-    }
-}
-
-/// Edit/pencil icon (w-4 h-4).
-fn icon_edit_4() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-        </svg>
-    }
-}
-
-/// Trash icon (w-4 h-4).
-fn icon_trash_4() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-        </svg>
-    }
-}
 
 // ─── Collection form data ───────────────────────────────────────────────────
 
@@ -244,33 +182,35 @@ fn CollectionRow(
                 />
                 // React: `flex-1 truncate`
                 <span class="flex-1 truncate">{name.clone()}</span>
-                // React: `text-sm text-muted-foreground`
-                <span class="text-sm text-muted-foreground">{count}</span>
+                <span class="text-sm text-muted-foreground group-hover:invisible">{count}</span>
             </button>
 
             // Quick Actions (visible on hover)
-            // React: `absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1`
             <div class="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-                <button
-                    class="p-1 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors"
-                    aria-label="Edit collection"
+                <Button
+                    variant=ButtonVariant::Ghost
+                    size=ButtonSize::Icon
+                    aria_label="Edit collection"
+                    class="h-7 w-7"
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();
                         on_edit.run(coll_for_edit.clone());
                     }
                 >
-                    {icon_edit_4()}
-                </button>
-                <button
-                    class="p-1 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded-md transition-colors"
-                    aria-label="Delete collection"
+                    <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                </Button>
+                <Button
+                    variant=ButtonVariant::Ghost
+                    size=ButtonSize::Icon
+                    aria_label="Delete collection"
+                    class="h-7 w-7"
                     on:click=move |ev: web_sys::MouseEvent| {
                         ev.stop_propagation();
                         on_delete.run(coll_for_delete.clone());
                     }
                 >
-                    {icon_trash_4()}
-                </button>
+                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+                </Button>
             </div>
         </div>
     }
@@ -297,24 +237,22 @@ fn CollectionList(
     let has_private = !private_collections.is_empty();
     let has_any = !collections.is_empty();
 
-    // React: `w-full flex items-center gap-3 px-4 py-3 text-left transition-colors ${!activeCollectionId ? 'bg-warning ...' : '...'}`
     let all_btn_class = move || {
         if active_collection_id.get().is_none() {
-            "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors bg-warning text-foreground font-medium"
+            "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors bg-primary/10 text-primary font-medium"
         } else {
             "w-full flex items-center gap-3 px-4 py-3 text-left transition-colors text-foreground hover:bg-secondary"
         }
     };
 
     view! {
-        // React: `flex-1 overflow-y-auto`
         <div class="flex-1 overflow-y-auto">
             // "All Dashboards" button
             <button
                 class=all_btn_class
                 on:click=move |_| on_all_click.run(())
             >
-                {icon_all_dashboards()}
+                <Icon icon=icondata_lu::LuLayoutDashboard width="18" height="18" />
                 <span class="flex-1">"All Dashboards"</span>
                 <span class="text-sm text-muted-foreground">{move || dashboard_count.get()}</span>
             </button>
@@ -329,7 +267,7 @@ fn CollectionList(
                             Some(view! {
                                 // React: `px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2`
                                 <div class="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                                    {icon_globe_3()}
+                                    <Icon icon=icondata_lu::LuGlobe width="12" height="12" />
                                     "Public Collections"
                                 </div>
                                 {public_collections.into_iter().map(|c| {
@@ -353,7 +291,7 @@ fn CollectionList(
                             Some(view! {
                                 // React: `px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2 mt-2`
                                 <div class="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2 mt-2">
-                                    {icon_lock_3()}
+                                    <Icon icon=icondata_lu::LuLock width="12" height="12" />
                                     "Private Collections"
                                 </div>
                                 {private_collections.into_iter().map(|c| {
@@ -389,27 +327,24 @@ fn SidebarHeader(
     on_new: Callback<()>,
 ) -> impl IntoView {
     view! {
-        // React: `p-4 border-b border-border flex items-center justify-between flex-shrink-0`
         <div class="p-4 border-b border-border flex items-center justify-between flex-shrink-0">
             <h3 class="font-semibold text-foreground">"Collections"</h3>
-            <button
-                class="p-1 text-muted-foreground hover:text-foreground rounded-md transition-colors"
-                aria-label="Close"
+            <Button
+                variant=ButtonVariant::Secondary
+                size=ButtonSize::Icon
+                aria_label="Close"
+                class="h-7 w-7"
                 on:click=move |_| on_close.run(())
             >
-                {icon_close_5()}
-            </button>
+                <Icon icon=icondata_lu::LuX width="16" height="16" />
+            </Button>
         </div>
 
-        // React: `flex-shrink-0 p-4 border-b border-border`
         <div class="flex-shrink-0 p-4 border-b border-border">
-            <button
-                class="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
-                on:click=move |_| on_new.run(())
-            >
-                {icon_plus_4()}
+            <Button class="w-full" on:click=move |_| on_new.run(())>
+                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
                 "New Collection"
-            </button>
+            </Button>
         </div>
     }
 }
@@ -573,22 +508,32 @@ fn CollectionModal(
     // Footer with Cancel + Submit buttons
     let footer: Arc<dyn Fn() -> AnyView + Send + Sync> = Arc::new(move || {
         view! {
-            // React: `flex gap-3 pt-4` — but we're inside the modal footer area so just provide the buttons
-            <button
-                type="button"
-                class="flex-1 px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-secondary/80 rounded-lg transition-colors"
+            <Button
+                variant=ButtonVariant::Secondary
+                class="flex-1"
                 on:click=move |_| on_close.run(())
             >
                 "Cancel"
-            </button>
-            <button
-                type="submit"
-                form="collection-form"
-                disabled=move || saving.get()
-                class="flex-1 inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
+            </Button>
+            <Button
+                class="flex-1"
+                disabled=Signal::derive(move || saving.get())
+                on:click=move |_| {
+                    // Trigger the form submit by dispatching a submit event
+                    #[cfg(target_arch = "wasm32")]
+                    if let Some(form) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id("collection-form"))
+                    {
+                        use wasm_bindgen::JsCast;
+                        if let Ok(form) = form.dyn_into::<web_sys::HtmlFormElement>() {
+                            let _ = form.request_submit();
+                        }
+                    }
+                }
             >
                 {move || if saving.get() { "Saving..." } else { submit_text }}
-            </button>
+            </Button>
         }.into_any()
     });
 

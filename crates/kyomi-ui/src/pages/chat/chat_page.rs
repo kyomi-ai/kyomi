@@ -1803,7 +1803,7 @@ pub fn ChatPage() -> impl IntoView {
             fallback=move || {
                 // Phase 12.2 — Personal mode without LLM configured
                 view! {
-                    <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
+                    <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
                         <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
                                 <Icon icon=icondata_lu::LuMessageSquare attr:class="text-primary" width="32" height="32" />
@@ -1828,7 +1828,7 @@ pub fn ChatPage() -> impl IntoView {
                 fallback=move || {
                     // Phase 12.1 — No datasources empty state
                     view! {
-                        <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
+                        <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
                             <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
                                     <Icon icon=icondata_lu::LuDatabase attr:class="text-primary" width="32" height="32" />
@@ -1845,7 +1845,7 @@ pub fn ChatPage() -> impl IntoView {
                     }
                 }
             >
-                <div class="flex flex-col h-full bg-muted overflow-x-hidden" style="flex-direction: column;">
+                <div class="flex flex-col h-full bg-background overflow-x-hidden" style="flex-direction: column;">
                     <div class="flex-1 flex flex-col overflow-hidden">
                         // Phase 9 — Chat Header (only shown when messages exist)
                         // Matches React: Chat.jsx lines 1467-1613
