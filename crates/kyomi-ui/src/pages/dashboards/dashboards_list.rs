@@ -442,10 +442,10 @@ pub fn DashboardsListPage() -> impl IntoView {
             // Content area
             <div class="flex flex-1 min-h-0">
                 // Main Content — Dashboards Grid
-                <div class="flex-1 overflow-y-auto">
+                <div class="flex-1 overflow-y-auto @container">
                     <div class="p-4 md:p-6">
                         <Transition fallback=move || view! {
-                            <div class="w-full grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+                            <div class="w-full grid gap-6 grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3">
                                 {(0..6).map(|_| view! {
                                     <Card class="bg-muted">
                                         <CardHeader>
@@ -685,7 +685,7 @@ fn DashboardGrid(
         .collect_view();
 
     view! {
-        <div class="w-full grid gap-6 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+        <div class="w-full grid gap-6 grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3">
             {items}
         </div>
     }
