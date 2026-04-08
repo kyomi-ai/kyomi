@@ -701,11 +701,11 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     </div>
 
                                     // Right: action buttons
-                                    <div class="flex items-center gap-1 @5xl:gap-2 flex-shrink-0">
+                                    <div class="flex items-center gap-1 @6xl:gap-2 flex-shrink-0">
                                         // Refresh All
                                         <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Refresh all charts" on:click=on_refresh_all>
                                             <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
-                                            <span class="hidden @5xl:inline whitespace-nowrap">"Refresh All"</span>
+                                            <span class="hidden @6xl:inline whitespace-nowrap">"Refresh All"</span>
                                         </Button>
 
                                         // Download PDF — visible when toolbar has room
@@ -715,7 +715,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                 <div class="hidden @3xl:flex">
                                                     <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Download PDF" disabled=Signal::derive(move || is_exporting.get()) on:click=on_download>
                                                         <Icon icon=icondata_lu::LuDownload width="14" height="14" />
-                                                        <span class="hidden @5xl:inline whitespace-nowrap">
+                                                        <span class="hidden @6xl:inline whitespace-nowrap">
                                                             {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
                                                         </span>
                                                     </Button>
@@ -732,7 +732,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                 on:click=move |_| set_history_open.update(|o| *o = !*o)
                                             >
                                                 <Icon icon=icondata_lu::LuClock width="14" height="14" />
-                                                <span class="hidden @5xl:inline whitespace-nowrap">"History"</span>
+                                                <span class="hidden @6xl:inline whitespace-nowrap">"History"</span>
                                             </ToggleButton>
                                         </div>
 
@@ -746,7 +746,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                 on:click=toggle_user_default
                                             >
                                                 <Icon icon=icondata_lu::LuStar width="14" height="14" />
-                                                <span class="hidden @5xl:inline whitespace-nowrap">
+                                                <span class="hidden @6xl:inline whitespace-nowrap">
                                                     {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
                                                 </span>
                                             </ToggleButton>
@@ -764,7 +764,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         on:click=toggle_ws_default
                                                     >
                                                         <Icon icon=icondata_lu::LuHouse width="14" height="14" />
-                                                        <span class="hidden @5xl:inline whitespace-nowrap">
+                                                        <span class="hidden @6xl:inline whitespace-nowrap">
                                                             {move || if is_workspace_default.get() { "Workspace Default" } else { "Set Workspace Default" }}
                                                         </span>
                                                     </ToggleButton>
@@ -842,7 +842,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         // Edit Dashboard — always visible (primary action)
                                         <ButtonLink href=edit_href size=ButtonSize::Sm>
                                             <Icon icon=icondata_lu::LuPencil width="14" height="14" />
-                                            <span class="hidden @5xl:inline whitespace-nowrap">"Edit Dashboard"</span>
+                                            <span class="hidden @6xl:inline whitespace-nowrap">"Edit Dashboard"</span>
                                         </ButtonLink>
                                     </div>
                                 </div>

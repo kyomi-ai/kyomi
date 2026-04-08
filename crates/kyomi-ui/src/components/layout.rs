@@ -330,7 +330,7 @@ fn Sidebar(
     // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {
         <div
-            class="bg-[#1E3A5F] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
+            class="bg-[#0F172A] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
             style=move || {
                 let width = if is_mobile.get() {
                     "width: 20rem"
@@ -432,7 +432,7 @@ fn Sidebar(
                     <div class="flex items-center justify-between px-3 mb-2">
                         <div class="text-xs text-slate-500 font-medium">"Recent Chats"</div>
                     </div>
-                    <div class="space-y-1 overflow-y-auto">
+                    <div class="space-y-1 overflow-y-auto scrollbar-sidebar">
                         <Transition fallback=|| view! {
                             <div class="text-xs text-slate-500 px-3 py-2 italic">"Loading..."</div>
                         }>
@@ -562,7 +562,7 @@ fn Sidebar(
                                 // User menu dropdown — dark theme to match sidebar context.
                                 // React: dark popover with border-white/10, bg matching sidebar.
                                 <Show when=move || user_menu_open.get()>
-                                    <div class="absolute bottom-full left-0 mb-2 bg-[--navy-deep] border border-white/10 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 z-50 min-w-48">
+                                    <div class="absolute bottom-full left-0 mb-2 bg-[#0F172A] border border-white/10 rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 z-50 min-w-48">
                                         // User info header — hide in personal mode
                                         {if !is_personal {
                                             Some(view! {

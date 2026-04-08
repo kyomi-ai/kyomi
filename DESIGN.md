@@ -67,8 +67,8 @@
 | `--accent` | #D97706 | Primary actions, links, active states, focus rings, brand |
 | `--accent-hover` | #B45309 | Hover state for primary actions |
 | `--accent-light` | #FEF3C7 | Light accent backgrounds, selected states |
-| `--navy` | #1E3A5F | Sidebar, dark surfaces |
-| `--navy-deep` | #0F172A | Sidebar deepest, hero backgrounds |
+| `--navy` | #1E3A5F | Dark surfaces, sidebar hover/active states |
+| `--navy-deep` | #0F172A | Sidebar background, hero backgrounds |
 
 ### Neutral Palette (Warm Grays)
 
@@ -163,7 +163,7 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 - **Approach:** Hybrid. Grid-disciplined for the application, creative-editorial for marketing/landing.
 - **Grid:** 12 columns on desktop (lg+), 1 column on mobile
 - **Max content width:** 1120px for marketing, 860px for dashboard prose, full-width for app shell
-- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, navy (#1E3A5F)
+- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, navy-deep (#0F172A) background, navy (#1E3A5F) for hover/active states
 - **Content area:** Fills remaining width, scrollable, `bg-muted` (#FAFAF8)
 
 ### Page Layout Pattern
@@ -195,7 +195,7 @@ Every detail/viewer page MUST use this 4-zone vertical layout inside a `@contain
 @container (flex flex-col h-full bg-background overflow-hidden @container)
 ├── Header bar (page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between)
 │   ├── Left: back button + title (flex items-center gap-4 flex-1 min-w-0 overflow-hidden)
-│   └── Right: toolbar buttons (flex items-center gap-1 @5xl:gap-2 flex-shrink-0)
+│   └── Right: toolbar buttons (flex items-center gap-1 @6xl:gap-2 flex-shrink-0)
 ├── Content area (flex-1 overflow-hidden flex)
 │   ├── Main scroll area (flex-1 overflow-y-auto p-4 md:p-6 bg-background)
 │   └── Optional: side panel (slides in from right, see Side Panel Pattern)
@@ -332,7 +332,7 @@ Page header action buttons use container queries with three tiers. The container
 
 | Tier | Container width | What shows | Tailwind class |
 |------|----------------|------------|----------------|
-| 1. Full buttons | `@5xl` (1024px+) | Icon + text label | `@5xl:inline` on label span |
+| 1. Full buttons | `@6xl` (1280px+) | Icon + text label | `@6xl:inline` on label span |
 | 2. Icon-only buttons | `@3xl` (768px+) | Icon only, no labels | `hidden @3xl:flex` on button wrapper |
 | 3. Overflow menu | Below `@3xl` | Primary action + overflow kebab menu | `flex @3xl:hidden` on overflow menu |
 
@@ -341,11 +341,11 @@ The `@3xl` breakpoint (768px content) aligns with the sidebar collapse point. Wh
 **Structure:**
 ```
 <!-- Always visible: primary action (e.g. Edit) + Refresh -->
-<Button size=Sm>icon + <span class="hidden @5xl:inline">label</span></Button>
+<Button size=Sm>icon + <span class="hidden @6xl:inline">label</span></Button>
 
-<!-- Show at @3xl, labels at @5xl -->
+<!-- Show at @3xl, labels at @6xl -->
 <div class="hidden @3xl:flex">
-  <Button size=Sm>icon + <span class="hidden @5xl:inline">label</span></Button>
+  <Button size=Sm>icon + <span class="hidden @6xl:inline">label</span></Button>
 </div>
 
 <!-- Overflow: visible below @3xl only -->
@@ -374,6 +374,21 @@ All pages with toolbar actions MUST follow this pattern.
 | `shadow-md` | `0 4px 12px rgba(28,25,23,0.08)` | Cards, dropdowns |
 | `shadow-lg` | `0 8px 24px rgba(28,25,23,0.12)` | Sheets, sidebars, dashboard frame |
 | (dark mode) | Use `rgba(0,0,0,0.2-0.4)` equivalents | Same hierarchy |
+
+### Scrollbars
+
+All scrollbars use `scrollbar-width: thin` and must match their container's background.
+
+| Context | Thumb | Track | CSS |
+|---------|-------|-------|-----|
+| Light mode (default) | `--color-border` (#E8E5DE) | transparent | Applied globally via `*` selector |
+| Dark mode | `#475569` (slate-600) | transparent | Via `.dark` selector |
+| Sidebar (always dark) | `rgba(255,255,255,0.15)` | transparent | `.scrollbar-sidebar` utility class |
+
+**Rules:**
+- Scrollbars must never contrast harshly against their container. A white scrollbar on a dark sidebar is a bug.
+- The sidebar is always dark regardless of theme, so it uses `.scrollbar-sidebar` instead of inheriting from the theme.
+- Add `.scrollbar-sidebar` to any scrollable element inside the navy sidebar.
 
 ## Motion
 

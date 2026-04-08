@@ -16,7 +16,7 @@ html {
 
   /* Container query breakpoints for toolbar button visibility */
   /* @3xl (768px) — show toolbar buttons (matches sidebar collapse point) */
-  /* @5xl (1024px) — show button text labels */
+  /* @6xl (1280px) — show button text labels */
 
   /* === Design System Color Tokens ===
    * Reference: DESIGN.md */
@@ -166,6 +166,26 @@ html {
 /* Footer metadata bar: same bg as content */
 .metadata-footer {
   background-color: var(--color-background);
+}
+
+/* ── Scrollbars ─────────────────────────────────────────────────────
+ * DESIGN.md: thin scrollbars that match their container's background.
+ * Light mode: border-color thumb on transparent track.
+ * Dark mode: slate thumb on transparent track.
+ * Sidebar (always dark): light-on-dark regardless of theme. */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+:where(.dark, .dark *) {
+  scrollbar-color: #475569 transparent;
+}
+
+/* Sidebar scrollbar — always dark navy context */
+.scrollbar-sidebar {
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
 /* ── Chart containers: white card treatment ─────────────────────────
