@@ -38,6 +38,7 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use leptos_router::components::Outlet;
 use leptos_router::hooks::{use_location, use_navigate};
 
@@ -1804,10 +1805,7 @@ pub fn ChatPage() -> impl IntoView {
                     <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
                         <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                // Chat bubble icon (matches React's Heroicons outline)
-                                <svg class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a5.969 5.969 0 0 1-.474-.065 4.48 4.48 0 0 0 .978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
-                                </svg>
+                                <Icon icon=icondata_lu::LuMessageSquare attr:class="text-primary" width="32" height="32" />
                             </div>
                             <h2 class="text-xl font-semibold text-foreground mb-3">
                                 "Chat requires an AI provider"
@@ -1843,10 +1841,7 @@ pub fn ChatPage() -> impl IntoView {
                         <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-muted">
                             <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                    // Database icon
-                                    <svg class="w-8 h-8 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
-                                    </svg>
+                                    <Icon icon=icondata_lu::LuDatabase attr:class="text-primary" width="32" height="32" />
                                 </div>
                                 <h2 class="text-xl font-semibold text-foreground mb-3">
                                     "Connect a data source to start chatting"
@@ -1957,10 +1952,7 @@ pub fn ChatPage() -> impl IntoView {
                                                                 class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground opacity-50 cursor-not-allowed rounded-lg border border-border"
                                                                 title="Slack channel conversations are always shared with your team"
                                                             >
-                                                                // Lock icon
-                                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                                                                </svg>
+                                                                <Icon icon=icondata_lu::LuLock width="16" height="16" />
                                                                 <span class="hidden sm:inline">"Make Private"</span>
                                                             </button>
                                                         }.into_any()
@@ -1971,10 +1963,7 @@ pub fn ChatPage() -> impl IntoView {
                                                                 class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors border border-border"
                                                                 title="Make this conversation private"
                                                             >
-                                                                // Lock icon
-                                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                                                                </svg>
+                                                                <Icon icon=icondata_lu::LuLock width="16" height="16" />
                                                                 <span class="hidden sm:inline">"Make Private"</span>
                                                             </button>
                                                         }.into_any()
@@ -1986,10 +1975,7 @@ pub fn ChatPage() -> impl IntoView {
                                                             class="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors border border-border"
                                                             title="Share this conversation with your workspace"
                                                         >
-                                                            // Share icon
-                                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
-                                                            </svg>
+                                                            <Icon icon=icondata_lu::LuShare2 width="16" height="16" />
                                                             <span class="hidden sm:inline">"Share"</span>
                                                         </button>
                                                     }.into_any()
@@ -2012,15 +1998,7 @@ pub fn ChatPage() -> impl IntoView {
                                                 )
                                                 aria-label=move || if show_pinned_only.get() { "Show all messages" } else { "Show only pinned messages" }
                                             >
-                                                // Star icon
-                                                <svg
-                                                    class="w-4 h-4"
-                                                    fill=move || if show_pinned_only.get() { "currentColor" } else { "none" }
-                                                    stroke="currentColor"
-                                                    viewBox="0 0 24 24"
-                                                >
-                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
-                                                </svg>
+                                                <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="16" height="16" />
                                                 <span>{move || if show_pinned_only.get() { "Pinned Only" } else { "Pinned" }}</span>
                                             </button>
                                         </Show>

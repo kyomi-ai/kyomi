@@ -273,9 +273,7 @@ pub fn ChatMessage(
                                     aria-label=move || if is_pinned.get() { "Unpin message" } else { "Pin message" }
                                     on:click=move |_| on_toggle_pin.run(message_id_for_pin.get_value())
                                 >
-                                    <span class=move || if is_pinned.get() { "[&_svg]:fill-current" } else { "" }>
-                                        <Icon icon=icondata_lu::LuStar width="16" height="16" />
-                                    </span>
+                                    <Icon icon=icondata_lu::LuStar attr:class=move || if is_pinned.get() { "fill-current" } else { "" } width="16" height="16" />
                                 </button>
                             </Tooltip>
                             <Tooltip content="Save to Dashboard">
