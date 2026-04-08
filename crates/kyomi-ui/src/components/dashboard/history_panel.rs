@@ -596,7 +596,7 @@ pub fn HistoryPanel(
                                                                                     on:click=move |ev| ev.stop_propagation()
                                                                                 >
                                                                                     <button
-                                                                                        class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors"
+                                                                                        class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                                                         title="Compare with previous"
                                                                                         disabled=move || is_diff_loading.get()
                                                                                         on:click=move |_| handle_view_diff_clone(prev_ver, cv_ver)
@@ -683,7 +683,7 @@ pub fn HistoryPanel(
                                                                             // Compare with previous historical version
                                                                             {prev_ver_num.map(|pv| view! {
                                                                                 <button
-                                                                                    class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors"
+                                                                                    class="p-1.5 text-muted-foreground hover:text-foreground hover:bg-secondary rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                                                     title="Compare with previous"
                                                                                     disabled=move || is_diff_loading.get()
                                                                                     on:click=move |_| handle_view_diff_clone(pv, ver_num)
@@ -695,7 +695,7 @@ pub fn HistoryPanel(
                                                                             // Compare with current version
                                                                             {current_ver_num.map(|cv| view! {
                                                                                 <button
-                                                                                    class="p-1.5 text-muted-foreground hover:text-primary hover:bg-secondary rounded-md transition-colors"
+                                                                                    class="p-1.5 text-muted-foreground hover:text-primary hover:bg-secondary rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                                                     title="Compare with current"
                                                                                     disabled=move || is_diff_loading.get()
                                                                                     on:click=move |_| handle_view_diff_clone2(ver_num, cv)
@@ -706,7 +706,7 @@ pub fn HistoryPanel(
 
                                                                             // Restore button
                                                                             <button
-                                                                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-primary/10 rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
                                                                                 title="Restore this version"
                                                                                 disabled=move || is_restoring.get()
                                                                                 on:click=move |_| set_confirm_version.set(Some(ver_num))

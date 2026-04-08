@@ -903,7 +903,7 @@ pub fn CopilotSidebar(
                                 class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| handle_close_backdrop()
                             />
-                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl transition-all duration-slow ease-in-out">
+                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl transition-transform duration-slow ease-in-out">
                                 {panel_content()}
                             </div>
                         </div>
@@ -918,7 +918,7 @@ pub fn CopilotSidebar(
                         if is_resizing.get() {
                             "border-l border-border bg-muted flex h-full overflow-hidden select-none"
                         } else {
-                            "border-l border-border bg-muted flex h-full overflow-hidden transition-all duration-slow ease-in-out"
+                            "border-l border-border bg-muted flex h-full overflow-hidden transition-[width] duration-slow ease-in-out"
                         }
                     };
 

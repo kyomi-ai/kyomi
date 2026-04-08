@@ -180,9 +180,9 @@ pub(crate) fn DashboardListEntry(
             class=move || {
                 let selected = selected_dashboard_id.get().as_deref() == Some(&*id_for_class);
                 if selected {
-                    "border-2 rounded-lg p-4 cursor-pointer transition-all border-primary bg-primary/10"
+                    "border-2 rounded-lg p-4 cursor-pointer transition-colors border-primary bg-primary/10"
                 } else {
-                    "border-2 rounded-lg p-4 cursor-pointer transition-all border-border hover:border-input hover:bg-secondary"
+                    "border-2 rounded-lg p-4 cursor-pointer transition-colors border-border hover:border-input hover:bg-secondary"
                 }
             }
         >

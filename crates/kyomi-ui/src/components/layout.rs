@@ -214,7 +214,7 @@ pub fn Layout(children: Children) -> impl IntoView {
                             mobile_open=mobile_open
                         />
                         <main
-                            class="flex-1 overflow-y-auto transition-all duration-300 ease-in-out"
+                            class="flex-1 overflow-y-auto transition-[margin] duration-300 ease-in-out"
                             style=move || {
                                 if is_mobile.get() {
                                     // Mobile: no sidebar margin, top padding for the fixed header
@@ -301,7 +301,7 @@ fn Sidebar(
     // + isMobile ? 'top-16 bottom-0' : 'inset-y-0'
     view! {
         <div
-            class="bg-[#0F172A] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-all duration-300 ease-in-out"
+            class="bg-[#0F172A] border-r border-white/10 text-slate-300 flex-col z-30 absolute left-0 shadow-lg transition-[width,transform] duration-300 ease-in-out"
             style=move || {
                 let width = if is_mobile.get() {
                     "width: 20rem"
@@ -330,13 +330,13 @@ fn Sidebar(
                     // Collapse toggle — React places this FIRST (left side)
                     <button
                         on:click=move |_| set_collapsed.update(|c| *c = !*c)
-                        class="p-2.5 hover:bg-white/5 rounded-md transition-colors flex-shrink-0"
+                        class="p-2.5 hover:bg-white/5 rounded-md transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
                         <span class="text-slate-400"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
                     </button>
                     // Logo — to the right of the toggle, fades when collapsed
                     <div
-                        class="flex items-center overflow-hidden transition-all duration-300"
+                        class="flex items-center overflow-hidden transition-[width,opacity] duration-300"
                         style=move || {
                             if collapsed.get() { "opacity: 0; width: 0; margin-left: 0" } else { "opacity: 1; margin-left: 0.5rem" }
                         }
@@ -360,9 +360,9 @@ fn Sidebar(
                         class=move || {
                             let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                             if new_chat_active.get() {
-                                format!("w-full h-10 flex items-center rounded-lg transition-colors bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                                format!("w-full h-10 flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                             } else {
-                                format!("w-full h-10 flex items-center rounded-lg hover:bg-white/5 transition-colors {spacing}")
+                                format!("w-full h-10 flex items-center rounded-lg hover:bg-white/5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {spacing}")
                             }
                         }
                     >
@@ -425,7 +425,7 @@ fn Sidebar(
                                     >
                                         <a
                                             href=format!("/chat/{}", session.session_id)
-                                            class="block px-3 py-2 rounded-lg cursor-pointer transition-all duration-300 text-sm text-slate-300 hover:bg-white/5 truncate"
+                                            class="block px-3 py-2.5 rounded-lg cursor-pointer transition-colors duration-300 text-sm text-slate-300 hover:bg-white/5 truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                         >
                                             {session.title.clone()}
                                         </a>
@@ -479,7 +479,7 @@ fn Sidebar(
                                 <button
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
-                                        "flex items-center w-full h-10 hover:bg-white/5 rounded-lg transition-colors {}",
+                                        "flex items-center w-full h-10 hover:bg-white/5 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
                                         if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-2.5" }
                                     )
                                 >
@@ -491,7 +491,7 @@ fn Sidebar(
                                         }}
                                     </div>
                                     <div
-                                        class="flex-1 min-w-0 text-left overflow-hidden transition-all duration-300"
+                                        class="flex-1 min-w-0 text-left overflow-hidden transition-[width,opacity] duration-300"
                                         style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
                                     >
                                         <div class="text-sm font-medium text-slate-200 truncate">{display_name.clone()}</div>
@@ -502,7 +502,7 @@ fn Sidebar(
                                         }}
                                     </div>
                                     <span
-                                        class="text-slate-400 flex-shrink-0 transition-all duration-300"
+                                        class="text-slate-400 flex-shrink-0 transition-[opacity,width] duration-300"
                                         style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
                                     >
                                         <Icon icon=icondata_lu::LuChevronDown width="16" height="16"/>
@@ -607,9 +607,9 @@ fn NavItem(
                 let active = is_active.get();
                 let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                 if active {
-                    format!("w-full h-10 flex items-center rounded-lg transition-colors bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
+                    format!("w-full h-10 flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                 } else {
-                    format!("w-full h-10 flex items-center rounded-lg transition-colors hover:bg-white/5 text-slate-300 {spacing}")
+                    format!("w-full h-10 flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring hover:bg-white/5 text-slate-300 {spacing}")
                 }
             }
         >

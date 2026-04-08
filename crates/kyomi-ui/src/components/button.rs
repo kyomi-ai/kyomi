@@ -34,8 +34,8 @@ pub enum ButtonSize {
 /// Base classes shared by all button variants.
 ///
 /// DESIGN.md: DM Sans 14px weight 600, rounded-md (8px), gap-1.5,
-/// transition-all 200ms, focus-visible ring-1, disabled states.
-const BASE: &str = "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:pointer-events-none [&_svg]:shrink-0";
+/// transition-colors 200ms, focus-visible ring-1, disabled states.
+const BASE: &str = "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-semibold transition-colors duration-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 disabled:cursor-not-allowed [&_svg]:pointer-events-none [&_svg]:shrink-0";
 
 fn variant_classes(variant: ButtonVariant) -> &'static str {
     match variant {
@@ -60,8 +60,8 @@ fn size_classes(size: ButtonSize) -> &'static str {
     match size {
         // Default: 10px 20px (py-2.5 px-5)
         ButtonSize::Default => "px-5 py-2.5",
-        // Small: 7px 14px (py-[7px] px-3.5), 13px font
-        ButtonSize::Sm => "px-3.5 py-[7px] text-[13px]",
+        // Small: 8px 14px (py-2 px-3.5), 13px font — py-2 gives ~36px height for touch accessibility
+        ButtonSize::Sm => "px-3.5 py-2 text-[13px]",
         // Large
         ButtonSize::Lg => "px-8 py-3",
         // Icon-only: square

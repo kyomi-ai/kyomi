@@ -153,7 +153,7 @@ Each palette contains 12 colors optimized for data visualization and colorblind 
 | Modal Content | `p-6` | - |
 | Modal Footer | `px-6 py-4` | `gap-2` |
 | Status Bars | `px-6 py-3.5` | `gap-4` |
-| Buttons | `px-5 py-2.5` (default), `px-3.5 py-[7px]` (small) | `gap-1.5` |
+| Buttons | `px-5 py-2.5` (default), `px-3.5 py-2` (small) | `gap-1.5` |
 | Input Fields | `px-3.5 py-2.5` | - |
 | Section Spacing | - | `gap-4` or `gap-6` |
 | Chart containers | `p-6` content, `px-5 py-4` header | - |
@@ -259,7 +259,7 @@ Components follow the shadcn/ui pattern. Shared components live in `crates/kyomi
 
 ### Button Variants
 
-All buttons share: DM Sans 14px weight 600, `rounded-md` (8px), `px-5 py-2.5`, `gap-1.5`, `transition-all duration-200`.
+All buttons share: DM Sans 14px weight 600, `rounded-md` (8px), `px-5 py-2.5`, `gap-1.5`, `transition-colors duration-200`.
 
 | Variant | Background | Text | Border | Hover |
 |---------|-----------|------|--------|-------|
@@ -269,7 +269,7 @@ All buttons share: DM Sans 14px weight 600, `rounded-md` (8px), `px-5 py-2.5`, `
 | Destructive | `--error-foreground` (#DC2626) | white | none | darken 10% |
 | Outline | transparent | `--text` | `1px solid --border` | `--surface-alt` |
 
-Small buttons: 13px font, `px-3.5 py-[7px]`.
+Small buttons: 13px font, `px-3.5 py-2` (~36px height at 15px root for touch accessibility).
 
 ### Dropdown Menus
 

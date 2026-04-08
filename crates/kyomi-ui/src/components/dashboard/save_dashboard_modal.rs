@@ -359,9 +359,9 @@ fn CreateNewOption(
             on:click=move |_| on_select.run(())
             class=move || {
                 if is_creating_new.get() {
-                    "border-2 rounded-lg p-4 transition-all border-primary bg-primary/10 cursor-pointer"
+                    "border-2 rounded-lg p-4 transition-colors border-primary bg-primary/10 cursor-pointer"
                 } else {
-                    "border-2 rounded-lg p-4 transition-all border-border hover:border-input hover:bg-secondary cursor-pointer"
+                    "border-2 rounded-lg p-4 transition-colors border-border hover:border-input hover:bg-secondary cursor-pointer"
                 }
             }
         >

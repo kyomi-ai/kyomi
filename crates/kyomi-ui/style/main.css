@@ -142,6 +142,11 @@ html {
   font-weight: 400;
 }
 
+/* DESIGN.md heading scale (rem-based, scales with 15px root) */
+.prose h1 { font-size: 2rem; }       /* 30px */
+.prose h2 { font-size: 1.6rem; }     /* 24px */
+.prose h3 { font-size: 1.333rem; }   /* 20px */
+
 /* Dashboard prose body: 15px, line-height 1.8 per DESIGN.md */
 .prose {
   font-size: 15px;

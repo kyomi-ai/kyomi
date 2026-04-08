@@ -206,7 +206,7 @@ fn ChartTypeSelector(
     view! {
         <div class="relative" node_ref=menu_ref>
             <button
-                class="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                class="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 on:click=move |_| set_open.update(|v| *v = !*v)
             >
                 {icons::chart_type_icon(&current.get_value())}
@@ -251,9 +251,9 @@ fn ModifierChip(
     on_toggle: Callback<()>,
 ) -> impl IntoView {
     let class = if active {
-        "px-2 py-0.5 text-xs font-medium rounded-full bg-accent text-foreground border border-border cursor-pointer transition-colors"
+        "px-2 py-0.5 text-xs font-medium rounded-full bg-accent text-foreground border border-border cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
     } else {
-        "px-2 py-0.5 text-xs font-medium rounded-full text-muted-foreground hover:bg-secondary/50 border border-transparent cursor-pointer transition-colors"
+        "px-2 py-0.5 text-xs font-medium rounded-full text-muted-foreground hover:bg-secondary/50 border border-transparent cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
     };
 
     view! {
@@ -491,9 +491,9 @@ pub fn ChartHeaderBar(
                             .map(|s| s.get())
                             .unwrap_or(false);
                         if spinning {
-                            "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors animate-spin"
+                            "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring animate-spin"
                         } else {
-                            "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                            "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                         }
                     };
                     view! {
@@ -512,7 +512,7 @@ pub fn ChartHeaderBar(
                     let cb = on_save_to_dashboard.unwrap();
                     view! {
                         <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                             title="Save to Dashboard"
                             on:click=move |_| cb.run(())
                         >
@@ -526,7 +526,7 @@ pub fn ChartHeaderBar(
                     let cb = on_ask_about.unwrap();
                     view! {
                         <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                             title="Ask about this chart"
                             on:click=move |_| cb.run(())
                         >
@@ -540,7 +540,7 @@ pub fn ChartHeaderBar(
                     let cb = on_info.unwrap();
                     view! {
                         <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                             title="Chart Info"
                             on:click=move |_| cb.run(())
                         >
@@ -557,7 +557,7 @@ pub fn ChartHeaderBar(
                     view! {
                         <div class="relative" node_ref=menu_ref>
                             <button
-                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                 title="Actions"
                                 on:click=move |_| set_menu_open.update(|v| *v = !*v)
                             >

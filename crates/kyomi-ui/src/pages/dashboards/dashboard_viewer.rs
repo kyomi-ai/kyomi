@@ -22,7 +22,7 @@ use leptos_router::hooks::use_params_map;
 use crate::components::dashboard::{
     ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters, SaveDashboardModal,
 };
-use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
+use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
 use leptos_icons::Icon;
@@ -902,19 +902,37 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         }.into_any()
                                                     } else if params_initialized.get() || is_previewing {
                                                         view! {
-                                                            <MarkdownRenderer
-                                                                content=display_content
-                                                                parameters=Signal::derive(move || param_values.get())
-                                                                on_save_to_dashboard=on_save_to_dashboard
-                                                                on_chart_info=on_chart_info
-                                                                on_ask_about_chart=on_ask_about_chart
-                                                                chart_palette=chart_palette.clone()
-                                                            />
+                                                            <div class="animate-fade-in">
+                                                                <MarkdownRenderer
+                                                                    content=display_content
+                                                                    parameters=Signal::derive(move || param_values.get())
+                                                                    on_save_to_dashboard=on_save_to_dashboard
+                                                                    on_chart_info=on_chart_info
+                                                                    on_ask_about_chart=on_ask_about_chart
+                                                                    chart_palette=chart_palette.clone()
+                                                                />
+                                                            </div>
                                                         }.into_any()
                                                     } else {
                                                         view! {
-                                                            <div class="flex h-64 items-center justify-center">
-                                                                <Spinner class="h-8 w-8 text-muted-foreground" />
+                                                            <div class="space-y-6 max-w-[860px]">
+                                                                // Heading skeleton
+                                                                <Skeleton class="h-8 w-2/5" />
+                                                                // Description skeleton
+                                                                <Skeleton class="h-4 w-3/5" />
+                                                                // Chart area skeleton
+                                                                <div class="border border-border rounded-md">
+                                                                    <div class="px-5 py-4 border-b border-border flex items-center justify-between">
+                                                                        <Skeleton class="h-4 w-1/4" />
+                                                                        <Skeleton class="h-4 w-16" />
+                                                                    </div>
+                                                                    <div class="p-6">
+                                                                        <Skeleton class="h-48 w-full" />
+                                                                    </div>
+                                                                </div>
+                                                                // Second section heading
+                                                                <Skeleton class="h-6 w-1/3" />
+                                                                <Skeleton class="h-4 w-2/5" />
                                                             </div>
                                                         }.into_any()
                                                     }

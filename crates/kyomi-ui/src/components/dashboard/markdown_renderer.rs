@@ -300,6 +300,8 @@ fn markdown_to_html(markdown: &str) -> String {
     let parser = pulldown_cmark::Parser::new_ext(markdown, options);
     let mut html_output = String::new();
     pulldown_cmark::html::push_html(&mut html_output, parser);
+    // Add loading="lazy" to all images for performance
+    html_output = html_output.replace("<img ", "<img loading=\"lazy\" ");
     html_output
 }
 
@@ -450,7 +452,7 @@ fn CodeBlockView(
             // Copy button
             <button
                 on:click=on_copy
-                class="absolute top-2 right-2 p-1.5 rounded-md bg-accent hover:bg-secondary/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                class="absolute top-2 right-2 p-1.5 rounded-md bg-accent hover:bg-secondary/80 opacity-0 group-hover:opacity-100 transition-opacity z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:opacity-100"
                 title=move || if copied.get() { "Copied!" } else { "Copy code" }
             >
                 {move || {
