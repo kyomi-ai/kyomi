@@ -218,17 +218,16 @@ pub fn AgentThinking(
     {
         let is_expanded = is_expanded;
         let events_len = thinking_events.len();
-        let thinking_end_ref = thinking_end_ref;
 
         Effect::new(move |_| {
             if is_expanded.get() && events_len > 0 {
-                // Use try_read_untracked to avoid panicking if AgentThinking is
-                // unmounted before this Effect's microtask runs.
-                if let Some(guard) = thinking_end_ref.try_read_untracked() {
+                // Scroll the inner container to the bottom — NOT the page.
+                // Using scrollIntoView on the sentinel would scroll the entire
+                // page, which is jarring. Instead, set scrollTop on the
+                // overflow container directly.
+                if let Some(guard) = scroll_container_ref.try_read_untracked() {
                     if let Some(el) = guard.as_ref() {
-                        let opts = web_sys::ScrollIntoViewOptions::new();
-                        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                        el.scroll_into_view_with_scroll_into_view_options(&opts);
+                        el.set_scroll_top(el.scroll_height());
                     }
                 }
             }
