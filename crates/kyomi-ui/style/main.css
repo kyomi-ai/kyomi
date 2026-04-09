@@ -487,17 +487,15 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 }
 
 /* ── kode toolbar overrides ─────────────────────────────────────────
- * Match React TiptapDashboardEditor.jsx toolbar styling.
- * Uses doubled class selectors for specificity over kode's <style>. */
+ * Toolbar bg, border, padding, and content font/line-height are set via
+ * the kode Theme API in code_editor.rs. These remaining overrides handle
+ * toolbar layout details and button styling not yet in the Theme API. */
 
 .kode-toolbar.kode-toolbar {
-  padding: 12px;
   gap: 4px;
   font-family: inherit;
   overflow-x: auto;
   overflow-y: hidden;
-  background-color: color-mix(in oklab, var(--color-muted) 50%, transparent);
-  border-bottom: 1px solid var(--color-border);
   flex-wrap: nowrap;
   scrollbar-width: thin;
   scrollbar-color: var(--color-border) transparent;
@@ -528,40 +526,22 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   color: var(--color-primary-foreground);
 }
 
-.kode-toolbar-button-secondary {
-  background: var(--color-secondary);
-  color: var(--color-secondary-foreground);
-  border: none;
-}
-
-.kode-toolbar-button-secondary:hover {
-  background: color-mix(in srgb, var(--color-secondary) 90%, black);
-}
-
 .kode-toolbar-separator.kode-toolbar-separator {
   height: 16px;
   margin: 0 4px;
 }
 
 /* ── kode wysiwyg container overrides ──────────────────────────────
- * Remove padding from the wysiwyg-container so the toolbar stretches
- * edge-to-edge of the parent card. Content padding is applied to the
- * scroll container instead. */
+ * Container padding is zeroed so the toolbar stretches edge-to-edge.
+ * Content padding/font/line-height are set via Theme API. */
 
 .wysiwyg-container.wysiwyg-container {
   padding: 0;
 }
 
-.tree-wysiwyg-scroll-container.tree-wysiwyg-scroll-container {
-  padding: 1.5rem;          /* 24px — matches viewer p-6 and source preview */
-  font-family: var(--font-sans);
-  line-height: 1.8;
-}
-
-/* WYSIWYG headings: match dashboard viewer prose (Instrument Serif, weight 400).
- * Double selector beats kode's single .wysiwyg-heading { font-weight: 700 }. */
+/* WYSIWYG heading sizes and weight — not yet in Theme API.
+ * Matches dashboard viewer prose headings (DESIGN.md). */
 .wysiwyg-heading.wysiwyg-heading {
-  font-family: var(--font-display);
   font-weight: 400;
 }
 .wysiwyg-h1.wysiwyg-h1 {
@@ -576,11 +556,6 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 }
 .wysiwyg-h3.wysiwyg-h3 {
   font-size: 1.333rem;      /* 20px — matches .prose h3 */
-}
-
-/* WYSIWYG code blocks & inline code: Geist Mono */
-.wysiwyg-inline-code, .wysiwyg-code-block code {
-  font-family: var(--font-mono);
 }
 
 
