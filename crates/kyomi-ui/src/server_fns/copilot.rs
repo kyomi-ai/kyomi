@@ -248,6 +248,7 @@ pub async fn send_copilot_message(
     let spawn_session_id = session_id.clone();
     let spawn_assistant_message_id = assistant_message_id.clone();
     let spawn_context_type = context_type.to_string();
+    let spawn_cancel_registry = cancel_registry;
 
     tokio::spawn(async move {
         let result = kyomi_agent::execute_agent_chat(
@@ -293,34 +294,34 @@ pub async fn send_copilot_message(
                 let error_text = format!(
                     "I encountered an error while processing your request: {e}"
                 );
+                let error_metadata = serde_json::json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                });
                 let _ = kyomi_auth::chat_service::update_message(
                     &db,
                     &encryption_key,
                     &spawn_assistant_message_id,
                     Some(&error_text),
-                    Some(&serde_json::json!({
-                        "status": "error",
-                        "error": e.to_string(),
-                    })),
+                    Some(&error_metadata),
                 )
                 .await;
 
-                kyomi_agent::deliver_response(
+                // Send error event (not deliver_response) — matches chat.rs pattern.
+                kyomi_auth::websocket::helpers::send_error(
                     &ws_manager,
                     &spawn_user_id,
-                    &spawn_session_id,
-                    &spawn_assistant_message_id,
-                    &error_text,
-                    kyomi_agent::DEFAULT_MODEL,
-                    None,
-                    &spawn_context_type,
-                    None,
-                    None,
-                    None,
+                    Some(&spawn_session_id),
+                    &format!("AI processing failed: {e}"),
+                    Some("agent_error"),
+                    Some(&spawn_context_type),
                 )
                 .await;
             }
         }
+
+        // Clean up cancel token so it doesn't leak.
+        spawn_cancel_registry.remove(&spawn_user_id, &spawn_session_id);
     });
 
     tracing::info!(
