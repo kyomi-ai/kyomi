@@ -486,76 +486,14 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   --kode-code-fg: var(--color-foreground);
 }
 
-/* ── kode toolbar overrides ─────────────────────────────────────────
- * Toolbar bg, border, padding, and content font/line-height are set via
- * the kode Theme API in code_editor.rs. These remaining overrides handle
- * toolbar layout details and button styling not yet in the Theme API. */
+/* ── kode theming ──────────────────────────────────────────────────
+ * All kode styling is handled via the Theme API in code_editor.rs.
+ * Heading font-sizes are set as CSS variables (no Theme struct field yet). */
 
-.kode-toolbar.kode-toolbar {
-  gap: 4px;
-  font-family: inherit;
-  overflow-x: auto;
-  overflow-y: hidden;
-  flex-wrap: nowrap;
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
-}
-
-.kode-toolbar-button.kode-toolbar-button {
-  padding: 4px 8px;
-  font-size: 12px;
-  font-family: inherit;
-  border-radius: 4px;
-  border: none;
-  gap: 4px;
-  color: var(--color-foreground);
-}
-
-.kode-toolbar-button.kode-toolbar-button:hover {
-  background: var(--color-accent);
-  color: var(--color-foreground);
-}
-
-.kode-toolbar-button.kode-toolbar-button.active {
-  background: var(--color-primary);
-  color: var(--color-primary-foreground);
-}
-
-.kode-toolbar-button.kode-toolbar-button.active:hover {
-  background: var(--color-primary);
-  color: var(--color-primary-foreground);
-}
-
-.kode-toolbar-separator.kode-toolbar-separator {
-  height: 16px;
-  margin: 0 4px;
-}
-
-/* ── kode wysiwyg container overrides ──────────────────────────────
- * Container padding is zeroed so the toolbar stretches edge-to-edge.
- * Content padding/font/line-height are set via Theme API. */
-
-.wysiwyg-container.wysiwyg-container {
-  padding: 0;
-}
-
-/* WYSIWYG heading sizes and weight — not yet in Theme API.
- * Matches dashboard viewer prose headings (DESIGN.md). */
-.wysiwyg-heading.wysiwyg-heading {
-  font-weight: 400;
-}
-.wysiwyg-h1.wysiwyg-h1 {
-  font-size: 2rem;          /* 30px — matches .prose h1 */
-  border-bottom: none;
-  padding-bottom: 0;
-}
-.wysiwyg-h2.wysiwyg-h2 {
-  font-size: 1.6rem;        /* 24px — matches .prose h2 */
-  border-bottom: none;
-  padding-bottom: 0;
-}
-.wysiwyg-h3.wysiwyg-h3 {
-  font-size: 1.333rem;      /* 20px — matches .prose h3 */
+.kode-editor, .wysiwyg-container {
+  --kode-h1-font-size: 2rem;          /* 30px — matches .prose h1 */
+  --kode-h2-font-size: 1.6rem;        /* 24px — matches .prose h2 */
+  --kode-h3-font-size: 1.333rem;      /* 20px — matches .prose h3 */
 }
 
 

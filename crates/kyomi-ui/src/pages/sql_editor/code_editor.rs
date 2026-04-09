@@ -31,111 +31,81 @@ use super::status_bar::{DryRunStatus, StatusBar};
 /// so the editor automatically adapts when colors change. Only `selection`,
 /// `current_line`, and `syntax` differ between dark/light.
 
-/// Shared typography and toolbar settings for both themes.
+/// Apply Kyomi design system overrides to a kode theme.
+/// Sets CSS custom property references for colors, typography, toolbar, and headings.
 #[cfg(target_arch = "wasm32")]
-const KYOMI_TYPOGRAPHY: KyomiTypography = KyomiTypography {
-    content_font_family: "'DM Sans', system-ui, sans-serif",
-    heading_font_family: "'Instrument Serif', Georgia, serif",
-    code_font_family: "'Geist Mono', ui-monospace, monospace",
-    toolbar_bg: "color-mix(in oklab, var(--color-muted) 50%, transparent)",
-    toolbar_border_color: "var(--color-border)",
-    toolbar_padding: "12px",
-    content_padding: "1.5rem",
-    content_max_width: "100%",
-    content_line_height: "1.8",
-};
-
-#[cfg(target_arch = "wasm32")]
-struct KyomiTypography {
-    content_font_family: &'static str,
-    heading_font_family: &'static str,
-    code_font_family: &'static str,
-    toolbar_bg: &'static str,
-    toolbar_border_color: &'static str,
-    toolbar_padding: &'static str,
-    content_padding: &'static str,
-    content_max_width: &'static str,
-    content_line_height: &'static str,
+fn apply_kyomi_overrides(theme: &mut kode_leptos::Theme) {
+    // Core colors — CSS vars adapt to light/dark automatically
+    theme.bg = "var(--color-card)";
+    theme.fg = "var(--color-foreground)";
+    theme.fg_bright = "var(--color-foreground)";
+    theme.fg_dim = "var(--color-muted-foreground)";
+    theme.cursor = "var(--color-foreground)";
+    theme.gutter_fg = "var(--color-muted-foreground)";
+    theme.gutter_border = "var(--color-border)";
+    theme.border = "var(--color-border)";
+    theme.accent = "var(--color-primary)";
+    theme.marker_error = "var(--color-error-foreground)";
+    theme.marker_warning = "var(--color-warning-foreground)";
+    theme.marker_info = "var(--color-info-foreground)";
+    theme.marker_hint = "var(--color-muted-foreground)";
+    theme.code_fg = "var(--color-foreground)";
+    theme.link = "var(--color-primary)";
+    // Typography
+    theme.content_font_family = Some("'DM Sans', system-ui, sans-serif");
+    theme.heading_font_family = Some("'Instrument Serif', Georgia, serif");
+    theme.code_font_family = Some("'Geist Mono', ui-monospace, monospace");
+    // Toolbar — layout and styling
+    theme.toolbar_bg = Some("color-mix(in oklab, var(--color-muted) 50%, transparent)");
+    theme.toolbar_border_color = Some("var(--color-border)");
+    theme.toolbar_padding = Some("12px");
+    theme.toolbar_gap = Some("4px");
+    theme.toolbar_wrap = Some("nowrap");
+    theme.toolbar_scrollbar_color = Some("var(--color-border) transparent");
+    // Toolbar buttons
+    theme.toolbar_button_padding = Some("4px 8px");
+    theme.toolbar_button_font_size = Some("12px");
+    theme.toolbar_button_gap = Some("4px");
+    theme.toolbar_button_border = Some("none");
+    theme.toolbar_button_hover_bg = Some("var(--color-accent)");
+    theme.toolbar_button_selected_bg = Some("var(--color-primary)");
+    theme.toolbar_button_selected_color = Some("var(--color-primary-foreground)");
+    // Toolbar separator
+    theme.toolbar_separator_height = Some("16px");
+    theme.toolbar_separator_margin = Some("0 4px");
+    // Content area
+    theme.content_padding = Some("1.5rem");
+    theme.content_max_width = Some("100%");
+    theme.content_line_height = Some("1.8");
+    theme.container_padding = Some("0");
+    // Headings — Instrument Serif is weight 400, no border-bottom
+    theme.heading_font_weight = Some("400");
+    theme.h1_border_width = Some("0");
+    theme.h2_border_width = Some("0");
 }
 
 #[cfg(target_arch = "wasm32")]
 fn kyomi_dark_theme() -> kode_leptos::Theme {
-    kode_leptos::Theme {
-        bg: "var(--color-card)",
-        fg: "var(--color-foreground)",
-        fg_bright: "var(--color-foreground)",
-        fg_dim: "var(--color-muted-foreground)",
-        cursor: "var(--color-foreground)",
-        selection: "rgba(59, 89, 152, 0.6)",
-        current_line: "color-mix(in oklab, var(--color-border) 50%, transparent)",
-        gutter_fg: "var(--color-muted-foreground)",
-        gutter_border: "var(--color-border)",
-        border: "var(--color-border)",
-        accent: "var(--color-primary)",
-        bg_highlight: "var(--color-border)",
-        bg_hover: "color-mix(in oklab, var(--color-border) 80%, white)",
-        marker_error: "var(--color-error-foreground)",
-        marker_warning: "var(--color-warning-foreground)",
-        marker_info: "var(--color-info-foreground)",
-        marker_hint: "var(--color-muted-foreground)",
-        code_fg: "var(--color-foreground)",
-        link: "var(--color-primary)",
-        syntax: kode_leptos::SyntaxTheme::OneDark,
-        // Typography + toolbar via Theme API (replaces CSS overrides)
-        font_family: None,
-        font_size: None,
-        content_font_family: Some(KYOMI_TYPOGRAPHY.content_font_family),
-        heading_font_family: Some(KYOMI_TYPOGRAPHY.heading_font_family),
-        code_font_family: Some(KYOMI_TYPOGRAPHY.code_font_family),
-        toolbar_bg: Some(KYOMI_TYPOGRAPHY.toolbar_bg),
-        toolbar_border_color: Some(KYOMI_TYPOGRAPHY.toolbar_border_color),
-        toolbar_padding: Some(KYOMI_TYPOGRAPHY.toolbar_padding),
-        toolbar_button_height: None,
-        toolbar_button_border_radius: None,
-        content_padding: Some(KYOMI_TYPOGRAPHY.content_padding),
-        content_max_width: Some(KYOMI_TYPOGRAPHY.content_max_width),
-        content_line_height: Some(KYOMI_TYPOGRAPHY.content_line_height),
-    }
+    let mut theme = kode_leptos::Theme::dark();
+    apply_kyomi_overrides(&mut theme);
+    theme.selection = "rgba(59, 89, 152, 0.6)";
+    theme.current_line = "color-mix(in oklab, var(--color-border) 50%, transparent)";
+    theme.bg_highlight = "var(--color-border)";
+    theme.bg_hover = "color-mix(in oklab, var(--color-border) 80%, white)";
+    theme.syntax = kode_leptos::SyntaxTheme::OneDark;
+    theme
 }
 
 #[cfg(target_arch = "wasm32")]
 fn kyomi_light_theme() -> kode_leptos::Theme {
-    kode_leptos::Theme {
-        bg: "var(--color-card)",
-        fg: "var(--color-foreground)",
-        fg_bright: "var(--color-foreground)",
-        fg_dim: "var(--color-muted-foreground)",
-        cursor: "var(--color-foreground)",
-        selection: "rgba(201, 214, 232, 0.6)",
-        current_line: "color-mix(in oklab, var(--color-muted) 50%, transparent)",
-        gutter_fg: "var(--color-muted-foreground)",
-        gutter_border: "var(--color-border)",
-        border: "var(--color-border)",
-        accent: "var(--color-primary)",
-        bg_highlight: "var(--color-muted)",
-        bg_hover: "var(--color-secondary)",
-        marker_error: "var(--color-error-foreground)",
-        marker_warning: "var(--color-warning-foreground)",
-        marker_info: "var(--color-info-foreground)",
-        marker_hint: "var(--color-muted-foreground)",
-        code_fg: "var(--color-foreground)",
-        link: "var(--color-primary)",
-        syntax: kode_leptos::SyntaxTheme::GithubLight,
-        // Typography + toolbar via Theme API (replaces CSS overrides)
-        font_family: None,
-        font_size: None,
-        content_font_family: Some(KYOMI_TYPOGRAPHY.content_font_family),
-        heading_font_family: Some(KYOMI_TYPOGRAPHY.heading_font_family),
-        code_font_family: Some(KYOMI_TYPOGRAPHY.code_font_family),
-        toolbar_bg: Some(KYOMI_TYPOGRAPHY.toolbar_bg),
-        toolbar_border_color: Some(KYOMI_TYPOGRAPHY.toolbar_border_color),
-        toolbar_padding: Some(KYOMI_TYPOGRAPHY.toolbar_padding),
-        toolbar_button_height: None,
-        toolbar_button_border_radius: None,
-        content_padding: Some(KYOMI_TYPOGRAPHY.content_padding),
-        content_max_width: Some(KYOMI_TYPOGRAPHY.content_max_width),
-        content_line_height: Some(KYOMI_TYPOGRAPHY.content_line_height),
-    }
+    let mut theme = kode_leptos::Theme::light();
+    apply_kyomi_overrides(&mut theme);
+    theme.selection = "rgba(201, 214, 232, 0.6)";
+    theme.current_line = "color-mix(in oklab, var(--color-muted) 50%, transparent)";
+    theme.bg_highlight = "var(--color-muted)";
+    theme.bg_hover = "var(--color-secondary)";
+    theme.syntax = kode_leptos::SyntaxTheme::GithubLight;
+    theme
 }
 
 /// Returns a reactive Signal that switches between kyomi dark/light themes
