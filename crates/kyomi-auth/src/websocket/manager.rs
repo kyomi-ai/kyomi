@@ -113,6 +113,25 @@ impl WebSocketManager {
     ///
     /// Starts a Redis subscriber if this is the first connection for the user.
     pub fn connect(&self, user_id: &str) -> Result<(u64, mpsc::Receiver<String>), String> {
+        // Prune stale connections before checking the limit.
+        // A connection is stale when its mpsc sender is closed (the outbound
+        // task dropped the receiver — e.g., after a server restart killed the
+        // TCP socket). Without this, dead connections count toward the limit
+        // and block new connections indefinitely.
+        if let Some(mut conns) = self.inner.connections.get_mut(user_id) {
+            let before = conns.len();
+            conns.retain(|c| !c.sender.is_closed());
+            let pruned = before - conns.len();
+            if pruned > 0 {
+                tracing::info!(
+                    user_id,
+                    pruned,
+                    remaining = conns.len(),
+                    "Pruned stale WebSocket connections"
+                );
+            }
+        }
+
         // Enforce per-user connection limit.
         if let Some(conns) = self.inner.connections.get(user_id)
             && conns.len() >= MAX_CONNECTIONS_PER_USER

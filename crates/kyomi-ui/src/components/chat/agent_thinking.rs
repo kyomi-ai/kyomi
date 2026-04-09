@@ -12,8 +12,6 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use super::thinking::{ThinkingEvent, TokenUsage};
-use crate::components::button::{Button, ButtonSize, ButtonVariant};
-use crate::components::card::Card;
 
 /// Rendering variant for the agent thinking panel.
 ///
@@ -77,23 +75,15 @@ fn format_duration(duration_ms: u64) -> String {
 
 /// Format a timestamp string to HH:MM:SS.sss (24-hour, milliseconds).
 ///
-/// Matches React's `formatTimestamp()` — parses ISO 8601 and formats
-/// with 24-hour clock and millisecond precision.
-///
-/// Note: chrono only supports %.3f (ms), %.6f (us), %.9f (ns) — NOT %.1f.
-/// Using %.1f causes DelayedFormat::fmt to return Err(fmt::Error), which
-/// makes .to_string() panic with "a Display implementation returned an error
-/// unexpectedly". Always use a supported precision.
+/// Format a timestamp to `HH:MM:SS` (no milliseconds — the user doesn't
+/// need that precision).
 fn format_timestamp(timestamp: &str) -> String {
-    // Parse ISO 8601 timestamp using chrono
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
-        // Format as HH:MM:SS.sss (milliseconds precision)
-        dt.format("%H:%M:%S%.3f").to_string()
+        dt.format("%H:%M:%S").to_string()
     } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H:%M:%S%.f")
     {
-        dt.format("%H:%M:%S%.3f").to_string()
+        dt.format("%H:%M:%S").to_string()
     } else {
-        // Fallback: return the raw timestamp if we can't parse it
         timestamp.to_string()
     }
 }
@@ -130,6 +120,107 @@ fn strip_emojis(text: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+/// Render tool schema data from a thinking event.
+///
+/// Matches React's `ToolSchemaRenderer` — shows tool name, input summary,
+/// and output/result summary. This is a compact generic renderer; tool-specific
+/// renderers (BigQuery cost, query results, etc.) will be added later.
+fn render_tool_schema(schema: serde_json::Value) -> impl IntoView {
+    let tool = schema
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if tool.is_empty() {
+        return view! { <span /> }.into_any();
+    }
+
+    // Input summary: show datasource, path, or SQL snippet
+    let input = schema.get("input");
+    let input_summary = input.and_then(|inp| {
+        // Try datasource first, then path, then sql
+        if let Some(ds) = inp.get("datasource").and_then(|v| v.as_str()) {
+            Some(format!("datasource: {ds}"))
+        } else if let Some(p) = inp.get("path").and_then(|v| v.as_str()) {
+            Some(format!("path: {p}"))
+        } else if let Some(sql) = inp.get("sql").and_then(|v| v.as_str()) {
+            let truncated = if sql.chars().count() > 80 {
+                format!("{}...", sql.chars().take(77).collect::<String>())
+            } else {
+                sql.to_string()
+            };
+            Some(format!("sql: {truncated}"))
+        } else {
+            inp.get("table_id")
+                .and_then(|v| v.as_str())
+                .map(|table| format!("table: {table}"))
+        }
+    });
+
+    // Output summary: show row count, error, or status
+    let output = schema.get("output");
+    let output_summary = output.and_then(|out| {
+        if let Some(err) = out.get("error").and_then(|v| v.as_str()) {
+            Some(("error", err.to_string()))
+        } else if let Some(rows) = out.get("rows").and_then(|v| v.as_u64()) {
+            let status = out
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ok");
+            Some(("result", format!("{rows} rows ({status})")))
+        } else if let Some(status) = out.get("status").and_then(|v| v.as_str()) {
+            Some(("result", status.to_string()))
+        } else if let Some(cost) = out.get("cost").and_then(|v| v.as_str()) {
+            let size = out
+                .get("size")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let safety = out
+                .get("safety")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Some(("cost", format!("{cost} / {size} [{safety}]")))
+        } else {
+            None
+        }
+    });
+
+    // Human-readable tool name
+    let tool_label = match tool.as_str() {
+        "query_datasource" | "bigquery_query" => "Query",
+        "estimate_query_cost" | "bigquery_cost_estimate" => "Cost Estimate",
+        "get_table_info" => "Table Info",
+        "get_table_sample" => "Table Sample",
+        "create_chart" | "create_chart_visualization" => "Create Chart",
+        "update_chart" => "Update Chart",
+        "browse_catalog" => "Browse Catalog",
+        "search_knowledge" => "Search Knowledge",
+        "write_knowledge_file" | "edit_knowledge_file" => "Write Knowledge",
+        "create_watch" | "update_watch" => "Watch",
+        other => other,
+    };
+
+    view! {
+        <div class="mt-1.5 text-xs bg-muted rounded px-2 py-1.5 space-y-0.5">
+            <div class="font-medium text-foreground">{tool_label.to_string()}</div>
+            {input_summary.map(|s| view! {
+                <div class="text-muted-foreground font-mono truncate">{s}</div>
+            })}
+            {output_summary.map(|(kind, text)| {
+                let class = if kind == "error" {
+                    "text-destructive"
+                } else {
+                    "text-muted-foreground"
+                };
+                view! {
+                    <div class=class>{text}</div>
+                }
+            })}
+        </div>
+    }
+    .into_any()
 }
 
 /// Agent Thinking UI component.
@@ -266,12 +357,12 @@ pub fn AgentThinking(
         let events = events_for_list.clone();
 
         view! {
-            // Header - Always visible
+            // Header — always visible, clickable to expand/collapse
             <div
-                class="flex items-center justify-between cursor-pointer py-1"
+                class="flex items-center justify-between cursor-pointer py-1.5"
                 on:click=move |_| set_is_expanded.update(|v| *v = !*v)
             >
-                <div class="flex items-center space-x-2 min-w-0 flex-1">
+                <div class="flex items-center gap-2 min-w-0 flex-1">
                     {if is_active {
                         view! {
                             <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-4 h-4 flex-shrink-0" />
@@ -283,12 +374,12 @@ pub fn AgentThinking(
                     }}
                     {current_title.map(|title| {
                         view! {
-                            <span class="text-xs text-muted-foreground truncate animate-subtle-breathe">{title}</span>
+                            <span class="text-xs text-muted-foreground truncate">{title}</span>
                         }
                     })}
                 </div>
-                <div class="flex items-center space-x-2 flex-shrink-0">
-                    <div class="text-xs text-muted-foreground font-mono whitespace-nowrap">
+                <div class="flex items-center gap-2 flex-shrink-0">
+                    <span class="text-xs text-muted-foreground font-mono whitespace-nowrap">
                         {if is_active {
                             let tool_count = tool_executions_count;
                             view! {
@@ -301,72 +392,73 @@ pub fn AgentThinking(
                                 <span>{format!("{} tools \u{2022} {}", tool_count, format_duration(duration))}</span>
                             }.into_any()
                         }}
-                    </div>
-                    <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm attr:class="h-6 w-6 text-muted-foreground hover:text-foreground p-0">
-                        <svg
-                            class=move || format!(
-                                "w-3 h-3 transform transition-transform {}",
-                                if is_expanded.get() { "rotate-180" } else { "" }
-                            )
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                        >
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-                        </svg>
-                    </Button>
+                    </span>
+                    <Icon
+                        icon=icondata_lu::LuChevronDown
+                        attr:class=move || format!(
+                            "w-3.5 h-3.5 text-muted-foreground transition-transform {}",
+                            if is_expanded.get() { "rotate-180" } else { "" }
+                        )
+                        width="14"
+                        height="14"
+                    />
                 </div>
             </div>
 
-            // Expanded Content
+            // Expanded event list — simple rows, no nested cards
             <div
                 node_ref=scroll_container_ref
-                class="space-y-2 overflow-y-auto transition-all duration-300 ease-in-out"
+                class="overflow-y-auto transition-all duration-200 ease-in-out"
                 style=move || format!(
-                    "max-height: {}; margin-top: {}; opacity: {}; scroll-behavior: smooth;",
+                    "max-height: {}; opacity: {}; scroll-behavior: smooth;",
                     if is_expanded.get() { "24rem" } else { "0" },
-                    if is_expanded.get() { "0.75rem" } else { "0" },
                     if is_expanded.get() { "1" } else { "0" },
                 )
             >
-                {events.iter().map(|event| {
-                    let icon = get_event_icon(&event.event_type);
-                    let title = event.title.clone();
-                    let description = event.description.clone();
-                    let duration_ms = event.duration_ms;
-                    // PANIC-HUNT: restoring format_timestamp call to test if it's the panic source
-                    let timestamp = format_timestamp(&event.timestamp);
+                <div class="border-t border-border mt-1 pt-1">
+                    {events.iter().map(|event| {
+                        let icon = get_event_icon(&event.event_type);
+                        let title = event.title.clone();
+                        let description = event.description.clone();
+                        let duration_ms = event.duration_ms;
+                        let timestamp = format_timestamp(&event.timestamp);
 
-                    view! {
-                        <div class="flex items-start space-x-3 py-2 px-3 bg-card rounded-lg border border-border">
-                            <div class="flex-shrink-0 mt-0.5">
-                                <span class="text-sm">{icon}</span>
-                            </div>
-                            <div class="flex-1 min-w-0">
-                                <div class="flex items-center justify-between">
-                                    <h4 class="text-sm font-medium text-foreground">
-                                        {title}
-                                    </h4>
-                                    <div class="flex items-center space-x-2 text-xs text-muted-foreground">
-                                        {duration_ms.map(|d| {
-                                            let formatted = format_duration(d);
-                                            view! { <span>{formatted}</span> }
-                                        })}
-                                        <span>{timestamp}</span>
-                                    </div>
+                        // Extract schema from event.data for tool result rendering.
+                        // Matches React: event.data?.schema → ToolSchemaRenderer
+                        let schema = event.data.as_ref()
+                            .and_then(|d| d.get("schema"))
+                            .cloned();
+
+                        view! {
+                            <div class="flex items-start gap-2.5 py-2 px-1">
+                                <div class="flex-shrink-0 mt-0.5 text-muted-foreground">
+                                    {icon}
                                 </div>
-                                {description.map(|desc| {
-                                    view! {
-                                        <p class="text-sm text-muted-foreground mt-1">
-                                            {desc}
-                                        </p>
-                                    }
-                                })}
+                                <div class="flex-1 min-w-0">
+                                    <div class="flex items-center justify-between gap-2">
+                                        <span class="text-xs font-medium text-foreground truncate">
+                                            {title}
+                                        </span>
+                                        <span class="text-xs text-muted-foreground font-mono whitespace-nowrap flex-shrink-0">
+                                            {duration_ms.map(|d| format!("{} ", format_duration(d))).unwrap_or_default()}
+                                            {timestamp}
+                                        </span>
+                                    </div>
+                                    {description.map(|desc| {
+                                        view! {
+                                            <p class="text-xs text-muted-foreground mt-0.5">
+                                                {desc}
+                                            </p>
+                                        }
+                                    })}
+                                    // Tool schema/result rendering
+                                    {schema.map(render_tool_schema)}
+                                </div>
                             </div>
-                        </div>
-                    }
-                }).collect_view()}
-                <div node_ref=thinking_end_ref />
+                        }
+                    }).collect_view()}
+                    <div node_ref=thinking_end_ref />
+                </div>
             </div>
         }
     };
@@ -375,14 +467,14 @@ pub fn AgentThinking(
     let _token_usage = token_usage;
 
     // -- Variant rendering --
+    // All variants now use a clean, minimal container. The Inset variant
+    // (default for chat messages) no longer bleeds with bg-accent.
     match variant {
         ThinkingVariant::Inset => {
-            // Deep inset — looks like it's recessed behind the message
+            // Subtle top section inside the message card — no background bleed
             view! {
-                <div class="mb-4 -mx-6 -mt-2 bg-accent border-l-4 border-primary shadow-inner" data-testid="agent-thinking">
-                    <div class="p-4 pl-6">
-                        {render_content()}
-                    </div>
+                <div class="mb-3 pb-3 border-b border-border" data-testid="agent-thinking">
+                    {render_content()}
                 </div>
             }
             .into_any()
@@ -390,7 +482,7 @@ pub fn AgentThinking(
         ThinkingVariant::HeaderBar => {
             // Slim bar at top that expands downward
             view! {
-                <div class="mb-3 -mx-6 -mt-4 bg-muted border-b border-border overflow-hidden transition-all duration-300 ease-in-out" data-testid="agent-thinking">
+                <div class="mb-3 -mx-6 -mt-4 border-b border-border overflow-hidden" data-testid="agent-thinking">
                     <div class="py-1 px-4">
                         {render_content()}
                     </div>
@@ -399,29 +491,20 @@ pub fn AgentThinking(
             .into_any()
         }
         ThinkingVariant::Tab => {
-            // Tab sticking out from top-left
+            // Tab — same as header bar (tab variant was unused and had emoji)
             view! {
-                <div class="mb-3 relative" data-testid="agent-thinking">
-                    <div class="absolute -top-3 left-0 bg-primary text-primary-foreground px-3 py-1 rounded-t-lg text-xs font-medium shadow">
-                        "\u{1F9E0} Thinking"
-                    </div>
-                    <Card class="mt-2 bg-muted border-border pt-6">
-                        <div class="p-3">
-                            {render_content()}
-                        </div>
-                    </Card>
+                <div class="mb-3 border-b border-border" data-testid="agent-thinking">
+                    {render_content()}
                 </div>
             }
             .into_any()
         }
         ThinkingVariant::Default => {
-            // Original floating card
+            // Plain section with bottom border
             view! {
-                <Card class="mt-2 mb-3 bg-muted border-border" attr:data-testid="agent-thinking">
-                    <div class="p-2">
-                        {render_content()}
-                    </div>
-                </Card>
+                <div class="mb-3 pb-3 border-b border-border" data-testid="agent-thinking">
+                    {render_content()}
+                </div>
             }
             .into_any()
         }

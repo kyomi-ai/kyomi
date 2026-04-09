@@ -226,7 +226,9 @@ pub fn ChatPage() -> impl IntoView {
     });
 
     // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
-    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+    // Uses LocalResource to avoid "reading resource outside Suspense" warnings —
+    // this resource is read in Signal::derive closures which run outside Suspense.
+    let user_ctx_resource = LocalResource::new(get_user_context);
 
     // Derive the user's display name from the user context resource.
     // Uses the user's name if available, falls back to email prefix, then "there".
@@ -263,7 +265,8 @@ pub fn ChatPage() -> impl IntoView {
     let (current_greeting, set_current_greeting) = signal(String::new());
 
     // Phase 9 — shared conversation: skip AI response checkbox
-    let (skip_ai_response, set_skip_ai_response) = signal(false);
+    // RwSignal so it can be passed to ChatInput's skip_ai prop.
+    let skip_ai_response: RwSignal<bool> = RwSignal::new(false);
 
     // M8 — Track just-created sessions to skip redundant reload when URL changes.
     // When on_send creates a new session and navigates, the URL change triggers
@@ -1182,6 +1185,7 @@ pub fn ChatPage() -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
         let location_search_chart = _location.search.clone();
+        let navigate_chart = navigate.clone();
         Effect::new(move |_| {
             let search = location_search_chart.get();
             if search.is_empty() {
@@ -1196,6 +1200,7 @@ pub fn ChatPage() -> impl IntoView {
             };
 
             // Fetch chart context from KV via server function
+            let navigate_inner = navigate_chart.clone();
             leptos::task::spawn_local(async move {
                 match get_chart_context(chart_id).await {
                     Ok(Some(ctx)) => {
@@ -1273,8 +1278,7 @@ pub fn ChatPage() -> impl IntoView {
                 // Clear the query parameter to prevent re-triggering on refresh
                 if let Some(window) = web_sys::window() {
                     if let Ok(pathname) = window.location().pathname() {
-                        let navigate = leptos_router::hooks::use_navigate();
-                        navigate(&pathname, leptos_router::NavigateOptions {
+                        navigate_inner(&pathname, leptos_router::NavigateOptions {
                             replace: true,
                             ..Default::default()
                         });
@@ -1292,6 +1296,7 @@ pub fn ChatPage() -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
         let location_search = _location.search.clone();
+        let navigate_explore = navigate.clone();
         Effect::new(move |_| {
             let search = location_search.get();
             if search.is_empty() {
@@ -1369,8 +1374,7 @@ pub fn ChatPage() -> impl IntoView {
             if has_explore_chart || has_create_watch {
                 if let Some(window) = web_sys::window() {
                     if let Ok(location) = window.location().pathname() {
-                        let navigate = leptos_router::hooks::use_navigate();
-                        navigate(&location, leptos_router::NavigateOptions {
+                        navigate_explore(&location, leptos_router::NavigateOptions {
                             replace: true,
                             ..Default::default()
                         });
@@ -1613,7 +1617,7 @@ pub fn ChatPage() -> impl IntoView {
                     // (no AI response expected). Matches React: Chat.jsx lines 1147-1151.
                     if response.skip_ai {
                         chat_state_inner.reset();
-                        set_skip_ai_response.set(false);
+                        skip_ai_response.set(false);
                         // Still need to update session_id if new
                         if session_id.is_none() {
                             // M8 — Mark as just-created to skip redundant reload.
@@ -1851,8 +1855,18 @@ pub fn ChatPage() -> impl IntoView {
                         // Matches React: Chat.jsx lines 1467-1613
                         <Show when=move || !messages.get().is_empty()>
                             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 z-20 flex items-center justify-between gap-4">
-                                    // Left side: title + badges
+                                    // Left side: back button + title + badges
                                     <div class="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">
+                                        // Back to chat list — DESIGN.md: detail pages must have back nav
+                                        <ButtonLink
+                                            href="/chats"
+                                            variant=ButtonVariant::Ghost
+                                            size=ButtonSize::Icon
+                                            class="flex-shrink-0 text-muted-foreground hover:text-foreground"
+                                            aria_label="Back to chats"
+                                        >
+                                            <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+                                        </ButtonLink>
                                         <Show
                                             when=move || current_session_id.get().is_some()
                                             fallback=move || view! {
@@ -2149,39 +2163,8 @@ pub fn ChatPage() -> impl IntoView {
                         // When messages are empty (new chat), the input is rendered inline
                         // with the greeting above, not at the bottom.
                         <Show when=move || !messages.get().is_empty()>
-                            // Phase 9 — "Skip AI response" checkbox for existing sessions
-                            // M13: React shows this for ALL existing sessions (currentSessionId &&),
-                            // not just shared ones.
-                            <Show when=move || current_session_id.get().is_some()>
-                                <div class="flex items-center gap-2 px-4 py-2 bg-muted">
-                                    <input
-                                        type="checkbox"
-                                        id="skip-ai-checkbox"
-                                        prop:checked=move || skip_ai_response.get()
-                                        on:change=move |ev| {
-                                            #[cfg(target_arch = "wasm32")]
-                                            {
-                                                use wasm_bindgen::JsCast;
-                                                if let Some(target) = ev.target() {
-                                                    if let Some(input) = target.dyn_ref::<web_sys::HtmlInputElement>() {
-                                                        set_skip_ai_response.set(input.checked());
-                                                    }
-                                                }
-                                            }
-                                            #[cfg(not(target_arch = "wasm32"))]
-                                            {
-                                                let _ = ev;
-                                            }
-                                        }
-                                        class="h-4 w-4 rounded-md border-input text-primary focus:ring-ring"
-                                    />
-                                    <label for="skip-ai-checkbox" class="text-sm text-muted-foreground">
-                                        "Post as comment (skip AI response)"
-                                    </label>
-                                </div>
-                            </Show>
-
-                            // Chat input area — wired to send_message and cancel handlers
+                            // Chat input area — wired to send_message and cancel handlers.
+                            // Skip AI checkbox is built into ChatInput (show_skip_ai + skip_ai props).
                             <ChatInput
                                 on_send=on_send
                                 on_cancel=on_cancel
@@ -2189,6 +2172,8 @@ pub fn ChatPage() -> impl IntoView {
                                 show_stop_button=show_stop_button_signal
                                 connection_state=connection_state_signal
                                 credits_exhausted=credits_exhausted.get()
+                                show_skip_ai=current_session_id.get().is_some()
+                                skip_ai=skip_ai_response
                             />
                         </Show>
                     </div>

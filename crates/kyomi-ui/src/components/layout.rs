@@ -52,7 +52,9 @@ pub fn Layout(children: Children) -> impl IntoView {
     let (mobile_open, set_mobile_open) = signal(false);
 
     // Fetch sidebar user info — used for both the sidebar UI and WebSocket auth signals.
-    let user_info = Resource::new(|| (), |_| get_sidebar_user());
+    // Uses LocalResource to avoid "reading resource outside Suspense" warnings —
+    // this resource is read in Memo closures which run outside Suspense.
+    let user_info = LocalResource::new(get_sidebar_user);
 
     // Auth guard: tracks whether the user has been authenticated.
     // Starts as `false`; set to `true` once `user_info` resolves successfully.

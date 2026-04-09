@@ -256,7 +256,7 @@ Detail/viewer pages navigate back to their parent list using a ghost icon button
 
 ### Metadata Footer Pattern
 
-Every detail/viewer page shows a metadata footer at the bottom with created/updated timestamps.
+Detail/viewer pages show a metadata footer at the bottom with created/updated timestamps. **Optional** for conversational pages (e.g., chat) where the footer zone is occupied by an input area.
 
 ```rust
 <div class="metadata-footer bg-background px-4 md:px-6 py-3 flex-shrink-0">

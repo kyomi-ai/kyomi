@@ -147,6 +147,8 @@ mod wasm {
         next_sub_id: usize,
         /// Set of seen message keys for deduplication.
         seen_messages: HashSet<String>,
+        /// Whether a `connect()` call is in progress (prevents concurrent connects).
+        connecting: bool,
         /// Whether close was intentional (disconnect called).
         intentional_close: bool,
         /// Current reconnect attempt count.
@@ -163,6 +165,7 @@ mod wasm {
                 subscribers: HashMap::new(),
                 next_sub_id: 0,
                 seen_messages: HashSet::new(),
+                connecting: false,
                 intentional_close: false,
                 reconnect_attempts: 0,
                 reconnect_timeout: None,
@@ -224,9 +227,13 @@ mod wasm {
 
         // -- connect/disconnect effect ----------------------------------------
         let connect_state = state.clone();
+        let effect_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
         Effect::new(move |_| {
             let uid = user_id.get();
             let wid = workspace_id.get();
+            let count = effect_count.get() + 1;
+            effect_count.set(count);
+            tracing::info!("WS Effect fired #{count}, uid={uid:?}, wid={wid:?}");
 
             match (uid, wid) {
                 (Some(uid), Some(wid)) if !uid.is_empty() && !wid.is_empty() => {
@@ -269,15 +276,35 @@ mod wasm {
         state: Rc<RefCell<WsState>>,
         set_connection_state: WriteSignal<ConnectionState>,
     ) {
-        // Don't connect if already open. Clean up stale connections
-        // in non-OPEN states (CONNECTING, CLOSING) — matches React's pattern
-        // of nulling onclose and closing stale connections before reconnecting.
+        // Guard against concurrent connect() calls. The Effect that triggers
+        // connect can fire multiple times (e.g., during hydration or auth state
+        // settling). Each call is async and yields at `get_websocket_config().await`,
+        // allowing a second call to enter before the first finishes. Without this
+        // guard, both calls open a WebSocket — the first becomes orphaned (still
+        // alive server-side, forgotten client-side), exhausting the per-user limit.
         {
-            let mut s = state.borrow_mut();
+            let s = state.borrow();
+            if s.connecting {
+                tracing::info!("connect(): already connecting, skipping");
+                return;
+            }
             if let Some(ref ws) = s.ws {
-                if ws.ready_state() == WebSocket::OPEN {
+                let ready = ws.ready_state();
+                tracing::info!("connect(): existing WS ready_state={ready}");
+                if ready == WebSocket::OPEN {
+                    tracing::info!("connect(): already OPEN, skipping");
                     return;
                 }
+            } else {
+                tracing::info!("connect(): no existing WS");
+            }
+        }
+
+        // Set the guard and clean up any stale non-OPEN connection.
+        {
+            let mut s = state.borrow_mut();
+            s.connecting = true;
+            if let Some(ref ws) = s.ws {
                 // Clean up stale non-OPEN connection — null event handlers
                 // to prevent spurious reconnect triggers, then close.
                 ws.set_onclose(None);
@@ -297,6 +324,7 @@ mod wasm {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("Failed to get WebSocket config: {e}");
+                state.borrow_mut().connecting = false;
                 set_connection_state.set(ConnectionState::Disconnected);
                 schedule_reconnect(state, set_connection_state);
                 return;
@@ -306,6 +334,7 @@ mod wasm {
         // Check if intentional close was requested while awaiting config
         // (e.g., user logged out mid-connection-attempt)
         if state.borrow().intentional_close {
+            state.borrow_mut().connecting = false;
             return;
         }
 
@@ -315,6 +344,7 @@ mod wasm {
             Ok(u) => u,
             Err(e) => {
                 tracing::error!("Failed to build WebSocket URL: {e}");
+                state.borrow_mut().connecting = false;
                 set_connection_state.set(ConnectionState::Disconnected);
                 schedule_reconnect(state, set_connection_state);
                 return;
@@ -325,6 +355,7 @@ mod wasm {
             Ok(ws) => ws,
             Err(e) => {
                 tracing::error!("WebSocket::new failed: {:?}", e);
+                state.borrow_mut().connecting = false;
                 set_connection_state.set(ConnectionState::Disconnected);
                 schedule_reconnect(state, set_connection_state);
                 return;
@@ -407,8 +438,8 @@ mod wasm {
 
         // -- onclose ----------------------------------------------------------
         let onclose_state = state.clone();
-        let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |_event: CloseEvent| {
-            tracing::info!("WebSocket closed");
+        let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |event: CloseEvent| {
+            tracing::info!("WebSocket closed: code={}, reason={}", event.code(), event.reason());
             set_connection_state.set(ConnectionState::Disconnected);
 
             // Clear the ws reference
@@ -423,10 +454,11 @@ mod wasm {
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
         closures.push(SendWrapper::new(on_close.into_js_value()));
 
-        // Store the connection
+        // Store the connection and clear the connecting guard.
         let mut s = state.borrow_mut();
         s.ws = Some(ws);
         s._closures = closures;
+        s.connecting = false;
     }
 
     /// Intentionally disconnect the WebSocket.

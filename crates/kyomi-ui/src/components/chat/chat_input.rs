@@ -9,6 +9,7 @@
 //! (lines 564-628). CSS classes are copied verbatim from the React source.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::alert::{Alert, AlertDescription, AlertVariant};
 use crate::components::checkbox::Checkbox;
@@ -52,7 +53,7 @@ pub fn ChatInput(
     credits_exhausted: bool,
     /// Whether to render in inline mode (centered with greeting, no border/bg).
     /// When true, the outer wrapper is unstyled. When false (default), the wrapper
-    /// has `border-t border-border bg-card` for the bottom-pinned layout.
+    /// has `bg-background` for the bottom-pinned layout.
     #[prop(default = false)]
     inline: bool,
     /// Maximum height for the auto-expanding textarea in pixels.
@@ -174,7 +175,7 @@ pub fn ChatInput(
     };
 
     view! {
-        <div class=if inline { "" } else { "flex-shrink-0 p-4 bg-muted" }>
+        <div class=if inline { "" } else { "flex-shrink-0 p-4 bg-background" }>
             // Credits exhausted warning banner — shown above the (disabled) textarea.
             // Matches React: Chat.jsx lines 1651-1657 and 1721-1727.
             {if credits_exhausted {
@@ -251,10 +252,7 @@ pub fn ChatInput(
                         }
                     }
                 >
-                    // Paper airplane SVG
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                    </svg>
+                    <Icon icon=icondata_lu::LuSend width="16" height="16" />
                 </button>
                 // Stop button
                 <button
@@ -265,10 +263,7 @@ pub fn ChatInput(
                     aria-label="Stop generating"
                     title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
                 >
-                    // X/stop SVG
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
+                    <Icon icon=icondata_lu::LuSquare width="16" height="16" />
                     <span class="text-sm font-medium">"Stop"</span>
                 </button>
             </div>
