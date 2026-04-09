@@ -9,8 +9,9 @@
 //! - User name and workspace/user knowledge sections
 //! - Cross-session learning injection (user-scoped learnings)
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Utc};
 use kyomi_core::{DbPool, KVPool};
 use tracing::info;
 
@@ -60,13 +61,13 @@ pub async fn build_system_prompt(
         ""
     };
 
-    // Build knowledge file tree for system prompt injection.
-    let knowledge_tree = match kyomi_knowledge::knowledge_files::build_knowledge_tree_text(db, workspace_id).await {
-        Ok(tree) if !tree.is_empty() => format!(
-            "\n\n## Knowledge Files\n\n\
-             Your workspace has a knowledge base of markdown documents. \
-             The file tree is shown below — use `read_knowledge_file` to read any file, \
-             or `search_knowledge` to find relevant content by topic.\n\n{tree}\n\n"
+    // Build document list for system prompt injection.
+    let documents = match build_documents_text(db, workspace_id).await {
+        Ok(text) if !text.is_empty() => format!(
+            "\n\n## Documents\n\n\
+             Your workspace has knowledge documents and dashboards organized in collections. \
+             The document list is shown below — use `read_knowledge_file` to read any document, \
+             or `search_knowledge` to find relevant content by topic.\n\n{text}\n\n"
         ),
         _ => String::new(),
     };
@@ -110,7 +111,7 @@ pub async fn build_system_prompt(
         .replace("{user_name}", &user_name_section)
         .replace("{workspace_knowledge}", &workspace_knowledge_section)
         .replace("{user_knowledge}", &user_knowledge_section)
-        .replace("{knowledge_tree}", &knowledge_tree)
+        .replace("{documents}", &documents)
         .replace("{chartml_reference}", chartml_reference);
 
     Ok(prompt)
@@ -246,6 +247,139 @@ pub async fn get_learnings_for_system_prompt(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// -- Document list for system prompt ----------------------------------------
+
+/// Row returned by the documents query.
+#[derive(sqlx::FromRow)]
+struct DocumentRow {
+    dashboard_id: String,
+    title: String,
+    doc_type: String,
+    updated_at: DateTime<Utc>,
+    collection_name: Option<String>,
+}
+
+/// Build a human-readable document list grouped by type and collection.
+///
+/// Groups documents by `doc_type` (Knowledge first, then Dashboards),
+/// then by collection name (named collections before "Uncollected"),
+/// then alphabetically by title. A document appearing in multiple
+/// collections is only listed once (under its first collection).
+///
+/// Returns an empty string if no documents exist.
+async fn build_documents_text(db: &DbPool, workspace_id: &str) -> kyomi_core::Result<String> {
+    let rows: Vec<DocumentRow> = kyomi_core::db_fetch_all!(
+        db,
+        DocumentRow,
+        "SELECT d.dashboard_id, d.title, d.doc_type, d.updated_at, \
+                c.name AS collection_name \
+         FROM dashboards d \
+         LEFT JOIN collection_dashboards cd ON cd.dashboard_id = d.dashboard_id \
+         LEFT JOIN collections c ON c.id = cd.collection_id \
+         WHERE d.workspace_id = $1 \
+         ORDER BY d.doc_type, c.name NULLS LAST, d.title",
+        workspace_id
+    )?;
+
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Deduplicate: each dashboard_id only appears once (first occurrence wins).
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for row in rows {
+        if seen.insert(row.dashboard_id.clone()) {
+            deduped.push(row);
+        }
+    }
+
+    // Display order: Knowledge first, then Dashboard.
+    let type_order: &[(&str, &str)] = &[
+        ("knowledge", "Knowledge"),
+        ("dashboard", "Dashboards"),
+    ];
+
+    let now = Utc::now();
+
+    let mut output = String::from("<workspace_documents>\n");
+
+    for &(type_key, type_label) in type_order {
+        // Group by collection name for this doc_type.
+        // Use BTreeMap for deterministic ordering by collection name.
+        // Key: Option<String> where None = uncollected.
+        let mut by_collection: BTreeMap<Option<String>, Vec<&DocumentRow>> = BTreeMap::new();
+        for row in &deduped {
+            if row.doc_type == type_key {
+                by_collection
+                    .entry(row.collection_name.clone())
+                    .or_default()
+                    .push(row);
+            }
+        }
+
+        if by_collection.is_empty() {
+            continue;
+        }
+
+        output.push_str(&format!("[{type_label}]\n"));
+
+        // Named collections first (Some), then Uncollected (None).
+        // BTreeMap sorts None before Some, so we partition manually.
+        let mut named: Vec<_> = by_collection.iter()
+            .filter(|(k, _)| k.is_some())
+            .collect();
+        named.sort_by_key(|(k, _)| k.as_ref().unwrap().to_lowercase());
+
+        let uncollected = by_collection.get(&None);
+
+        for (collection_name, docs) in &named {
+            let name = collection_name.as_ref().unwrap();
+            output.push_str(&format!("  {name} (collection)\n"));
+            for doc in *docs {
+                output.push_str(&format!("    - {}{}\n", doc.title, format_relative_time(doc.updated_at, now)));
+            }
+        }
+
+        if let Some(docs) = uncollected {
+            output.push_str("  Uncollected\n");
+            for doc in docs {
+                output.push_str(&format!("    - {}{}\n", doc.title, format_relative_time(doc.updated_at, now)));
+            }
+        }
+
+        output.push('\n');
+    }
+
+    // Trim trailing newlines and close tag.
+    let trimmed = output.trim_end().to_string();
+    Ok(format!("{trimmed}\n</workspace_documents>"))
+}
+
+/// Format a relative time suffix for documents updated within 30 days.
+///
+/// Returns an empty string for documents older than 30 days.
+fn format_relative_time(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let duration = now.signed_duration_since(updated_at);
+    let days = duration.num_days();
+
+    if !(0..=30).contains(&days) {
+        return String::new();
+    }
+
+    if days == 0 {
+        let hours = duration.num_hours();
+        if hours == 0 {
+            return " (updated just now)".to_string();
+        }
+        return format!(" (updated {hours}h ago)");
+    }
+
+    format!(" (updated {days}d ago)")
+}
+
+// -- User & workspace info --------------------------------------------------
+
 /// Load user name and knowledge from the database.
 async fn load_user_info(db: &DbPool, user_id: &str) -> kyomi_core::Result<(String, String)> {
     let row: Option<(Option<String>, Option<String>)> = kyomi_core::db_fetch_optional!(
@@ -360,7 +494,7 @@ You're not just an assistant - you're an evolving expert on this workspace's dat
 You have two ways to persist knowledge across ALL future conversations:
 
 1. **`save_learning`** — quick-save a data navigation insight (table names, field meanings, query patterns)
-2. **Knowledge files** (`write_knowledge_file` / `edit_knowledge_file`) — create or update markdown \
+2. **Knowledge documents** (`write_knowledge_file` / `edit_knowledge_file`) — create or update markdown \
    documents for richer, structured knowledge (metric definitions, onboarding guides, data dictionaries)
 
 Over time, you transform from a general analytics assistant into a domain expert who knows:
@@ -370,7 +504,7 @@ Over time, you transform from a general analytics assistant into a domain expert
 - User and team preferences
 
 **Think like an analyst building knowledge that grows with each investigation.**
-{knowledge_tree}
+{documents}
 
 **CRITICAL: How to Deliver Your Final Answer**
 When your investigation is complete, provide your answer in your response text with no tool calls. \
@@ -418,14 +552,14 @@ For bite-sized data navigation insights that persist across ALL sessions:
   - `metric_formula`: How it's calculated (e.g., \"SUM(amount) WHERE status='active'\")
   - `metric_unit`: Unit of measurement (USD, %, count, etc.)
 
-### 2. Knowledge Files (`write_knowledge_file` / `edit_knowledge_file` / `read_knowledge_file` / `list_knowledge_files`)
+### 2. Knowledge Documents (`write_knowledge_file` / `edit_knowledge_file` / `read_knowledge_file` / `list_knowledge_files`)
 For richer, structured documentation:
 - Metric definitions with SQL formulas
 - Data dictionaries and onboarding guides
 - Business logic and domain explanations
-- Use `search_knowledge` to find relevant files by topic
-- Use `read_knowledge_file` to read a specific file
-- Use `write_knowledge_file` to create new files (parent folders auto-created)
+- Use `search_knowledge` to find relevant documents by topic
+- Use `read_knowledge_file` to read a specific document
+- Use `write_knowledge_file` to create new documents (collections organize them)
 - Use `edit_knowledge_file` for targeted edits (find-and-replace)
 
 ## Your Investigative Mindset
@@ -589,7 +723,7 @@ mod tests {
             .replace("{user_name}", user_name)
             .replace("{workspace_knowledge}", workspace_knowledge)
             .replace("{user_knowledge}", user_knowledge)
-            .replace("{knowledge_tree}", "")
+            .replace("{documents}", "")
             .replace("{chartml_reference}", chartml_reference)
     }
 
@@ -775,8 +909,8 @@ mod tests {
             "Leftover {{user_knowledge}} placeholder"
         );
         assert!(
-            !result.contains("{knowledge_tree}"),
-            "Leftover {{knowledge_tree}} placeholder"
+            !result.contains("{documents}"),
+            "Leftover {{documents}} placeholder"
         );
         assert!(
             !result.contains("{chartml_reference}"),
@@ -880,8 +1014,8 @@ mod tests {
             "Unresolved placeholder: user_knowledge"
         );
         assert!(
-            !result.contains("{knowledge_tree}"),
-            "Unresolved placeholder: knowledge_tree"
+            !result.contains("{documents}"),
+            "Unresolved placeholder: documents"
         );
         assert!(
             !result.contains("{chartml_reference}"),
