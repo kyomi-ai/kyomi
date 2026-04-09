@@ -11,7 +11,49 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Document type for the unified dashboards table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocType {
+    Dashboard,
+    Knowledge,
+}
+
+impl DocType {
+    /// SQL-storable string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+            Self::Knowledge => "knowledge",
+        }
+    }
+
+    /// Parse from database string. Returns `Dashboard` for unrecognized values.
+    pub fn from_str_or_default(s: &str) -> Self {
+        match s {
+            "knowledge" => Self::Knowledge,
+            _ => Self::Dashboard,
+        }
+    }
+
+    pub fn is_dashboard(&self) -> bool {
+        matches!(self, Self::Dashboard)
+    }
+
+    pub fn is_knowledge(&self) -> bool {
+        matches!(self, Self::Knowledge)
+    }
+}
+
+impl std::fmt::Display for DocType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A dashboard from the `dashboards` table.
+///
+/// Covers both traditional dashboards (`doc_type = "dashboard"`) and
+/// knowledge documents (`doc_type = "knowledge"`).
 #[derive(Debug, Clone, sqlx::FromRow, Serialize, Deserialize)]
 pub struct Dashboard {
     /// Primary key — UUID string.
@@ -29,8 +71,20 @@ pub struct Dashboard {
     /// Markdown content with optional ChartML fenced blocks.
     pub content: String,
 
+    /// Document type: "dashboard" or "knowledge".
+    pub doc_type: String,
+
+    /// SHA-256 hash of content (first 16 hex chars) for optimistic concurrency.
+    pub content_hash: Option<String>,
+
     /// Summary of most recent changes (auto-generated or user-provided).
     pub last_change_summary: Option<String>,
+
+    /// User ID who created this document.
+    pub created_by: Option<String>,
+
+    /// User ID who last updated this document.
+    pub updated_by: Option<String>,
 
     /// 384-dimension embedding vector for semantic search.
     /// Stored as raw f32 little-endian bytes.
@@ -42,6 +96,13 @@ pub struct Dashboard {
 
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
+}
+
+impl Dashboard {
+    /// Parse the `doc_type` string field into a `DocType` enum.
+    pub fn doc_type(&self) -> DocType {
+        DocType::from_str_or_default(&self.doc_type)
+    }
 }
 
 /// A dashboard view record from the `dashboard_views` table.

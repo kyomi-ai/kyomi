@@ -89,6 +89,7 @@ pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
         &ctx.db,
         workspace_id,
         None,
+        Some(kyomi_core::models::DocType::Dashboard), // profile page only shows dashboards
         kyomi_auth::dashboard_service::SearchSort::Recent,
         100,
     )

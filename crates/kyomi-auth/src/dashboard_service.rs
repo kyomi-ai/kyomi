@@ -16,7 +16,9 @@ use chrono::{DateTime, Duration, Utc};
 use kyomi_core::embedding_compat::{bytes_to_embedding, embedding_to_bytes};
 use kyomi_core::sql_compat;
 use kyomi_core::{db_execute, db_fetch_optional, db_fetch_scalar};
+use kyomi_core::models::DocType;
 use kyomi_core::{DbPool, Result};
+use kyomi_embed::EmbeddingService;
 use pgvector::Vector;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,19 @@ static CHARTML_BLOCK_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)```chartml\n(.*?)```").unwrap()
 });
 
+/// Target chunk size in characters (~500 tokens).
+const CHUNK_SIZE: usize = 2000;
+/// Overlap between adjacent chunks in characters (~100 tokens).
+const CHUNK_OVERLAP: usize = 400;
+
+/// Compute a short SHA-256 hash of content (first 16 hex chars).
+fn hash_content(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8])
+}
+
 // ─── Response types ──────────────────────────────────────────────────────────
 
 /// Sort order for dashboard search/listing.
@@ -65,6 +80,7 @@ pub struct DashboardSearchResult {
     pub workspace_id: String,
     pub title: String,
     pub content: String,
+    pub doc_type: String,
     pub last_change_summary: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -213,57 +229,74 @@ pub fn generate_change_summary(old_content: &str, new_content: &str) -> String {
 
 // ─── Create dashboard ────────────────────────────────────────────────────────
 
-/// Create a new dashboard.
+/// Create a new dashboard or knowledge document.
 ///
-/// Validates title length, validates ChartML content, checks free tier limit,
-/// and INSERTs into the `dashboards` table.
+/// Validates title length, validates ChartML content (dashboards only),
+/// checks free tier limit, and INSERTs into the `dashboards` table.
+///
+/// - Knowledge documents skip ChartML validation and compute a `content_hash`.
 pub async fn create_dashboard(
     db: &DbPool,
     user_id: &str,
     workspace_id: &str,
     title: &str,
     content: &str,
+    doc_type: DocType,
 ) -> Result<String> {
     validate_title(title)?;
-    validate_dashboard_content(content)?;
 
-    // Check free tier limit (5 dashboards per workspace) — paid tiers are unlimited
-    #[derive(sqlx::FromRow)]
-    struct TierRow { subscription_tier: String }
-    let tier_row = db_fetch_optional!(
-        db,
-        TierRow,
-        "SELECT subscription_tier FROM workspaces WHERE workspace_id = $1",
-        workspace_id
-    )?
-    .ok_or_else(|| kyomi_core::Error::NotFound("Workspace not found".into()))?;
-    let tier_str = tier_row.subscription_tier;
+    // Dashboards: validate ChartML and enforce free tier limit
+    if doc_type.is_dashboard() {
+        validate_dashboard_content(content)?;
 
-    if tier_str == "free" {
-        let count = get_dashboard_count(db, workspace_id, Some(user_id)).await?;
-        if count >= FREE_TIER_DASHBOARD_LIMIT {
-            return Err(kyomi_core::Error::Forbidden(
-                "Free tier is limited to 5 dashboards. Please upgrade to create more dashboards."
-                    .into(),
-            ));
+        #[derive(sqlx::FromRow)]
+        struct TierRow { subscription_tier: String }
+        let tier_row = db_fetch_optional!(
+            db,
+            TierRow,
+            "SELECT subscription_tier FROM workspaces WHERE workspace_id = $1",
+            workspace_id
+        )?
+        .ok_or_else(|| kyomi_core::Error::NotFound("Workspace not found".into()))?;
+
+        if tier_row.subscription_tier == "free" {
+            let count = get_dashboard_count(db, workspace_id, Some(user_id)).await?;
+            if count >= FREE_TIER_DASHBOARD_LIMIT {
+                return Err(kyomi_core::Error::Forbidden(
+                    "Free tier is limited to 5 dashboards. Please upgrade to create more dashboards."
+                        .into(),
+                ));
+            }
         }
     }
 
     let is_pg = db.is_postgres();
     let now_expr = sql_compat::now(is_pg);
     let dashboard_id = format!("{}", uuid::Uuid::new_v4());
+    let content_hash = if doc_type.is_knowledge() {
+        Some(hash_content(content))
+    } else {
+        None
+    };
+    let doc_type_str = doc_type.as_str();
 
     let sql = format!(
         r#"
-        INSERT INTO dashboards (dashboard_id, user_id, workspace_id, title, content, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, {now_expr}, {now_expr})
+        INSERT INTO dashboards
+            (dashboard_id, user_id, workspace_id, title, content,
+             doc_type, content_hash, created_by, updated_by,
+             created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, {now_expr}, {now_expr})
         "#
     );
 
-    db_execute!(db, &sql, &dashboard_id, user_id, workspace_id, title.trim(), content)
-        .map_err(|e| kyomi_core::Error::Internal(format!("failed to create dashboard: {e}")))?;
+    db_execute!(
+        db, &sql, &dashboard_id, user_id, workspace_id, title.trim(), content,
+        doc_type_str, &content_hash as &Option<String>, user_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to create dashboard: {e}")))?;
 
-    tracing::info!(dashboard_id = %dashboard_id, "Created dashboard");
+    tracing::info!(dashboard_id = %dashboard_id, doc_type = doc_type_str, "Created dashboard");
     Ok(dashboard_id)
 }
 
@@ -280,7 +313,8 @@ pub async fn get_dashboard(
         kyomi_core::models::Dashboard,
         r#"
         SELECT dashboard_id, user_id, workspace_id, title, content,
-               last_change_summary,
+               doc_type, content_hash, last_change_summary,
+               created_by, updated_by,
                created_at, updated_at
         FROM dashboards
         WHERE dashboard_id = $1 AND workspace_id = $2
@@ -300,14 +334,20 @@ pub async fn get_dashboard(
 /// Ownership check: only the dashboard owner can update.
 /// Before updating, creates a version snapshot of the old state.
 /// Auto-generates a change summary if not provided.
+///
+/// For knowledge documents (`doc_type = "knowledge"`):
+/// - Supports CAS via `expected_content_hash` — returns `Err(Conflict)` on mismatch.
+/// - Updates `content_hash` and `updated_by`.
 pub async fn update_dashboard(
     db: &DbPool,
+    embed: Option<&EmbeddingService>,
     dashboard_id: &str,
     workspace_id: &str,
     user_id: &str,
     title: Option<&str>,
     content: Option<&str>,
     change_summary: Option<&str>,
+    expected_content_hash: Option<&str>,
 ) -> Result<bool> {
     // Fetch current dashboard for ownership check and version creation
     let current = get_dashboard(db, dashboard_id, workspace_id).await?;
@@ -321,11 +361,26 @@ pub async fn update_dashboard(
         ));
     }
 
+    // CAS check for knowledge documents: verify content_hash matches expected
+    if let Some(expected) = expected_content_hash {
+        let current_hash = current.content_hash.as_deref().unwrap_or("");
+        if current_hash != expected {
+            return Err(kyomi_core::Error::Conflict(format!(
+                "Content hash mismatch: expected {expected}, got {current_hash}. \
+                 The document was modified concurrently."
+            )));
+        }
+    }
+
     // Validate new values
     if let Some(t) = title {
         validate_title(t)?;
     }
-    if let Some(c) = content {
+    let current_doc_type = current.doc_type();
+    // Only validate ChartML for dashboards — knowledge docs are free-form markdown
+    if let Some(c) = content
+        && current_doc_type.is_dashboard()
+    {
         validate_dashboard_content(c)?;
     }
 
@@ -348,6 +403,13 @@ pub async fn update_dashboard(
     )
     .await?;
 
+    // Compute new content_hash for knowledge documents
+    let new_content_hash = if current_doc_type.is_knowledge() {
+        content.map(hash_content)
+    } else {
+        None
+    };
+
     // Dynamic UPDATE
     let mut set_parts: Vec<String> = Vec::new();
     let mut param_idx = 3u32; // $1 = dashboard_id, $2 = workspace_id
@@ -361,9 +423,18 @@ pub async fn update_dashboard(
         param_idx += 1;
     }
 
-    // Always set change summary and updated_at
+    // Always set change summary, updated_by, and updated_at
     set_parts.push(format!("last_change_summary = ${param_idx}"));
     param_idx += 1;
+    set_parts.push(format!("updated_by = ${param_idx}"));
+    param_idx += 1;
+
+    // Set content_hash for knowledge documents
+    if new_content_hash.is_some() {
+        set_parts.push(format!("content_hash = ${param_idx}"));
+        param_idx += 1;
+    }
+
     set_parts.push(format!("updated_at = ${param_idx}"));
 
     let sql = format!(
@@ -379,6 +450,8 @@ pub async fn update_dashboard(
             if let Some(t) = title { query = query.bind(t.trim()); }
             if let Some(c) = content { query = query.bind(c); }
             query = query.bind(&auto_summary);
+            query = query.bind(user_id);
+            if let Some(ref hash) = new_content_hash { query = query.bind(hash); }
             query = query.bind(now);
             query.execute(pg).await.map(kyomi_core::db::DbQueryResult::from_pg)
         }
@@ -387,6 +460,8 @@ pub async fn update_dashboard(
             if let Some(t) = title { query = query.bind(t.trim()); }
             if let Some(c) = content { query = query.bind(c); }
             query = query.bind(&auto_summary);
+            query = query.bind(user_id);
+            if let Some(ref hash) = new_content_hash { query = query.bind(hash); }
             query = query.bind(now);
             query.execute(sq).await.map(kyomi_core::db::DbQueryResult::from_sqlite)
         }
@@ -396,6 +471,22 @@ pub async fn update_dashboard(
     })?;
 
     tracing::info!(dashboard_id = %dashboard_id, "Updated dashboard");
+
+    // Rechunk knowledge documents after content update
+    if result.rows_affected() > 0
+        && current_doc_type.is_knowledge()
+        && let Some(c) = content
+    {
+        if let Some(embed_svc) = embed {
+            rechunk_document(db, embed_svc, dashboard_id, c, workspace_id).await?;
+        } else {
+            tracing::warn!(
+                dashboard_id = %dashboard_id,
+                "Knowledge document updated without EmbeddingService — chunks are now stale"
+            );
+        }
+    }
+
     Ok(result.rows_affected() > 0)
 }
 
@@ -442,6 +533,9 @@ pub async fn delete_dashboard(
 /// (BM25 + semantic), the REST endpoint layer can compose this with
 /// embedding-based search.
 ///
+/// - `doc_type_filter`: `None` searches all types, `Some(DocType::Dashboard)` or
+///   `Some(DocType::Knowledge)` filters by document type.
+///
 /// Popularity is computed via time-weighted view counts:
 /// - Last 7 days: 1.0 weight
 /// - Last 30 days: 0.5
@@ -451,6 +545,7 @@ pub async fn search_dashboards(
     db: &DbPool,
     workspace_id: &str,
     query: Option<&str>,
+    doc_type_filter: Option<DocType>,
     sort_by: SearchSort,
     limit: i64,
 ) -> Result<Vec<DashboardSearchResult>> {
@@ -463,12 +558,19 @@ pub async fn search_dashboards(
     let query_param: Option<&str> = query
         .filter(|q| !q.trim().is_empty())
         .map(|q| q.trim());
+    let doc_type_str: Option<&str> = doc_type_filter.map(|dt: DocType| dt.as_str());
 
-    // Build the text filter
+    // Build the text filter — $5 is query text, $6 is doc_type filter
     let text_filter = if is_pg {
         "AND ($5::text IS NULL OR d.title ILIKE '%' || $5 || '%' OR d.content ILIKE '%' || $5 || '%')"
     } else {
         "AND ($5 IS NULL OR d.title LIKE '%' || $5 || '%' OR d.content LIKE '%' || $5 || '%')"
+    };
+
+    let doc_type_clause = if is_pg {
+        "AND ($6::text IS NULL OR d.doc_type = $6)"
+    } else {
+        "AND ($6 IS NULL OR d.doc_type = $6)"
     };
 
     // Postgres SUM returns NUMERIC; cast to FLOAT8 so sqlx can decode as f64.
@@ -481,7 +583,7 @@ pub async fn search_dashboards(
         r#"
         SELECT
             d.dashboard_id, d.user_id, d.workspace_id, d.title, d.content,
-            d.last_change_summary, d.created_at, d.updated_at,
+            d.doc_type, d.last_change_summary, d.created_at, d.updated_at,
             COALESCE(v.popularity_score, 0.0) AS popularity_score,
             COALESCE(v.view_count, 0) AS view_count,
             COALESCE(v.recent_views, 0) AS recent_views
@@ -505,6 +607,7 @@ pub async fn search_dashboards(
         ) v ON d.dashboard_id = v.dashboard_id
         WHERE d.workspace_id = $1
         {text_filter}
+        {doc_type_clause}
         "#
     );
 
@@ -521,6 +624,7 @@ pub async fn search_dashboards(
                 .bind(medium_cutoff)
                 .bind(old_cutoff)
                 .bind(query_param)
+                .bind(doc_type_str)
                 .fetch_all(pg)
                 .await
                 .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
@@ -539,6 +643,7 @@ pub async fn search_dashboards(
                     workspace_id: row.get("workspace_id"),
                     title: row.get("title"),
                     content,
+                    doc_type: row.get("doc_type"),
                     last_change_summary: row.get("last_change_summary"),
                     created_at: row.get("created_at"),
                     updated_at: row.get("updated_at"),
@@ -556,6 +661,7 @@ pub async fn search_dashboards(
                 .bind(medium_cutoff)
                 .bind(old_cutoff)
                 .bind(query_param)
+                .bind(doc_type_str)
                 .fetch_all(sq)
                 .await
                 .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
@@ -574,6 +680,7 @@ pub async fn search_dashboards(
                     workspace_id: row.get("workspace_id"),
                     title: row.get("title"),
                     content,
+                    doc_type: row.get("doc_type"),
                     last_change_summary: row.get("last_change_summary"),
                     created_at: row.get("created_at"),
                     updated_at: row.get("updated_at"),
@@ -634,6 +741,184 @@ pub async fn get_dashboard_count(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to count dashboards: {e}")))?;
 
     Ok(count)
+}
+
+// ─── Rechunking (knowledge documents) ───────────────────────────────────────
+
+/// Rechunk a knowledge document: delete old chunks, split content into
+/// fixed-size chunks with overlap, embed each chunk, and insert into
+/// `knowledge_chunks`. Also extracts and stores table references in
+/// `knowledge_file_tables`.
+///
+/// The `knowledge_chunks` and `knowledge_file_tables` tables use `dashboard_id`
+/// as the foreign key (renamed from `file_id` during the knowledge unification migration).
+pub async fn rechunk_document(
+    db: &DbPool,
+    embed: &EmbeddingService,
+    dashboard_id: &str,
+    content: &str,
+    workspace_id: &str,
+) -> Result<()> {
+    use kyomi_knowledge::knowledge_files::{extract_table_references, split_into_chunks};
+
+    if content.trim().is_empty() {
+        // No content — just delete old chunks and table refs
+        db_execute!(
+            db,
+            "DELETE FROM knowledge_chunks WHERE dashboard_id = $1",
+            dashboard_id
+        )
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete chunks: {e}")))?;
+        db_execute!(
+            db,
+            "DELETE FROM knowledge_file_tables WHERE dashboard_id = $1",
+            dashboard_id
+        )
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete table refs: {e}")))?;
+        return Ok(());
+    }
+
+    // Split into chunks
+    let chunks = split_into_chunks(content, CHUNK_SIZE, CHUNK_OVERLAP);
+
+    if chunks.is_empty() {
+        return Ok(());
+    }
+
+    // Embed BEFORE deleting old chunks — if embedding fails, old chunks remain intact
+    let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+    let embeddings = embed
+        .embed_passages(&chunk_refs)
+        .map_err(|e| kyomi_core::Error::Internal(format!("embedding failed: {e}")))?;
+
+    if embeddings.len() != chunks.len() {
+        return Err(kyomi_core::Error::Internal(format!(
+            "BUG: embedding count {} != chunk count {}",
+            embeddings.len(),
+            chunks.len()
+        )));
+    }
+
+    // Extract table references before the transaction
+    let table_refs = extract_table_references(content);
+
+    // Wrap delete + insert in a transaction for atomicity — if any insert
+    // fails, the old chunks remain intact rather than leaving partial state.
+    match db {
+        kyomi_core::db::DbPool::Postgres(pg) => {
+            let mut tx = pg.begin().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!("failed to begin transaction: {e}"))
+            })?;
+
+            sqlx::query("DELETE FROM knowledge_chunks WHERE dashboard_id = $1")
+                .bind(dashboard_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete chunks: {e}")))?;
+            sqlx::query("DELETE FROM knowledge_file_tables WHERE dashboard_id = $1")
+                .bind(dashboard_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete table refs: {e}")))?;
+
+            for (i, (chunk_text, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+                let chunk_id = uuid::Uuid::new_v4().to_string();
+                let vector = pgvector::Vector::from(embedding.clone());
+                sqlx::query(
+                    "INSERT INTO knowledge_chunks \
+                        (id, dashboard_id, workspace_id, content, chunk_index, embedding) \
+                     VALUES ($1, $2, $3, $4, $5, $6::vector)",
+                )
+                .bind(&chunk_id)
+                .bind(dashboard_id)
+                .bind(workspace_id)
+                .bind(chunk_text)
+                .bind(i as i32)
+                .bind(&vector)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert chunk: {e}")))?;
+            }
+
+            for table_ref in &table_refs {
+                sqlx::query(
+                    "INSERT INTO knowledge_file_tables (dashboard_id, workspace_id, table_full_name) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                )
+                .bind(dashboard_id)
+                .bind(workspace_id)
+                .bind(table_ref)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert table ref: {e}")))?;
+            }
+
+            tx.commit().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!("failed to commit rechunk transaction: {e}"))
+            })?;
+        }
+        kyomi_core::db::DbPool::Sqlite(sq) => {
+            let mut tx = sq.begin().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!("failed to begin transaction: {e}"))
+            })?;
+
+            sqlx::query("DELETE FROM knowledge_chunks WHERE dashboard_id = $1")
+                .bind(dashboard_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete chunks: {e}")))?;
+            sqlx::query("DELETE FROM knowledge_file_tables WHERE dashboard_id = $1")
+                .bind(dashboard_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete table refs: {e}")))?;
+
+            for (i, (chunk_text, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+                let chunk_id = uuid::Uuid::new_v4().to_string();
+                let emb_bytes = embedding_to_bytes(embedding);
+                sqlx::query(
+                    "INSERT INTO knowledge_chunks \
+                        (id, dashboard_id, workspace_id, content, chunk_index, embedding) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(&chunk_id)
+                .bind(dashboard_id)
+                .bind(workspace_id)
+                .bind(chunk_text)
+                .bind(i as i32)
+                .bind(&emb_bytes)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert chunk: {e}")))?;
+            }
+
+            for table_ref in &table_refs {
+                sqlx::query(
+                    "INSERT INTO knowledge_file_tables (dashboard_id, workspace_id, table_full_name) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                )
+                .bind(dashboard_id)
+                .bind(workspace_id)
+                .bind(table_ref)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to insert table ref: {e}")))?;
+            }
+
+            tx.commit().await.map_err(|e| {
+                kyomi_core::Error::Internal(format!("failed to commit rechunk transaction: {e}"))
+            })?;
+        }
+    }
+
+    tracing::debug!(
+        dashboard_id,
+        chunks = chunks.len(),
+        table_refs = table_refs.len(),
+        "Rechunked knowledge document"
+    );
+
+    Ok(())
 }
 
 // ─── Record view ─────────────────────────────────────────────────────────────
@@ -1201,6 +1486,29 @@ visualize:
     fn test_title_maximum_valid() {
         let title = "x".repeat(255);
         assert!(validate_title(&title).is_ok());
+    }
+
+    // ── hash_content ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hash_content_deterministic() {
+        let h1 = hash_content("test content");
+        let h2 = hash_content("test content");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_content_different_inputs() {
+        let h1 = hash_content("content a");
+        let h2 = hash_content("content b");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_content_is_16_hex_chars() {
+        let h = hash_content("hello");
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
 

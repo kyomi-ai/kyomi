@@ -98,6 +98,7 @@ impl AgentTool for SearchDashboardsTool {
             &ctx.db,
             &ctx.workspace_id,
             query,
+            None, // agent searches all doc types
             sort_by,
             limit,
         )
@@ -331,6 +332,7 @@ impl AgentTool for CreateDashboardTool {
             &ctx.workspace_id,
             title,
             content,
+            kyomi_core::models::DocType::Dashboard,
         )
         .await
         {
@@ -487,12 +489,14 @@ impl AgentTool for ModifyDashboardTool {
 
         match kyomi_auth::dashboard_service::update_dashboard(
             &ctx.db,
+            None, // embed: no rechunking from agent tool (yet)
             dashboard_id,
             &ctx.workspace_id,
             &ctx.user_id,
             title,
             content,
             change_summary,
+            None, // expected_content_hash: no CAS for agent tool
         )
         .await
         {

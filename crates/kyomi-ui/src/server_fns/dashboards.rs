@@ -125,6 +125,7 @@ pub async fn list_dashboards(
         &ctx.db,
         ws_id,
         query.as_deref(),
+        Some(kyomi_core::models::DocType::Dashboard), // dashboard page only shows dashboards
         sort,
         limit,
     )
@@ -225,6 +226,7 @@ pub async fn create_dashboard(
         ws_id,
         &title,
         &content,
+        kyomi_core::models::DocType::Dashboard,
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -268,12 +270,14 @@ pub async fn update_dashboard(
 
     kyomi_auth::dashboard_service::update_dashboard(
         &ctx.db,
+        None, // embed: no rechunking from dashboard UI (yet)
         &dashboard_id,
         ws_id,
         &auth.user_id,
         title.as_deref(),
         content.as_deref(),
         change_summary.as_deref(),
+        None, // expected_content_hash: no CAS for dashboard UI
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;

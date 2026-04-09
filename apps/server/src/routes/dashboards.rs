@@ -314,6 +314,7 @@ async fn create_dashboard(
         workspace_id,
         &request.title,
         &request.content,
+        kyomi_core::models::DocType::Dashboard,
     )
     .await?;
 
@@ -373,6 +374,7 @@ async fn list_dashboards(
         &state.db,
         workspace_id,
         params.query.as_deref(),
+        Some(kyomi_core::models::DocType::Dashboard), // REST endpoint only shows dashboards
         sort_by,
         limit,
     )
@@ -436,12 +438,14 @@ async fn update_dashboard(
 
     dashboard_service::update_dashboard(
         &state.db,
+        None, // embed: no rechunking from REST API (yet)
         &dashboard_id,
         workspace_id,
         &user.user_id,
         request.title.as_deref(),
         request.content.as_deref(),
         request.change_summary.as_deref(),
+        None, // expected_content_hash: no CAS for dashboard REST
     )
     .await?;
 
