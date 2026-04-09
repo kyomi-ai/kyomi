@@ -32,7 +32,7 @@ use crate::components::dashboard::{
     ChartBuilderModal, CopilotSidebar, HistoryPanel, InsertDashboardLinkModal, MarkdownRenderer,
     markdown_renderer::kyomi_palette,
 };
-use crate::components::Spinner;
+use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
 use crate::server_fns::context::get_user_context;
 use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
 
@@ -81,7 +81,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
                 view! {
                     <Transition fallback=move || {
                         view! {
-                            <div class="flex h-full items-center justify-center bg-muted">
+                            <div class="flex h-full items-center justify-center bg-background">
                                 <Spinner class="h-8 w-8 text-muted-foreground" />
                             </div>
                         }
@@ -92,18 +92,15 @@ pub fn DashboardEditorPage() -> impl IntoView {
                                 .map(|result| match result {
                                     Err(e) => {
                                         view! {
-                                            <div class="flex h-full items-center justify-center bg-muted">
+                                            <div class="flex h-full items-center justify-center bg-background">
                                                 <div class="text-center">
                                                     <h2 class="text-lg font-semibold text-foreground mb-4">
                                                         "Dashboard Not Found"
                                                     </h2>
                                                     <p class="text-muted-foreground mb-6">{e.to_string()}</p>
-                                                    <a
-                                                        href="/dashboards"
-                                                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 bg-primary text-primary-foreground shadow hover:bg-primary/90"
-                                                    >
+                                                    <ButtonLink href="/dashboards">
                                                         "Back to Dashboards"
-                                                    </a>
+                                                    </ButtonLink>
                                                 </div>
                                             </div>
                                         }
@@ -139,7 +136,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
 /// Matches React's `modeToggle` which appears in the toolbar row.
 fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<EditorMode>) -> impl IntoView {
     view! {
-        <div class="flex items-center bg-accent rounded-md p-0.5 flex-shrink-0">
+        <div class="flex items-center bg-muted rounded-md p-0.5 flex-shrink-0">
             <button
                 class=move || {
                     let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1";
@@ -508,23 +505,30 @@ fn DashboardEditorInner(
     });
 
     view! {
-        <div class="h-full flex flex-col overflow-hidden">
-            // ── Header bar ───────────────────────────────────────────────
-            // Matches React: Title | (spacer) | History | Copilot | Close | Save
-            <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
-                // Title (left side, takes remaining space)
-                <div class="flex items-center flex-1">
-                    <input
-                        type="text"
-                        class="flex-1 min-w-[100px] text-sm sm:text-lg font-semibold bg-transparent border-none outline-none text-foreground placeholder:text-muted-foreground truncate"
-                        placeholder="Untitled Dashboard"
-                        prop:value=move || title.get()
-                        on:input=on_title_input
-                    />
+        <div class="flex flex-col h-full bg-background overflow-hidden @container">
+            // ── Header bar — matches viewer: page-header pattern ────────
+            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                // Left: back button + title input
+                <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
+                    <ButtonLink href="/dashboards" variant=ButtonVariant::Ghost size=ButtonSize::Icon
+                        class="flex-shrink-0 text-muted-foreground hover:text-foreground"
+                        aria_label="Back to dashboards">
+                        <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+                    </ButtonLink>
+
+                    <div class="min-w-0 flex-1">
+                        <input
+                            type="text"
+                            class="text-3xl font-display text-foreground bg-transparent border-none outline-none w-full placeholder:text-muted-foreground truncate"
+                            placeholder="Untitled Dashboard"
+                            prop:value=move || title.get()
+                            on:input=on_title_input
+                        />
+                    </div>
                 </div>
 
-                // Action buttons (right side)
-                <div class="flex items-center space-x-3">
+                // Right: action buttons — matches viewer responsive toolbar pattern
+                <div class="flex items-center gap-1 @6xl:gap-2 flex-shrink-0">
                     // Unsaved indicator
                     {move || {
                         has_unsaved_changes.get().then(|| {
@@ -552,29 +556,25 @@ fn DashboardEditorInner(
                     {move || {
                         is_existing.get().then(|| {
                             view! {
-                                <button
-                                    class=move || {
-                                        let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors";
-                                        if history_open.get() {
-                                            format!("{base} bg-primary/10 text-primary")
-                                        } else {
-                                            format!("{base} bg-accent text-foreground hover:bg-secondary")
+                                <div class="hidden @3xl:flex">
+                                    <ToggleButton
+                                        variant=Signal::derive(move || if history_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                        size=ButtonSize::Sm
+                                        aria_label="Toggle version history"
+                                        on:click=move |_| {
+                                            if history_open.get() {
+                                                set_history_open.set(false);
+                                                set_history_preview_content.set(None);
+                                            } else {
+                                                set_copilot_open.set(false);
+                                                set_history_open.set(true);
+                                            }
                                         }
-                                    }
-                                    on:click=move |_| {
-                                        if history_open.get() {
-                                            set_history_open.set(false);
-                                            set_history_preview_content.set(None);
-                                        } else {
-                                            set_copilot_open.set(false);
-                                            set_history_open.set(true);
-                                        }
-                                    }
-                                    aria-label="Toggle version history"
-                                >
-                                    <Icon icon=icondata_lu::LuClock attr:class="w-4 h-4 flex-shrink-0" />
-                                    <span class="hidden sm:inline">"History"</span>
-                                </button>
+                                    >
+                                        <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                                        <span class="hidden @6xl:inline whitespace-nowrap">"History"</span>
+                                    </ToggleButton>
+                                </div>
                             }
                         })
                     }}
@@ -583,88 +583,67 @@ fn DashboardEditorInner(
                     {move || {
                         is_existing.get().then(|| {
                             view! {
-                                <button
-                                    class=move || {
-                                        let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors";
-                                        if copilot_open.get() {
-                                            format!("{base} bg-primary/10 text-primary")
-                                        } else {
-                                            format!("{base} bg-accent text-foreground hover:bg-secondary")
+                                <div class="hidden @3xl:flex">
+                                    <ToggleButton
+                                        variant=Signal::derive(move || if copilot_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                        size=ButtonSize::Sm
+                                        aria_label="Toggle copilot"
+                                        on:click=move |_| {
+                                            if copilot_open.get() {
+                                                set_copilot_open.set(false);
+                                            } else {
+                                                set_history_open.set(false);
+                                                set_history_preview_content.set(None);
+                                                set_copilot_open.set(true);
+                                            }
                                         }
-                                    }
-                                    on:click=move |_| {
-                                        if copilot_open.get() {
-                                            set_copilot_open.set(false);
-                                        } else {
-                                            set_history_open.set(false);
-                                            set_history_preview_content.set(None);
-                                            set_copilot_open.set(true);
-                                        }
-                                    }
-                                    aria-label="Toggle copilot"
-                                >
-                                    <Icon icon=icondata_lu::LuMessagesSquare attr:class="w-4 h-4 flex-shrink-0" />
-                                    <span class="hidden sm:inline">"Copilot"</span>
-                                </button>
+                                    >
+                                        <Icon icon=icondata_lu::LuMessagesSquare width="14" height="14" />
+                                        <span class="hidden @6xl:inline whitespace-nowrap">"Copilot"</span>
+                                    </ToggleButton>
+                                </div>
                             }
                         })
                     }}
 
-                    // Close button — navigates back to dashboard or list
-                    <a
-                        href=move || back_href.get()
-                        class="flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium bg-accent text-foreground hover:bg-secondary rounded-lg transition-colors"
-                    >
-                        // X icon
-                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                        <span class="hidden sm:inline">"Close"</span>
-                    </a>
-
-                    // Save button — matches React: success state (green + checkmark for 2s)
-                    <button
-                        class=move || {
-                            let base = "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50";
-                            if save_success.get() {
-                                format!("{base} bg-success-foreground")
-                            } else {
-                                format!("{base} bg-primary hover:bg-primary/90")
-                            }
+                    // Close button — navigates back to dashboard view or list
+                    <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm
+                        aria_label="Close editor".to_string()
+                        on:click=move |_| {
+                            let href = back_href.get();
+                            let nav = leptos_router::hooks::use_navigate();
+                            nav(&href, leptos_router::NavigateOptions::default());
                         }
+                    >
+                        <Icon icon=icondata_lu::LuX width="14" height="14" />
+                        <span class="hidden @6xl:inline whitespace-nowrap">"Close"</span>
+                    </Button>
+
+                    // Save button
+                    <Button
+                        size=ButtonSize::Sm
+                        disabled=Signal::derive(move || saving.get() || !has_unsaved_changes.get())
                         on:click=save_on_click
-                        disabled=move || saving.get() || !has_unsaved_changes.get()
                     >
                         {move || {
                             if saving.get() {
-                                view! {
-                                    <Spinner class="w-4 h-4" />
-                                }.into_any()
+                                view! { <Spinner class="w-4 h-4" /> }.into_any()
                             } else if save_success.get() {
-                                view! {
-                                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                                    </svg>
-                                }.into_any()
+                                view! { <Icon icon=icondata_lu::LuCheck width="14" height="14" /> }.into_any()
                             } else {
-                                view! {
-                                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
-                                    </svg>
-                                }.into_any()
+                                view! { <Icon icon=icondata_lu::LuSave width="14" height="14" /> }.into_any()
                             }
                         }}
-                        <span class="hidden sm:inline">
+                        <span class="hidden @6xl:inline whitespace-nowrap">
                             {move || if saving.get() { "Saving..." } else if save_success.get() { "Saved!" } else { "Save" }}
                         </span>
-                    </button>
+                    </Button>
                 </div>
             </div>
 
-            // ── Content area with card framing (matches React DashboardEditor.jsx:795-798) ──
+            // ── Content area — no card wrapper, matches viewer bg-background ──
             <div class="flex-1 overflow-hidden flex">
-                <div class="flex-1 overflow-hidden bg-muted p-4 md:p-6">
-                    <div class="bg-card rounded-lg border border-border shadow-sm h-full flex flex-col overflow-hidden">
+                <div class="flex-1 overflow-hidden flex flex-col bg-background">
                 // Main editor area (switches between Source and Visual)
                 {move || {
                     if mode.get() == EditorMode::Source {
@@ -819,7 +798,6 @@ fn DashboardEditorInner(
                         .into_any()
                     }
                 }}
-                    </div>
                 </div>
 
                 // History panel (only for existing dashboards)
