@@ -12,6 +12,7 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use super::thinking::{ThinkingEvent, TokenUsage};
+use super::tool_schema_renderer;
 
 /// Rendering variant for the agent thinking panel.
 ///
@@ -124,103 +125,14 @@ fn strip_emojis(text: &str) -> String {
 
 /// Render tool schema data from a thinking event.
 ///
-/// Matches React's `ToolSchemaRenderer` — shows tool name, input summary,
-/// and output/result summary. This is a compact generic renderer; tool-specific
-/// renderers (BigQuery cost, query results, etc.) will be added later.
+/// Delegates to `tool_schema_renderer::render_tool_schema()` which has dedicated
+/// renderers for each tool type (query results, cost estimates, dashboards, etc.).
 fn render_tool_schema(schema: serde_json::Value) -> impl IntoView {
-    let tool = schema
-        .get("tool")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if tool.is_empty() {
-        return view! { <span /> }.into_any();
-    }
-
-    // Input summary: show datasource, path, or SQL snippet
-    let input = schema.get("input");
-    let input_summary = input.and_then(|inp| {
-        // Try datasource first, then path, then sql
-        if let Some(ds) = inp.get("datasource").and_then(|v| v.as_str()) {
-            Some(format!("datasource: {ds}"))
-        } else if let Some(p) = inp.get("path").and_then(|v| v.as_str()) {
-            Some(format!("path: {p}"))
-        } else if let Some(sql) = inp.get("sql").and_then(|v| v.as_str()) {
-            let truncated = if sql.chars().count() > 80 {
-                format!("{}...", sql.chars().take(77).collect::<String>())
-            } else {
-                sql.to_string()
-            };
-            Some(format!("sql: {truncated}"))
-        } else {
-            inp.get("table_id")
-                .and_then(|v| v.as_str())
-                .map(|table| format!("table: {table}"))
-        }
-    });
-
-    // Output summary: show row count, error, or status
-    let output = schema.get("output");
-    let output_summary = output.and_then(|out| {
-        if let Some(err) = out.get("error").and_then(|v| v.as_str()) {
-            Some(("error", err.to_string()))
-        } else if let Some(rows) = out.get("rows").and_then(|v| v.as_u64()) {
-            let status = out
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("ok");
-            Some(("result", format!("{rows} rows ({status})")))
-        } else if let Some(status) = out.get("status").and_then(|v| v.as_str()) {
-            Some(("result", status.to_string()))
-        } else if let Some(cost) = out.get("cost").and_then(|v| v.as_str()) {
-            let size = out
-                .get("size")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            let safety = out
-                .get("safety")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            Some(("cost", format!("{cost} / {size} [{safety}]")))
-        } else {
-            None
-        }
-    });
-
-    // Human-readable tool name
-    let tool_label = match tool.as_str() {
-        "query_datasource" | "bigquery_query" => "Query",
-        "estimate_query_cost" | "bigquery_cost_estimate" => "Cost Estimate",
-        "get_table_info" => "Table Info",
-        "get_table_sample" => "Table Sample",
-        "create_chart" | "create_chart_visualization" => "Create Chart",
-        "update_chart" => "Update Chart",
-        "browse_catalog" => "Browse Catalog",
-        "search_knowledge" => "Search Knowledge",
-        "write_knowledge_file" | "edit_knowledge_file" => "Write Knowledge",
-        "create_watch" | "update_watch" => "Watch",
-        other => other,
-    };
-
     view! {
-        <div class="mt-1.5 text-xs bg-muted rounded px-2 py-1.5 space-y-0.5">
-            <div class="font-medium text-foreground">{tool_label.to_string()}</div>
-            {input_summary.map(|s| view! {
-                <div class="text-muted-foreground font-mono truncate">{s}</div>
-            })}
-            {output_summary.map(|(kind, text)| {
-                let class = if kind == "error" {
-                    "text-destructive"
-                } else {
-                    "text-muted-foreground"
-                };
-                view! {
-                    <div class=class>{text}</div>
-                }
-            })}
+        <div class="mt-1.5 text-xs bg-muted rounded px-2 py-1.5">
+            {tool_schema_renderer::render_tool_schema(schema)}
         </div>
     }
-    .into_any()
 }
 
 /// Agent Thinking UI component.

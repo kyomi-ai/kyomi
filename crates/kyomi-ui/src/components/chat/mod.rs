@@ -7,6 +7,7 @@ pub mod chat_input;
 pub mod chat_state;
 pub mod inline_editable_title;
 pub mod thinking;
+pub mod tool_schema_renderer;
 pub mod websocket_client;
 
 pub use agent_thinking::AgentThinking;
