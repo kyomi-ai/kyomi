@@ -553,6 +553,33 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 
 .tree-wysiwyg-scroll-container.tree-wysiwyg-scroll-container {
   padding: 1rem 1.5rem;
+  font-family: var(--font-sans);
+  line-height: 1.8;
+}
+
+/* WYSIWYG headings: match dashboard viewer prose (Instrument Serif, weight 400).
+ * Double selector beats kode's single .wysiwyg-heading { font-weight: 700 }. */
+.wysiwyg-heading.wysiwyg-heading {
+  font-family: var(--font-display);
+  font-weight: 400;
+}
+.wysiwyg-h1.wysiwyg-h1 {
+  font-size: 2rem;          /* 30px — matches .prose h1 */
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.wysiwyg-h2.wysiwyg-h2 {
+  font-size: 1.6rem;        /* 24px — matches .prose h2 */
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.wysiwyg-h3.wysiwyg-h3 {
+  font-size: 1.333rem;      /* 20px — matches .prose h3 */
+}
+
+/* WYSIWYG code blocks & inline code: Geist Mono */
+.wysiwyg-inline-code, .wysiwyg-code-block code {
+  font-family: var(--font-mono);
 }
 
 /* Give the toolbar the card's top border-radius so it looks like a header */

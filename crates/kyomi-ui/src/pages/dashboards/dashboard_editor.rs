@@ -751,30 +751,25 @@ fn DashboardEditorInner(
                                 </svg>
                             }.into_any()),
                             ToolbarItem::Separator,
-                            // Add Chart — matches React: responsive icon+text, secondary style
+                            // Add Chart — uses kode-toolbar-button class to match builtins
                             ToolbarItem::Custom(CustomToolbarButton {
                                 label: view! {
-                                    <svg class="w-4 h-4 sm:w-3 sm:h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                                    </svg>
+                                    <Icon icon=icondata_lu::LuChartColumnBig width="16" height="16" />
                                     <span class="hidden sm:inline">"Add Chart"</span>
                                 }.into_any(),
                                 title: "Add Chart".to_string(),
                                 on_click: Arc::new(move || set_chart_open.set(true)),
-                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded-md bg-secondary text-secondary-foreground transition-colors hover:bg-secondary/90 flex items-center gap-1 flex-shrink-0".to_string()),
+                                class: Some("kode-toolbar-button flex items-center gap-1".to_string()),
                             }),
-                            // Link — matches React: responsive icon+text
+                            // Link — uses kode-toolbar-button class to match builtins
                             ToolbarItem::Custom(CustomToolbarButton {
                                 label: view! {
-                                    <svg class="w-4 h-4 sm:w-3 sm:h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
-                                        <path stroke-linecap="round" stroke-linejoin="round" d="M10.172 13.828a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" />
-                                    </svg>
+                                    <Icon icon=icondata_lu::LuLink width="16" height="16" />
                                     <span class="hidden sm:inline">"Link"</span>
                                 }.into_any(),
                                 title: "Link to Dashboard".to_string(),
                                 on_click: Arc::new(move || set_link_open.set(true)),
-                                class: Some("p-1.5 sm:px-2 sm:py-1 text-xs rounded-md text-foreground transition-colors hover:bg-secondary flex items-center gap-1 flex-shrink-0".to_string()),
+                                class: Some("kode-toolbar-button flex items-center gap-1".to_string()),
                             }),
                             // Push mode toggle to far right
                             ToolbarItem::Spacer,
