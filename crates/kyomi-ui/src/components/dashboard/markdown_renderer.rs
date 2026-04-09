@@ -397,14 +397,14 @@ pub(crate) fn kyomi_palette(name: &str) -> Vec<String> {
 
 /// Create a configured ChartML instance with all chart renderers registered
 /// and the user's palette preference applied.
-fn configured_chartml(palette_name: &str) -> Arc<ChartML> {
+pub(crate) fn configured_chartml(palette_name: &str) -> Arc<ChartML> {
     let colors = kyomi_palette(palette_name);
     use_chartml_configured(|c| {
         c.register_renderer("bar", CartesianRenderer::new());
         c.register_renderer("line", CartesianRenderer::new());
         c.register_renderer("area", CartesianRenderer::new());
         c.register_renderer("pie", PieRenderer::new());
-        c.register_renderer("donut", PieRenderer::new());
+        c.register_renderer("doughnut", PieRenderer::new());
         c.register_renderer("scatter", ScatterRenderer::new());
         c.register_renderer("metric", MetricRenderer::new());
         c.register_transform(DataFusionTransform);
@@ -1010,7 +1010,7 @@ fn ChartBlock(
                         chartml_mut.register_renderer("line", CartesianRenderer::new());
                         chartml_mut.register_renderer("area", CartesianRenderer::new());
                         chartml_mut.register_renderer("pie", PieRenderer::new());
-                        chartml_mut.register_renderer("donut", PieRenderer::new());
+                        chartml_mut.register_renderer("doughnut", PieRenderer::new());
                         chartml_mut.register_renderer("scatter", ScatterRenderer::new());
                         chartml_mut.register_renderer("metric", MetricRenderer::new());
                         chartml_mut.register_transform(DataFusionTransform);

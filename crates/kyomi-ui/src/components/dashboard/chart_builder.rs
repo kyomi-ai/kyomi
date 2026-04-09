@@ -1,36 +1,45 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Chart Builder Modal — a simplified Leptos port of
+//! Chart Builder Modal — Leptos port of
 //! `apps/frontend/src/components/ChartBuilderModal.jsx`.
 //!
-//! Provides a step-by-step flow for creating/editing charts:
-//! 1. Select a datasource
-//! 2. Write a SQL query
-//! 3. Configure chart type, axes, and series
-//! 4. Generate ChartML YAML and insert into the dashboard
+//! Two-screen flow:
+//! 1. **SQL Editor** — datasource selection, SQL query, catalog sidebar
+//! 2. **Chart Config** — split pane: left editing panel (Visual / AI / YAML sub-tabs),
+//!    right live preview
 //!
-//! Uses the project's `Modal`, `DynSelect`, and kode-leptos `CodeEditor`
-//! components to match existing patterns.
+//! React reference: `ChartBuilderModal.jsx`, `ChartVisualEditor.jsx`,
+//! `ChartMLConfigEditor.jsx`, `ChartBuilderCopilotSidebar.jsx`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::components::chat::websocket_client::WebSocketContext;
+use crate::components::chat::{AgentThinking, ThinkingState};
+#[cfg(target_arch = "wasm32")]
+use crate::components::chat::{ThinkingEvent, TokenUsage, process_thinking_event};
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::DynSelect;
-use crate::components::Spinner;
+use crate::components::{Button, ButtonSize, EmptyState, Spinner};
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
 use crate::pages::sql_editor::types::QueryResult;
-use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
+use crate::server_fns::copilot::{
+    create_chart_copilot_session, delete_copilot_session, send_chart_copilot_message,
+};
+use crate::server_fns::datasources::{list_datasources, query_datasource_arrow, DatasourceInfo};
 use crate::server_fns::sql_editor::execute_sql_query;
 
+use super::markdown_renderer::{configured_chartml, kyomi_palette};
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 
-/// Label classes — matches the project's design system.
-const LABEL_CLASS: &str = "text-sm font-medium text-foreground";
+/// Label classes — matches the design system (uppercase tracking-wide like React).
+const LABEL_CLASS: &str =
+    "text-xs font-medium text-muted-foreground uppercase tracking-wide";
 
 /// Chart type options matching the React `CHART_TYPE_OPTIONS` in
 /// `ChartVisualEditor.jsx` and the ChartML spec.
@@ -66,6 +75,8 @@ struct ParsedChart {
     sql: String,
     chart_type: String,
     x_field: String,
+    orientation: Option<String>,
+    mode: Option<String>,
     series: Vec<SeriesEntry>,
 }
 
@@ -114,6 +125,12 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
         }
         if let Some(x) = vis.get("columns").and_then(|v| v.as_str()) {
             chart.x_field = x.to_string();
+        }
+        if let Some(o) = vis.get("orientation").and_then(|v| v.as_str()) {
+            chart.orientation = Some(o.to_string());
+        }
+        if let Some(m) = vis.get("mode").and_then(|v| v.as_str()) {
+            chart.mode = Some(m.to_string());
         }
 
         // Title lives under visualize.style.title
@@ -181,6 +198,8 @@ fn build_yaml(
     sql: &str,
     chart_type: &str,
     x_field: &str,
+    orientation: Option<&str>,
+    mode: Option<&str>,
     series: &[SeriesEntry],
 ) -> String {
     // Indent SQL lines for YAML block scalar
@@ -200,6 +219,16 @@ fn build_yaml(
   visualize:
     type: {chart_type}"#
     );
+
+    // orientation — only for bar charts
+    if let Some(orient) = orientation {
+        yaml.push_str(&format!("\n    orientation: {orient}"));
+    }
+
+    // mode — grouped for bar, normalized for area
+    if let Some(m) = mode {
+        yaml.push_str(&format!("\n    mode: {m}"));
+    }
 
     // columns — only for chart types that use axes
     let needs_axes = !matches!(chart_type, "metric" | "pie" | "doughnut");
@@ -241,11 +270,12 @@ fn build_yaml(
 ///
 /// React reference: `apps/frontend/src/components/ChartBuilderModal.jsx`
 ///
-/// This is a simplified version that covers the core flow:
-/// datasource selection, SQL query, chart type/axis configuration,
-/// and YAML generation. The React version has additional features
-/// (Monaco editor, AI copilot, live preview) that will be added
-/// incrementally.
+/// Features:
+/// - SQL Editor tab with datasource selector, catalog sidebar, query execution
+/// - Chart Config tab with 50/50 split pane:
+///   - Left: Visual / AI / YAML sub-tabs
+///   - Right: live chart preview
+/// - Chart type modifier chips (Horizontal, Grouped, Normalized)
 #[component]
 pub fn ChartBuilderModal(
     /// Whether the modal is open.
@@ -270,7 +300,7 @@ pub fn ChartBuilderModal(
 
     // ── Unique ID counter for series entries ─────────────────────────────
     let (next_series_id, set_next_series_id) = signal(
-        if initial.series.is_empty() { 1u32 } else { initial.series.len() as u32 }
+        initial.series.iter().map(|s| s.id).max().map(|m| m + 1).unwrap_or(1)
     );
 
     // ── Form state ──────────────────────────────────────────────────────
@@ -293,6 +323,9 @@ pub fn ChartBuilderModal(
 
     let (x_field, set_x_field) = signal(initial.x_field.clone());
 
+    let (orientation, set_orientation) = signal(initial.orientation.clone());
+    let (mode, set_mode) = signal(initial.mode.clone());
+
     let initial_series = if initial.series.is_empty() {
         vec![SeriesEntry {
             id: 0,
@@ -303,6 +336,9 @@ pub fn ChartBuilderModal(
         initial.series.clone()
     };
     let (series, set_series) = signal(initial_series);
+
+    // ── YAML editor state (separate from form, synced on sub-tab switch) ──
+    let (yaml_text, set_yaml_text) = signal(String::new());
 
     // ── Reset form state when modal opens with different yaml ────────────
     Effect::new(move || {
@@ -326,18 +362,39 @@ pub fn ChartBuilderModal(
                 parsed.chart_type.clone()
             });
             set_x_field.set(parsed.x_field.clone());
+            set_orientation.set(parsed.orientation.clone());
+            set_mode.set(parsed.mode.clone());
 
-            if parsed.series.is_empty() {
+            let series_for_yaml = if parsed.series.is_empty() {
                 set_next_series_id.set(1);
-                set_series.set(vec![SeriesEntry {
+                let default_series = vec![SeriesEntry {
                     id: 0,
                     y_field: String::new(),
                     label: String::new(),
-                }]);
+                }];
+                set_series.set(default_series.clone());
+                default_series
             } else {
-                set_next_series_id.set(parsed.series.len() as u32);
+                set_next_series_id.set(
+                    parsed.series.iter().map(|s| s.id).max().unwrap_or(0) + 1
+                );
+                let s = parsed.series.clone();
                 set_series.set(parsed.series);
-            }
+                s
+            };
+
+            // Sync YAML text
+            let yaml_str = build_yaml(
+                &parsed.title,
+                &parsed.datasource_slug,
+                &parsed.sql,
+                &parsed.chart_type,
+                &parsed.x_field,
+                parsed.orientation.as_deref(),
+                parsed.mode.as_deref(),
+                &series_for_yaml,
+            );
+            set_yaml_text.set(yaml_str);
         }
     });
 
@@ -389,17 +446,24 @@ pub fn ChartBuilderModal(
         });
     };
 
+    // ── Derived YAML from form state (for preview and YAML tab) ─────────
+    let current_yaml = Memo::new(move |_| {
+        build_yaml(
+            &title.get(),
+            &datasource_slug.get(),
+            &sql.get(),
+            &chart_type.get(),
+            &x_field.get(),
+            orientation.get().as_deref(),
+            mode.get().as_deref(),
+            &series.get(),
+        )
+    });
+
     // ── Insert / Update handler ─────────────────────────────────────────
 
     let handle_insert = Callback::new(move |()| {
-        let yaml = build_yaml(
-            &title.get_untracked(),
-            &datasource_slug.get_untracked(),
-            &sql.get_untracked(),
-            &chart_type.get_untracked(),
-            &x_field.get_untracked(),
-            &series.get_untracked(),
-        );
+        let yaml = current_yaml.get_untracked();
         on_insert.run(yaml);
         on_close.run(());
     });
@@ -423,9 +487,13 @@ pub fn ChartBuilderModal(
         let cancel_class = cancel_class_clone.clone();
         let insert_class = insert_class_clone.clone();
 
-        // Disable insert when datasource or SQL is empty
-        let is_disabled =
-            datasource_slug.get().is_empty() || sql.get().trim().is_empty();
+        // Disable insert: inline charts are always saveable, but remote charts
+        // (datasource selected) require SQL to be useful.
+        let is_disabled = if datasource_slug.get().is_empty() {
+            false // inline chart — no SQL required
+        } else {
+            sql.get().trim().is_empty() // remote chart — SQL is required
+        };
 
         view! {
             <button
@@ -454,6 +522,41 @@ pub fn ChartBuilderModal(
         });
     let sql_on_change = StoredValue::new(sql_on_change);
 
+    // ── YAML editor on_change ────────────────────────────────────────────
+    // ── Shared: apply parsed YAML back into form signals ───────────────
+    // Used by both the YAML editor on_change and the AI copilot on_chart_update.
+    let apply_parsed = move |parsed: ParsedChart, yaml_str: &str| {
+        if !parsed.chart_type.is_empty() {
+            set_chart_type.set(parsed.chart_type);
+        }
+        if !parsed.title.is_empty() || yaml_str.contains("title:") {
+            set_title.set(parsed.title);
+        }
+        set_x_field.set(parsed.x_field);
+        set_orientation.set(parsed.orientation);
+        set_mode.set(parsed.mode);
+        if !parsed.datasource_slug.is_empty() {
+            set_datasource_slug.set(parsed.datasource_slug);
+        }
+        if !parsed.sql.is_empty() {
+            set_sql.set(parsed.sql);
+        }
+        if !parsed.series.is_empty() {
+            set_next_series_id.set(
+                parsed.series.iter().map(|s| s.id).max().unwrap_or(0) + 1
+            );
+            set_series.set(parsed.series);
+        }
+    };
+
+    let yaml_on_change: Arc<dyn Fn(String) + Send + Sync> =
+        Arc::new(move |new_val: String| {
+            set_yaml_text.set(new_val.clone());
+            let parsed = parse_existing_yaml(&new_val);
+            apply_parsed(parsed, &new_val);
+        });
+    let yaml_on_change = StoredValue::new(yaml_on_change);
+
     // ── Catalog sidebar state ──────────────────────────────────────────
     let (catalog_open, set_catalog_open) = signal(false);
     let (catalog_tab, set_catalog_tab) = signal("catalog".to_string());
@@ -465,6 +568,12 @@ pub fn ChartBuilderModal(
     let (query_result, set_query_result) = signal(None::<QueryResult>);
     let (query_error, set_query_error) = signal(None::<String>);
 
+    // ── Preview state — remote data fetching ──────────────────────────
+    let (preview_chartml, set_preview_chartml) =
+        signal(None::<Arc<chartml_core::ChartML>>);
+    let (preview_loading, set_preview_loading) = signal(false);
+    let (preview_error, set_preview_error) = signal(None::<String>);
+
     // ── View ────────────────────────────────────────────────────────────
 
     let modal_title = if is_edit_mode {
@@ -474,13 +583,31 @@ pub fn ChartBuilderModal(
     };
 
     // ── Tab state ──────────────────────────────────────────────────────
-    let (active_tab, set_active_tab) = signal("sql".to_string());
+    let (active_tab, set_active_tab) = signal(
+        if is_edit_mode { "chart".to_string() } else { "sql".to_string() }
+    );
+
+    // ── Chart Config sub-tab state (Visual / AI / YAML) ────────────────
+    let (config_tab, set_config_tab) = signal("visual".to_string());
 
     /// CSS classes for underlined tab buttons — matches React's border-b-2 style.
     const TAB_ACTIVE: &str =
         "px-1 py-3 text-sm font-medium border-b-2 border-amber-600 text-primary transition-colors";
     const TAB_INACTIVE: &str =
         "px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground hover:border-border transition-colors";
+
+    /// CSS for config sub-tab pills (matches React's pill-style bg-background toggle).
+    const SUB_TAB_ACTIVE: &str =
+        "px-3 py-1 text-xs font-medium rounded bg-background text-foreground shadow-sm transition-colors";
+    const SUB_TAB_INACTIVE: &str =
+        "px-3 py-1 text-xs font-medium rounded text-muted-foreground hover:text-foreground transition-colors";
+
+    /// CSS for modifier chip — active state.
+    const CHIP_ACTIVE: &str =
+        "inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors bg-primary/10 border-primary/50 text-primary";
+    /// CSS for modifier chip — inactive state.
+    const CHIP_INACTIVE: &str =
+        "inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors bg-transparent border-border text-muted-foreground hover:border-foreground hover:text-foreground";
 
     view! {
         <Modal
@@ -509,7 +636,11 @@ pub fn ChartBuilderModal(
                         class=move || {
                             if active_tab.get() == "chart" { TAB_ACTIVE } else { TAB_INACTIVE }
                         }
-                        on:click=move |_| set_active_tab.set("chart".to_string())
+                        on:click=move |_| {
+                            // Sync YAML text from current form state when switching to chart tab
+                            set_yaml_text.set(current_yaml.get_untracked());
+                            set_active_tab.set("chart".to_string());
+                        }
                     >
                         "Chart Config"
                     </button>
@@ -552,9 +683,7 @@ pub fn ChartBuilderModal(
                                         }
                                         on:click=move |_| set_catalog_open.update(|v| *v = !*v)
                                     >
-                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                                        </svg>
+                                        <Icon icon=icondata_lu::LuDatabase width="14" height="14" />
                                         "Catalog"
                                     </button>
                                 </div>
@@ -597,6 +726,7 @@ pub fn ChartBuilderModal(
                                             set_query_running.set(true);
                                             set_query_error.set(None);
                                             set_query_result.set(None);
+
                                             leptos::task::spawn_local(async move {
                                                 match execute_sql_query(ds_slug, query_text, 50, 1).await {
                                                     Ok(result) => {
@@ -688,9 +818,7 @@ pub fn ChartBuilderModal(
                                                     class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Refresh catalog"
                                                 >
-                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.992 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182M21.015 4.356v4.992" />
-                                                    </svg>
+                                                    <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
                                                 </button>
                                                 <button
                                                     type="button"
@@ -698,9 +826,7 @@ pub fn ChartBuilderModal(
                                                     title="Close catalog"
                                                     on:click=move |_| set_catalog_open.set(false)
                                                 >
-                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                                    </svg>
+                                                    <Icon icon=icondata_lu::LuX width="14" height="14" />
                                                 </button>
                                             </div>
                                         </div>
@@ -753,9 +879,7 @@ pub fn ChartBuilderModal(
                                                 // History tab placeholder
                                                 view! {
                                                     <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                                        <svg class="w-10 h-10 text-muted-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                                        </svg>
+                                                        <Icon icon=icondata_lu::LuClock width="40" height="40" attr:class="text-muted-foreground mb-2" />
                                                         <p class="text-sm text-muted-foreground">"Query history"</p>
                                                         <p class="text-xs text-muted-foreground mt-1">"Coming soon"</p>
                                                     </div>
@@ -769,133 +893,392 @@ pub fn ChartBuilderModal(
                     })
                 }}
 
-                // ── Chart Config tab ────────────────────────────────────
+                // ── Chart Config tab — 50/50 split pane ────────────────
+                // React: flex-1 min-h-0 flex → left 50% editing, right 50% preview
                 {move || {
                     (active_tab.get() == "chart").then(|| view! {
-                        <div class="px-6 py-4 flex-1 min-h-0 overflow-y-auto">
-                            <div class="space-y-6">
-                                // Chart Title
-                                <div class="space-y-2">
-                                    <label class=LABEL_CLASS>"Chart Title"</label>
-                                    <input
-                                        type="text"
-                                        class=INPUT_CLASS
-                                        prop:value=move || title.get()
-                                        on:input=move |ev| set_title.set(event_target_value(&ev))
-                                        placeholder="Enter chart title..."
-                                    />
-                                </div>
-
-                                // Chart Type
-                                <div class="space-y-2">
-                                    <label class=LABEL_CLASS>"Chart Type"</label>
-                                    <DynSelect
-                                        value=Signal::derive(move || chart_type.get())
-                                        options=Signal::stored(
-                                            CHART_TYPES
-                                                .iter()
-                                                .map(|(k, v)| (k.to_string(), v.to_string()))
-                                                .collect::<Vec<_>>()
-                                        )
-                                        on_change=move |ct: String| set_chart_type.set(ct)
-                                    />
-                                </div>
-
-                                // X Axis Field — hidden for pie/doughnut/metric
-                                {move || {
-                                    let ct = chart_type.get();
-                                    let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
-                                    needs_axes.then(|| view! {
-                                        <div class="space-y-2">
-                                            <label class=LABEL_CLASS>"X Axis Field"</label>
-                                            <input
-                                                type="text"
-                                                class=INPUT_CLASS
-                                                prop:value=move || x_field.get()
-                                                on:input=move |ev| set_x_field.set(event_target_value(&ev))
-                                                placeholder="e.g. date, category, name..."
-                                            />
-                                        </div>
-                                    })
-                                }}
-
-                                // Series (Y Axis)
-                                <div class="space-y-3">
-                                    <div class="flex items-center justify-between">
-                                        <label class=LABEL_CLASS>"Series (Y Axis)"</label>
-                                        <button
-                                            type="button"
-                                            class="text-sm text-primary hover:text-primary/80 font-medium transition-colors px-2 py-1.5 -mr-2 rounded-md hover:bg-primary/5"
-                                            on:click=add_series
-                                        >
-                                            "+ Add Series"
-                                        </button>
-                                    </div>
-
-                                    <For
-                                        each=move || {
-                                            let s = series.get();
-                                            s.into_iter().enumerate().collect::<Vec<_>>()
-                                        }
-                                        key=|(_, entry)| entry.id
-                                        let:item
+                        <div class="flex flex-1 min-h-[70vh]">
+                            // ── Left: Editing Panel (50%) ──────────────
+                            <div class="w-1/2 border-r border-border flex flex-col min-h-0">
+                                // Config sub-tab bar (Visual / AI / YAML)
+                                <div class="border-b border-border px-4 py-2 bg-muted flex items-center gap-1 flex-shrink-0">
+                                    <button
+                                        type="button"
+                                        class=move || if config_tab.get() == "visual" { SUB_TAB_ACTIVE } else { SUB_TAB_INACTIVE }
+                                        on:click=move |_| set_config_tab.set("visual".to_string())
                                     >
-                                        {
-                                            let (idx, entry) = item;
-                                            let y_val = entry.y_field.clone();
-                                            let label_val = entry.label.clone();
-                                            let show_remove = move || series.get().len() > 1;
+                                        "Visual"
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class=move || if config_tab.get() == "ai" { SUB_TAB_ACTIVE } else { SUB_TAB_INACTIVE }
+                                        on:click=move |_| set_config_tab.set("ai".to_string())
+                                    >
+                                        "AI"
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class=move || if config_tab.get() == "yaml" { SUB_TAB_ACTIVE } else { SUB_TAB_INACTIVE }
+                                        on:click=move |_| {
+                                            // Sync YAML text from form state when switching to YAML tab
+                                            set_yaml_text.set(current_yaml.get_untracked());
+                                            set_config_tab.set("yaml".to_string());
+                                        }
+                                    >
+                                        "YAML"
+                                    </button>
+                                </div>
 
-                                            view! {
-                                                <div class="flex items-start gap-2">
-                                                    <div class="flex-1 space-y-1">
+                                // Sub-tab content
+                                <div class="flex-1 min-h-0 overflow-auto">
+                                    // ── Visual sub-tab ──────────────────
+                                    {move || (config_tab.get() == "visual").then(|| view! {
+                                        <div class="p-4 space-y-6">
+                                            // Chart Type
+                                            <div class="space-y-2">
+                                                <label class=LABEL_CLASS>"Chart Type"</label>
+                                                <DynSelect
+                                                    value=Signal::derive(move || chart_type.get())
+                                                    options=Signal::stored(
+                                                        CHART_TYPES
+                                                            .iter()
+                                                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                                                            .collect::<Vec<_>>()
+                                                    )
+                                                    on_change=move |ct: String| {
+                                                        // Clear incompatible modifiers on type change
+                                                        if ct != "bar" {
+                                                            set_orientation.set(None);
+                                                        }
+                                                        if ct != "bar" && ct != "area" {
+                                                            set_mode.set(None);
+                                                        }
+                                                        set_chart_type.set(ct);
+                                                    }
+                                                />
+
+                                                // Modifier chips — contextual based on chart type
+                                                // React: ChartVisualEditor lines 216-258
+                                                {move || {
+                                                    let ct = chart_type.get();
+                                                    (ct == "bar" || ct == "area").then(|| view! {
+                                                        <div class="flex flex-wrap gap-2 mt-2">
+                                                            // Horizontal chip (bar only)
+                                                            {move || (chart_type.get() == "bar").then(|| view! {
+                                                                <button
+                                                                    type="button"
+                                                                    class=move || {
+                                                                        if orientation.get().as_deref() == Some("horizontal") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                    }
+                                                                    on:click=move |_| {
+                                                                        if orientation.get_untracked().as_deref() == Some("horizontal") {
+                                                                            set_orientation.set(None);
+                                                                        } else {
+                                                                            set_orientation.set(Some("horizontal".to_string()));
+                                                                        }
+                                                                    }
+                                                                >
+                                                                    "Horizontal"
+                                                                </button>
+                                                            })}
+                                                            // Grouped chip (bar only)
+                                                            {move || (chart_type.get() == "bar").then(|| view! {
+                                                                <button
+                                                                    type="button"
+                                                                    class=move || {
+                                                                        if mode.get().as_deref() == Some("grouped") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                    }
+                                                                    on:click=move |_| {
+                                                                        if mode.get_untracked().as_deref() == Some("grouped") {
+                                                                            set_mode.set(None);
+                                                                        } else {
+                                                                            set_mode.set(Some("grouped".to_string()));
+                                                                        }
+                                                                    }
+                                                                >
+                                                                    "Grouped"
+                                                                </button>
+                                                            })}
+                                                            // Normalized chip (area only)
+                                                            {move || (chart_type.get() == "area").then(|| view! {
+                                                                <button
+                                                                    type="button"
+                                                                    class=move || {
+                                                                        if mode.get().as_deref() == Some("normalized") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                    }
+                                                                    on:click=move |_| {
+                                                                        if mode.get_untracked().as_deref() == Some("normalized") {
+                                                                            set_mode.set(None);
+                                                                        } else {
+                                                                            set_mode.set(Some("normalized".to_string()));
+                                                                        }
+                                                                    }
+                                                                >
+                                                                    "Normalized"
+                                                                </button>
+                                                            })}
+                                                        </div>
+                                                    })
+                                                }}
+                                            </div>
+
+                                            // Title
+                                            <div class="space-y-2">
+                                                <label class=LABEL_CLASS>"Title"</label>
+                                                <input
+                                                    type="text"
+                                                    class=INPUT_CLASS
+                                                    prop:value=move || title.get()
+                                                    on:input=move |ev| set_title.set(event_target_value(&ev))
+                                                    placeholder="Chart title"
+                                                />
+                                            </div>
+
+                                            // X Axis Field — hidden for pie/doughnut/metric
+                                            {move || {
+                                                let ct = chart_type.get();
+                                                let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
+                                                needs_axes.then(|| view! {
+                                                    <div class="space-y-2">
+                                                        <label class=LABEL_CLASS>"X Axis Field"</label>
                                                         <input
                                                             type="text"
                                                             class=INPUT_CLASS
-                                                            prop:value=y_val.clone()
-                                                            on:input=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                set_series.update(|s| {
-                                                                    if let Some(entry) = s.get_mut(idx) {
-                                                                        entry.y_field = val;
-                                                                    }
-                                                                });
-                                                            }
-                                                            placeholder="Y field name (e.g. revenue, count)"
-                                                        />
-                                                        <input
-                                                            type="text"
-                                                            class=INPUT_CLASS
-                                                            prop:value=label_val.clone()
-                                                            on:input=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                set_series.update(|s| {
-                                                                    if let Some(entry) = s.get_mut(idx) {
-                                                                        entry.label = val;
-                                                                    }
-                                                                });
-                                                            }
-                                                            placeholder="Label (optional)"
+                                                            prop:value=move || x_field.get()
+                                                            on:input=move |ev| set_x_field.set(event_target_value(&ev))
+                                                            placeholder="e.g. date, category, name..."
                                                         />
                                                     </div>
-                                                    {move || show_remove().then(|| {
-                                                        view! {
-                                                            <button
-                                                                type="button"
-                                                                class="mt-1 p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                                                                on:click=move |_| remove_series(idx)
-                                                                title="Remove series"
-                                                            >
-                                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                                                </svg>
-                                                            </button>
-                                                        }
-                                                    })}
+                                                })
+                                            }}
+
+                                            // Series (Y Axis)
+                                            <div class="space-y-3">
+                                                <div class="flex items-center justify-between">
+                                                    <label class=LABEL_CLASS>"Series (Y Axis)"</label>
+                                                    <button
+                                                        type="button"
+                                                        class="text-sm text-primary hover:text-primary/80 font-medium transition-colors px-2 py-1.5 -mr-2 rounded-md hover:bg-primary/5"
+                                                        on:click=add_series
+                                                    >
+                                                        "+ Add Series"
+                                                    </button>
                                                 </div>
+
+                                                <For
+                                                    each=move || {
+                                                        let s = series.get();
+                                                        s.into_iter().enumerate().collect::<Vec<_>>()
+                                                    }
+                                                    key=|(_, entry)| entry.id
+                                                    let:item
+                                                >
+                                                    {
+                                                        let (idx, entry) = item;
+                                                        let y_val = entry.y_field.clone();
+                                                        let label_val = entry.label.clone();
+                                                        let show_remove = move || series.get().len() > 1;
+
+                                                        view! {
+                                                            <div class="flex items-start gap-2">
+                                                                <div class="flex-1 space-y-1">
+                                                                    <input
+                                                                        type="text"
+                                                                        class=INPUT_CLASS
+                                                                        prop:value=y_val.clone()
+                                                                        on:input=move |ev| {
+                                                                            let val = event_target_value(&ev);
+                                                                            set_series.update(|s| {
+                                                                                if let Some(entry) = s.get_mut(idx) {
+                                                                                    entry.y_field = val;
+                                                                                }
+                                                                            });
+                                                                        }
+                                                                        placeholder="Y field name (e.g. revenue, count)"
+                                                                    />
+                                                                    <input
+                                                                        type="text"
+                                                                        class=INPUT_CLASS
+                                                                        prop:value=label_val.clone()
+                                                                        on:input=move |ev| {
+                                                                            let val = event_target_value(&ev);
+                                                                            set_series.update(|s| {
+                                                                                if let Some(entry) = s.get_mut(idx) {
+                                                                                    entry.label = val;
+                                                                                }
+                                                                            });
+                                                                        }
+                                                                        placeholder="Label (optional)"
+                                                                    />
+                                                                </div>
+                                                                {move || show_remove().then(|| {
+                                                                    view! {
+                                                                        <button
+                                                                            type="button"
+                                                                            class="mt-1 p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                                                                            on:click=move |_| remove_series(idx)
+                                                                            title="Remove series"
+                                                                        >
+                                                                            <Icon icon=icondata_lu::LuX width="16" height="16" />
+                                                                        </button>
+                                                                    }
+                                                                })}
+                                                            </div>
+                                                        }
+                                                    }
+                                                </For>
+                                            </div>
+                                        </div>
+                                    })}
+
+                                    // ── AI sub-tab ─────────────────────
+                                    {move || (config_tab.get() == "ai").then(|| view! {
+                                        <ChartCopilot
+                                            chart_yaml=Signal::derive(move || current_yaml.get())
+                                            on_chart_update=Callback::new(move |new_yaml: String| {
+                                                let parsed = parse_existing_yaml(&new_yaml);
+                                                apply_parsed(parsed, &new_yaml);
+                                                set_yaml_text.set(new_yaml);
+                                            })
+                                        />
+                                    })}
+
+                                    // ── YAML sub-tab ────────────────────
+                                    {move || (config_tab.get() == "yaml").then(|| view! {
+                                        <div class="h-full min-h-[400px]">
+                                            <YamlEditorSection
+                                                content=Signal::derive(move || yaml_text.get())
+                                                on_change=yaml_on_change.get_value()
+                                            />
+                                        </div>
+                                    })}
+                                </div>
+                            </div>
+
+                            // ── Right: Always-visible Preview (50%) ────
+                            <div class="w-1/2 flex flex-col min-h-0">
+                                <div class="border-b border-border px-4 py-2 bg-muted flex items-center justify-between flex-shrink-0">
+                                    <h3 class="text-xs font-medium text-foreground">"Preview"</h3>
+                                    // Refresh preview button
+                                    <button
+                                        type="button"
+                                        class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                                        title="Refresh preview"
+                                        disabled=move || preview_loading.get()
+                                        on:click=move |_| {
+                                            let ds_slug = datasource_slug.get_untracked();
+                                            let query_text = sql.get_untracked();
+                                            if ds_slug.is_empty() || query_text.trim().is_empty() {
+                                                return;
                                             }
+                                            set_preview_loading.set(true);
+                                            set_preview_error.set(None);
+
+                                            leptos::task::spawn_local(async move {
+                                                match query_datasource_arrow(ds_slug, query_text, None).await {
+                                                    Ok(query_result) => {
+                                                        use base64::Engine;
+                                                        match base64::engine::general_purpose::STANDARD
+                                                            .decode(&query_result.ipc_base64) {
+                                                            Ok(ipc_bytes) => {
+                                                                match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
+                                                                    Ok(data_table) => {
+                                                                        let colors = kyomi_palette("balanced");
+                                                                        let mut chartml_inst = chartml_core::ChartML::new();
+                                                                        chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
+                                                                        chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
+                                                                        chartml_inst.register_renderer("area", chartml_chart_cartesian::CartesianRenderer::new());
+                                                                        chartml_inst.register_renderer("pie", chartml_chart_pie::PieRenderer::new());
+                                                                        chartml_inst.register_renderer("doughnut", chartml_chart_pie::PieRenderer::new());
+                                                                        chartml_inst.register_renderer("scatter", chartml_chart_scatter::ScatterRenderer::new());
+                                                                        chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
+                                                                        chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
+                                                                        chartml_inst.set_default_palette(colors);
+                                                                        chartml_inst.register_source("_remote", data_table);
+                                                                        set_preview_chartml.set(Some(Arc::new(chartml_inst)));
+                                                                    }
+                                                                    Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
+                                                                }
+                                                            }
+                                                            Err(e) => set_preview_error.set(Some(format!("Base64 decode error: {e}"))),
+                                                        }
+                                                        set_preview_loading.set(false);
+                                                    }
+                                                    Err(e) => {
+                                                        set_preview_error.set(Some(format!("Query error: {e}")));
+                                                        set_preview_loading.set(false);
+                                                    }
+                                                }
+                                            });
                                         }
-                                    </For>
+                                    >
+                                        {move || {
+                                            if preview_loading.get() {
+                                                view! { <Spinner class="text-primary w-3.5 h-3.5".to_string() /> }.into_any()
+                                            } else {
+                                                view! {
+                                                    <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
+                                                }.into_any()
+                                            }
+                                        }}
+                                    </button>
+                                </div>
+
+                                <div class="flex-1 min-h-0 overflow-auto p-4">
+                                    // Preview content
+                                    {move || {
+                                        if preview_loading.get() {
+                                            view! {
+                                                <div class="flex items-center justify-center h-full">
+                                                    <div class="flex flex-col items-center gap-2">
+                                                        <Spinner class="text-primary".to_string() />
+                                                        <p class="text-sm text-muted-foreground">"Loading preview..."</p>
+                                                    </div>
+                                                </div>
+                                            }.into_any()
+                                        } else if let Some(ref err) = preview_error.get() {
+                                            view! {
+                                                <div class="flex items-center justify-center h-full">
+                                                    <div class="text-center px-4">
+                                                        <p class="text-sm text-error-foreground mb-1">"Preview Error"</p>
+                                                        <p class="text-xs text-muted-foreground">{err.clone()}</p>
+                                                    </div>
+                                                </div>
+                                            }.into_any()
+                                        } else if let Some(chartml_inst) = preview_chartml.get() {
+                                            // Render remote chart preview — data was fetched
+                                            let preview_yaml = current_yaml.get();
+                                            let preview_spec = rewrite_spec_for_remote(&preview_yaml);
+                                            view! {
+                                                <ChartPreview
+                                                    spec=preview_spec
+                                                    chartml=chartml_inst
+                                                />
+                                            }.into_any()
+                                        } else if datasource_slug.get().is_empty() {
+                                            // Inline data chart — render directly without remote fetch.
+                                            // ChartML with DataFusionTransform handles inline data natively.
+                                            let chartml_inst = configured_chartml("balanced");
+                                            let preview_yaml = current_yaml.get();
+                                            view! {
+                                                <ChartPreview
+                                                    spec=preview_yaml
+                                                    chartml=chartml_inst
+                                                />
+                                            }.into_any()
+                                        } else {
+                                            // Has datasource but no data fetched yet
+                                            view! {
+                                                <div class="flex items-center justify-center h-full">
+                                                    <div class="text-center px-4">
+                                                        <Icon icon=icondata_lu::LuChartBar width="48" height="48" attr:class="text-muted-foreground/30 mx-auto mb-3" />
+                                                        <p class="text-sm text-muted-foreground mb-1">"No preview available"</p>
+                                                        <p class="text-xs text-muted-foreground">"Run your SQL query first, then click the refresh button to see a preview."</p>
+                                                    </div>
+                                                </div>
+                                            }.into_any()
+                                        }
+                                    }}
                                 </div>
                             </div>
                         </div>
@@ -906,13 +1289,76 @@ pub fn ChartBuilderModal(
     }
 }
 
+// ─── Helper: rewrite YAML spec to use _remote data source ──────────────────
+
+/// Rewrites a ChartML YAML spec to reference the named `_remote` source
+/// instead of a datasource + SQL query. This is the same pattern used by
+/// `ChartBlock` in `markdown_renderer.rs`.
+fn rewrite_spec_for_remote(yaml: &str) -> String {
+    match serde_yaml::from_str::<serde_json::Value>(yaml) {
+        Ok(mut val) => {
+            // Handle sequence (list) format
+            let doc = if let Some(arr) = val.as_array_mut() {
+                arr.first_mut()
+            } else {
+                Some(&mut val)
+            };
+            if let Some(doc) = doc
+                && let Some(data) = doc.get_mut("data")
+                && let Some(obj) = data.as_object_mut()
+            {
+                obj.remove("datasource");
+                obj.remove("sql");
+                obj.remove("query");
+                obj.insert(
+                    "source".to_string(),
+                    serde_json::Value::String("_remote".to_string()),
+                );
+            }
+            serde_yaml::to_string(&val).unwrap_or_else(|_| yaml.to_string())
+        }
+        Err(_) => yaml.to_string(),
+    }
+}
+
+// ─── Chart Preview component ──────────────────────────────────────────────
+
+/// Renders a live chart preview using `ChartMLChart`.
+#[component]
+fn ChartPreview(
+    #[prop(into)] spec: String,
+    chartml: Arc<chartml_core::ChartML>,
+) -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use chartml_leptos::ChartMLChart;
+
+        view! {
+            <ChartMLChart
+                spec=Signal::stored(spec)
+                chartml=chartml
+            />
+        }
+        .into_any()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = spec;
+        let _ = chartml;
+        view! {
+            <div class="flex items-center justify-center h-full text-muted-foreground text-sm">
+                "Chart preview loading..."
+            </div>
+        }
+        .into_any()
+    }
+}
+
 // ─── SQL Editor Section ─────────────────────────────────────────────────────
 
 /// Renders either the kode-leptos CodeEditor (on wasm32) or a plain textarea
 /// placeholder (during SSR).
-///
-/// Follows the same `#[cfg(target_arch = "wasm32")]` gating pattern as
-/// `DashboardCodeEditor` in `pages/dashboards/dashboard_editor.rs`.
 #[component]
 fn SqlEditorSection(
     content: Signal<String>,
@@ -947,3 +1393,591 @@ fn SqlEditorSection(
         .into_any()
     }
 }
+
+// ─── YAML Editor Section ────────────────────────────────────────────────────
+
+/// Renders a kode-leptos CodeEditor in YAML mode for the YAML sub-tab.
+#[component]
+fn YamlEditorSection(
+    content: Signal<String>,
+    on_change: Arc<dyn Fn(String) + Send + Sync>,
+) -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use kode_leptos::{CodeEditor, Language};
+
+        view! {
+            <div class="h-full min-h-[400px] border-t border-border overflow-hidden">
+                <CodeEditor
+                    language=Signal::stored(Language::Yaml)
+                    content=content
+                    on_change=on_change
+                />
+            </div>
+        }
+        .into_any()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = content;
+        let _ = on_change;
+
+        view! {
+            <div class="h-full min-h-[400px] bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
+                "Loading YAML editor..."
+            </div>
+        }
+        .into_any()
+    }
+}
+
+// ─── Chart Copilot ──────────────────────────────────────────────────────────
+
+/// Chat message for the chart copilot.
+#[derive(Clone, Debug)]
+struct CopilotMessage {
+    message_id: String,
+    role: String,
+    content: String,
+}
+
+/// Chart Builder Copilot — inline AI chat for editing charts.
+///
+/// Matches React `ChartBuilderCopilotSidebar.jsx`:
+/// - Creates an ephemeral copilot session
+/// - Sends messages via REST API with `context_type = "chart_builder_copilot"`
+/// - Receives streaming responses via WebSocket
+/// - Handles `chart_update` events to apply AI-generated chart specs
+///
+/// Rendered inline as tab content (no sidebar chrome).
+#[component]
+fn ChartCopilot(
+    /// Current chart YAML — sent as context with each message.
+    #[prop(into)]
+    chart_yaml: Signal<String>,
+    /// Callback when the AI updates the chart spec.
+    on_chart_update: Callback<String>,
+) -> impl IntoView {
+    // ── Session state ───────────────────────────────────────────────────
+    let (session_id, set_session_id) = signal(Option::<String>::None);
+
+    // ── Chat state ──────────────────────────────────────────────────────
+    let (messages, set_messages) = signal(Vec::<CopilotMessage>::new());
+    let (is_loading, set_is_loading) = signal(false);
+    let (input_value, set_input_value) = signal(String::new());
+    let (error, set_error) = signal(Option::<String>::None);
+    let (user_msg_counter, set_user_msg_counter) = signal(0u32);
+
+    // Track whether first message has been sent (for context prefix).
+    let (has_sent_first, set_has_sent_first) = signal(false);
+
+    // Track chart YAML at last AI update (for change detection in chart_update events).
+    #[cfg(target_arch = "wasm32")]
+    let (_, set_chart_at_last_msg) = signal(String::new());
+
+    // ── Thinking state ─────────────────────────────────────────────────
+    let (thinking_map, set_thinking_map) = signal(HashMap::<String, ThinkingState>::new());
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (&set_session_id, &set_thinking_map, &on_chart_update);
+
+    // ── WebSocket context ──────────────────────────────────────────────
+    let ws_ctx = use_context::<WebSocketContext>();
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = &ws_ctx;
+
+    // ── Create session on mount ────────────────────────────────────────
+    Effect::new(move || {
+        leptos::task::spawn_local(async move {
+            match create_chart_copilot_session().await {
+                Ok(sid) => set_session_id.set(Some(sid)),
+                Err(e) => set_error.set(Some(format!("Failed to start copilot: {e}"))),
+            }
+        });
+    });
+
+    // ── Cleanup session on unmount ─────────────────────────────────────
+    on_cleanup(move || {
+        if let Some(sid) = session_id.get_untracked() {
+            leptos::task::spawn_local(async move {
+                let _ = delete_copilot_session(sid).await;
+            });
+        }
+    });
+
+    // ── Send message handler ───────────────────────────────────────────
+    let handle_send = move || {
+        let msg = input_value.get_untracked().trim().to_string();
+        if msg.is_empty() {
+            return;
+        }
+
+        let sid = match session_id.get_untracked() {
+            Some(sid) => sid,
+            None => return,
+        };
+
+        // Add user message to the list
+        let counter = user_msg_counter.get_untracked();
+        set_user_msg_counter.set(counter + 1);
+        let user_msg_id = format!("user_{counter}");
+        set_messages.update(|msgs| {
+            msgs.push(CopilotMessage {
+                message_id: user_msg_id,
+                role: "user".to_string(),
+                content: msg.clone(),
+            });
+        });
+
+        set_input_value.set(String::new());
+        set_is_loading.set(true);
+        set_error.set(None);
+
+        // Build chart content context: first message includes full chart,
+        // subsequent messages include updated chart only if changed.
+        let is_first = !has_sent_first.get_untracked();
+        let current_chart = chart_yaml.get_untracked();
+        let content_opt = if current_chart.is_empty() {
+            None
+        } else if is_first {
+            Some(format!("[Chart Content]\n{current_chart}"))
+        } else {
+            Some(format!("[Chart has been updated]\n{current_chart}"))
+        };
+        set_has_sent_first.set(true);
+
+        leptos::task::spawn_local(async move {
+            if let Err(e) = send_chart_copilot_message(sid, msg, content_opt).await {
+                set_error.set(Some(format!("Failed to send: {e}")));
+                set_is_loading.set(false);
+            }
+        });
+    };
+
+    // ── WebSocket subscriptions ─────────────────────────────────────────
+    #[cfg(target_arch = "wasm32")]
+    {
+        Effect::new(move |_| {
+            let Some(ws) = ws_ctx.as_ref().cloned() else {
+                return;
+            };
+
+            let should_handle =
+                move |event_context_type: Option<&str>, msg_session_id: Option<&str>| -> bool {
+                    if event_context_type != Some("chart_builder_copilot") {
+                        return false;
+                    }
+                    // If we have a session, filter by it
+                    if let Some(sid) = &session_id.get_untracked() {
+                        if let Some(msg_sid) = msg_session_id {
+                            if msg_sid != sid.as_str() {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                };
+
+            // ── agent_thinking ──────────────────────────────────────────
+            let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
+                let data = match &msg.data {
+                    Some(d) => d,
+                    None => return,
+                };
+
+                let thinking_event: ThinkingEvent = match data
+                    .get("event")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                {
+                    Some(e) => e,
+                    None => return,
+                };
+
+                let event_context_type = data
+                    .get("event")
+                    .and_then(|v| v.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if !should_handle(event_context_type, msg.session_id.as_deref()) {
+                    return;
+                }
+
+                // Capture session_id from first event if we don't have one
+                if session_id.get_untracked().is_none() {
+                    if let Some(sid) = &msg.session_id {
+                        set_session_id.set(Some(sid.clone()));
+                    }
+                }
+
+                let token_usage: Option<TokenUsage> = data
+                    .get("token_usage")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                set_messages.update(|msgs| {
+                    if !msgs.iter().any(|m| m.message_id == msg_message_id) {
+                        msgs.push(CopilotMessage {
+                            message_id: msg_message_id.clone(),
+                            role: "assistant".to_string(),
+                            content: String::new(),
+                        });
+                    }
+                });
+
+                set_is_loading.set(false);
+
+                set_thinking_map.update(|map| {
+                    let current = map.get(&msg_message_id).cloned().unwrap_or_default();
+                    if current.cancelled {
+                        return;
+                    }
+                    let updated_events =
+                        process_thinking_event(&current.events, thinking_event);
+                    map.insert(
+                        msg_message_id,
+                        ThinkingState {
+                            events: updated_events,
+                            is_active: true,
+                            cancelled: false,
+                            token_usage: token_usage.or(current.token_usage),
+                        },
+                    );
+                });
+            });
+
+            // ── chat_stream ─────────────────────────────────────────────
+            let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if !should_handle(event_context_type, msg.session_id.as_deref()) {
+                    return;
+                }
+
+                if session_id.get_untracked().is_none() {
+                    if let Some(sid) = &msg.session_id {
+                        set_session_id.set(Some(sid.clone()));
+                    }
+                }
+
+                let content = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str());
+
+                let content = match content {
+                    Some(c) if !c.is_empty() => c.to_string(),
+                    _ => return,
+                };
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                set_messages.update(|msgs| {
+                    if let Some(existing) = msgs
+                        .iter_mut()
+                        .find(|m| m.message_id == msg_message_id && m.role == "assistant")
+                    {
+                        existing.content.push_str(&content);
+                    } else {
+                        msgs.push(CopilotMessage {
+                            message_id: msg_message_id,
+                            role: "assistant".to_string(),
+                            content,
+                        });
+                    }
+                });
+            });
+
+            // ── chat_complete ───────────────────────────────────────────
+            let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if !should_handle(event_context_type, msg.session_id.as_deref()) {
+                    return;
+                }
+
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                let full_content = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                set_messages.update(|msgs| {
+                    for m in msgs.iter_mut() {
+                        if m.message_id == msg_message_id && m.role == "assistant" {
+                            if let Some(ref content) = full_content {
+                                m.content = content.clone();
+                            }
+                        }
+                    }
+                });
+
+                set_thinking_map.update(|map| {
+                    if let Some(entry) = map.get_mut(&msg_message_id) {
+                        if !entry.cancelled {
+                            entry.is_active = false;
+                        }
+                    }
+                });
+
+                set_is_loading.set(false);
+            });
+
+            // ── chart_update — AI applied a chart spec change ───────────
+            let unsub_chart_update = ws.subscribe("chart_update", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if event_context_type != Some("chart_builder_copilot") {
+                    return;
+                }
+
+                if let Some(sid) = &session_id.get_untracked() {
+                    if msg.session_id.as_deref() != Some(sid.as_str()) {
+                        return;
+                    }
+                }
+
+                if let Some(content) = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str())
+                {
+                    on_chart_update.run(content.to_string());
+                    set_chart_at_last_msg.set(content.to_string());
+                }
+            });
+
+            // ── error ───────────────────────────────────────────────────
+            let unsub_error = ws.subscribe("error", move |msg| {
+                let event_context_type = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("context_type"))
+                    .and_then(|v| v.as_str());
+
+                if event_context_type != Some("chart_builder_copilot") {
+                    return;
+                }
+
+                let error_msg = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("An error occurred")
+                    .to_string();
+
+                set_error.set(Some(error_msg));
+                set_is_loading.set(false);
+            });
+
+            // ── request_cancelled ───────────────────────────────────────
+            let unsub_request_cancelled = ws.subscribe("request_cancelled", move |msg| {
+                let msg_message_id = match &msg.message_id {
+                    Some(m) => m.clone(),
+                    None => return,
+                };
+
+                set_messages.update(|msgs| {
+                    for m in msgs.iter_mut() {
+                        if m.message_id == msg_message_id && m.role == "assistant" {
+                            m.content = "_Request cancelled._".to_string();
+                        }
+                    }
+                });
+
+                set_thinking_map.update(|map| {
+                    if let Some(entry) = map.get_mut(&msg_message_id) {
+                        entry.is_active = false;
+                        entry.cancelled = true;
+                    }
+                });
+
+                set_is_loading.set(false);
+            });
+
+            // ── Cleanup subscriptions ───────────────────────────────────
+            let unsub_agent_thinking = send_wrapper::SendWrapper::new(unsub_agent_thinking);
+            let unsub_chat_stream = send_wrapper::SendWrapper::new(unsub_chat_stream);
+            let unsub_chat_complete = send_wrapper::SendWrapper::new(unsub_chat_complete);
+            let unsub_chart_update = send_wrapper::SendWrapper::new(unsub_chart_update);
+            let unsub_error = send_wrapper::SendWrapper::new(unsub_error);
+            let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
+            on_cleanup(move || {
+                unsub_agent_thinking.take()();
+                unsub_chat_stream.take()();
+                unsub_chat_complete.take()();
+                unsub_chart_update.take()();
+                unsub_error.take()();
+                unsub_request_cancelled.take()();
+            });
+        });
+    }
+
+    // ── Scroll to bottom on new messages ────────────────────────────────
+    let message_list_ref = NodeRef::<leptos::html::Div>::new();
+    Effect::new(move || {
+        let _ = messages.get();
+        #[cfg(target_arch = "wasm32")]
+        if let Some(guard) = message_list_ref.try_read_untracked() {
+            if let Some(el) = guard.as_ref() {
+                let scroll_height = el.scroll_height();
+                el.set_scroll_top(scroll_height);
+            }
+        }
+    });
+
+    let handle_send_clone = handle_send;
+
+    view! {
+        <div class="flex flex-col h-full min-h-0">
+            // Error banner
+            {move || error.get().map(|err| view! {
+                <div class="px-4 py-2 bg-error text-error-foreground text-sm border-b border-error-border">
+                    {err}
+                </div>
+            })}
+
+            // Message list
+            <div
+                class="flex-1 overflow-y-auto p-4 space-y-4"
+                node_ref=message_list_ref
+            >
+                // Empty state
+                <Show when=move || messages.get().is_empty() && !is_loading.get()>
+                    <EmptyState
+                        icon=Arc::new(|| view! { <Icon icon=icondata_lu::LuSparkles width="48" height="48" /> }.into_any())
+                        title="Ask me anything about your chart!"
+                        description="I can help you change chart types, adjust styling, or fix configuration issues."
+                    />
+                </Show>
+
+                // Messages
+                {move || {
+                    let msgs = messages.get();
+                    let thinking = thinking_map.get();
+
+                    msgs.iter().map(|msg| {
+                        let is_user = msg.role == "user";
+                        let content = msg.content.clone();
+                        let msg_id = msg.message_id.clone();
+
+                        let thinking_state = if !is_user {
+                            thinking.get(&msg_id).cloned()
+                        } else {
+                            None
+                        };
+                        let has_thinking = thinking_state.as_ref().is_some_and(|t| !t.events.is_empty());
+                        let thinking_events = thinking_state.as_ref().map(|t| t.events.clone()).unwrap_or_default();
+                        let thinking_active = thinking_state.as_ref().is_some_and(|t| t.is_active);
+                        let thinking_token_usage = thinking_state.as_ref().and_then(|t| t.token_usage.clone());
+
+                        view! {
+                            <div class=if is_user { "flex justify-end" } else { "flex justify-start" }>
+                                <div class=if is_user {
+                                    "bg-primary text-primary-foreground rounded-lg p-3 max-w-[85%]"
+                                } else {
+                                    "bg-muted rounded-lg p-3 max-w-[85%]"
+                                }>
+                                    // Agent thinking panel
+                                    {has_thinking.then(move || {
+                                        if let Some(tu) = thinking_token_usage.clone() {
+                                            view! {
+                                                <div class="mb-2">
+                                                    <AgentThinking
+                                                        thinking_events=thinking_events.clone()
+                                                        is_active=thinking_active
+                                                        token_usage=tu
+                                                    />
+                                                </div>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <div class="mb-2">
+                                                    <AgentThinking
+                                                        thinking_events=thinking_events.clone()
+                                                        is_active=thinking_active
+                                                    />
+                                                </div>
+                                            }.into_any()
+                                        }
+                                    })}
+
+                                    // Message content
+                                    {(!content.is_empty() || is_user).then(|| {
+                                        view! {
+                                            <p class="text-sm whitespace-pre-wrap">{content.clone()}</p>
+                                        }
+                                    })}
+                                </div>
+                            </div>
+                        }
+                    }).collect_view()
+                }}
+
+                // Loading indicator
+                <Show when=move || is_loading.get()>
+                    <div class="flex justify-start">
+                        <div class="bg-muted rounded-lg p-3 flex items-center gap-2">
+                            <Spinner class="text-muted-foreground" />
+                            <span class="text-sm text-muted-foreground">"Thinking..."</span>
+                        </div>
+                    </div>
+                </Show>
+            </div>
+
+            // Input area
+            <div class="border-t border-border p-4">
+                <div class="flex items-end gap-2">
+                    <textarea
+                        class="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[40px] max-h-[120px]"
+                        placeholder="Ask about your chart..."
+                        rows="1"
+                        prop:value=move || input_value.get()
+                        on:input=move |ev| set_input_value.set(event_target_value(&ev))
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" && !ev.shift_key() {
+                                ev.prevent_default();
+                                handle_send_clone();
+                            }
+                        }
+                    />
+                    <Button size=ButtonSize::Icon
+                        disabled=Signal::derive(move || is_loading.get() || input_value.get().trim().is_empty())
+                        on:click=move |_| handle_send()
+                        aria_label="Send message".to_string()
+                    >
+                        <Icon icon=icondata_lu::LuSend width="16" height="16" />
+                    </Button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
