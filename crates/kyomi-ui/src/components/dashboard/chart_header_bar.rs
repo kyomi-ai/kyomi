@@ -342,8 +342,8 @@ pub fn ChartHeaderBar(
     let show_orientation_chip = chart_type.as_deref() == Some("bar") && show_type_selector;
     let show_mode_chip = matches!(chart_type.as_deref(), Some("bar") | Some("area")) && show_type_selector;
 
-    // Overflow menu only contains Edit, Delete, and Ask About
-    let has_menu_items = show_edit || show_delete;
+    // Overflow menu only for Delete (Edit is a direct icon button now)
+    let has_menu_items = show_delete;
 
     // Close menu on Escape / click-outside
     type MKeyHandler = SendWrapper<Rc<RefCell<Option<(Closure<dyn Fn(web_sys::KeyboardEvent)>, web_sys::Window)>>>>;
@@ -549,9 +549,22 @@ pub fn ChartHeaderBar(
                     }
                 })}
 
-                // Action overflow menu (Edit, Delete only)
+                // Edit button (direct icon, rightmost action)
+                {(show_edit && on_edit.is_some()).then(|| {
+                    let cb = on_edit.unwrap();
+                    view! {
+                        <button
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            title="Edit Chart"
+                            on:click=move |_| cb.run(())
+                        >
+                            <Icon icon=icondata_lu::LuPencil width="16" height="16" />
+                        </button>
+                    }
+                })}
+
+                // Overflow menu (Delete only — shows kebab when delete is available)
                 {has_menu_items.then(|| {
-                    let edit_cb = StoredValue::new(on_edit);
                     let delete_cb = StoredValue::new(on_delete);
 
                     view! {
@@ -566,15 +579,6 @@ pub fn ChartHeaderBar(
 
                             <Show when=move || menu_open.get()>
                                 <div class="absolute right-0 top-full mt-1 w-48 bg-popover border border-border rounded-md shadow-lg z-50 py-1">
-                                    {show_edit.then(|| {
-                                        let cb = edit_cb.get_value();
-                                        cb.map(|cb| view! {
-                                            <button
-                                                class="w-full text-left px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
-                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
-                                            >"Edit"</button>
-                                        })
-                                    })}
                                     {show_delete.then(|| {
                                         let cb = delete_cb.get_value();
                                         cb.map(|cb| view! {
