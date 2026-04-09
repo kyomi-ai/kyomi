@@ -92,6 +92,25 @@ pub struct DiffLine {
     pub content: String,
 }
 
+/// Result from list_versions — includes the current live version and historical snapshots.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VersionListResult {
+    /// The current live dashboard content (version_number = max + 1).
+    pub current_version: CurrentVersion,
+    /// Historical version snapshots, newest first.
+    pub versions: Vec<VersionSummary>,
+}
+
+/// The current live dashboard state — not yet snapshotted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CurrentVersion {
+    pub version_number: i32,
+    pub title: String,
+    pub content: String,
+    pub change_summary: Option<String>,
+    pub created_at: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Read operations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,25 +153,34 @@ pub async fn list_dashboards(
 
     Ok(results
         .into_iter()
-        .map(|r| {
-            let summary = kyomi_auth::dashboard_service::extract_summary(&r.content);
-            DashboardListItem {
-                dashboard_id: r.dashboard_id,
-                user_id: r.user_id,
-                workspace_id: r.workspace_id,
-                title: r.title,
-                content: r.content,
-                content_preview: r.content_preview,
-                summary,
-                last_change_summary: r.last_change_summary,
-                popularity_score: r.popularity_score,
-                view_count: r.view_count,
-                recent_views: r.recent_views,
-                updated_at: r.updated_at.to_rfc3339(),
-                created_at: r.created_at.to_rfc3339(),
-            }
-        })
+        .map(map_search_result_to_list_item)
         .collect())
+}
+
+/// Convert a `DashboardSearchResult` to a `DashboardListItem`.
+///
+/// Shared by both `list_dashboards` and `list_knowledge_docs` to avoid
+/// duplicating the 13-field mapping.
+#[cfg(feature = "ssr")]
+pub(crate) fn map_search_result_to_list_item(
+    r: kyomi_auth::dashboard_service::DashboardSearchResult,
+) -> DashboardListItem {
+    let summary = kyomi_auth::dashboard_service::extract_summary(&r.content);
+    DashboardListItem {
+        dashboard_id: r.dashboard_id,
+        user_id: r.user_id,
+        workspace_id: r.workspace_id,
+        title: r.title,
+        content: r.content,
+        content_preview: r.content_preview,
+        summary,
+        last_change_summary: r.last_change_summary,
+        popularity_score: r.popularity_score,
+        view_count: r.view_count,
+        recent_views: r.recent_views,
+        updated_at: r.updated_at.to_rfc3339(),
+        created_at: r.created_at.to_rfc3339(),
+    }
 }
 
 /// Get a single dashboard by ID, including full content.
@@ -329,14 +357,18 @@ pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError>
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// List version history for a dashboard (most recent first).
+///
+/// Returns the current live dashboard content as `current_version`
+/// (with `version_number = max + 1`) alongside historical snapshots.
+/// Matches the Python/REST API contract.
 #[server(prefix = "/leptos-api")]
-pub async fn list_versions(dashboard_id: String) -> Result<Vec<VersionSummary>, ServerFnError> {
+pub async fn list_versions(dashboard_id: String) -> Result<VersionListResult, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // Verify the dashboard belongs to this workspace
-    kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+    // Fetch the live dashboard (also verifies workspace ownership)
+    let dashboard = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
@@ -346,7 +378,21 @@ pub async fn list_versions(dashboard_id: String) -> Result<Vec<VersionSummary>, 
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(versions
+    // Current version = max + 1 (represents the live dashboard content)
+    let current_version_number = versions
+        .first()
+        .map(|v| v.version_number + 1)
+        .unwrap_or(1);
+
+    let current_version = CurrentVersion {
+        version_number: current_version_number,
+        title: dashboard.title,
+        content: dashboard.content,
+        change_summary: dashboard.last_change_summary,
+        created_at: dashboard.updated_at.to_rfc3339(),
+    };
+
+    let version_summaries = versions
         .into_iter()
         .map(|v| VersionSummary {
             version_number: v.version_number,
@@ -356,7 +402,12 @@ pub async fn list_versions(dashboard_id: String) -> Result<Vec<VersionSummary>, 
             created_at: v.created_at.to_rfc3339(),
             created_by_name: v.created_by.name,
         })
-        .collect())
+        .collect();
+
+    Ok(VersionListResult {
+        current_version,
+        versions: version_summaries,
+    })
 }
 
 /// Get a specific version's full content.
@@ -399,6 +450,9 @@ pub async fn get_version(
 /// Diff two versions of a dashboard.
 ///
 /// Returns added/removed line counts and the actual diff lines.
+/// Handles the "current version" case: if either version number equals
+/// `max_version + 1`, reads content from the live `dashboards` table
+/// instead of `dashboard_versions`. Matches the Python/REST API contract.
 #[server(prefix = "/leptos-api")]
 pub async fn diff_versions(
     dashboard_id: String,
@@ -409,53 +463,53 @@ pub async fn diff_versions(
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // Verify dashboard belongs to workspace
-    kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+    // Fetch live dashboard (also verifies workspace ownership)
+    let dashboard = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
-    let from =
+    // Compute the current version number (max + 1)
+    let version_count = kyomi_auth::dashboard_service::get_version_count(&ctx.db, &dashboard_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))? as i32;
+    let current_version_number = version_count + 1;
+
+    // Get content for each version, handling "current" by reading from dashboards table
+    let from_content = if from_version == current_version_number {
+        dashboard.content.clone()
+    } else {
         kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, from_version)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| {
-                ServerFnError::new(format!("Version {from_version} not found"))
-            })?;
+            .ok_or_else(|| ServerFnError::new(format!("Version {from_version} not found")))?
+            .content
+    };
 
-    let to =
+    let to_content = if to_version == current_version_number {
+        dashboard.content.clone()
+    } else {
         kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, to_version)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| {
-                ServerFnError::new(format!("Version {to_version} not found"))
-            })?;
+            .ok_or_else(|| ServerFnError::new(format!("Version {to_version} not found")))?
+            .content
+    };
 
-    // Simple line-based diff (matches REST handler)
-    let from_lines: Vec<&str> = from.content.lines().collect();
-    let to_lines: Vec<&str> = to.content.lines().collect();
-
-    let from_set: std::collections::HashSet<&str> = from_lines.iter().copied().collect();
-    let to_set: std::collections::HashSet<&str> = to_lines.iter().copied().collect();
-
+    // Proper line-based diff using the `similar` crate (Myers algorithm)
+    let diff = similar::TextDiff::from_lines(&from_content, &to_content);
     let mut diff_lines = Vec::new();
 
-    for line in &from_lines {
-        if !to_set.contains(line) {
-            diff_lines.push(DiffLine {
-                line_type: "delete".to_string(),
-                content: line.to_string(),
-            });
-        }
-    }
-
-    for line in &to_lines {
-        if !from_set.contains(line) {
-            diff_lines.push(DiffLine {
-                line_type: "add".to_string(),
-                content: line.to_string(),
-            });
-        }
+    for change in diff.iter_all_changes() {
+        let line_type = match change.tag() {
+            similar::ChangeTag::Insert => "add",
+            similar::ChangeTag::Delete => "delete",
+            similar::ChangeTag::Equal => "context",
+        };
+        diff_lines.push(DiffLine {
+            line_type: line_type.to_string(),
+            content: change.value().trim_end_matches('\n').to_string(),
+        });
     }
 
     let additions = diff_lines.iter().filter(|l| l.line_type == "add").count() as i32;

@@ -622,6 +622,15 @@ pub fn CollectionsSidebar(
     set_active_collection_id: WriteSignal<Option<String>>,
     /// Callback after any collection change (to refetch dashboard list).
     on_collections_changed: Callback<()>,
+    /// Optional document type filter. When set, only collections containing
+    /// documents of this type are shown. Default (None) shows all collections.
+    ///
+    /// Note: filtering requires `CollectionDashboard` to carry `doc_type`,
+    /// which is a server-side enhancement. The prop is accepted now so both
+    /// dashboards and knowledge pages can pass it; actual filtering will be
+    /// wired when the collections API includes doc_type metadata.
+    #[prop(optional)]
+    _doc_type: Option<String>,
 ) -> impl IntoView {
     let is_mobile = use_is_mobile();
 

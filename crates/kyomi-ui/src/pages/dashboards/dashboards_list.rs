@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Dashboard list page — matches `apps/frontend/src/pages/DashboardsList.jsx`.
+//! Dashboard list page — thin wrapper around shared document components.
 //!
-//! Displays a searchable, sortable grid of dashboard cards with collection
-//! badges, hamburger menus, and empty states. Uses server functions for data
-//! fetching and mutations (create, delete).
-//!
-//! The collections sidebar itself is implemented separately (Task 8). This
-//! module exposes `collections_open` and `active_collection_id` signals as
-//! integration points.
+//! Uses `DocumentCardGrid`, `SearchSortBar`, and `CollectionsSidebar` for
+//! the reusable UI, adding only dashboard-specific logic: create action,
+//! empty state text, WebSocket subscription, and collection management.
+
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
 use crate::components::{
-    Button, ButtonLink, ButtonSize, ButtonVariant, Card, CardContent, CardFooter,
-    CardHeader, CardTitle, ConfirmDialog, EmptyState, SearchInput, Skeleton,
-    Spinner, StyledSelect, ToggleButton,
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
 };
 use super::collections_sidebar::CollectionsSidebar;
 use crate::server_fns::collections::{
@@ -27,56 +24,6 @@ use crate::server_fns::dashboards::{
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Relative time helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Converts an RFC 3339 timestamp string into a compact relative time string.
-///
-/// Matches the React frontend's display format:
-/// - "just now" (< 60s)
-/// - "5m ago" (< 60m)
-/// - "2h ago" (< 24h)
-/// - "3d ago" (< 30d)
-/// - "Mar 15" (>= 30d, same year)
-/// - "Mar 15, 2025" (different year)
-fn format_relative_time(rfc3339: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
-        return rfc3339.to_string();
-    };
-
-    let now = chrono::Utc::now();
-    let duration = now.signed_duration_since(parsed);
-
-    let seconds = duration.num_seconds();
-    if seconds < 60 {
-        return "just now".to_string();
-    }
-
-    let minutes = duration.num_minutes();
-    if minutes < 60 {
-        return format!("{minutes}m ago");
-    }
-
-    let hours = duration.num_hours();
-    if hours < 24 {
-        return format!("{hours}h ago");
-    }
-
-    let days = duration.num_days();
-    if days < 30 {
-        return format!("{days}d ago");
-    }
-
-    // For older dates, show "Mar 15" or "Mar 15, 2025"
-    let parsed_utc = parsed.with_timezone(&chrono::Utc);
-    if parsed_utc.format("%Y").to_string() == now.format("%Y").to_string() {
-        parsed_utc.format("%b %-d").to_string()
-    } else {
-        parsed_utc.format("%b %-d, %Y").to_string()
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main page component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -84,94 +31,24 @@ fn format_relative_time(rfc3339: &str) -> String {
 /// integration.
 #[component]
 pub fn DashboardsListPage() -> impl IntoView {
-    // ── Collection sidebar integration points (Task 8) ──────────────────
+    // ── Collection sidebar integration points ───────────────────────────
     let (collections_open, set_collections_open) = signal(false);
     let (active_collection_id, set_active_collection_id) = signal(Option::<String>::None);
 
-    // ── Search (with 600ms debounce) ────────────────────────────────────
-    let (search_input, set_search_input) = signal(String::new());
+    // ── Search + sort signals ───────────────────────────────────────────
     let (query_signal, set_query_signal) = signal(Option::<String>::None);
+    let (sort_signal, set_sort_signal) = signal("recent".to_string());
 
-    #[cfg(target_arch = "wasm32")]
-    {
-        use send_wrapper::SendWrapper;
-
-        let timeout_handle: StoredValue<Option<SendWrapper<gloo_timers::callback::Timeout>>> =
-            StoredValue::new(None);
-
-        Effect::new(move |_| {
-            let value = search_input.get();
-
-            // Cancel any pending timeout
-            timeout_handle.update_value(|h| {
-                drop(h.take());
-            });
-
-            let handle = gloo_timers::callback::Timeout::new(600, move || {
-                let q = if value.is_empty() { None } else { Some(value) };
-                set_query_signal.set(q);
-            });
-
-            timeout_handle.set_value(Some(SendWrapper::new(handle)));
-        });
-
-        on_cleanup(move || {
-            timeout_handle.update_value(|h| {
-                drop(h.take());
-            });
-        });
-    }
-
-    // On SSR, set query directly (no debounce needed)
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        Effect::new(move |_| {
-            let value = search_input.get();
-            let q = if value.is_empty() { None } else { Some(value) };
-            set_query_signal.set(q);
-        });
-    }
-
-    // ── Sort (persisted in localStorage) ───────────────────────────────
-    let initial_sort = {
-        #[cfg(target_arch = "wasm32")]
-        {
-            web_sys::window()
-                .and_then(|w| w.local_storage().ok().flatten())
-                .and_then(|s| s.get_item("kyomi_dashboards_sort").ok().flatten())
-                .unwrap_or_else(|| "recent".to_string())
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        { "recent".to_string() }
-    };
-    let (sort_signal, set_sort_signal) = signal(initial_sort);
-
-    // Persist sort preference on change
-    #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move |_| {
-            let val = sort_signal.get();
-            if let Some(storage) = web_sys::window()
-                .and_then(|w| w.local_storage().ok().flatten())
-            {
-                let _ = storage.set_item("kyomi_dashboards_sort", &val);
-            }
-        });
-    }
-
-    // ── Data fetching ────────────────────────────────────────────────────
+    // ── Data fetching ───────────────────────────────────────────────────
     let dashboards_resource = Resource::new(
         move || (query_signal.get(), sort_signal.get()),
         move |(query, sort)| list_dashboards(query, Some(sort), None),
     );
 
     // Fetch collections for badge display and filtering
-    let collections_resource = Resource::new(
-        || (),
-        |_| list_collections(),
-    );
+    let collections_resource = Resource::new(|| (), |_| list_collections());
 
-    // ── Delete confirmation ──────────────────────────────────────────────
+    // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
     let (deleting_dashboard, set_deleting_dashboard) =
         signal(Option::<(String, String)>::None); // (id, title)
@@ -193,7 +70,7 @@ pub fn DashboardsListPage() -> impl IntoView {
         set_deleting_dashboard.set(None);
     });
 
-    // ── Add to collection ────────────────────────────────────────────────
+    // ── Add to collection ───────────────────────────────────────────────
     let (add_to_collection_dashboard, set_add_to_collection_dashboard) =
         signal(Option::<DashboardListItem>::None);
 
@@ -206,7 +83,9 @@ pub fn DashboardsListPage() -> impl IntoView {
         set_remove_confirm_open.set(false);
         if let Some((collection_id, dashboard_id, _)) = removing_info.get_untracked() {
             leptos::task::spawn_local(async move {
-                if let Err(e) = remove_dashboard_from_collection(collection_id, dashboard_id).await {
+                if let Err(e) =
+                    remove_dashboard_from_collection(collection_id, dashboard_id).await
+                {
                     leptos::logging::error!("Failed to remove from collection: {e}");
                 }
                 collections_resource.refetch();
@@ -219,7 +98,7 @@ pub fn DashboardsListPage() -> impl IntoView {
         set_removing_info.set(None);
     });
 
-    // ── Create new dashboard ─────────────────────────────────────────────
+    // ── Create new dashboard ────────────────────────────────────────────
     let (creating, set_creating) = signal(false);
 
     let handle_create = move |_| {
@@ -240,7 +119,7 @@ pub fn DashboardsListPage() -> impl IntoView {
         });
     };
 
-    // ── Filter dashboards by active collection ───────────────────────────
+    // ── Filter dashboards by active collection ──────────────────────────
     let filtered_dashboards = move || -> Option<Result<Vec<DashboardListItem>, ServerFnError>> {
         let result = dashboards_resource.get()?;
         let active_id = active_collection_id.get();
@@ -249,7 +128,6 @@ pub fn DashboardsListPage() -> impl IntoView {
             Err(e) => Some(Err(e)),
             Ok(dashboards) => {
                 if let Some(ref coll_id) = active_id {
-                    // Get dashboard IDs in the active collection
                     let collection_dashboard_ids: std::collections::HashSet<String> =
                         collections_resource
                             .get()
@@ -272,7 +150,6 @@ pub fn DashboardsListPage() -> impl IntoView {
         }
     };
 
-    // Get collections for a given dashboard
     let get_collections = move || -> Vec<CollectionItem> {
         collections_resource
             .get()
@@ -280,9 +157,7 @@ pub fn DashboardsListPage() -> impl IntoView {
             .unwrap_or_default()
     };
 
-    // ── WebSocket subscription: dashboard_update ─────────────────────────
-    // When any dashboard is created or deleted (by another user or agent),
-    // refetch the list so the UI stays in sync in real-time.
+    // ── WebSocket subscription: dashboard_update ────────────────────────
     #[cfg(target_arch = "wasm32")]
     {
         use crate::components::chat::websocket_client::WebSocketContext;
@@ -319,7 +194,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     view! {
         <div class="flex flex-col h-full bg-background">
-            // Row 1: Title + action buttons (matches chats page pattern)
+            // Row 1: Title + action buttons
             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                 <h1 class="text-3xl font-display text-foreground">"Dashboards"</h1>
 
@@ -360,30 +235,17 @@ pub fn DashboardsListPage() -> impl IntoView {
                 </div>
             </div>
 
-            // Row 2: Search + sort (full-width, matches chats page pattern)
-            <div class="bg-background px-4 md:px-6 py-3 flex-shrink-0">
-                <div class="flex items-center gap-3">
-                    <SearchInput
-                        value=Signal::derive(move || search_input.get())
-                        on_input=Callback::new(move |val: String| set_search_input.set(val))
-                        placeholder="Search dashboards..."
-                        class="flex-1"
-                    />
-                    <div class="w-40">
-                        <StyledSelect
-                            value=sort_signal.get_untracked()
-                            options=vec![
-                                ("recent", "Recently Updated"),
-                                ("popularity", "Most Popular"),
-                                ("created", "Newest First"),
-                            ]
-                            on_change=move |val: String| set_sort_signal.set(val)
-                        />
-                    </div>
-                </div>
+            // Row 2: Search + sort
+            <SearchSortBar
+                on_search=Callback::new(move |q| set_query_signal.set(q))
+                on_sort=Callback::new(move |s| set_sort_signal.set(s))
+                storage_key="kyomi_dashboards_sort"
+                placeholder="Search dashboards..."
+            />
 
-                // Row 3: Collection filter buttons
-                <div class="flex items-center gap-2 mt-3">
+            // Collection filter buttons
+            <div class="bg-background px-4 md:px-6 pb-3 flex-shrink-0">
+                <div class="flex items-center gap-2">
                     // "All" filter
                     <button
                         on:click=move |_| set_active_collection_id.set(None)
@@ -444,28 +306,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 // Main Content — Dashboards Grid
                 <div class="flex-1 overflow-y-auto @container">
                     <div class="p-4 md:p-6">
-                        <Transition fallback=move || view! {
-                            <div class="w-full grid gap-6 grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3">
-                                {(0..6).map(|_| view! {
-                                    <Card class="bg-muted">
-                                        <CardHeader>
-                                            <Skeleton class="h-5 w-3/4" />
-                                        </CardHeader>
-                                        <CardContent>
-                                            <Skeleton class="h-4 w-full mb-2" />
-                                            <Skeleton class="h-4 w-2/3 mb-4" />
-                                            <Skeleton class="h-3 w-1/3" />
-                                        </CardContent>
-                                        <CardFooter>
-                                            <div class="flex gap-2 w-full">
-                                                <Skeleton class="h-10 flex-1" />
-                                                <Skeleton class="h-10 flex-1" />
-                                            </div>
-                                        </CardFooter>
-                                    </Card>
-                                }).collect_view()}
-                            </div>
-                        }>
+                        <Transition fallback=move || view! { <DocumentCardGridSkeleton /> }>
                             {move || {
                                 let collections = get_collections();
 
@@ -491,7 +332,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                                         }
                                         Ok(dashboards) => {
                                             view! {
-                                                <DashboardGrid
+                                                <DocumentCardGrid
                                                     dashboards=dashboards
                                                     collections=collections
                                                     on_delete=Callback::new(move |(id, title): (String, String)| {
@@ -580,7 +421,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-components
+// Sub-components (dashboard-specific)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Dashboard chart icon for empty states.
@@ -592,15 +433,12 @@ fn DashboardChartIcon() -> impl IntoView {
 }
 
 /// Empty state when no dashboards exist, search returns nothing, or active
-/// collection is empty. Delegates to the shared `EmptyState` component.
+/// collection is empty.
 #[component]
 fn DashboardsEmptyState(
-    /// Whether the user has an active search query.
     has_search: Signal<bool>,
-    /// Whether filtering by a collection.
     #[prop(default = false)]
     has_active_collection: bool,
-    /// Callback for the "Create" button.
     on_create: Callback<leptos::ev::MouseEvent>,
 ) -> impl IntoView {
     view! {
@@ -608,7 +446,7 @@ fn DashboardsEmptyState(
             if has_search.get() {
                 view! {
                     <EmptyState
-                        icon=std::sync::Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
+                        icon=Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
                         title="No matching dashboards"
                         description="No dashboards found for your search. Try a different search term."
                     />
@@ -616,7 +454,7 @@ fn DashboardsEmptyState(
             } else if has_active_collection {
                 view! {
                     <EmptyState
-                        icon=std::sync::Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
+                        icon=Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
                         title="No dashboards in this collection"
                         description="Add dashboards to this collection using the + icon on dashboard cards"
                     />
@@ -624,10 +462,10 @@ fn DashboardsEmptyState(
             } else {
                 view! {
                     <EmptyState
-                        icon=std::sync::Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
+                        icon=Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
                         title="No dashboards yet"
                         description="Get started by creating your first markdown dashboard with embedded charts"
-                        action=std::sync::Arc::new(move || view! {
+                        action=Arc::new(move || view! {
                             <Button on:click=move |ev| on_create.run(ev)>
                                 <Icon icon=icondata_lu::LuPlus width="14" height="14" />
                                 "Create Your First Dashboard"
@@ -640,233 +478,16 @@ fn DashboardsEmptyState(
     }
 }
 
-/// Grid of dashboard cards.
-#[component]
-fn DashboardGrid(
-    dashboards: Vec<DashboardListItem>,
-    collections: Vec<CollectionItem>,
-    on_delete: Callback<(String, String)>,
-    on_add_to_collection: Callback<DashboardListItem>,
-    on_remove_from_collection: Callback<(String, String, String)>,
-    on_collection_click: Callback<String>,
-) -> impl IntoView {
-    let total_collection_count = collections.len();
-    let collections = std::sync::Arc::new(collections);
-    let items = dashboards
-        .into_iter()
-        .map(|dashboard| {
-            // Find which collections this dashboard belongs to
-            let dashboard_collections: Vec<CollectionItem> = collections
-                .iter()
-                .filter(|c| {
-                    c.dashboards
-                        .iter()
-                        .any(|d| d.dashboard_id == dashboard.dashboard_id)
-                })
-                .cloned()
-                .collect();
-
-            // Show + icon only when there are collections the dashboard is NOT yet in
-            let has_available_collections =
-                dashboard_collections.len() < total_collection_count;
-
-            view! {
-                <DashboardCard
-                    dashboard=dashboard
-                    collections=dashboard_collections
-                    has_available_collections=has_available_collections
-                    on_delete=on_delete
-                    on_add_to_collection=on_add_to_collection
-                    on_remove_from_collection=on_remove_from_collection
-                    on_collection_click=on_collection_click
-                />
-            }
-        })
-        .collect_view();
-
-    view! {
-        <div class="w-full grid gap-6 grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3">
-            {items}
-        </div>
-    }
-}
-
-/// A single dashboard card with action icons.
-#[component]
-fn DashboardCard(
-    dashboard: DashboardListItem,
-    collections: Vec<CollectionItem>,
-    /// Whether there are collections the dashboard is NOT yet in.
-    #[prop(default = false)]
-    has_available_collections: bool,
-    on_delete: Callback<(String, String)>,
-    on_add_to_collection: Callback<DashboardListItem>,
-    on_remove_from_collection: Callback<(String, String, String)>,
-    on_collection_click: Callback<String>,
-) -> impl IntoView {
-    let view_href = format!("/dashboard/{}", dashboard.dashboard_id);
-    let view_href_footer = view_href.clone();
-    let edit_href = format!("/dashboard/{}/edit", dashboard.dashboard_id);
-    let title = dashboard.title.clone();
-    let delete_id = dashboard.dashboard_id.clone();
-    let delete_title = dashboard.title.clone();
-    let relative_time = format_relative_time(&dashboard.updated_at);
-    let view_count = dashboard.view_count;
-    let summary = dashboard.summary.clone();
-
-    let dashboard_id_for_badges = dashboard.dashboard_id.clone();
-    let dashboard_for_add = dashboard.clone();
-
-    view! {
-        <Card class="hover:border-primary/30 transition-colors duration-200 flex flex-col">
-            <CardHeader>
-                <div class="flex items-center justify-between">
-                    <CardTitle class="text-xl flex-1 pr-2 line-clamp-2">
-                        <a href=view_href.clone() class="hover:text-primary transition-colors">
-                            {title}
-                        </a>
-                    </CardTitle>
-                    <div class="flex gap-1">
-                        // Add to Collection — only when collections are available
-                        {if has_available_collections {
-                            let dashboard_for_add = dashboard_for_add.clone();
-                            Some(view! {
-                                <Button
-                                    variant=ButtonVariant::Ghost
-                                    size=ButtonSize::Icon
-                                    aria_label="Add to collection"
-                                    class="flex-shrink-0"
-                                    on:click=move |_| on_add_to_collection.run(dashboard_for_add.clone())
-                                >
-                                    <Icon icon=icondata_lu::LuPlus width="14" height="14" />
-                                </Button>
-                            })
-                        } else {
-                            None
-                        }}
-                        // Delete
-                        {
-                            let delete_id = delete_id.clone();
-                            let delete_title = delete_title.clone();
-                            view! {
-                                <Button
-                                    variant=ButtonVariant::Ghost
-                                    size=ButtonSize::Icon
-                                    aria_label="Delete dashboard"
-                                    class="flex-shrink-0"
-                                    on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
-                                >
-                                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" attr:class="text-destructive" />
-                                </Button>
-                            }
-                        }
-                    </div>
-                </div>
-            </CardHeader>
-
-            <CardContent class="flex-1 flex flex-col">
-                // AI-generated summary / content preview
-                {summary.map(|text| {
-                    view! {
-                        <p class="text-sm text-muted-foreground mb-3 line-clamp-4">
-                            {text}
-                        </p>
-                    }
-                })}
-
-                // Collection Badges
-                {if !collections.is_empty() {
-                    let badges = collections.iter().map(|collection| {
-                        let color = collection.color.clone().unwrap_or_else(|| "#d97706".to_string());
-                        let bg_color = format!("background-color: {color}20; color: {color};");
-                        let dot_color = format!("background-color: {color};");
-                        let name = collection.name.clone();
-                        let coll_id = collection.collection_id.clone();
-                        let coll_id_for_click = coll_id.clone();
-                        let coll_id_for_remove = coll_id.clone();
-                        let coll_name_for_remove = collection.name.clone();
-                        let dash_id_for_remove = dashboard_id_for_badges.clone();
-                        view! {
-                            <div
-                                class="group relative inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium cursor-pointer hover:opacity-80 transition-opacity"
-                                style=bg_color
-                                on:click=move |_| on_collection_click.run(coll_id_for_click.clone())
-                            >
-                                <div class="w-2 h-2 rounded-full" style=dot_color.clone() />
-                                {name}
-                                <button
-                                    class="ml-1 hover:bg-foreground/10 rounded-full p-0.5"
-                                    aria-label="Remove from collection"
-                                    on:click=move |ev: leptos::ev::MouseEvent| {
-                                        ev.stop_propagation();
-                                        on_remove_from_collection.run((
-                                            coll_id_for_remove.clone(),
-                                            dash_id_for_remove.clone(),
-                                            coll_name_for_remove.clone(),
-                                        ));
-                                    }
-                                >
-                                    <Icon icon=icondata_lu::LuX width="12" height="12" />
-                                </button>
-                            </div>
-                        }
-                    }).collect_view();
-
-                    Some(view! {
-                        <div class="flex flex-wrap gap-2 mb-4">
-                            {badges}
-                        </div>
-                    })
-                } else {
-                    None
-                }}
-
-                // Metadata: time + view count
-                <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-auto">
-                    <div class="flex items-center gap-1">
-                        <Icon icon=icondata_lu::LuClock width="14" height="14" />
-                        <span class="whitespace-nowrap">"Updated " {relative_time}</span>
-                    </div>
-                    <div class="flex items-center gap-1">
-                        <Icon icon=icondata_lu::LuEye width="14" height="14" />
-                        <span class="whitespace-nowrap">{view_count}</span>
-                    </div>
-                </div>
-            </CardContent>
-
-            <CardFooter>
-                <div class="flex gap-2 w-full">
-                    <ButtonLink href=view_href_footer variant=ButtonVariant::Default class="w-full flex-1">
-                        <Icon icon=icondata_lu::LuEye width="14" height="14" />
-                        "View"
-                    </ButtonLink>
-                    <ButtonLink href=edit_href variant=ButtonVariant::Outline class="w-full flex-1">
-                        <Icon icon=icondata_lu::LuPencil width="14" height="14" />
-                        "Edit"
-                    </ButtonLink>
-                </div>
-            </CardFooter>
-        </Card>
-    }
-}
-
 /// Modal for adding a dashboard to a collection.
-///
-/// Matches the "Add to Collection" modal from React DashboardsList.jsx.
 #[component]
 fn AddToCollectionModal(
-    /// The dashboard to add (None = modal closed).
     dashboard: Signal<Option<DashboardListItem>>,
-    /// All collections in the workspace.
     collections: Signal<Vec<CollectionItem>>,
-    /// Called when modal is closed without action.
     on_close: Callback<()>,
-    /// Called after successfully adding to a collection.
     on_added: Callback<()>,
 ) -> impl IntoView {
     let (adding, set_adding) = signal(false);
 
-    // Available collections = those that don't already contain this dashboard
     let available_collections = move || -> Vec<CollectionItem> {
         let Some(ref db) = dashboard.get() else {
             return vec![];

@@ -1,444 +1,340 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Knowledge page — main layout + CRUD orchestration + mobile responsiveness.
+//! Knowledge page — thin wrapper around shared document components.
 //!
-//! Matches `apps/frontend/src/pages/Knowledge.jsx` (272 lines).
+//! Uses `DocumentCardGrid`, `SearchSortBar`, and `CollectionsSidebar` for
+//! the reusable UI, adding only knowledge-specific logic: create action,
+//! empty state text, and WebSocket subscription.
 //!
-//! Layout:
-//! ```text
-//! ┌────────────────────────────────────────────────┐
-//! │ Header: "Knowledge" + New File + New Folder    │
-//! ├──────────────┬─────────────────────────────────┤
-//! │ File Tree    │ File Editor                     │
-//! │ (w-72)       │ (flex-1)                        │
-//! │              │                                  │
-//! └──────────────┴─────────────────────────────────┘
-//! ```
-//!
-//! On mobile (< md / 768px), the sidebar is hidden by default and toggled via
-//! a menu button in the header. Selecting a file auto-closes the sidebar.
+//! Knowledge documents use `DocType::Knowledge` and are stored in the same
+//! `dashboards` table. Clicking a card navigates to `/dashboard/{id}/edit`.
+
+use std::sync::Arc;
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
-use crate::components::confirm_dialog::ConfirmDialog;
-use crate::components::knowledge::{
-    build_path, CreateKnowledgeItemModal, KnowledgeFileEditor, KnowledgeFileTree,
+use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
+use crate::components::{
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
 };
-use crate::components::toast::{toast_error, toast_success};
-use crate::components::{Button, ButtonSize, ButtonVariant, Spinner};
-use crate::server_fns::knowledge::{
-    create_knowledge_file, delete_knowledge_file, list_knowledge_tree, update_knowledge_file,
-};
-use crate::types::KnowledgeTreeEntry;
+use crate::pages::dashboards::CollectionsSidebar;
+use crate::server_fns::collections::{list_collections, CollectionItem};
+use crate::server_fns::dashboards::DashboardListItem;
+use crate::server_fns::knowledge::{create_knowledge_doc, delete_knowledge_doc, list_knowledge_docs};
 
-// ─── Modal state ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Main page component
+// ─────────────────────────────────────────────────────────────────────────────
 
-/// Modal variant for create/rename operations.
-#[derive(Clone, Debug)]
-enum ModalState {
-    Hidden,
-    CreateFile { parent_id: Option<String> },
-    CreateFolder { parent_id: Option<String> },
-    Rename { entry: KnowledgeTreeEntry },
-}
-
-impl ModalState {
-    fn is_visible(&self) -> bool {
-        !matches!(self, Self::Hidden)
-    }
-
-    fn title(&self) -> &str {
-        match self {
-            Self::Hidden => "",
-            Self::CreateFile { .. } => "New File",
-            Self::CreateFolder { .. } => "New Folder",
-            Self::Rename { .. } => "Rename",
-        }
-    }
-
-    fn default_value(&self) -> String {
-        match self {
-            Self::Rename { entry } => entry.name.clone(),
-            _ => String::new(),
-        }
-    }
-
-    fn submit_label(&self) -> &str {
-        match self {
-            Self::Rename { .. } => "Rename",
-            _ => "Create",
-        }
-    }
-}
-
-// ─── Main page component ───────────────────────────────────────────────────
-
-/// Knowledge page — workspace knowledge base with file tree + editor.
-///
-/// React reference: `apps/frontend/src/pages/Knowledge.jsx`
+/// Knowledge page — card grid of knowledge documents with search, sort,
+/// collections, and CRUD.
 #[component]
 pub fn KnowledgePage() -> impl IntoView {
-    // ── Core state ──────────────────────────────────────────────────────
-    let (tree_entries, set_tree_entries) = signal(Vec::<KnowledgeTreeEntry>::new());
-    let (selected_file, set_selected_file) = signal(Option::<KnowledgeTreeEntry>::None);
-    let (selected_file_path, set_selected_file_path) = signal(String::new());
-    let (is_loading, set_is_loading) = signal(true);
+    // ── Collection sidebar integration points ───────────────────────────
+    let (collections_open, set_collections_open) = signal(false);
+    let (active_collection_id, set_active_collection_id) = signal(Option::<String>::None);
 
-    // ── Modal state ─────────────────────────────────────────────────────
-    let (modal_state, set_modal_state) = signal(ModalState::Hidden);
+    // ── Search + sort signals ───────────────────────────────────────────
+    let (query_signal, set_query_signal) = signal(Option::<String>::None);
+    let (sort_signal, set_sort_signal) = signal("recent".to_string());
 
-    // ── Delete confirm dialog state ─────────────────────────────────────
-    let (delete_open, set_delete_open) = signal(false);
-    let (delete_target, set_delete_target) = signal(Option::<KnowledgeTreeEntry>::None);
+    // ── Data fetching ───────────────────────────────────────────────────
+    let knowledge_resource = Resource::new(
+        move || (query_signal.get(), sort_signal.get()),
+        move |(query, sort)| list_knowledge_docs(query, Some(sort), None),
+    );
 
-    // ── Mobile sidebar toggle ───────────────────────────────────────────
-    let (sidebar_open, set_sidebar_open) = signal(false);
+    // Fetch collections for badge display and filtering
+    let collections_resource = Resource::new(|| (), |_| list_collections());
 
-    // ── Tree refresh helper ─────────────────────────────────────────────
-    let refresh_tree = move || {
-        leptos::task::spawn_local(async move {
-            match list_knowledge_tree().await {
-                Ok(entries) => set_tree_entries.set(entries),
-                Err(e) => toast_error(format!("Failed to load knowledge files: {e}")),
-            }
-        });
-    };
+    // ── Delete confirmation ─────────────────────────────────────────────
+    let (confirm_open, set_confirm_open) = signal(false);
+    let (deleting_doc, set_deleting_doc) =
+        signal(Option::<(String, String)>::None); // (id, title)
 
-    // ── Initial data load ───────────────────────────────────────────────
-    Effect::new(move |_| {
-        leptos::task::spawn_local(async move {
-            match list_knowledge_tree().await {
-                Ok(entries) => set_tree_entries.set(entries),
-                Err(e) => toast_error(format!("Failed to load knowledge files: {e}")),
-            }
-            set_is_loading.set(false);
-        });
-    });
-
-    // ── CRUD callbacks ──────────────────────────────────────────────────
-
-    // 1. Create file — opens modal
-    let on_create_file = Callback::new(move |parent_id: Option<String>| {
-        set_modal_state.set(ModalState::CreateFile { parent_id });
-    });
-
-    // 2. Create folder — opens modal
-    let on_create_folder = Callback::new(move |parent_id: Option<String>| {
-        set_modal_state.set(ModalState::CreateFolder { parent_id });
-    });
-
-    // 3. Rename — opens modal with current name
-    let on_rename = Callback::new(move |entry: KnowledgeTreeEntry| {
-        set_modal_state.set(ModalState::Rename { entry });
-    });
-
-    // 4. Delete — opens confirm dialog
-    let on_delete = Callback::new(move |file_id: String| {
-        // Find the entry in the current tree to get its name for the dialog.
-        let entries = tree_entries.get_untracked();
-        if let Some(entry) = entries.iter().find(|e| e.id == file_id) {
-            set_delete_target.set(Some(entry.clone()));
-            set_delete_open.set(true);
-        } else {
-            toast_error("Could not find the selected item. Refresh the page and try again.");
-        }
-    });
-
-    // Delete confirm handler — called when user confirms the dialog.
-    let on_delete_confirm = Callback::new(move |()| {
-        set_delete_open.set(false);
-        if let Some(entry) = delete_target.get_untracked() {
-            let entry_id = entry.id.clone();
-            let entry_name = entry.name.clone();
+    let on_confirm_delete = Callback::new(move |()| {
+        set_confirm_open.set(false);
+        if let Some((doc_id, _title)) = deleting_doc.get_untracked() {
             leptos::task::spawn_local(async move {
-                match delete_knowledge_file(entry_id.clone()).await {
-                    Ok(()) => {
-                        // Clear selection if the deleted file was selected.
-                        if selected_file.get_untracked().as_ref().map(|f| &f.id)
-                            == Some(&entry_id)
-                        {
-                            set_selected_file.set(None);
-                            set_selected_file_path.set(String::new());
-                        }
-                        refresh_tree();
-                        toast_success(format!("Deleted {entry_name}"));
-                    }
-                    Err(e) => toast_error(format!("Failed to delete: {e}")),
+                if let Err(e) = delete_knowledge_doc(doc_id).await {
+                    leptos::logging::error!("Failed to delete knowledge doc: {e}");
                 }
+                knowledge_resource.refetch();
             });
         }
     });
 
-    let on_delete_cancel = Callback::new(move |()| {
-        set_delete_open.set(false);
+    let on_cancel_delete = Callback::new(move |()| {
+        set_confirm_open.set(false);
+        set_deleting_doc.set(None);
     });
 
-    // 5. Move — directly calls server function
-    let on_move = Callback::new(move |(file_id, new_parent_id, sort_order): (String, Option<String>, i32)| {
+    // ── Create new knowledge document ───────────────────────────────────
+    let (creating, set_creating) = signal(false);
+
+    let handle_create = move |_| {
+        set_creating.set(true);
         leptos::task::spawn_local(async move {
-            match update_knowledge_file(
-                file_id,
-                None,             // content
-                None,             // content_hash
-                None,             // name
-                new_parent_id,    // parent_id
-                Some(sort_order), // sort_order
-            )
-            .await
-            {
-                Ok(_) => refresh_tree(),
-                Err(e) => toast_error(format!("Failed to move: {e}")),
+            match create_knowledge_doc("Untitled Document".to_string(), None).await {
+                Ok(doc_id) => {
+                    let url = format!("/dashboard/{doc_id}/edit");
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.location().set_href(&url);
+                    }
+                }
+                Err(e) => {
+                    leptos::logging::error!("Failed to create knowledge doc: {e}");
+                    set_creating.set(false);
+                }
             }
         });
-    });
+    };
 
-    // 6. File selection
-    let on_select = Callback::new(move |entry: KnowledgeTreeEntry| {
-        if entry.is_folder {
-            return;
+    // ── Filter documents by active collection ───────────────────────────
+    let filtered_docs = move || -> Option<Result<Vec<DashboardListItem>, ServerFnError>> {
+        let result = knowledge_resource.get()?;
+        let active_id = active_collection_id.get();
+
+        match result {
+            Err(e) => Some(Err(e)),
+            Ok(docs) => {
+                if let Some(ref coll_id) = active_id {
+                    let collection_doc_ids: std::collections::HashSet<String> =
+                        collections_resource
+                            .get()
+                            .and_then(|r| r.ok())
+                            .unwrap_or_default()
+                            .iter()
+                            .filter(|c| c.collection_id == *coll_id)
+                            .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
+                            .collect();
+
+                    let filtered: Vec<DashboardListItem> = docs
+                        .into_iter()
+                        .filter(|d| collection_doc_ids.contains(&d.dashboard_id))
+                        .collect();
+                    Some(Ok(filtered))
+                } else {
+                    Some(Ok(docs))
+                }
+            }
         }
-        set_selected_file.set(Some(entry.clone()));
-        let path = build_path(&tree_entries.get_untracked(), &entry.id);
-        set_selected_file_path.set(path);
-        // Auto-close sidebar on mobile after file selection.
-        set_sidebar_open.set(false);
-    });
+    };
 
-    // 7. on_saved callback from editor — refresh tree (names may change).
-    let on_saved = Callback::new(move |()| {
-        refresh_tree();
-    });
+    let get_collections = move || -> Vec<CollectionItem> {
+        collections_resource
+            .get()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+    };
 
-    // ── Modal submit handler ────────────────────────────────────────────
-    let on_modal_submit = Callback::new(move |name: String| {
-        let state = modal_state.get_untracked();
-        match state {
-            ModalState::CreateFile { parent_id } => {
-                leptos::task::spawn_local(async move {
-                    match create_knowledge_file(name.clone(), parent_id, None, false).await {
-                        Ok(_) => {
-                            refresh_tree();
-                            toast_success(format!("Created {name}"));
-                        }
-                        Err(e) => toast_error(format!("Failed to create file: {e}")),
+    // ── WebSocket subscription: dashboard_update ────────────────────────
+    // Knowledge docs go through the same dashboard_update channel.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::components::chat::websocket_client::WebSocketContext;
+        let ws_ctx = use_context::<WebSocketContext>();
+
+        let ws_ctx_for_effect = ws_ctx.clone();
+        Effect::new(move |_| {
+            let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
+                return;
+            };
+
+            let unsub = ws.subscribe("dashboard_update", move |msg| {
+                let action = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("action"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                match action {
+                    "created" | "deleted" => {
+                        knowledge_resource.refetch();
                     }
-                });
-            }
-            ModalState::CreateFolder { parent_id } => {
-                leptos::task::spawn_local(async move {
-                    match create_knowledge_file(name.clone(), parent_id, None, true).await {
-                        Ok(_) => {
-                            refresh_tree();
-                            toast_success(format!("Created {name}"));
-                        }
-                        Err(e) => toast_error(format!("Failed to create folder: {e}")),
-                    }
-                });
-            }
-            ModalState::Rename { entry } => {
-                let file_id = entry.id.clone();
-                leptos::task::spawn_local(async move {
-                    match update_knowledge_file(
-                        file_id.clone(),
-                        None,              // content
-                        None,              // content_hash
-                        Some(name.clone()), // name
-                        None,              // parent_id
-                        None,              // sort_order
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            refresh_tree();
-                            // Update selected file if it was the renamed one.
-                            if selected_file
-                                .get_untracked()
-                                .as_ref()
-                                .map(|f| &f.id)
-                                == Some(&file_id)
-                            {
-                                set_selected_file.update(|f| {
-                                    if let Some(file) = f {
-                                        file.name = name.clone();
-                                    }
-                                });
-                            }
-                            toast_success(format!("Renamed to {name}"));
-                        }
-                        Err(e) => toast_error(format!("Failed to rename: {e}")),
-                    }
-                });
-            }
-            ModalState::Hidden => {}
-        }
-        set_modal_state.set(ModalState::Hidden);
-    });
+                    _ => {}
+                }
+            });
 
-    let on_modal_close = Callback::new(move |()| {
-        set_modal_state.set(ModalState::Hidden);
-    });
+            let unsub = send_wrapper::SendWrapper::new(unsub);
+            on_cleanup(move || {
+                unsub.take()();
+            });
+        });
+    }
 
-    // ── Derived signals for modal props ─────────────────────────────────
-    let modal_show = Signal::derive(move || modal_state.get().is_visible());
-    // ── Derived signals for child components ────────────────────────────
-    let selected_id = Signal::derive(move || selected_file.get().map(|f| f.id));
-
-    // Delete dialog title/message are derived reactively via MaybeProp<String>.
-
-    // ── Render ──────────────────────────────────────────────────────────
     view! {
-        <div class="flex flex-col h-full bg-muted" style="flex-direction: column;">
-            // Header
-            <div class="h-16 border-b border-border bg-card px-6 flex-shrink-0 flex items-center justify-between">
-                <div class="flex items-center gap-3">
-                    // Mobile sidebar toggle button
-                    <button
-                        class="md:hidden inline-flex items-center justify-center rounded-md text-sm font-medium h-8 w-8 border border-input bg-background text-foreground hover:bg-secondary hover:text-accent-foreground transition-colors"
-                        on:click=move |_| set_sidebar_open.update(|v| *v = !*v)
+        <div class="flex flex-col h-full bg-background">
+            // Row 1: Title + action buttons
+            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                <h1 class="text-3xl font-display text-foreground">"Knowledge"</h1>
+
+                <div class="flex items-center gap-2">
+                    // Collections sidebar toggle
+                    <ToggleButton
+                        variant=Signal::derive(move || {
+                            if collections_open.get() {
+                                ButtonVariant::Active
+                            } else {
+                                ButtonVariant::Secondary
+                            }
+                        })
+                        size=ButtonSize::Sm
+                        aria_label=MaybeProp::from(Some("Manage Collections".to_string()))
+                        on:click=move |_| set_collections_open.update(|v| *v = !*v)
+                    >
+                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                        </svg>
+                        <span class="hidden sm:inline">"Collections"</span>
+                    </ToggleButton>
+
+                    // Create Knowledge Document
+                    <Button
+                        size=ButtonSize::Sm
+                        on:click=handle_create
+                        disabled=Signal::derive(move || creating.get())
                     >
                         <Show
-                            when=move || sidebar_open.get()
-                            fallback=|| view! { <Icon icon=icondata_lu::LuMenu attr:class="h-4 w-4"/> }
+                            when=move || !creating.get()
+                            fallback=|| view! { <Spinner class="text-primary-foreground" /> }
                         >
-                            <Icon icon=icondata_lu::LuX attr:class="h-4 w-4"/>
+                            <Icon icon=icondata_lu::LuPlus width="14" height="14" />
                         </Show>
-                    </button>
-                    <h1 class="text-2xl font-display text-foreground">"Knowledge"</h1>
-                </div>
-                <div class="flex items-center gap-2">
-                    <Button
-                        variant=ButtonVariant::Outline
-                        size=ButtonSize::Sm
-                        on:click=move |_| on_create_file.run(None)
-                    >
-                        <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4 mr-1"/>
-                        <span class="hidden md:inline">"New File"</span>
-                    </Button>
-                    <Button
-                        variant=ButtonVariant::Outline
-                        size=ButtonSize::Sm
-                        on:click=move |_| on_create_folder.run(None)
-                    >
-                        <Icon icon=icondata_lu::LuFolderPlus attr:class="h-4 w-4 mr-1"/>
-                        <span class="hidden md:inline">"New Folder"</span>
+                        <span class="hidden sm:inline whitespace-nowrap">"New Document"</span>
                     </Button>
                 </div>
             </div>
 
-            // Content: sidebar + editor
-            <div class="flex-1 flex overflow-hidden">
-                // Sidebar — hidden on mobile by default, shown as overlay when toggled
-                // Desktop: always visible
-                <div class={move || {
-                    if sidebar_open.get() {
-                        // Mobile open: fixed overlay
-                        "fixed inset-0 z-40 md:static md:z-auto w-72 flex-shrink-0 border-r border-border bg-card overflow-y-auto"
-                    } else {
-                        // Mobile closed: hidden; desktop: always shown
-                        "hidden md:block w-72 flex-shrink-0 border-r border-border bg-card overflow-y-auto"
-                    }
-                }}>
-                    // On mobile overlay, add a top offset to clear the header
-                    <div class={move || {
-                        if sidebar_open.get() {
-                            "pt-16 md:pt-0 h-full bg-card"
-                        } else {
-                            "h-full"
-                        }
-                    }}>
-                        <Show when=move || !is_loading.get() fallback=move || view! {
-                            <div class="flex items-center justify-center h-32">
-                                <Spinner class="text-muted-foreground"/>
-                            </div>
-                        }>
-                            <KnowledgeFileTree
-                                entries=tree_entries
-                                selected_id=selected_id
-                                on_select=on_select
-                                on_create_file=on_create_file
-                                on_create_folder=on_create_folder
-                                on_rename=on_rename
-                                on_delete=on_delete
-                                on_move=on_move
-                            />
-                        </Show>
+            // Row 2: Search + sort
+            <SearchSortBar
+                on_search=Callback::new(move |q| set_query_signal.set(q))
+                on_sort=Callback::new(move |s| set_sort_signal.set(s))
+                storage_key="kyomi_knowledge_sort"
+                placeholder="Search knowledge..."
+            />
+
+            // Content area
+            <div class="flex flex-1 min-h-0">
+                // Main Content — Knowledge Grid
+                <div class="flex-1 overflow-y-auto @container">
+                    <div class="p-4 md:p-6">
+                        <Transition fallback=move || view! { <DocumentCardGridSkeleton /> }>
+                            {move || {
+                                let collections = get_collections();
+
+                                filtered_docs().map(|result| {
+                                    match result {
+                                        Err(e) => {
+                                            view! {
+                                                <div class="text-center py-16 text-destructive">
+                                                    <p>"Failed to load knowledge: " {e.to_string()}</p>
+                                                </div>
+                                            }.into_any()
+                                        }
+                                        Ok(docs) if docs.is_empty() => {
+                                            let create_cb = Callback::new(handle_create);
+                                            view! {
+                                                <KnowledgeEmptyState
+                                                    has_search=Signal::derive(move || query_signal.get().is_some())
+                                                    on_create=create_cb
+                                                />
+                                            }.into_any()
+                                        }
+                                        Ok(docs) => {
+                                            view! {
+                                                <DocumentCardGrid
+                                                    dashboards=docs
+                                                    collections=collections
+                                                    on_delete=Callback::new(move |(id, title): (String, String)| {
+                                                        set_deleting_doc.set(Some((id, title)));
+                                                        set_confirm_open.set(true);
+                                                    })
+                                                />
+                                            }.into_any()
+                                        }
+                                    }
+                                })
+                            }}
+                        </Transition>
                     </div>
                 </div>
 
-                // Mobile backdrop — shown when sidebar is open on mobile
-                <Show when=move || sidebar_open.get()>
-                    <div
-                        class="fixed inset-0 z-30 bg-[var(--color-overlay)] md:hidden"
-                        on:click=move |_| set_sidebar_open.set(false)
-                    />
-                </Show>
-
-                // Editor pane
-                <div class="flex-1 min-h-0 min-w-0 overflow-hidden">
-                    <Show when=move || !is_loading.get() fallback=move || view! {
-                        <div class="flex items-center justify-center h-full">
-                            <Spinner class="text-muted-foreground"/>
-                        </div>
-                    }>
-                        <KnowledgeFileEditor
-                            selected_file=selected_file
-                            file_path=selected_file_path
-                            on_saved=on_saved
-                        />
-                    </Show>
-                </div>
+                // Right sidebar — collections
+                <CollectionsSidebar
+                    open=Signal::derive(move || collections_open.get())
+                    set_open=set_collections_open
+                    active_collection_id=Signal::derive(move || active_collection_id.get())
+                    set_active_collection_id=set_active_collection_id
+                    on_collections_changed=Callback::new(move |()| {
+                        collections_resource.refetch();
+                        knowledge_resource.refetch();
+                    })
+                />
             </div>
 
-            // Create/Rename modal
-            //
-            // The CreateKnowledgeItemModal takes String props (not Signal), so we
-            // conditionally render it based on modal_show to ensure it re-mounts
-            // with fresh props whenever the modal state changes.
-            <Show when=move || modal_show.get()>
-                {move || {
-                    let state = modal_state.get();
-                    view! {
-                        <CreateKnowledgeItemModal
-                            show=modal_show
-                            on_close=on_modal_close
-                            on_submit=on_modal_submit
-                            title=state.title().to_string()
-                            default_value=state.default_value()
-                            submit_label=state.submit_label().to_string()
-                        />
-                    }
-                }}
-            </Show>
-
-            // Delete confirm dialog — outer Show forces re-mount so String
-            // Props are freshly evaluated from delete_target each time.
-            <Show when=move || delete_open.get()>
-                {move || {
-                    let target = delete_target.get();
-                    let (title, message) = match target.as_ref() {
-                        Some(e) if e.is_folder => (
-                            format!("Delete \"{}\"?", e.name),
-                            format!("Delete \"{}\" and all its contents? This cannot be undone.", e.name),
-                        ),
-                        Some(e) => (
-                            format!("Delete \"{}\"?", e.name),
-                            format!("Delete \"{}\"? This cannot be undone.", e.name),
-                        ),
-                        None => (String::new(), String::new()),
-                    };
-                    view! {
-                        <ConfirmDialog
-                            open=delete_open
-                            title=title
-                            message=message
-                            confirm_text="Delete"
-                            on_confirm=on_delete_confirm
-                            on_cancel=on_delete_cancel
-                        />
-                    }
-                }}
-            </Show>
+            // Confirm dialog for delete
+            <ConfirmDialog
+                open=Signal::derive(move || confirm_open.get())
+                title=Signal::derive(move || "Delete Document?".to_string())
+                message=Signal::derive(move || {
+                    deleting_doc.get()
+                        .map(|(_, title)| format!("Are you sure you want to delete \"{title}\"? This action cannot be undone."))
+                        .unwrap_or_default()
+                })
+                confirm_text="Delete"
+                on_confirm=on_confirm_delete
+                on_cancel=on_cancel_delete
+            />
         </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components (knowledge-specific)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Knowledge icon for empty states.
+#[component]
+fn KnowledgeIcon() -> impl IntoView {
+    view! {
+        <Icon icon=icondata_lu::LuBookOpen attr:class="w-12 h-12" />
+    }
+}
+
+/// Empty state for the knowledge page.
+#[component]
+fn KnowledgeEmptyState(
+    has_search: Signal<bool>,
+    on_create: Callback<leptos::ev::MouseEvent>,
+) -> impl IntoView {
+    view! {
+        {move || {
+            if has_search.get() {
+                view! {
+                    <EmptyState
+                        icon=Arc::new(|| view! { <KnowledgeIcon /> }.into_any())
+                        title="No matching documents"
+                        description="No knowledge documents found for your search. Try a different search term."
+                    />
+                }.into_any()
+            } else {
+                view! {
+                    <EmptyState
+                        icon=Arc::new(|| view! { <KnowledgeIcon /> }.into_any())
+                        title="No knowledge documents yet"
+                        description="What does your team need to know? Create your first knowledge document."
+                        action=Arc::new(move || view! {
+                            <Button on:click=move |ev| on_create.run(ev)>
+                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                "Create Your First Document"
+                            </Button>
+                        }.into_any())
+                    />
+                }.into_any()
+            }
+        }}
     }
 }

@@ -19,7 +19,7 @@ pub mod confirm_dialog;
 pub mod dashboard;
 pub mod empty_state;
 pub mod input;
-pub mod knowledge;
+pub mod documents;
 pub mod label;
 pub mod layout;
 pub mod modal;
