@@ -496,7 +496,8 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   font-family: inherit;
   overflow-x: auto;
   overflow-y: hidden;
-  background: color-mix(in srgb, var(--color-muted) 50%, transparent);
+  background-color: color-mix(in oklab, var(--color-muted) 50%, transparent);
+  border-bottom: 1px solid var(--color-border);
   flex-wrap: nowrap;
   scrollbar-width: thin;
   scrollbar-color: var(--color-border) transparent;
@@ -582,10 +583,6 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   font-family: var(--font-mono);
 }
 
-/* Give the toolbar the card's top border-radius so it looks like a header */
-.kode-toolbar.kode-toolbar {
-  border-radius: 8px 8px 0 0;
-}
 
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected
  * automatically by chartml-leptos's ChartMLChart component on mount.

@@ -943,10 +943,10 @@ fn DashboardEditorInner(
                 });
                 let insert_cb = Callback::new(move |yaml: String| {
                     let current = editor_content.get_untracked();
-                    let new_fenced = format!("```chartml\n{yaml}```");
+                    let new_fenced = format!("```chartml\n{yaml}\n```");
 
                     let new_content = if let Some(old_yaml) = edit_chart_yaml.get_untracked() {
-                        let old_fenced = format!("```chartml\n{old_yaml}```");
+                        let old_fenced = format!("```chartml\n{old_yaml}\n```");
                         current.replace(&old_fenced, &new_fenced)
                     } else {
                         let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
