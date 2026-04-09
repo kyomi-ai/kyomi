@@ -242,6 +242,7 @@ pub async fn create_dashboard(
     title: &str,
     content: &str,
     doc_type: DocType,
+    embed: Option<&EmbeddingService>,
 ) -> Result<String> {
     validate_title(title)?;
 
@@ -293,6 +294,20 @@ pub async fn create_dashboard(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create dashboard: {e}")))?;
 
     tracing::info!(dashboard_id = %dashboard_id, doc_type = doc_type_str, "Created dashboard");
+
+    // Rechunk newly created document in background (if content is non-trivial)
+    if let Some(embed_svc) = embed
+        && !content.trim().is_empty()
+    {
+            spawn_rechunk_document(
+                db.clone(),
+                embed_svc.clone(),
+                dashboard_id.clone(),
+                content.to_string(),
+                workspace_id.to_string(),
+            );
+    }
+
     Ok(dashboard_id)
 }
 
@@ -465,12 +480,18 @@ pub async fn update_dashboard(
 
     tracing::info!(dashboard_id = %dashboard_id, "Updated dashboard");
 
-    // Rechunk documents after content update (all doc types)
+    // Rechunk documents after content update (all doc types) — fire-and-forget
     if result.rows_affected() > 0
         && let Some(c) = content
     {
         if let Some(embed_svc) = embed {
-            rechunk_document(db, embed_svc, dashboard_id, c, workspace_id).await?;
+            spawn_rechunk_document(
+                db.clone(),
+                embed_svc.clone(),
+                dashboard_id.to_string(),
+                c.to_string(),
+                workspace_id.to_string(),
+            );
         } else {
             tracing::warn!(
                 dashboard_id = %dashboard_id,
@@ -1308,6 +1329,26 @@ pub fn spawn_embedding_generation(
             Err(e) => {
                 tracing::error!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard embedding");
             }
+        }
+    });
+}
+
+// ─── Background rechunking ───────────────────────────────────────────────────
+
+/// Spawn background rechunking for a document.
+///
+/// Fire-and-forget — errors are logged but don't propagate. Parameters are
+/// owned because they're moved into the spawned future.
+pub fn spawn_rechunk_document(
+    db: DbPool,
+    embed: EmbeddingService,
+    dashboard_id: String,
+    content: String,
+    workspace_id: String,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = rechunk_document(&db, &embed, &dashboard_id, &content, &workspace_id).await {
+            tracing::error!(dashboard_id = %dashboard_id, "Background rechunking failed: {e}");
         }
     });
 }

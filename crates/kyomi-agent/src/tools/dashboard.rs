@@ -343,6 +343,7 @@ impl AgentTool for CreateDashboardTool {
             title,
             content,
             kyomi_core::models::DocType::Dashboard,
+            None, // Embedding generation handled separately below
         )
         .await
         {

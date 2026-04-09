@@ -167,23 +167,47 @@ pub async fn create_collection(
 // ─── List collections ────────────────────────────────────────────────────────
 
 /// List all collections in a workspace with their dashboards.
+///
+/// When `doc_type` is `Some`, only collections containing at least one
+/// document of the given type are returned. When `None`, all collections
+/// are returned (backward compatible).
 pub async fn list_collections(
     db: &DbPool,
     workspace_id: &str,
+    doc_type: Option<&str>,
 ) -> Result<Vec<CollectionWithDashboards>> {
-    // Fetch all collections
-    let collections = db_fetch_all!(
-        db,
-        kyomi_core::models::Collection,
-        r#"
-        SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
-        FROM collections
-        WHERE workspace_id = $1
-        ORDER BY created_at DESC
-        "#,
-        workspace_id
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?;
+    // Fetch collections — optionally filtered to those containing docs of the given type
+    let collections = if let Some(dt) = doc_type {
+        db_fetch_all!(
+            db,
+            kyomi_core::models::Collection,
+            r#"
+            SELECT DISTINCT c.id, c.workspace_id, c.name, c.description, c.color,
+                   c.is_public, c.created_at, c.updated_at
+            FROM collections c
+            JOIN collection_dashboards cd ON cd.collection_id = c.id
+            JOIN dashboards d ON d.dashboard_id = cd.dashboard_id
+            WHERE c.workspace_id = $1 AND d.doc_type = $2
+            ORDER BY c.created_at DESC
+            "#,
+            workspace_id,
+            dt
+        )
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?
+    } else {
+        db_fetch_all!(
+            db,
+            kyomi_core::models::Collection,
+            r#"
+            SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+            FROM collections
+            WHERE workspace_id = $1
+            ORDER BY created_at DESC
+            "#,
+            workspace_id
+        )
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?
+    };
 
     // Fetch all dashboards in collections for this workspace in one query
     let dashboard_rows = db_fetch_all!(

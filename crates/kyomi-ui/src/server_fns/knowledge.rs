@@ -68,6 +68,13 @@ pub async fn create_knowledge_doc(
 
     let content = content.unwrap_or_default();
 
+    // Get embedding service for both embedding generation and rechunking
+    let embedding_svc = ctx
+        .embedding
+        .wait_ready()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
+
     let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
         &ctx.db,
         &auth.user_id,
@@ -75,16 +82,10 @@ pub async fn create_knowledge_doc(
         &title,
         &content,
         kyomi_core::models::DocType::Knowledge,
+        Some(embedding_svc),
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Fire-and-forget embedding generation
-    let embedding_svc = ctx
-        .embedding
-        .wait_ready()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
     kyomi_auth::dashboard_service::spawn_embedding_generation(
         ctx.db.clone(),
         embedding_svc.clone(),

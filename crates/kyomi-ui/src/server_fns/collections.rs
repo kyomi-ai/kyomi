@@ -96,15 +96,24 @@ fn bare_to_collection_item(coll: &kyomi_core::models::Collection) -> CollectionI
 // ─── Server Functions ───────────────────────────────────────────────────────
 
 /// List all collections for the current workspace with dashboard counts.
+///
+/// When `doc_type` is `Some`, only collections containing at least one
+/// document of that type are returned (e.g. `"dashboard"` or `"knowledge"`).
 #[server(prefix = "/leptos-api")]
-pub async fn list_collections() -> Result<Vec<CollectionItem>, ServerFnError> {
+pub async fn list_collections(
+    doc_type: Option<String>,
+) -> Result<Vec<CollectionItem>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    let collections = kyomi_auth::collection_service::list_collections(&ctx.db, ws_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let collections = kyomi_auth::collection_service::list_collections(
+        &ctx.db,
+        ws_id,
+        doc_type.as_deref(),
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(collections.iter().map(to_collection_item).collect())
 }

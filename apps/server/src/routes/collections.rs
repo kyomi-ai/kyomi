@@ -199,7 +199,7 @@ async fn list_collections(
 ) -> Result<Json<Vec<CollectionResponse>>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
 
-    let collections = collection_service::list_collections(&state.db, workspace_id).await?;
+    let collections = collection_service::list_collections(&state.db, workspace_id, None).await?;
 
     let response: Vec<CollectionResponse> = collections
         .iter()

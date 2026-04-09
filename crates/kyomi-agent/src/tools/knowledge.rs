@@ -638,6 +638,7 @@ impl AgentTool for WriteDocumentTool {
                 title,
                 content,
                 doc_type,
+                None, // Agent does explicit sync rechunk below
             )
             .await?;
 

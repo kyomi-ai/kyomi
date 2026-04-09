@@ -46,7 +46,7 @@ pub fn DashboardsListPage() -> impl IntoView {
     );
 
     // Fetch collections for badge display and filtering
-    let collections_resource = Resource::new(|| (), |_| list_collections());
+    let collections_resource = Resource::new(|| (), |_| list_collections(None));
 
     // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
@@ -212,9 +212,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                         aria_label=MaybeProp::from(Some("Manage Collections".to_string()))
                         on:click=move |_| set_collections_open.update(|v| *v = !*v)
                     >
-                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                        </svg>
+                        <Icon icon=icondata_lu::LuLayers width="16" height="16" />
                         <span class="hidden sm:inline">"Collections"</span>
                     </ToggleButton>
 
@@ -373,6 +371,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                         collections_resource.refetch();
                         dashboards_resource.refetch();
                     })
+                    doc_type="dashboard".to_string()
                 />
             </div>
 

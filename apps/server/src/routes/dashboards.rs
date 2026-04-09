@@ -318,6 +318,7 @@ async fn create_dashboard(
         &request.title,
         &request.content,
         kyomi_core::models::DocType::Dashboard,
+        None, // Embedding generation handled separately below
     )
     .await?;
 
@@ -605,61 +606,68 @@ async fn diff_versions(
 ) -> Result<Json<Value>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
 
-    // Verify dashboard exists
+    // Fetch live dashboard (also verifies existence + ownership)
     let dashboard =
         dashboard_service::get_dashboard(&state.db, &dashboard_id, workspace_id).await?;
-    if dashboard.is_none() {
-        return Err(kyomi_core::Error::NotFound(format!(
-            "Dashboard {dashboard_id} not found"
-        )));
+    let dashboard = dashboard.ok_or_else(|| {
+        kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
+    })?;
+
+    // Compute current version number (max + 1) for live content
+    let version_count =
+        dashboard_service::get_version_count(&state.db, &dashboard_id).await? as i32;
+    let current_version_number = version_count + 1;
+
+    // Get content for each version, handling "current" by reading from dashboards table
+    let (from_content, from_title) = if params.from_version == current_version_number {
+        (dashboard.content.clone(), dashboard.title.clone())
+    } else {
+        let v = dashboard_service::get_version(&state.db, &dashboard_id, params.from_version)
+            .await?
+            .ok_or_else(|| {
+                kyomi_core::Error::NotFound(format!("Version {} not found", params.from_version))
+            })?;
+        (v.content, v.title)
+    };
+
+    let (to_content, to_title) = if params.to_version == current_version_number {
+        (dashboard.content.clone(), dashboard.title.clone())
+    } else {
+        let v = dashboard_service::get_version(&state.db, &dashboard_id, params.to_version)
+            .await?
+            .ok_or_else(|| {
+                kyomi_core::Error::NotFound(format!("Version {} not found", params.to_version))
+            })?;
+        (v.content, v.title)
+    };
+
+    // Proper line-based diff using the `similar` crate (Myers algorithm)
+    let diff = similar::TextDiff::from_lines(&from_content, &to_content);
+    let mut additions = 0i32;
+    let mut deletions = 0i32;
+    let mut diff_lines = Vec::new();
+
+    for change in diff.iter_all_changes() {
+        let (line_type, content) = match change.tag() {
+            similar::ChangeTag::Insert => { additions += 1; ("add", change.value()) }
+            similar::ChangeTag::Delete => { deletions += 1; ("delete", change.value()) }
+            similar::ChangeTag::Equal => ("context", change.value()),
+        };
+        diff_lines.push(json!({
+            "type": line_type,
+            "content": content.trim_end_matches('\n'),
+        }));
     }
-
-    let from_version =
-        dashboard_service::get_version(&state.db, &dashboard_id, params.from_version).await?;
-    let from_version = from_version.ok_or_else(|| {
-        kyomi_core::Error::NotFound(format!(
-            "Version {} not found",
-            params.from_version
-        ))
-    })?;
-
-    let to_version =
-        dashboard_service::get_version(&state.db, &dashboard_id, params.to_version).await?;
-    let to_version = to_version.ok_or_else(|| {
-        kyomi_core::Error::NotFound(format!(
-            "Version {} not found",
-            params.to_version
-        ))
-    })?;
-
-    // Simple line-based diff
-    let from_lines: Vec<&str> = from_version.content.lines().collect();
-    let to_lines: Vec<&str> = to_version.content.lines().collect();
-
-    let from_set: std::collections::HashSet<&str> = from_lines.iter().copied().collect();
-    let to_set: std::collections::HashSet<&str> = to_lines.iter().copied().collect();
-
-    let added: Vec<&str> = to_lines
-        .iter()
-        .filter(|l| !from_set.contains(**l))
-        .copied()
-        .collect();
-    let removed: Vec<&str> = from_lines
-        .iter()
-        .filter(|l| !to_set.contains(**l))
-        .copied()
-        .collect();
 
     Ok(Json(json!({
         "dashboard_id": dashboard_id,
         "from_version": params.from_version,
         "to_version": params.to_version,
-        "from_title": from_version.title,
-        "to_title": to_version.title,
-        "added_lines": added.len(),
-        "removed_lines": removed.len(),
-        "added": added,
-        "removed": removed,
+        "from_title": from_title,
+        "to_title": to_title,
+        "additions": additions,
+        "deletions": deletions,
+        "diff_lines": diff_lines,
     })))
 }
 

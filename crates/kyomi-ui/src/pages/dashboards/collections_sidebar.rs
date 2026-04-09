@@ -623,14 +623,10 @@ pub fn CollectionsSidebar(
     /// Callback after any collection change (to refetch dashboard list).
     on_collections_changed: Callback<()>,
     /// Optional document type filter. When set, only collections containing
-    /// documents of this type are shown. Default (None) shows all collections.
-    ///
-    /// Note: filtering requires `CollectionDashboard` to carry `doc_type`,
-    /// which is a server-side enhancement. The prop is accepted now so both
-    /// dashboards and knowledge pages can pass it; actual filtering will be
-    /// wired when the collections API includes doc_type metadata.
-    #[prop(optional)]
-    _doc_type: Option<String>,
+    /// documents of this type are shown (e.g. `"dashboard"` or `"knowledge"`).
+    /// Default (None) shows all collections.
+    #[prop(optional, into)]
+    doc_type: Option<String>,
 ) -> impl IntoView {
     let is_mobile = use_is_mobile();
 
@@ -639,10 +635,14 @@ pub fn CollectionsSidebar(
     #[cfg(not(feature = "hydrate"))]
     let _ = set_sidebar_width;
 
-    // Collection data
+    // Collection data — filtered by doc_type when provided
+    let doc_type_filter = doc_type.clone();
     let collections_resource = Resource::new(
         move || open.get(), // refetch when sidebar opens
-        move |_| list_collections(),
+        {
+            let dt = doc_type_filter.clone();
+            move |_| list_collections(dt.clone())
+        },
     );
 
     // Track a version counter to force refetch
