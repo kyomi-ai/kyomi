@@ -28,6 +28,7 @@ pub mod populate;
 pub mod references;
 pub mod retrieval;
 pub mod sql_references;
+pub mod unify;
 pub mod vector_search;
 
 pub use context::ConversationContext;

@@ -619,7 +619,7 @@ pub async fn get_dashboard_count(
         db_fetch_scalar!(
             db,
             i64,
-            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1 AND user_id = $2",
+            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1 AND user_id = $2 AND doc_type = 'dashboard'",
             workspace_id,
             uid
         )
@@ -627,7 +627,7 @@ pub async fn get_dashboard_count(
         db_fetch_scalar!(
             db,
             i64,
-            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1",
+            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1 AND doc_type = 'dashboard'",
             workspace_id
         )
     }

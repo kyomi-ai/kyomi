@@ -47,6 +47,12 @@ async fn main() {
         .await
         .expect("failed to connect to database");
 
+    // Post-SQL-migration hook: convert knowledge-file folders to collections,
+    // then drop the old knowledge_files table. Idempotent — no-op if already done.
+    kyomi_knowledge::unify::migrate_folders_to_collections(&db)
+        .await
+        .expect("failed to run folder-to-collection migration");
+
     // Personal mode: auto-provision local user and workspace on first boot
     if config.is_personal() {
         kyomi_server::auto_provision_personal_mode(&db)
