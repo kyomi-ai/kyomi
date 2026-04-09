@@ -26,7 +26,7 @@ use crate::components::chat::{
 };
 #[cfg(feature = "hydrate")]
 use crate::components::chat::{ThinkingEvent, TokenUsage, process_thinking_event};
-use crate::components::{EmptyState, Spinner};
+use crate::components::{Button, ButtonSize, ButtonVariant, EmptyState, Spinner};
 use crate::server_fns::copilot::{
     create_copilot_session, delete_copilot_session, send_copilot_message,
 };
@@ -717,16 +717,15 @@ pub fn CopilotSidebar(
                 // React: `flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0`
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
-                        <Icon icon=icondata_lu::LuMessagesSquare attr:class="w-5 h-5 text-primary" />
+                        <Icon icon=icondata_lu::LuMessagesSquare width="20" height="20" attr:class="text-primary" />
                         <span class="font-medium text-foreground">"Dashboard Copilot"</span>
                     </div>
-                    <button
-                        class="p-1 text-muted-foreground rounded-md transition-colors hover:text-foreground hover:bg-secondary"
-                        aria-label="Close copilot"
+                    <Button variant=ButtonVariant::GhostMuted size=ButtonSize::Icon
+                        aria_label="Close copilot".to_string()
                         on:click=move |_| handle_close_clone()
                     >
-                        <Icon icon=icondata_lu::LuX attr:class="w-5 h-5" />
-                    </button>
+                        <Icon icon=icondata_lu::LuX width="20" height="20" />
+                    </Button>
                 </div>
 
                 // Error banner
@@ -745,10 +744,9 @@ pub fn CopilotSidebar(
                     // Empty state
                     <Show when=move || messages.get().is_empty() && !is_loading.get()>
                         <EmptyState
-                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare attr:class="w-12 h-12" /> }.into_any())
+                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
                             title="Ask me anything about your dashboard!"
                             description="I can help you improve charts, suggest changes, or make edits directly."
-                            class="p-4 border-0"
                         />
                     </Show>
 
@@ -824,14 +822,14 @@ pub fn CopilotSidebar(
                                             let apply_content = suggested
                                                 .unwrap_or_else(|| full_message.clone());
                                             view! {
-                                                <button
-                                                    class="mt-2 text-xs text-primary font-medium transition-colors hover:text-primary/80"
+                                                <Button variant=ButtonVariant::Link size=ButtonSize::Sm
+                                                    class="mt-2"
                                                     on:click=move |_| {
                                                         on_apply_content.run(apply_content.clone());
                                                     }
                                                 >
                                                     "Apply to Dashboard"
-                                                </button>
+                                                </Button>
                                             }
                                         })}
                                     </div>
@@ -871,16 +869,13 @@ pub fn CopilotSidebar(
                                 }
                             }
                         />
-                        <button
-                            class="inline-flex items-center justify-center rounded-md h-10 w-10 bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                            disabled=move || {
-                                is_loading.get() || input_value.get().trim().is_empty()
-                            }
+                        <Button size=ButtonSize::Icon
+                            disabled=Signal::derive(move || is_loading.get() || input_value.get().trim().is_empty())
                             on:click=move |_| handle_send()
-                            aria-label="Send message"
+                            aria_label="Send message".to_string()
                         >
-                            <Icon icon=icondata_lu::LuSend attr:class="w-4 h-4" />
-                        </button>
+                            <Icon icon=icondata_lu::LuSend width="16" height="16" />
+                        </Button>
                     </div>
                 </div>
             </div>
@@ -903,7 +898,7 @@ pub fn CopilotSidebar(
                                 class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
                                 on:click=move |_| handle_close_backdrop()
                             />
-                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl transition-transform duration-slow ease-in-out">
+                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-muted flex flex-col shadow-xl transition-transform duration-slow ease-in-out">
                                 {panel_content()}
                             </div>
                         </div>
@@ -916,9 +911,9 @@ pub fn CopilotSidebar(
                     // Apply `select-none` during resize to prevent text selection.
                     let outer_class = move || {
                         if is_resizing.get() {
-                            "border-l border-border bg-muted flex h-full overflow-hidden select-none"
+                            "border-l border-t border-border bg-muted flex h-full overflow-hidden select-none"
                         } else {
-                            "border-l border-border bg-muted flex h-full overflow-hidden transition-[width] duration-slow ease-in-out"
+                            "border-l border-t border-border bg-muted flex h-full overflow-hidden transition-[width] duration-slow ease-in-out"
                         }
                     };
 
