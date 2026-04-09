@@ -756,7 +756,7 @@ fn DashboardCard(
                                     class="flex-shrink-0"
                                     on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
                                 >
-                                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+                                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" attr:class="text-destructive" />
                                 </Button>
                             }
                         }
