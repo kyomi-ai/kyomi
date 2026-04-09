@@ -783,10 +783,10 @@ pub fn ChatsListPage() -> impl IntoView {
                                                         let sid = session_id_delete.clone();
                                                         Some(view! {
                                                             <Button
-                                                                variant=ButtonVariant::GhostDestructive
-                                                                size=ButtonSize::IconSm
+                                                                variant=ButtonVariant::Ghost
+                                                                size=ButtonSize::Icon
                                                                 aria_label="Delete chat"
-                                                                class="opacity-0 group-hover:opacity-100 transition-opacity"
+                                                                class="flex-shrink-0"
                                                                 on:click=move |ev: leptos::ev::MouseEvent| {
                                                                     ev.prevent_default();
                                                                     ev.stop_propagation();
