@@ -346,7 +346,7 @@ fn extract_query(spec: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract the chart type from a parsed YAML spec (e.g. "bar", "line", "pie").
-fn extract_chart_type(spec: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_chart_type(spec: &serde_json::Value) -> Option<String> {
     spec.get("visualize")
         .and_then(|v| v.get("type"))
         .and_then(|v| v.as_str())
@@ -354,7 +354,7 @@ fn extract_chart_type(spec: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract the chart orientation from a parsed YAML spec (e.g. "horizontal").
-fn extract_chart_orientation(spec: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_chart_orientation(spec: &serde_json::Value) -> Option<String> {
     spec.get("visualize")
         .and_then(|v| v.get("orientation"))
         .and_then(|v| v.as_str())
@@ -362,7 +362,7 @@ fn extract_chart_orientation(spec: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract the chart mode from a parsed YAML spec (e.g. "stacked", "grouped").
-fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
     spec.get("visualize")
         .and_then(|v| v.get("mode"))
         .and_then(|v| v.as_str())
@@ -764,7 +764,7 @@ fn WatchPreviewCardView(
 /// - When type changes, strips per-row `mark` overrides so the new type applies uniformly
 /// - When switching away from bar, removes incompatible `orientation`
 /// - When switching away from bar/area, removes incompatible `mode`
-fn apply_spec_overrides(
+pub(crate) fn apply_spec_overrides(
     yaml: &str,
     type_override: Option<&str>,
     orientation_override: Option<Option<&str>>,

@@ -20,6 +20,9 @@ use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
 
 use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
+use crate::components::dashboard::markdown_renderer::{
+    apply_spec_overrides, extract_chart_mode, extract_chart_orientation, extract_chart_type,
+};
 
 /// Create a configured ChartML instance, optionally with a color palette.
 fn create_chartml(colors: Option<Vec<String>>) -> Arc<ChartML> {
@@ -84,41 +87,101 @@ impl Extension for ChartMLExtension {
 
         let yaml = content.to_string();
         let chartml = self.chartml.clone();
-        let spec = RwSignal::new(yaml.clone());
 
-        // Parse chart metadata from YAML — matches markdown_renderer's extract_* functions.
-        // ChartML specs nest type/orientation/mode under the "visualize" key.
-        let parsed: Option<serde_json::Value> = serde_yaml::from_str(&yaml).ok();
-        let vis = parsed.as_ref().and_then(|v| v.get("visualize"));
-        let chart_type = vis
-            .and_then(|v| v.get("type"))
-            .and_then(|t| t.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let chart_orientation = vis
-            .and_then(|v| v.get("orientation"))
-            .and_then(|o| o.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let chart_mode = vis
-            .and_then(|v| v.get("mode"))
-            .and_then(|m| m.as_str())
-            .unwrap_or_default()
-            .to_string();
+        // Parse initial chart metadata from YAML
+        let parsed_spec: Option<serde_json::Value> = serde_yaml::from_str(&yaml).ok();
+        let initial_chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
+        let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
+        let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
+
+        // Override signals — same pattern as ChartBlock in markdown_renderer
+        let (type_override, set_type_override) = signal(None::<String>);
+        let (orientation_override, set_orientation_override) = signal(None::<Option<String>>);
+        let (mode_override, set_mode_override) = signal(None::<Option<String>>);
+
+        let initial_type_stored = StoredValue::new(initial_chart_type.clone());
+        let initial_orient_stored = StoredValue::new(initial_orientation.clone());
+        let initial_mode_stored = StoredValue::new(initial_mode.clone());
+
+        // Derived current values for the header bar display
+        let current_chart_type = Memo::new(move |_| {
+            type_override.get().or_else(|| initial_type_stored.get_value())
+        });
+        let current_orientation = Memo::new(move |_| {
+            match orientation_override.get() {
+                Some(o) => o,
+                None => initial_orient_stored.get_value(),
+            }
+        });
+        let current_mode = Memo::new(move |_| {
+            match mode_override.get() {
+                Some(m) => m,
+                None => initial_mode_stored.get_value(),
+            }
+        });
+
+        // Derive effective YAML spec with overrides applied
+        let yaml_for_spec = yaml.clone();
+        let effective_spec = Memo::new(move |_| {
+            let t_ovr = type_override.get();
+            let o_ovr = orientation_override.get();
+            let m_ovr = mode_override.get();
+
+            if t_ovr.is_none() && o_ovr.is_none() && m_ovr.is_none() {
+                return yaml_for_spec.clone();
+            }
+
+            apply_spec_overrides(
+                &yaml_for_spec,
+                t_ovr.as_deref(),
+                o_ovr.as_ref().map(|o| o.as_deref()),
+                m_ovr.as_ref().map(|m| m.as_deref()),
+            )
+        });
+
+        // Callbacks for the header bar
+        let on_type_change = Callback::new(move |t: String| {
+            set_type_override.set(Some(t));
+        });
+        let on_orientation_change = Callback::new(move |o: Option<String>| {
+            set_orientation_override.set(Some(o));
+        });
+        let on_mode_change = Callback::new(move |m: Option<String>| {
+            set_mode_override.set(Some(m));
+        });
+
+        // Store callbacks for use inside the reactive header closure
+        let on_type_stored = StoredValue::new(on_type_change);
+        let on_orient_stored = StoredValue::new(on_orientation_change);
+        let on_mode_stored = StoredValue::new(on_mode_change);
 
         Some(
             view! {
                 // dashboard-content wrapper triggers chart container CSS (border, bg, radius)
                 <div class="dashboard-content not-prose">
                     <div class="my-2">
-                        <ChartHeaderBar
-                            chart_type=chart_type
-                            chart_orientation=chart_orientation
-                            chart_mode=chart_mode
-                            show_type_selector=true
-                        />
+                        // Reactive header bar — re-renders when type/orientation/mode change
+                        {move || {
+                            let ct = current_chart_type.get();
+                            let co = current_orientation.get();
+                            let cm = current_mode.get();
+                            let type_cb = on_type_stored.get_value();
+                            let orient_cb = on_orient_stored.get_value();
+                            let mode_cb = on_mode_stored.get_value();
+                            view! {
+                                <ChartHeaderBar
+                                    chart_type=ct.unwrap_or_default()
+                                    chart_orientation=co.unwrap_or_default()
+                                    chart_mode=cm.unwrap_or_default()
+                                    show_type_selector=true
+                                    on_type_change=type_cb
+                                    on_orientation_change=orient_cb
+                                    on_mode_change=mode_cb
+                                />
+                            }
+                        }}
                         <ChartMLChart
-                            spec=Signal::derive(move || spec.get())
+                            spec=Signal::derive(move || effective_spec.get())
                             chartml=chartml
                         />
                     </div>
