@@ -19,6 +19,8 @@ use kode_leptos::extension::Extension;
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
 
+use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
+
 /// Create a configured ChartML instance, optionally with a color palette.
 fn create_chartml(colors: Option<Vec<String>>) -> Arc<ChartML> {
     let mut chartml = ChartML::new();
@@ -82,15 +84,44 @@ impl Extension for ChartMLExtension {
 
         let yaml = content.to_string();
         let chartml = self.chartml.clone();
-        let spec = RwSignal::new(yaml);
+        let spec = RwSignal::new(yaml.clone());
+
+        // Parse chart metadata from YAML — matches markdown_renderer's extract_* functions.
+        // ChartML specs nest type/orientation/mode under the "visualize" key.
+        let parsed: Option<serde_json::Value> = serde_yaml::from_str(&yaml).ok();
+        let vis = parsed.as_ref().and_then(|v| v.get("visualize"));
+        let chart_type = vis
+            .and_then(|v| v.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let chart_orientation = vis
+            .and_then(|v| v.get("orientation"))
+            .and_then(|o| o.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let chart_mode = vis
+            .and_then(|v| v.get("mode"))
+            .and_then(|m| m.as_str())
+            .unwrap_or_default()
+            .to_string();
 
         Some(
             view! {
-                <div class="my-2 not-prose">
-                    <ChartMLChart
-                        spec=Signal::derive(move || spec.get())
-                        chartml=chartml
-                    />
+                // dashboard-content wrapper triggers chart container CSS (border, bg, radius)
+                <div class="dashboard-content not-prose">
+                    <div class="my-2">
+                        <ChartHeaderBar
+                            chart_type=chart_type
+                            chart_orientation=chart_orientation
+                            chart_mode=chart_mode
+                            show_type_selector=true
+                        />
+                        <ChartMLChart
+                            spec=Signal::derive(move || spec.get())
+                            chartml=chartml
+                        />
+                    </div>
                 </div>
             }
             .into_any(),

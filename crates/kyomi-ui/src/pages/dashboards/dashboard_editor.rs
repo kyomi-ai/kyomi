@@ -686,9 +686,10 @@ fn DashboardEditorInner(
                                         />
                                     </div>
 
-                                    // Right panel: Live preview
+                                    // Right panel: Live preview — wrapped in dashboard-content
+                                    // for chart container styling (border, bg, header bar)
                                     <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
-                                        <div class="p-6 flex-1">
+                                        <div class="dashboard-content p-6 flex-1">
                                             <MarkdownRenderer
                                                 content=effective_preview
                                                 chart_palette=chart_palette.get().unwrap_or_else(|| "balanced".to_string())
