@@ -497,7 +497,7 @@ fn DashboardEditorInner(
         let handler = Closure::<dyn Fn(web_sys::CustomEvent)>::new(
             move |ev: web_sys::CustomEvent| {
                 if let Some(yaml) = ev.detail().as_string() {
-                    set_edit_chart_yaml.set(Some(yaml));
+                    set_edit_chart_yaml.set(Some(yaml.trim().to_string()));
                     set_chart_builder_open.set(true);
                 }
             },
@@ -739,7 +739,7 @@ fn DashboardEditorInner(
                                     if is_previewing_version.get() {
                                         "flex items-center gap-2 p-3 border-b border-warning-border bg-warning flex-shrink-0"
                                     } else {
-                                        "flex items-center gap-2 p-3 border-b border-border bg-muted/50 flex-shrink-0"
+                                        "flex items-center gap-2 p-3 border-b border-border bg-muted flex-shrink-0"
                                     }
                                 }>
                                     {move || {

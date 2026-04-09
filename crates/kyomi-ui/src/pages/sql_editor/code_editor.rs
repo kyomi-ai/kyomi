@@ -56,7 +56,7 @@ fn apply_kyomi_overrides(theme: &mut kode_leptos::Theme) {
     theme.heading_font_family = Some("'Instrument Serif', Georgia, serif");
     theme.code_font_family = Some("'Geist Mono', ui-monospace, monospace");
     // Toolbar — layout and styling
-    theme.toolbar_bg = Some("color-mix(in oklab, var(--color-muted) 50%, transparent)");
+    theme.toolbar_bg = Some("var(--color-muted)");
     theme.toolbar_border_color = Some("var(--color-border)");
     theme.toolbar_padding = Some("12px");
     theme.toolbar_gap = Some("4px");
