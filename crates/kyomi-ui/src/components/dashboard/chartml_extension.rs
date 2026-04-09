@@ -150,21 +150,30 @@ impl Extension for ChartMLExtension {
             set_mode_override.set(Some(m));
         });
 
-        // Info callback — dispatches a custom event with the YAML for the editor
-        // page to pick up and show in ChartInfoModal.
-        let yaml_for_info = yaml.clone();
-        let on_info = Callback::new(move |()| {
-            let _ = &yaml_for_info; // ensure captured on all targets
+        // Helper: dispatch a named CustomEvent with YAML as detail
+        fn dispatch_chart_event(event_name: &str, yaml: &str) {
             #[cfg(target_arch = "wasm32")]
             if let Some(window) = web_sys::window() {
-                let detail = wasm_bindgen::JsValue::from_str(&yaml_for_info);
+                let detail = wasm_bindgen::JsValue::from_str(yaml);
                 if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict(
-                    "chart-info-request",
+                    event_name,
                     web_sys::CustomEventInit::new().detail(&detail),
                 ) {
                     let _ = window.dispatch_event(&event);
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            { let _ = (event_name, yaml); }
+        }
+
+        let yaml_for_info = yaml.clone();
+        let on_info = Callback::new(move |()| {
+            dispatch_chart_event("chart-info-request", &yaml_for_info);
+        });
+
+        let yaml_for_edit = yaml.clone();
+        let on_edit = Callback::new(move |()| {
+            dispatch_chart_event("chart-edit-request", &yaml_for_edit);
         });
 
         // Last refreshed tracking — set_last_refreshed used in cfg(wasm32) blocks
@@ -191,6 +200,7 @@ impl Extension for ChartMLExtension {
         let on_orient_stored = StoredValue::new(on_orientation_change);
         let on_mode_stored = StoredValue::new(on_mode_change);
         let on_info_stored = StoredValue::new(on_info);
+        let on_edit_stored = StoredValue::new(on_edit);
         let on_refresh_stored = StoredValue::new(on_refresh);
 
         Some(
@@ -207,6 +217,7 @@ impl Extension for ChartMLExtension {
                             let orient_cb = on_orient_stored.get_value();
                             let mode_cb = on_mode_stored.get_value();
                             let info_cb = on_info_stored.get_value();
+                            let edit_cb = on_edit_stored.get_value();
                             let refresh_cb = on_refresh_stored.get_value();
                             let last_sig = Signal::derive(move || last_refreshed.get());
                             let refreshing_sig = Signal::derive(move || is_refreshing.get());
@@ -218,10 +229,12 @@ impl Extension for ChartMLExtension {
                                     show_type_selector=true
                                     show_refresh=true
                                     show_info=true
+                                    show_edit=true
                                     on_type_change=type_cb
                                     on_orientation_change=orient_cb
                                     on_mode_change=mode_cb
                                     on_info=info_cb
+                                    on_edit=edit_cb
                                     on_refresh=refresh_cb
                                     last_updated=last_sig
                                     is_refreshing=refreshing_sig

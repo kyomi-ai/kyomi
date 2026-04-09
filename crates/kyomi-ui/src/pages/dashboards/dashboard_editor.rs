@@ -204,6 +204,7 @@ fn DashboardEditorInner(
 
     // ── Chart builder modal ──────────────────────────────────────────────
     let (chart_builder_open, set_chart_builder_open) = signal(false);
+    let (edit_chart_yaml, set_edit_chart_yaml) = signal(Option::<String>::None);
 
     // ── Insert link modal ────────────────────────────────────────────────
     let (insert_link_open, set_insert_link_open) = signal(false);
@@ -487,6 +488,45 @@ fn DashboardEditorInner(
         });
     }
 
+    // ── Chart edit event listener (from WYSIWYG extension + source preview) ──
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::closure::Closure;
+
+        let handler = Closure::<dyn Fn(web_sys::CustomEvent)>::new(
+            move |ev: web_sys::CustomEvent| {
+                if let Some(yaml) = ev.detail().as_string() {
+                    set_edit_chart_yaml.set(Some(yaml));
+                    set_chart_builder_open.set(true);
+                }
+            },
+        );
+
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "chart-edit-request",
+                handler.as_ref().unchecked_ref(),
+            );
+        }
+
+        let handler_stored =
+            StoredValue::new(Some(send_wrapper::SendWrapper::new(handler)));
+
+        on_cleanup(move || {
+            handler_stored.update_value(|h| {
+                if let Some(cb) = h.take() {
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.remove_event_listener_with_callback(
+                            "chart-edit-request",
+                            cb.as_ref().unchecked_ref(),
+                        );
+                    }
+                }
+            });
+        });
+    }
+
     // ── Title input handler ──────────────────────────────────────────────
     let on_title_input = move |ev: leptos::ev::Event| {
         set_title.set(event_target_value(&ev));
@@ -740,6 +780,16 @@ fn DashboardEditorInner(
                                                     set_chart_info_yaml.set(yaml);
                                                     set_chart_info_open.set(true);
                                                 })
+                                                on_edit_chart=Callback::new(move |(block_index, _array_index): (usize, usize)| {
+                                                    // Extract the YAML at block_index from editor content
+                                                    let content = editor_content.get_untracked();
+                                                    let re = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```").unwrap();
+                                                    if let Some(cap) = re.captures_iter(&content).nth(block_index) {
+                                                        let yaml = cap.get(1).map_or("", |m| m.as_str()).trim().to_string();
+                                                        set_edit_chart_yaml.set(Some(yaml));
+                                                        set_chart_builder_open.set(true);
+                                                    }
+                                                })
                                             />
                                         </div>
                                     </div>
@@ -885,20 +935,39 @@ fn DashboardEditorInner(
             </div>
 
             // ── Modals (rendered outside the layout flow) ─────────────────
-            <ChartBuilderModal
-                open=Signal::derive(move || chart_builder_open.get())
-                on_close=Callback::new(move |()| set_chart_builder_open.set(false))
-                on_insert=Callback::new(move |yaml: String| {
-                    // Wrap in ```chartml fence so MarkdownRenderer recognizes it
+            // Chart builder modal — reactively rendered so existing_yaml updates
+            {move || {
+                let close_cb = Callback::new(move |()| {
+                    set_chart_builder_open.set(false);
+                    set_edit_chart_yaml.set(None);
+                });
+                let insert_cb = Callback::new(move |yaml: String| {
                     let current = editor_content.get_untracked();
-                    let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
-                    let fenced = format!("```chartml\n{yaml}```");
-                    let new_content = format!("{current}{separator}{fenced}\n");
+                    let new_fenced = format!("```chartml\n{yaml}```");
+
+                    let new_content = if let Some(old_yaml) = edit_chart_yaml.get_untracked() {
+                        let old_fenced = format!("```chartml\n{old_yaml}```");
+                        current.replace(&old_fenced, &new_fenced)
+                    } else {
+                        let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
+                        format!("{current}{separator}{new_fenced}\n")
+                    };
+
                     set_editor_content.set(new_content.clone());
                     set_preview_content.set(new_content);
                     set_chart_builder_open.set(false);
-                })
-            />
+                    set_edit_chart_yaml.set(None);
+                });
+                let open_sig = Signal::derive(move || chart_builder_open.get());
+                match edit_chart_yaml.get() {
+                    Some(yaml) => view! {
+                        <ChartBuilderModal open=open_sig existing_yaml=yaml on_close=close_cb on_insert=insert_cb />
+                    }.into_any(),
+                    None => view! {
+                        <ChartBuilderModal open=open_sig on_close=close_cb on_insert=insert_cb />
+                    }.into_any(),
+                }
+            }}
 
             <InsertDashboardLinkModal
                 open=Signal::derive(move || insert_link_open.get())
