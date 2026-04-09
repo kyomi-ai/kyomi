@@ -142,6 +142,7 @@ kode-leptos = { path = "../../../kode/kode-leptos" }
 # ChartML parser (YAML parsing + block extraction)
 serde_yaml = { workspace = true }
 regex = { workspace = true }
+similar = { workspace = true }
 
 # Date/time (used in both SSR and WASM for date formatting)
 chrono = { workspace = true }

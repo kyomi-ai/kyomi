@@ -488,13 +488,17 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 
 /* ── kode theming ──────────────────────────────────────────────────
  * All kode styling is handled via the Theme API in code_editor.rs.
- * Heading font-sizes are set as CSS variables (no Theme struct field yet). */
+ * Heading font-sizes are set as CSS variables (no Theme struct field yet).
+ * overflow-y: hidden prevents a 1px vertical scrollbar on the toolbar
+ * (CSS spec: overflow-x:auto forces overflow-y to auto). */
 
 .kode-editor, .wysiwyg-container {
   --kode-h1-font-size: 2rem;          /* 30px — matches .prose h1 */
   --kode-h2-font-size: 1.6rem;        /* 24px — matches .prose h2 */
   --kode-h3-font-size: 1.333rem;      /* 20px — matches .prose h3 */
 }
+
+.kode-toolbar { overflow-y: hidden; }
 
 
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected

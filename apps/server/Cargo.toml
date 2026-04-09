@@ -54,6 +54,7 @@ async-stripe-billing = { workspace = true }
 async-stripe-shared = { workspace = true }
 async-stripe-types = { workspace = true }
 regex = { workspace = true }
+similar = { workspace = true }
 serde_urlencoded = { workspace = true }
 chrono-tz = { workspace = true }
 dashmap = { workspace = true }

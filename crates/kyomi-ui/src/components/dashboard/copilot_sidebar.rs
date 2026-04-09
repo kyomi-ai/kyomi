@@ -851,11 +851,10 @@ pub fn CopilotSidebar(
                 </div>
 
                 // Input area
-                // React: `border-t border-border p-4`
-                <div class="border-t border-border p-4">
-                    <div class="flex items-end gap-2">
+                <div class="border-t border-border px-4 py-3">
+                    <div class="flex items-center gap-2">
                         <textarea
-                            class="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[40px] max-h-[120px]"
+                            class="flex-1 resize-none rounded-md border border-input bg-background px-3.5 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[36px] max-h-[120px]"
                             placeholder="Ask about your dashboard..."
                             rows="1"
                             prop:value=move || input_value.get()
@@ -863,7 +862,6 @@ pub fn CopilotSidebar(
                                 set_input_value.set(event_target_value(&ev));
                             }
                             on:keydown=move |ev| {
-                                // Submit on Enter (without Shift for newline).
                                 if ev.key() == "Enter" && !ev.shift_key() {
                                     ev.prevent_default();
                                     handle_send_clone();

@@ -136,7 +136,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
 /// Matches React's `modeToggle` which appears in the toolbar row.
 fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<EditorMode>) -> impl IntoView {
     view! {
-        <div class="flex items-center bg-muted rounded-md p-0.5 flex-shrink-0">
+        <div class="flex items-center bg-muted rounded-md p-0.5 flex-shrink-0 font-sans">
             <button
                 class=move || {
                     let base = "px-1.5 sm:px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1";
@@ -583,6 +583,13 @@ fn DashboardEditorInner(
             .unwrap_or_else(|| preview_content.get())
     });
 
+    // Editor content: show historical version when previewing, current content otherwise
+    let effective_editor_content = Signal::derive(move || {
+        history_preview_content
+            .get()
+            .unwrap_or_else(|| editor_content.get())
+    });
+
     let is_previewing_version = Signal::derive(move || {
         history_preview_content.get().is_some()
     });
@@ -761,10 +768,10 @@ fn DashboardEditorInner(
                                 </div>
                                 // Editor panels
                                 <div class="flex flex-1 min-h-0 overflow-hidden">
-                                    // Left panel: Kode editor
+                                    // Left panel: Kode editor (read-only when previewing history)
                                     <div class="flex-1 min-h-0 overflow-hidden border-r border-border">
                                         <DashboardCodeEditor
-                                            content=editor_content
+                                            content=effective_editor_content
                                             on_change=on_editor_change.clone()
                                         />
                                     </div>
@@ -879,7 +886,7 @@ fn DashboardEditorInner(
                             <div class="flex flex-1 min-h-0 overflow-hidden">
                                 <div class="flex-1 min-h-0 overflow-hidden">
                                     <DashboardWysiwygEditor
-                                        content=editor_content
+                                        content=effective_editor_content
                                         on_change=on_editor_change.clone()
                                         chart_colors=kyomi_palette(&chart_palette.get().unwrap_or_else(|| "balanced".to_string()))
                                         toolbar_items=items
@@ -935,39 +942,43 @@ fn DashboardEditorInner(
             </div>
 
             // ── Modals (rendered outside the layout flow) ─────────────────
-            // Chart builder modal — reactively rendered so existing_yaml updates
-            {move || {
-                let close_cb = Callback::new(move |()| {
-                    set_chart_builder_open.set(false);
-                    set_edit_chart_yaml.set(None);
-                });
-                let insert_cb = Callback::new(move |yaml: String| {
-                    let current = editor_content.get_untracked();
-                    let new_fenced = format!("```chartml\n{yaml}\n```");
+            // Chart builder modal — Show/hide based on open signal to avoid
+            // disposal panics from reactive re-rendering.
+            <Show when=move || chart_builder_open.get()>
+                {move || {
+                    let existing = edit_chart_yaml.get_untracked();
+                    let close_cb = Callback::new(move |()| {
+                        set_chart_builder_open.set(false);
+                        set_edit_chart_yaml.set(None);
+                    });
+                    let insert_cb = Callback::new(move |yaml: String| {
+                        let current = editor_content.get_untracked();
+                        let new_fenced = format!("```chartml\n{yaml}\n```");
 
-                    let new_content = if let Some(old_yaml) = edit_chart_yaml.get_untracked() {
-                        let old_fenced = format!("```chartml\n{old_yaml}\n```");
-                        current.replace(&old_fenced, &new_fenced)
-                    } else {
-                        let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
-                        format!("{current}{separator}{new_fenced}\n")
-                    };
+                        let new_content = if let Some(old_yaml) = edit_chart_yaml.get_untracked() {
+                            let old_fenced = format!("```chartml\n{old_yaml}\n```");
+                            current.replace(&old_fenced, &new_fenced)
+                        } else {
+                            let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
+                            format!("{current}{separator}{new_fenced}\n")
+                        };
 
-                    set_editor_content.set(new_content.clone());
-                    set_preview_content.set(new_content);
-                    set_chart_builder_open.set(false);
-                    set_edit_chart_yaml.set(None);
-                });
-                let open_sig = Signal::derive(move || chart_builder_open.get());
-                match edit_chart_yaml.get() {
-                    Some(yaml) => view! {
-                        <ChartBuilderModal open=open_sig existing_yaml=yaml on_close=close_cb on_insert=insert_cb />
-                    }.into_any(),
-                    None => view! {
-                        <ChartBuilderModal open=open_sig on_close=close_cb on_insert=insert_cb />
-                    }.into_any(),
-                }
-            }}
+                        set_editor_content.set(new_content.clone());
+                        set_preview_content.set(new_content);
+                        set_chart_builder_open.set(false);
+                        set_edit_chart_yaml.set(None);
+                    });
+                    let open_sig = Signal::derive(move || chart_builder_open.get());
+                    match existing {
+                        Some(yaml) => view! {
+                            <ChartBuilderModal open=open_sig existing_yaml=yaml on_close=close_cb on_insert=insert_cb />
+                        }.into_any(),
+                        None => view! {
+                            <ChartBuilderModal open=open_sig on_close=close_cb on_insert=insert_cb />
+                        }.into_any(),
+                    }
+                }}
+            </Show>
 
             <InsertDashboardLinkModal
                 open=Signal::derive(move || insert_link_open.get())

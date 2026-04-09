@@ -122,7 +122,7 @@ pub fn Button(
     );
 
     view! {
-        <button class=classes disabled=move || disabled.get().unwrap_or(false) aria-label=aria_label.clone() title=aria_label>
+        <button class=classes disabled=move || disabled.try_get().flatten().unwrap_or(false) aria-label=aria_label.clone() title=aria_label>
             {children()}
         </button>
     }

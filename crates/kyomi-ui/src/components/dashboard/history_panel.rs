@@ -18,8 +18,8 @@ use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, Tooltip,
 };
 use crate::server_fns::dashboards::{
-    diff_versions, get_version, list_versions, restore_version, DiffLine, VersionDiff,
-    VersionDetail, VersionSummary,
+    diff_versions, get_version, list_versions, restore_version,
+    DiffLine, VersionDiff, VersionDetail,
 };
 
 use super::shared::use_is_mobile;
@@ -87,19 +87,25 @@ fn format_time(iso: &str) -> String {
 /// - "context" lines: neutral
 #[component]
 fn DiffViewer(diff_lines: Vec<DiffLine>) -> impl IntoView {
+    // Filter to only show changed lines with up to 3 lines of surrounding context
+    let filtered = context_filter(&diff_lines, 3);
+
     view! {
-        <div class="font-mono text-xs bg-foreground rounded-lg overflow-x-auto">
+        <div class="font-mono text-xs bg-card border border-border rounded-lg overflow-x-auto">
             <pre class="p-4">
-                {diff_lines.into_iter().map(|line| {
+                {filtered.into_iter().map(|line| {
                     let (class, prefix) = match line.line_type.as_str() {
-                        "add" => ("text-green-400 bg-green-900/30 px-2 -mx-2", "+"),
-                        "delete" => ("text-red-400 bg-red-900/30 px-2 -mx-2", "-"),
-                        _ => ("text-background/80 px-2 -mx-2", " "),
+                        "add" => ("text-success-foreground bg-success/10 px-2 -mx-2", "+"),
+                        "delete" => ("text-error-foreground bg-error/10 px-2 -mx-2", "-"),
+                        "separator" => ("text-muted-foreground px-2 -mx-2 my-1 border-t border-border", ""),
+                        _ => ("text-muted-foreground px-2 -mx-2", " "),
                     };
-                    let text = if line.content.is_empty() {
+                    let text = if line.line_type == "separator" {
+                        "···".to_string()
+                    } else if line.content.is_empty() {
                         format!("{prefix} ")
                     } else {
-                        format!("{prefix}{}", line.content)
+                        format!("{prefix} {}", line.content)
                     };
                     view! {
                         <div class=class>{text}</div>
@@ -108,6 +114,47 @@ fn DiffViewer(diff_lines: Vec<DiffLine>) -> impl IntoView {
             </pre>
         </div>
     }
+}
+
+/// Filter diff lines to show only changes with surrounding context lines.
+/// Inserts separator markers ("···") between non-contiguous hunks.
+fn context_filter(lines: &[DiffLine], context: usize) -> Vec<DiffLine> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    // Mark which lines are within `context` distance of a change
+    let mut show = vec![false; lines.len()];
+    for (i, line) in lines.iter().enumerate() {
+        if line.line_type == "add" || line.line_type == "delete" {
+            let start = i.saturating_sub(context);
+            let end = (i + context + 1).min(lines.len());
+            for flag in &mut show[start..end] {
+                *flag = true;
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut last_shown = false;
+
+    for (i, line) in lines.iter().enumerate() {
+        if show[i] {
+            if !last_shown && !result.is_empty() {
+                // Insert separator between non-contiguous hunks
+                result.push(DiffLine {
+                    line_type: "separator".to_string(),
+                    content: String::new(),
+                });
+            }
+            result.push(line.clone());
+            last_shown = true;
+        } else {
+            last_shown = false;
+        }
+    }
+
+    result
 }
 
 
@@ -491,7 +538,7 @@ pub fn HistoryPanel(
                                                         </Button>
                                                     </div>
                                                 }.into_any(),
-                                                Ok(items) if items.is_empty() => view! {
+                                                Ok(result) if result.versions.is_empty() => view! {
                                                     <EmptyState
                                                         icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuClock attr:class="w-12 h-12" /> }.into_any())
                                                         title="No version history yet"
@@ -499,15 +546,11 @@ pub fn HistoryPanel(
                                                         class="p-4 border-0"
                                                     />
                                                 }.into_any(),
-                                                Ok(items) => {
-                                                    // First item is current (most recent), rest are historical.
-                                                    // The server returns versions newest first.
-                                                    let current_version = items.first().cloned();
-                                                    let historical_versions: Vec<VersionSummary> = if items.len() > 1 {
-                                                        items[1..].to_vec()
-                                                    } else {
-                                                        Vec::new()
-                                                    };
+                                                Ok(result) => {
+                                                    // current_version = live dashboard content (version_number = max + 1)
+                                                    // versions = historical snapshots, newest first
+                                                    let current_version = Some(result.current_version);
+                                                    let historical_versions = result.versions;
 
                                                     view! {
                                                         <div class="divide-y divide-border/50">
@@ -540,8 +583,9 @@ pub fn HistoryPanel(
                                                                 let cv_ver = cv.version_number;
                                                                 let cv_created_at = cv.created_at.clone();
                                                                 let cv_change_summary = cv.change_summary.clone();
+                                                                let cv_content = cv.content.clone();
+                                                                let cv_title = cv.title.clone();
                                                                 let first_historical = historical_versions.first().map(|h| h.version_number);
-                                                                let handle_preview_version_clone = handle_preview_version;
 
                                                                 view! {
                                                                     <div
@@ -555,14 +599,31 @@ pub fn HistoryPanel(
                                                                                 "px-4 py-3 transition-colors cursor-pointer hover:bg-accent"
                                                                             }
                                                                         }
-                                                                        on:click=move |_| {
-                                                                            let is_current_previewing = previewing.get_untracked()
-                                                                                .map(|pv| pv.version_number == cv_ver)
-                                                                                .unwrap_or(false);
-                                                                            if is_current_previewing {
-                                                                                handle_exit_preview();
-                                                                            } else {
-                                                                                handle_preview_version_clone(cv_ver);
+                                                                        on:click={
+                                                                            let cv_content = cv_content.clone();
+                                                                            let cv_title = cv_title.clone();
+                                                                            let cv_created_at = cv_created_at.clone();
+                                                                            move |_| {
+                                                                                let is_current_previewing = previewing.get_untracked()
+                                                                                    .map(|pv| pv.version_number == cv_ver)
+                                                                                    .unwrap_or(false);
+                                                                                if is_current_previewing {
+                                                                                    handle_exit_preview();
+                                                                                } else {
+                                                                                    // Current version: use content directly (no server fetch needed)
+                                                                                    let detail = VersionDetail {
+                                                                                        version_number: cv_ver,
+                                                                                        title: cv_title.clone(),
+                                                                                        content: cv_content.clone(),
+                                                                                        change_summary: None,
+                                                                                        byte_size: None,
+                                                                                        created_at: cv_created_at.clone(),
+                                                                                        created_by_name: None,
+                                                                                    };
+                                                                                    if let Some(cb) = on_preview { cb.run(Some(detail.content.clone())); }
+                                                                                    set_previewing.set(Some(detail));
+                                                                                    set_show_diff.set(false);
+                                                                                }
                                                                             }
                                                                         }
                                                                     >

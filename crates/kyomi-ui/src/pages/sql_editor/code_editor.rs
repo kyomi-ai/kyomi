@@ -77,7 +77,6 @@ fn apply_kyomi_overrides(theme: &mut kode_leptos::Theme) {
     theme.content_padding = Some("1.5rem");
     theme.content_max_width = Some("100%");
     theme.content_line_height = Some("1.8");
-    theme.container_padding = Some("0");
     // Headings — Instrument Serif is weight 400, no border-bottom
     theme.heading_font_weight = Some("400");
     theme.h1_border_width = Some("0");
