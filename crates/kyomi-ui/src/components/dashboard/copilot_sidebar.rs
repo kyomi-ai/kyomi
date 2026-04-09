@@ -133,9 +133,9 @@ pub fn CopilotSidebar(
             set_has_sent_first.set(false);
             set_thinking_map.set(HashMap::new());
 
-            let did = dashboard_id.get_value();
+            let _did = dashboard_id.get_value();
             leptos::task::spawn_local(async move {
-                match create_copilot_session(did).await {
+                match create_copilot_session("dashboard_copilot".to_string()).await {
                     Ok(sid) => {
                         set_session_id.set(Some(sid));
                     }
@@ -572,7 +572,7 @@ pub fn CopilotSidebar(
         // asynchronously via WebSocket streaming events (chat_stream,
         // chat_complete, agent_thinking) — not in the HTTP response.
         leptos::task::spawn_local(async move {
-            if let Err(e) = send_copilot_message(sid, msg, content_opt).await {
+            if let Err(e) = send_copilot_message(sid, msg, "dashboard_copilot".to_string(), content_opt).await {
                 set_error.set(Some(format!("Failed to send message: {e}")));
                 set_is_loading.set(false);
             }

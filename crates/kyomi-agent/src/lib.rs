@@ -29,6 +29,7 @@ pub mod alert;
 pub mod anthropic;
 pub mod catalog;
 pub mod catalog_scheduler;
+pub mod copilot;
 pub mod chartml_factory;
 pub mod chartml_utils;
 pub mod compaction;

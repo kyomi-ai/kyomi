@@ -29,7 +29,7 @@ use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
 use crate::pages::sql_editor::types::QueryResult;
 use crate::server_fns::copilot::{
-    create_chart_copilot_session, delete_copilot_session, send_chart_copilot_message,
+    create_copilot_session, delete_copilot_session, send_copilot_message,
 };
 use crate::server_fns::datasources::{list_datasources, query_datasource_arrow, DatasourceInfo};
 use crate::server_fns::sql_editor::execute_sql_query;
@@ -1613,7 +1613,7 @@ fn ChartCopilot(
     // ── Create session on mount ────────────────────────────────────────
     Effect::new(move || {
         leptos::task::spawn_local(async move {
-            match create_chart_copilot_session().await {
+            match create_copilot_session("chart_builder_copilot".to_string()).await {
                 Ok(sid) => set_session_id.set(Some(sid)),
                 Err(e) => set_error.set(Some(format!("Failed to start copilot: {e}"))),
             }
@@ -1671,7 +1671,7 @@ fn ChartCopilot(
         set_has_sent_first.set(true);
 
         leptos::task::spawn_local(async move {
-            if let Err(e) = send_chart_copilot_message(sid, msg, content_opt).await {
+            if let Err(e) = send_copilot_message(sid, msg, "chart_builder_copilot".to_string(), content_opt).await {
                 set_error.set(Some(format!("Failed to send: {e}")));
                 set_is_loading.set(false);
             }

@@ -1,62 +1,49 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Server functions for the copilot sidebar.
+//! Server functions for copilot sessions (dashboard, chart builder, watch).
 //!
-//! Provides session management and message sending for the dashboard copilot.
-//! Calls the same service-layer code (`chat_service`) as
-//! `apps/server/src/routes/copilot.rs`.
+//! All copilot types share the same infrastructure:
+//! 1. `create_copilot_session` — create an ephemeral session for any context type
+//! 2. `send_copilot_message` — send a user message + spawn AI agent execution
+//! 3. `delete_copilot_session` — cleanup a session
 //!
-//! ## Endpoints
+//! The AI agent runs asynchronously — responses stream back via WebSocket events
+//! (`agent_thinking`, `chat_stream`, `chat_complete`, plus context-specific events
+//! like `chart_update` or `dashboard_update`).
 //!
-//! - `create_copilot_session`  — create an ephemeral copilot session
-//! - `send_copilot_message`    — send a user message and get an AI response
-//! - `delete_copilot_session`  — cleanup a copilot session
+//! Follows the same `AgentExecutionConfig` + `execute_agent_chat` pattern as
+//! `send_chat_message` in `chat.rs`.
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Response from the copilot after submitting a user message.
 ///
-/// The copilot agent runs asynchronously — the AI response is delivered via
-/// WebSocket streaming events (`chat_stream`, `chat_complete`), not in this
-/// HTTP response. The `status` field indicates that the message was accepted
-/// and is being processed.
-///
-/// ## Limitations (current implementation)
-///
-/// Full streaming requires the WebSocket client to handle copilot-specific
-/// event types (`chat_stream`, `chat_complete`). Until that is implemented,
-/// the copilot operates in request-response mode: the server function stores
-/// the user message and creates an assistant placeholder, but the actual AI
-/// content is not yet delivered back to the Leptos frontend.
+/// The agent runs asynchronously — the actual AI content arrives via WebSocket
+/// streaming events, not in this HTTP response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CopilotResponse {
-    /// Processing status: `"processing"` means the message was accepted and
-    /// the agent is generating a response asynchronously.
     pub status: String,
-    /// The AI-generated response text, if available synchronously.
-    /// Currently always empty — the real response arrives via WebSocket.
     pub message: String,
-    /// Optional suggested content (e.g., updated dashboard markdown).
-    /// When present, the UI can offer an "Apply to Dashboard" action.
-    /// Currently always `None` — populated via WebSocket events.
     pub suggested_content: Option<String>,
 }
 
-/// Create an ephemeral copilot session for a dashboard.
+/// Create an ephemeral copilot session.
 ///
-/// Creates a new chat session with `session_type = "dashboard_copilot"`.
-/// The session is ephemeral — it should be cleaned up when the sidebar closes
-/// via `delete_copilot_session`.
+/// `context_type` must be one of: `"dashboard_copilot"`, `"chart_builder_copilot"`,
+/// `"watch_copilot"`. Defaults to `"dashboard_copilot"` if unrecognized.
 ///
 /// Returns the new session ID.
 #[server(prefix = "/leptos-api")]
-pub async fn create_copilot_session(dashboard_id: String) -> Result<String, ServerFnError> {
+pub async fn create_copilot_session(
+    context_type: String,
+) -> Result<String, ServerFnError> {
     let auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
     let workspace_id = super::workspace_id(&auth)?;
 
-    let _ = &dashboard_id; // Acknowledged — used for context association.
+    let context_type = kyomi_agent::copilot::normalize_context_type(&context_type);
+    let title = kyomi_agent::copilot::session_title_for_context(context_type);
 
     let session_id = sqlx::types::Uuid::new_v4().to_string();
 
@@ -65,34 +52,38 @@ pub async fn create_copilot_session(dashboard_id: String) -> Result<String, Serv
         &auth.user_id,
         workspace_id,
         &session_id,
-        Some("Dashboard Copilot"),
-        "dashboard_copilot",
+        Some(title),
+        context_type,
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to create copilot session: {e}")))?;
 
     tracing::info!(
         session_id = %session_id,
-        dashboard_id = %dashboard_id,
-        "Created new dashboard copilot session"
+        context_type = %context_type,
+        "Created new copilot session"
     );
 
     Ok(session_id)
 }
 
-/// Send a message to the copilot and get a response.
+/// Send a message to the copilot and trigger AI agent execution.
 ///
-/// Validates the message, checks AI capability, stores the user message,
-/// creates an assistant placeholder, and returns conversation metadata.
+/// Works for all copilot context types. The `context_type` determines which
+/// system prompt and tool subset the agent uses.
 ///
-/// The actual AI response is generated asynchronously by the agent system
-/// and delivered via WebSocket streaming events. The returned
-/// `CopilotResponse` contains the message IDs for tracking.
+/// The `content` parameter carries context-specific data:
+/// - Dashboard copilot: the dashboard markdown (prefixed with `[Dashboard Content]`)
+/// - Chart copilot: the chart YAML (prefixed with `[Chart Content]`)
+/// - Watch copilot: the watch config JSON (prefixed with `[Watch Configuration]`)
+///
+/// The component is responsible for prefixing content appropriately.
 #[server(prefix = "/leptos-api")]
 pub async fn send_copilot_message(
     session_id: String,
     message: String,
-    dashboard_content: Option<String>,
+    context_type: String,
+    content: Option<String>,
 ) -> Result<CopilotResponse, ServerFnError> {
     let auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
@@ -108,7 +99,16 @@ pub async fn send_copilot_message(
         ));
     }
 
-    // Check AI capability (credits not exhausted).
+    // Normalize context type.
+    let context_type = kyomi_agent::copilot::normalize_context_type(&context_type);
+
+    // Check AI capability.
+    if !ctx.config.llm_configured() {
+        return Err(ServerFnError::new(
+            "No LLM provider configured. Add ANTHROPIC_API_KEY or LLM_API_KEY to your environment.",
+        ));
+    }
+
     let workspace =
         kyomi_auth::workspace_service::get_workspace_full(&ctx.db, workspace_id)
             .await
@@ -128,7 +128,7 @@ pub async fn send_copilot_message(
         ));
     }
 
-    // Verify user has access to this session.
+    // Verify session access.
     let session = kyomi_auth::chat_service::get_session_info(
         &ctx.db,
         &auth.user_id,
@@ -144,16 +144,13 @@ pub async fn send_copilot_message(
         ));
     }
 
-    // Build user message with dashboard content injection.
-    // The component prepends the appropriate prefix ("[Dashboard Content]"
-    // for the first message, "[Dashboard has been updated]" for subsequent).
-    let user_message = if let Some(ref content) = dashboard_content {
-        format!("{content}\n\n{message}")
+    // Build user message with content context injection.
+    let user_message = if let Some(ref ctx_content) = content {
+        format!("{ctx_content}\n\n{message}")
     } else {
         message.clone()
     };
 
-    // Require encryption key for storing messages.
     let encryption_key = ctx
         .encryption_key
         .as_ref()
@@ -166,55 +163,172 @@ pub async fn send_copilot_message(
         &session_id,
         "user",
         &user_message,
-        None,  // metadata
-        None,  // message_id (auto-generate)
-        None,  // current_time_user_tz
-        Some(&auth.user_id),
-        None,  // tool_call_id
-        None,  // tool_name
-        None,  // tool_calls
+        None, None, None, Some(&auth.user_id), None, None, None,
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to store message: {e}")))?;
 
-    // Create assistant placeholder message.
-    let _assistant_message_id = kyomi_auth::chat_service::add_message(
+    // Create assistant placeholder.
+    let assistant_message_id = kyomi_auth::chat_service::add_message(
         &ctx.db,
         encryption_key,
         &session_id,
         "assistant",
         "",
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        None, None, None, None, None, None, None,
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to create assistant message: {e}")))?;
 
-    // NOTE: The AI agent execution is handled by the main server's copilot
-    // route (`apps/server/src/routes/copilot.rs`) which has access to the
-    // full agent infrastructure (WebSocketManager, CancelRegistry, etc.).
-    // This server function stores the messages; the actual AI response
-    // delivery happens via the agent system and WebSocket events.
-    //
-    // For the Leptos frontend, the copilot sidebar will receive AI responses
-    // through WebSocket streaming events, matching the React frontend's
-    // pattern.
+    // ── Spawn AI agent execution ────────────────────────────────────────
+    // Follows the same pattern as send_chat_message in chat.rs.
+
+    let ws_manager = ctx
+        .ws_manager
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?
+        .clone();
+
+    let cancel_registry = ctx
+        .cancel_registry
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("Cancel registry not configured"))?
+        .clone();
+
+    let platforms = ctx
+        .platforms
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("Platform registry not configured"))?
+        .clone();
+
+    let system_prompt = kyomi_agent::copilot::build_copilot_system_prompt(
+        context_type,
+        "UTC", // TODO: pass user timezone from frontend
+        auth.name.as_deref(),
+    );
+
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let exec_config = kyomi_agent::AgentExecutionConfig {
+        session_id: session_id.clone(),
+        user_id: auth.user_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        message: user_message,
+        model_name: Some("claude-haiku-4-5-20251001".to_string()),
+        temperature: 0.1,
+        is_shared_conversation: false,
+        context_type: context_type.to_string(),
+        workspace_user_ids: None,
+        cancel_token: cancel_token.clone(),
+        current_time_user_tz: None,
+        message_source: Some("web".to_string()),
+        system_prompt: Some(system_prompt),
+        tools_subset: Some(kyomi_agent::copilot::tools_for_context(context_type)),
+        max_iterations: 20,
+        component: context_type.to_string(),
+        user_message_id: None,
+        assistant_message_id: Some(assistant_message_id.clone()),
+        conversation_history: None,
+        user_display_name: auth.name.clone().unwrap_or_else(|| auth.email.clone()),
+    };
+
+    cancel_registry.register(&auth.user_id, &session_id, cancel_token.clone());
+
+    let db = ctx.db.clone();
+    let kv = ctx
+        .kv
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("KV store not configured"))?
+        .clone();
+    let encryption_key = encryption_key.clone();
+    let embedding = ctx.embedding.clone();
+    let app_config = ctx.config.clone();
+    let connect_registry = ctx.connect_registry.clone();
+    let spawn_user_id = auth.user_id.clone();
+    let spawn_session_id = session_id.clone();
+    let spawn_assistant_message_id = assistant_message_id.clone();
+    let spawn_context_type = context_type.to_string();
+
+    tokio::spawn(async move {
+        let result = kyomi_agent::execute_agent_chat(
+            exec_config,
+            &db,
+            &kv,
+            &encryption_key,
+            &embedding,
+            &ws_manager,
+            &app_config,
+            connect_registry,
+            platforms,
+        )
+        .await;
+
+        match result {
+            Ok(exec_result) => {
+                kyomi_agent::deliver_response(
+                    &ws_manager,
+                    &spawn_user_id,
+                    &spawn_session_id,
+                    &exec_result.assistant_message_id,
+                    &exec_result.response_text,
+                    exec_result
+                        .model
+                        .as_deref()
+                        .unwrap_or(kyomi_agent::DEFAULT_MODEL),
+                    exec_result.token_usage,
+                    &spawn_context_type,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    session_id = %spawn_session_id,
+                    error = %e,
+                    "Copilot agent execution failed"
+                );
+
+                let error_text = format!(
+                    "I encountered an error while processing your request: {e}"
+                );
+                let _ = kyomi_auth::chat_service::update_message(
+                    &db,
+                    &encryption_key,
+                    &spawn_assistant_message_id,
+                    Some(&error_text),
+                    Some(&serde_json::json!({
+                        "status": "error",
+                        "error": e.to_string(),
+                    })),
+                )
+                .await;
+
+                kyomi_agent::deliver_response(
+                    &ws_manager,
+                    &spawn_user_id,
+                    &spawn_session_id,
+                    &spawn_assistant_message_id,
+                    &error_text,
+                    kyomi_agent::DEFAULT_MODEL,
+                    None,
+                    &spawn_context_type,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+        }
+    });
 
     tracing::info!(
         session_id = %session_id,
-        "Copilot message stored (awaiting agent processing)"
+        context_type = %context_type,
+        "Copilot message accepted — agent execution spawned"
     );
 
-    // Return a response indicating the message was accepted for processing.
-    // The actual AI content will arrive via WebSocket streaming events
-    // (`chat_stream`, `chat_complete`). Full streaming delivery to the
-    // Leptos frontend requires extending the WebSocket client to handle
-    // copilot-specific event types — see `utils/websocket.rs`.
     Ok(CopilotResponse {
         status: "processing".to_string(),
         message: String::new(),
@@ -224,8 +338,7 @@ pub async fn send_copilot_message(
 
 /// Delete/cleanup a copilot session.
 ///
-/// Called when the copilot sidebar closes to clean up the ephemeral session.
-/// Always returns success (matches Python/Rust REST behavior where missing = success).
+/// Called when the copilot sidebar/modal closes to clean up the ephemeral session.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnError> {
     let auth = super::extract_auth().await?;
@@ -242,150 +355,8 @@ pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnEr
     .map_err(|e| ServerFnError::new(format!("Failed to delete copilot session: {e}")))?;
 
     if deleted {
-        tracing::info!(
-            session_id = %session_id,
-            user_id = %auth.user_id,
-            "Deleted copilot session"
-        );
-    } else {
-        tracing::info!(
-            session_id = %session_id,
-            "Copilot session not found (already deleted?)"
-        );
+        tracing::info!(session_id = %session_id, "Deleted copilot session");
     }
 
     Ok(())
-}
-
-/// Create an ephemeral copilot session for chart building.
-///
-/// Creates a new chat session with `session_type = "chart_builder_copilot"`.
-/// The session is cleaned up when the chart builder modal closes.
-#[server(prefix = "/leptos-api")]
-pub async fn create_chart_copilot_session() -> Result<String, ServerFnError> {
-    let auth = super::extract_auth().await?;
-    let ctx = super::extract_context()?;
-    let workspace_id = super::workspace_id(&auth)?;
-
-    let session_id = sqlx::types::Uuid::new_v4().to_string();
-
-    kyomi_auth::chat_service::create_session_with_id(
-        &ctx.db,
-        &auth.user_id,
-        workspace_id,
-        &session_id,
-        Some("Chart Builder Copilot"),
-        "chart_builder_copilot",
-    )
-    .await
-    .map_err(|e| ServerFnError::new(format!("Failed to create chart copilot session: {e}")))?;
-
-    tracing::info!(
-        session_id = %session_id,
-        "Created new chart builder copilot session"
-    );
-
-    Ok(session_id)
-}
-
-/// Send a message to the chart builder copilot.
-///
-/// Same pattern as `send_copilot_message` but with chart content context
-/// using the `[Chart Content]` / `[Chart has been updated]` prefix pattern.
-#[server(prefix = "/leptos-api")]
-pub async fn send_chart_copilot_message(
-    session_id: String,
-    message: String,
-    chart_content: Option<String>,
-) -> Result<CopilotResponse, ServerFnError> {
-    let auth = super::extract_auth().await?;
-    let ctx = super::extract_context()?;
-    let workspace_id = super::workspace_id(&auth)?;
-
-    if message.trim().is_empty() {
-        return Err(ServerFnError::new("Message content cannot be empty"));
-    }
-    if message.len() > 100_000 {
-        return Err(ServerFnError::new(
-            "Message content exceeds maximum length",
-        ));
-    }
-
-    let workspace =
-        kyomi_auth::workspace_service::get_workspace_full(&ctx.db, workspace_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-
-    let capabilities = if ctx.config.self_hosted {
-        kyomi_core::capability::compute_capabilities_self_hosted(false)
-    } else {
-        kyomi_core::capability::compute_capabilities(&workspace, false)
-    };
-
-    if !capabilities.ai_chat_enabled {
-        return Err(ServerFnError::new(
-            "AI features are not available. Your budget may be exhausted or your plan \
-             doesn't include this feature.",
-        ));
-    }
-
-    let session = kyomi_auth::chat_service::get_session_info(
-        &ctx.db,
-        &auth.user_id,
-        &session_id,
-        Some(workspace_id),
-    )
-    .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    if session.is_none() {
-        return Err(ServerFnError::new(
-            "Session not found or access denied",
-        ));
-    }
-
-    let user_message = if let Some(ref content) = chart_content {
-        format!("{content}\n\n{message}")
-    } else {
-        message.clone()
-    };
-
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-
-    let _user_message_id = kyomi_auth::chat_service::add_message(
-        &ctx.db,
-        encryption_key,
-        &session_id,
-        "user",
-        &user_message,
-        None, None, None, Some(&auth.user_id), None, None, None,
-    )
-    .await
-    .map_err(|e| ServerFnError::new(format!("Failed to store message: {e}")))?;
-
-    let _assistant_message_id = kyomi_auth::chat_service::add_message(
-        &ctx.db,
-        encryption_key,
-        &session_id,
-        "assistant",
-        "",
-        None, None, None, None, None, None, None,
-    )
-    .await
-    .map_err(|e| ServerFnError::new(format!("Failed to create assistant message: {e}")))?;
-
-    tracing::info!(
-        session_id = %session_id,
-        "Chart copilot message stored (awaiting agent processing)"
-    );
-
-    Ok(CopilotResponse {
-        status: "processing".to_string(),
-        message: String::new(),
-        suggested_content: None,
-    })
 }
