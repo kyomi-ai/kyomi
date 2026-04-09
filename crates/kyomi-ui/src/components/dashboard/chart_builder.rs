@@ -105,6 +105,11 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
         return chart;
     };
 
+    // Top-level title (React stores it here, not under visualize.style)
+    if let Some(title) = doc.get("title").and_then(|v| v.as_str()) {
+        chart.title = title.to_string();
+    }
+
     if let Some(data) = doc.get("data") {
         if let Some(ds) = data.get("datasource").and_then(|v| v.as_str()) {
             chart.datasource_slug = ds.to_string();
@@ -189,25 +194,140 @@ fn parse_existing_yaml(yaml: &str) -> ParsedChart {
     chart
 }
 
-// ─── YAML generation ────────────────────────────────────────────────────────
+// ─── Chart form state snapshot ──────────────────────────────────────────────
+
+/// Snapshot of the form state for YAML generation/patching.
+/// Groups the parameters that `patch_yaml` and `build_yaml` share.
+struct ChartFormState<'a> {
+    title: &'a str,
+    datasource_slug: &'a str,
+    sql: &'a str,
+    chart_type: &'a str,
+    x_field: &'a str,
+    orientation: Option<&'a str>,
+    mode: Option<&'a str>,
+    series: &'a [SeriesEntry],
+}
+
+// ─── YAML patching ──────────────────────────────────────────────────────────
+
+/// Patch an existing ChartML YAML string with form-state changes.
+///
+/// Preserves all fields not modeled by the form (inline data, provider,
+/// cache, etc.) — only updates the fields the form controls.
+/// Falls back to `build_yaml` if the original YAML is empty or unparseable.
+fn patch_yaml(original: &str, f: &ChartFormState<'_>) -> String {
+    if original.trim().is_empty() {
+        return build_yaml(f);
+    }
+
+    let mut val: serde_yaml::Value = match serde_yaml::from_str(original) {
+        Ok(v) => v,
+        Err(_) => return build_yaml(f),
+    };
+
+    // Get the chart document — handle both list and single-doc format
+    let doc = if let Some(seq) = val.as_sequence_mut() {
+        seq.iter_mut().find(|d| {
+            d.get("type").and_then(|t| t.as_str()) == Some("chart")
+        })
+    } else {
+        Some(&mut val)
+    };
+
+    let Some(doc) = doc else {
+        return build_yaml(f);
+    };
+
+    // Patch top-level title
+    if !f.title.is_empty() {
+        doc["title"] = serde_yaml::Value::String(f.title.to_string());
+    }
+
+    // Patch data section — only if datasource/sql are non-empty (remote chart).
+    // Don't overwrite inline data with empty datasource/sql.
+    if !f.datasource_slug.is_empty() {
+        if doc.get("data").is_none() {
+            doc["data"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        }
+        doc["data"]["datasource"] = serde_yaml::Value::String(f.datasource_slug.to_string());
+        if !f.sql.is_empty() {
+            doc["data"]["sql"] = serde_yaml::Value::String(f.sql.to_string());
+        }
+    }
+
+    // Patch visualize section
+    if doc.get("visualize").is_none() {
+        doc["visualize"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+
+    doc["visualize"]["type"] = serde_yaml::Value::String(f.chart_type.to_string());
+
+    // Orientation
+    if let Some(orient) = f.orientation {
+        doc["visualize"]["orientation"] = serde_yaml::Value::String(orient.to_string());
+    } else if let Some(vis) = doc.get_mut("visualize").and_then(|v| v.as_mapping_mut()) {
+        vis.remove(serde_yaml::Value::String("orientation".to_string()));
+    }
+
+    // Mode
+    if let Some(m) = f.mode {
+        doc["visualize"]["mode"] = serde_yaml::Value::String(m.to_string());
+    } else if let Some(vis) = doc.get_mut("visualize").and_then(|v| v.as_mapping_mut()) {
+        vis.remove(serde_yaml::Value::String("mode".to_string()));
+    }
+
+    // Columns
+    let needs_axes = !matches!(f.chart_type, "metric" | "pie" | "doughnut");
+    if needs_axes && !f.x_field.is_empty() {
+        doc["visualize"]["columns"] = serde_yaml::Value::String(f.x_field.to_string());
+    }
+
+    // Rows (series)
+    let non_empty_series: Vec<&SeriesEntry> =
+        f.series.iter().filter(|s| !s.y_field.is_empty()).collect();
+    if !non_empty_series.is_empty() {
+        let rows: Vec<serde_yaml::Value> = non_empty_series.iter().map(|s| {
+            if s.label.is_empty() {
+                serde_yaml::Value::String(s.y_field.clone())
+            } else {
+                let mut map = serde_yaml::Mapping::new();
+                map.insert(
+                    serde_yaml::Value::String("field".to_string()),
+                    serde_yaml::Value::String(s.y_field.clone()),
+                );
+                map.insert(
+                    serde_yaml::Value::String("label".to_string()),
+                    serde_yaml::Value::String(s.label.clone()),
+                );
+                serde_yaml::Value::Mapping(map)
+            }
+        }).collect();
+
+        if rows.len() == 1 && matches!(&rows[0], serde_yaml::Value::String(_)) {
+            doc["visualize"]["rows"] = rows.into_iter().next().unwrap();
+        } else {
+            doc["visualize"]["rows"] = serde_yaml::Value::Sequence(rows);
+        }
+    }
+
+    serde_yaml::to_string(&val).unwrap_or_else(|_| original.to_string())
+}
+
+// ─── YAML generation (new charts only) ──────────────────────────────────────
 
 /// Build a ChartML YAML string from the form state.
-fn build_yaml(
-    title: &str,
-    datasource_slug: &str,
-    sql: &str,
-    chart_type: &str,
-    x_field: &str,
-    orientation: Option<&str>,
-    mode: Option<&str>,
-    series: &[SeriesEntry],
-) -> String {
+/// Used only for NEW charts — existing charts use `patch_yaml` to preserve data.
+fn build_yaml(f: &ChartFormState<'_>) -> String {
     // Indent SQL lines for YAML block scalar
-    let sql_indented = sql
+    let sql_indented = f.sql
         .lines()
         .map(|line| format!("      {line}"))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let datasource_slug = f.datasource_slug;
+    let chart_type = f.chart_type;
 
     let mut yaml = format!(
         r#"- type: chart
@@ -220,31 +340,25 @@ fn build_yaml(
     type: {chart_type}"#
     );
 
-    // orientation — only for bar charts
-    if let Some(orient) = orientation {
+    if let Some(orient) = f.orientation {
         yaml.push_str(&format!("\n    orientation: {orient}"));
     }
 
-    // mode — grouped for bar, normalized for area
-    if let Some(m) = mode {
+    if let Some(m) = f.mode {
         yaml.push_str(&format!("\n    mode: {m}"));
     }
 
-    // columns — only for chart types that use axes
-    let needs_axes = !matches!(chart_type, "metric" | "pie" | "doughnut");
-    if needs_axes && !x_field.is_empty() {
-        yaml.push_str(&format!("\n    columns: {x_field}"));
+    let needs_axes = !matches!(f.chart_type, "metric" | "pie" | "doughnut");
+    if needs_axes && !f.x_field.is_empty() {
+        yaml.push_str(&format!("\n    columns: {}", f.x_field));
     }
 
-    // rows — single row uses bare string form, multiple use object form
     let non_empty_series: Vec<&SeriesEntry> =
-        series.iter().filter(|s| !s.y_field.is_empty()).collect();
+        f.series.iter().filter(|s| !s.y_field.is_empty()).collect();
     if !non_empty_series.is_empty() {
         if non_empty_series.len() == 1 && non_empty_series[0].label.is_empty() {
-            // Single series without label — bare string form
             yaml.push_str(&format!("\n    rows: {}", non_empty_series[0].y_field));
         } else {
-            // Multi series or series with labels — object form
             yaml.push_str("\n    rows:");
             for entry in &non_empty_series {
                 yaml.push_str(&format!("\n      - field: {}", entry.y_field));
@@ -255,9 +369,8 @@ fn build_yaml(
         }
     }
 
-    // Title under visualize.style.title
-    if !title.is_empty() {
-        yaml.push_str(&format!("\n    style:\n      title: \"{title}\""));
+    if !f.title.is_empty() {
+        yaml.push_str(&format!("\n    style:\n      title: \"{}\"", f.title));
     }
 
     yaml.push('\n');
@@ -291,6 +404,12 @@ pub fn ChartBuilderModal(
 ) -> impl IntoView {
     let is_edit_mode = existing_yaml.is_some();
     let existing_yaml_stored = StoredValue::new(existing_yaml.clone());
+
+    // The original YAML — used as the base for patching in edit mode.
+    // New charts start with an empty string (build_yaml generates from scratch).
+    let (original_yaml, set_original_yaml) = signal(
+        existing_yaml.clone().unwrap_or_default()
+    );
 
     // Parse existing YAML or use defaults
     let initial = existing_yaml
@@ -344,6 +463,10 @@ pub fn ChartBuilderModal(
     Effect::new(move || {
         if open.get() {
             let yaml = existing_yaml_stored.get_value();
+
+            // Store original YAML for patching
+            set_original_yaml.set(yaml.clone().unwrap_or_default());
+
             let parsed = yaml
                 .as_ref()
                 .map(|y| parse_existing_yaml(y))
@@ -365,36 +488,23 @@ pub fn ChartBuilderModal(
             set_orientation.set(parsed.orientation.clone());
             set_mode.set(parsed.mode.clone());
 
-            let series_for_yaml = if parsed.series.is_empty() {
+            if parsed.series.is_empty() {
                 set_next_series_id.set(1);
-                let default_series = vec![SeriesEntry {
+                set_series.set(vec![SeriesEntry {
                     id: 0,
                     y_field: String::new(),
                     label: String::new(),
-                }];
-                set_series.set(default_series.clone());
-                default_series
+                }]);
             } else {
                 set_next_series_id.set(
                     parsed.series.iter().map(|s| s.id).max().unwrap_or(0) + 1
                 );
-                let s = parsed.series.clone();
                 set_series.set(parsed.series);
-                s
-            };
+            }
 
-            // Sync YAML text
-            let yaml_str = build_yaml(
-                &parsed.title,
-                &parsed.datasource_slug,
-                &parsed.sql,
-                &parsed.chart_type,
-                &parsed.x_field,
-                parsed.orientation.as_deref(),
-                parsed.mode.as_deref(),
-                &series_for_yaml,
-            );
-            set_yaml_text.set(yaml_str);
+            // Sync YAML text — use the original YAML directly for edit mode
+            // so the user sees the actual chart spec, not a reconstruction
+            set_yaml_text.set(yaml.unwrap_or_default());
         }
     });
 
@@ -447,17 +557,28 @@ pub fn ChartBuilderModal(
     };
 
     // ── Derived YAML from form state (for preview and YAML tab) ─────────
+    // In edit mode, patches the original YAML to preserve inline data etc.
+    // In create mode, builds from scratch.
     let current_yaml = Memo::new(move |_| {
-        build_yaml(
-            &title.get(),
-            &datasource_slug.get(),
-            &sql.get(),
-            &chart_type.get(),
-            &x_field.get(),
-            orientation.get().as_deref(),
-            mode.get().as_deref(),
-            &series.get(),
-        )
+        let t = title.get();
+        let ds = datasource_slug.get();
+        let s = sql.get();
+        let ct = chart_type.get();
+        let xf = x_field.get();
+        let o = orientation.get();
+        let m = mode.get();
+        let sr = series.get();
+        let form = ChartFormState {
+            title: &t,
+            datasource_slug: &ds,
+            sql: &s,
+            chart_type: &ct,
+            x_field: &xf,
+            orientation: o.as_deref(),
+            mode: m.as_deref(),
+            series: &sr,
+        };
+        patch_yaml(&original_yaml.get(), &form)
     });
 
     // ── Insert / Update handler ─────────────────────────────────────────
@@ -552,6 +673,8 @@ pub fn ChartBuilderModal(
     let yaml_on_change: Arc<dyn Fn(String) + Send + Sync> =
         Arc::new(move |new_val: String| {
             set_yaml_text.set(new_val.clone());
+            // Update the base YAML so future form changes patch from this version
+            set_original_yaml.set(new_val.clone());
             let parsed = parse_existing_yaml(&new_val);
             apply_parsed(parsed, &new_val);
         });
@@ -1138,6 +1261,7 @@ pub fn ChartBuilderModal(
                                             on_chart_update=Callback::new(move |new_yaml: String| {
                                                 let parsed = parse_existing_yaml(&new_yaml);
                                                 apply_parsed(parsed, &new_yaml);
+                                                set_original_yaml.set(new_yaml.clone());
                                                 set_yaml_text.set(new_yaml);
                                             })
                                         />
