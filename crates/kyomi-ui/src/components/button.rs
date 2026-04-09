@@ -19,6 +19,9 @@ pub enum ButtonVariant {
     /// Ghost button with muted text — for icon actions that should not draw attention.
     /// Starts `text-muted-foreground`, hovers to `text-foreground` with `bg-accent`.
     GhostMuted,
+    /// Ghost button for destructive actions — muted text, red hover.
+    /// Use with `opacity-0 group-hover:opacity-100` for hover-to-reveal on cards.
+    GhostDestructive,
     Link,
     /// Active/toggled-on state — amber tint.
     Active,
@@ -56,6 +59,8 @@ fn variant_classes(variant: ButtonVariant) -> &'static str {
         ButtonVariant::Ghost => "bg-transparent text-primary hover:bg-accent",
         // Ghost muted: transparent, muted text, hover foreground + accent bg
         ButtonVariant::GhostMuted => "bg-transparent text-muted-foreground hover:text-foreground hover:bg-accent",
+        // Ghost destructive: transparent, muted text, red hover — for delete actions on cards
+        ButtonVariant::GhostDestructive => "bg-transparent text-muted-foreground hover:text-error-foreground hover:bg-error/10",
         // Link: underline style
         ButtonVariant::Link => "text-primary underline-offset-4 hover:underline",
         // Active/toggled: amber tint

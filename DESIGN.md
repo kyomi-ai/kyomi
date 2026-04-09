@@ -482,10 +482,14 @@ All buttons share: DM Sans 14px weight 600, `rounded-md` (8px), `px-5 py-2.5`, `
 | Primary | `--accent` (#D97706) | white | none | `--accent-hover` (#B45309) |
 | Secondary | `--secondary` (#F5F3EF) | `--foreground` (#1C1917) | `1px solid --border` (#E8E5DE) | border → `--border-strong` (#D4D0C8) |
 | Ghost | transparent | `--accent` | none | `--accent-light` (#FEF3C7) |
+| GhostMuted | transparent | `--text-muted` | none | text → `--text`, bg `--accent-light` |
+| GhostDestructive | transparent | `--text-muted` | none | text → `--error`, bg `error/10` |
 | Destructive | `--error-foreground` (#DC2626) | white | none | darken 10% |
 | Outline | transparent | `--text` | `1px solid --border` | `--surface-alt` |
 
 Small buttons: 13px font, `px-3.5 py-2` (~36px height at 15px root for touch accessibility).
+
+Icon sizes: `Icon` = `h-9 w-9` (36px, standard toolbar), `IconSm` = `h-7 w-7` (28px, dense action rows and card actions).
 
 ### Dropdown Menus
 
@@ -503,6 +507,33 @@ Dropdown menus appear from overflow buttons and context actions. Menu items are 
 | Disabled | `opacity-50`, `cursor-not-allowed` |
 
 Use the `.menu-item` CSS class in `main.css`. Do NOT use `<Button variant=Ghost>` for menu items — ghost buttons use accent (amber) text, menu items use foreground (grey) text.
+
+### Destructive Actions on Cards
+
+Delete buttons and other destructive actions on list/grid cards follow a consistent pattern:
+
+1. **Hidden by default, visible on hover** — `opacity-0 group-hover:opacity-100 transition-opacity` on the button, `group` on the card container.
+2. **Red hover signal** — use `ButtonVariant::GhostDestructive` (`text-muted-foreground` at rest, `text-error-foreground` + `bg-error/10` on hover). This clearly communicates danger without drawing attention at rest.
+3. **Compact size** — use `ButtonSize::IconSm` (28px) for card action rows. Standard `Icon` (36px) is too large for inline card actions.
+4. **Confirm before executing** — all destructive actions MUST go through `<ConfirmDialog>` with `confirm_text="Delete"` and a message naming the item being deleted.
+
+```rust
+// Card container
+<Card class="group ...">
+    // ... card content ...
+    <Button
+        variant=ButtonVariant::GhostDestructive
+        size=ButtonSize::IconSm
+        aria_label="Delete item"
+        class="opacity-0 group-hover:opacity-100 transition-opacity"
+        on:click=move |_| handle_delete()
+    >
+        <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+    </Button>
+</Card>
+```
+
+This pattern applies to: chat session cards, dashboard cards, and any future list/grid item with a delete action.
 
 ### Overlay Decision Tree
 

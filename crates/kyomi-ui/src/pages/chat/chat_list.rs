@@ -21,7 +21,7 @@ use leptos::prelude::*;
 
 use leptos_icons::Icon;
 
-use crate::components::button::{ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
+use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, SearchInput, Skeleton};
 use crate::server_fns::chat::{
     bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
@@ -782,17 +782,19 @@ pub fn ChatsListPage() -> impl IntoView {
                                                     {if owned {
                                                         let sid = session_id_delete.clone();
                                                         Some(view! {
-                                                            <button
+                                                            <Button
+                                                                variant=ButtonVariant::GhostDestructive
+                                                                size=ButtonSize::IconSm
+                                                                aria_label="Delete chat"
+                                                                class="opacity-0 group-hover:opacity-100 transition-opacity"
                                                                 on:click=move |ev: leptos::ev::MouseEvent| {
                                                                     ev.prevent_default();
                                                                     ev.stop_propagation();
                                                                     handle_delete(sid.clone());
                                                                 }
-                                                                class="opacity-0 group-hover:opacity-100 p-2 text-muted-foreground hover:text-error-foreground hover:bg-error/10 rounded-lg transition-all"
-                                                                aria-label="Delete chat"
                                                             >
-                                                                <Icon icon=icondata_lu::LuTrash2 width="18" height="18" />
-                                                            </button>
+                                                                <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+                                                            </Button>
                                                         })
                                                     } else {
                                                         None
