@@ -29,8 +29,8 @@ use leptos_icons::Icon;
 use leptos_router::hooks::use_params_map;
 
 use crate::components::dashboard::{
-    ChartBuilderModal, CopilotSidebar, HistoryPanel, InsertDashboardLinkModal, MarkdownRenderer,
-    markdown_renderer::kyomi_palette,
+    ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel, InsertDashboardLinkModal,
+    MarkdownRenderer, markdown_renderer::kyomi_palette,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
 use crate::server_fns::context::get_user_context;
@@ -207,6 +207,10 @@ fn DashboardEditorInner(
 
     // ── Insert link modal ────────────────────────────────────────────────
     let (insert_link_open, set_insert_link_open) = signal(false);
+
+    // ── Chart info modal ────────────────────────────────────────────────
+    let (chart_info_open, set_chart_info_open) = signal(false);
+    let (chart_info_yaml, set_chart_info_yaml) = signal(String::new());
 
     // ── Inject content at cursor (used by modals to insert at cursor position) ──
     let inject = RwSignal::new(Option::<kode_leptos::InjectCommand>::None);
@@ -436,6 +440,45 @@ fn DashboardEditorInner(
                     if let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "beforeunload",
+                            cb.as_ref().unchecked_ref(),
+                        );
+                    }
+                }
+            });
+        });
+    }
+
+    // ── Chart info event listener (from WYSIWYG extension) ────────────
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::closure::Closure;
+
+        let handler = Closure::<dyn Fn(web_sys::CustomEvent)>::new(
+            move |ev: web_sys::CustomEvent| {
+                if let Some(yaml) = ev.detail().as_string() {
+                    set_chart_info_yaml.set(yaml);
+                    set_chart_info_open.set(true);
+                }
+            },
+        );
+
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "chart-info-request",
+                handler.as_ref().unchecked_ref(),
+            );
+        }
+
+        let handler_stored =
+            StoredValue::new(Some(send_wrapper::SendWrapper::new(handler)));
+
+        on_cleanup(move || {
+            handler_stored.update_value(|h| {
+                if let Some(cb) = h.take() {
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.remove_event_listener_with_callback(
+                            "chart-info-request",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
@@ -693,6 +736,10 @@ fn DashboardEditorInner(
                                             <MarkdownRenderer
                                                 content=effective_preview
                                                 chart_palette=chart_palette.get().unwrap_or_else(|| "balanced".to_string())
+                                                on_chart_info=Callback::new(move |yaml: String| {
+                                                    set_chart_info_yaml.set(yaml);
+                                                    set_chart_info_open.set(true);
+                                                })
                                             />
                                         </div>
                                     </div>
@@ -869,6 +916,12 @@ fn DashboardEditorInner(
                     }
                     set_insert_link_open.set(false);
                 })
+            />
+
+            <ChartInfoModal
+                open=Signal::derive(move || chart_info_open.get())
+                yaml=chart_info_yaml
+                on_close=Callback::new(move |()| set_chart_info_open.set(false))
             />
         </div>
     }

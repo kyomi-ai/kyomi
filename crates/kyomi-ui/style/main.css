@@ -552,7 +552,7 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 }
 
 .tree-wysiwyg-scroll-container.tree-wysiwyg-scroll-container {
-  padding: 1rem 1.5rem;
+  padding: 1.5rem;          /* 24px — matches viewer p-6 and source preview */
   font-family: var(--font-sans);
   line-height: 1.8;
 }

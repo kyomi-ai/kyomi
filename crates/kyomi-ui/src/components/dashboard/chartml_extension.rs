@@ -150,10 +150,48 @@ impl Extension for ChartMLExtension {
             set_mode_override.set(Some(m));
         });
 
+        // Info callback — dispatches a custom event with the YAML for the editor
+        // page to pick up and show in ChartInfoModal.
+        let yaml_for_info = yaml.clone();
+        let on_info = Callback::new(move |()| {
+            let _ = &yaml_for_info; // ensure captured on all targets
+            #[cfg(target_arch = "wasm32")]
+            if let Some(window) = web_sys::window() {
+                let detail = wasm_bindgen::JsValue::from_str(&yaml_for_info);
+                if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict(
+                    "chart-info-request",
+                    web_sys::CustomEventInit::new().detail(&detail),
+                ) {
+                    let _ = window.dispatch_event(&event);
+                }
+            }
+        });
+
+        // Last refreshed tracking — set_last_refreshed used in cfg(wasm32) blocks
+        let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
+        let (is_refreshing, _set_is_refreshing) = signal(false);
+
+        // Set initial timestamp and build refresh callback
+        #[cfg(target_arch = "wasm32")]
+        {
+            set_last_refreshed.set(Some(js_sys::Date::now()));
+        }
+        let on_refresh = Callback::new(move |()| {
+            // Inline charts don't fetch remote data — just update the timestamp
+            set_last_refreshed.set(Some(
+                #[cfg(target_arch = "wasm32")]
+                { js_sys::Date::now() },
+                #[cfg(not(target_arch = "wasm32"))]
+                { 0.0 },
+            ));
+        });
+
         // Store callbacks for use inside the reactive header closure
         let on_type_stored = StoredValue::new(on_type_change);
         let on_orient_stored = StoredValue::new(on_orientation_change);
         let on_mode_stored = StoredValue::new(on_mode_change);
+        let on_info_stored = StoredValue::new(on_info);
+        let on_refresh_stored = StoredValue::new(on_refresh);
 
         Some(
             view! {
@@ -168,15 +206,25 @@ impl Extension for ChartMLExtension {
                             let type_cb = on_type_stored.get_value();
                             let orient_cb = on_orient_stored.get_value();
                             let mode_cb = on_mode_stored.get_value();
+                            let info_cb = on_info_stored.get_value();
+                            let refresh_cb = on_refresh_stored.get_value();
+                            let last_sig = Signal::derive(move || last_refreshed.get());
+                            let refreshing_sig = Signal::derive(move || is_refreshing.get());
                             view! {
                                 <ChartHeaderBar
                                     chart_type=ct.unwrap_or_default()
                                     chart_orientation=co.unwrap_or_default()
                                     chart_mode=cm.unwrap_or_default()
                                     show_type_selector=true
+                                    show_refresh=true
+                                    show_info=true
                                     on_type_change=type_cb
                                     on_orientation_change=orient_cb
                                     on_mode_change=mode_cb
+                                    on_info=info_cb
+                                    on_refresh=refresh_cb
+                                    last_updated=last_sig
+                                    is_refreshing=refreshing_sig
                                 />
                             }
                         }}
