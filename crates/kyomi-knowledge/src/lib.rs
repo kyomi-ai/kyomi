@@ -22,7 +22,6 @@ pub mod context;
 pub mod episodic;
 pub mod expansion;
 pub mod knowledge_files;
-pub mod migration;
 pub mod models;
 pub mod populate;
 pub mod references;
