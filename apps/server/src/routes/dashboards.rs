@@ -263,6 +263,9 @@ struct DashboardListParams {
     sort_by: String,
     #[serde(default = "default_limit")]
     limit: i64,
+    /// Filter by document type: "dashboard" (default), "knowledge", or "all".
+    #[serde(default)]
+    doc_type: Option<String>,
 }
 
 fn default_sort_by() -> String {
@@ -370,11 +373,17 @@ async fn list_dashboards(
 
     let limit = params.limit.clamp(1, 100);
 
+    let doc_type_filter = match params.doc_type.as_deref() {
+        Some("knowledge") => Some(kyomi_core::models::DocType::Knowledge),
+        Some("all") => None,
+        _ => Some(kyomi_core::models::DocType::Dashboard), // default: dashboards only
+    };
+
     let results = dashboard_service::search_dashboards(
         &state.db,
         workspace_id,
         params.query.as_deref(),
-        Some(kyomi_core::models::DocType::Dashboard), // REST endpoint only shows dashboards
+        doc_type_filter,
         sort_by,
         limit,
     )
