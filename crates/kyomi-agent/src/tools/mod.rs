@@ -415,12 +415,12 @@ pub fn create_default_registry() -> ToolRegistry {
     // Learning tools
     registry.register(Arc::new(learning::SaveLearningTool));
 
-    // Knowledge tools (search + file CRUD)
+    // Knowledge tools (search + document CRUD)
     registry.register(Arc::new(knowledge::SearchKnowledgeTool));
-    registry.register(Arc::new(knowledge::WriteKnowledgeFileTool));
-    registry.register(Arc::new(knowledge::ReadKnowledgeFileTool));
-    registry.register(Arc::new(knowledge::ListKnowledgeFilesTool));
-    registry.register(Arc::new(knowledge::EditKnowledgeFileTool));
+    registry.register(Arc::new(knowledge::WriteDocumentTool));
+    registry.register(Arc::new(knowledge::ReadDocumentTool));
+    registry.register(Arc::new(knowledge::ListDocumentsTool));
+    registry.register(Arc::new(knowledge::EditDocumentTool));
 
     // Workspace tools
     registry.register(Arc::new(workspace::GetWorkspaceInfoTool));

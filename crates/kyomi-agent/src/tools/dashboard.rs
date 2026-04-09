@@ -52,6 +52,11 @@ impl AgentTool for SearchDashboardsTool {
                     "type": "boolean",
                     "description": "If true, returns top 10 most popular dashboards (ignores limit)",
                     "default": false
+                },
+                "doc_type": {
+                    "type": "string",
+                    "description": "Filter by document type: 'dashboard', 'knowledge', or omit for all",
+                    "enum": ["dashboard", "knowledge"]
                 }
             },
             "required": []
@@ -83,6 +88,10 @@ impl AgentTool for SearchDashboardsTool {
             .get("top_popular")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let doc_type_filter = args
+            .get("doc_type")
+            .and_then(|v| v.as_str())
+            .map(kyomi_core::models::DocType::from_str_or_default);
 
         if top_popular {
             limit = 10;
@@ -98,7 +107,7 @@ impl AgentTool for SearchDashboardsTool {
             &ctx.db,
             &ctx.workspace_id,
             query,
-            None, // agent searches all doc types
+            doc_type_filter,
             sort_by,
             limit,
         )
@@ -117,6 +126,7 @@ impl AgentTool for SearchDashboardsTool {
                     "dashboard_id": d.dashboard_id,
                     "url": format!("{frontend_url}/dashboard/{}", d.dashboard_id),
                     "title": d.title,
+                    "doc_type": d.doc_type,
                     "content": d.content_preview,
                     "created_at": d.created_at.to_rfc3339(),
                     "updated_at": d.updated_at.to_rfc3339(),

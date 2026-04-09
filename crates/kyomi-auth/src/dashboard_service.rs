@@ -54,7 +54,7 @@ const CHUNK_SIZE: usize = 2000;
 const CHUNK_OVERLAP: usize = 400;
 
 /// Compute a short SHA-256 hash of content (first 16 hex chars).
-fn hash_content(content: &str) -> String {
+pub fn hash_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let result = hasher.finalize();
@@ -273,11 +273,7 @@ pub async fn create_dashboard(
     let is_pg = db.is_postgres();
     let now_expr = sql_compat::now(is_pg);
     let dashboard_id = format!("{}", uuid::Uuid::new_v4());
-    let content_hash = if doc_type.is_knowledge() {
-        Some(hash_content(content))
-    } else {
-        None
-    };
+    let content_hash = Some(hash_content(content));
     let doc_type_str = doc_type.as_str();
 
     let sql = format!(
@@ -335,9 +331,10 @@ pub async fn get_dashboard(
 /// Before updating, creates a version snapshot of the old state.
 /// Auto-generates a change summary if not provided.
 ///
-/// For knowledge documents (`doc_type = "knowledge"`):
+/// For all document types:
 /// - Supports CAS via `expected_content_hash` — returns `Err(Conflict)` on mismatch.
-/// - Updates `content_hash` and `updated_by`.
+/// - Updates `content_hash` and `updated_by` when content changes.
+/// - Triggers rechunking if `embed` is `Some`.
 pub async fn update_dashboard(
     db: &DbPool,
     embed: Option<&EmbeddingService>,
@@ -403,12 +400,8 @@ pub async fn update_dashboard(
     )
     .await?;
 
-    // Compute new content_hash for knowledge documents
-    let new_content_hash = if current_doc_type.is_knowledge() {
-        content.map(hash_content)
-    } else {
-        None
-    };
+    // Compute new content_hash for all document types
+    let new_content_hash = content.map(hash_content);
 
     // Dynamic UPDATE
     let mut set_parts: Vec<String> = Vec::new();
@@ -472,9 +465,8 @@ pub async fn update_dashboard(
 
     tracing::info!(dashboard_id = %dashboard_id, "Updated dashboard");
 
-    // Rechunk knowledge documents after content update
+    // Rechunk documents after content update (all doc types)
     if result.rows_affected() > 0
-        && current_doc_type.is_knowledge()
         && let Some(c) = content
     {
         if let Some(embed_svc) = embed {
