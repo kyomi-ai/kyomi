@@ -681,7 +681,7 @@ fn DashboardEditorInner(
                                             }
                                         }
                                     >
-                                        <Icon icon=icondata_lu::LuMessagesSquare width="14" height="14" />
+                                        <Icon icon=icondata_lu::LuSparkles width="14" height="14" />
                                         <span class="hidden @6xl:inline whitespace-nowrap">"Copilot"</span>
                                     </ToggleButton>
                                 </div>

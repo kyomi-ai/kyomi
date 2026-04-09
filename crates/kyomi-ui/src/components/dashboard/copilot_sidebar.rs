@@ -717,7 +717,7 @@ pub fn CopilotSidebar(
                 // React: `flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0`
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
-                        <Icon icon=icondata_lu::LuMessagesSquare width="20" height="20" attr:class="text-primary" />
+                        <Icon icon=icondata_lu::LuSparkles width="20" height="20" attr:class="text-primary" />
                         <span class="font-medium text-foreground">"Dashboard Copilot"</span>
                     </div>
                     <Button variant=ButtonVariant::GhostMuted size=ButtonSize::Icon
@@ -744,7 +744,7 @@ pub fn CopilotSidebar(
                     // Empty state
                     <Show when=move || messages.get().is_empty() && !is_loading.get()>
                         <EmptyState
-                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuSparkles width="48" height="48" /> }.into_any())
                             title="Ask me anything about your dashboard!"
                             description="I can help you improve charts, suggest changes, or make edits directly."
                             class="border-0 bg-transparent"
