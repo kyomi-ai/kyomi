@@ -510,41 +510,30 @@ Use the `.menu-item` CSS class in `main.css`. Do NOT use `<Button variant=Ghost>
 
 ### Destructive Actions on Cards
 
-Delete buttons use `ButtonVariant::GhostDestructive` (`text-muted-foreground` at rest, `text-error-foreground` + `bg-error/10` on hover) and `ButtonSize::IconSm` (28px). The red hover clearly signals danger. All destructive actions MUST go through `<ConfirmDialog>`.
+Delete buttons and other destructive actions on list/grid cards follow a consistent pattern:
 
-**Placement depends on card layout:**
-
-**Grid cards with a footer action row** (e.g., dashboard cards): Place the delete button in the footer alongside other actions (View, Edit). Always visible, same row, consistent alignment.
-
-```rust
-<CardFooter>
-    <div class="flex gap-2 w-full">
-        <ButtonLink href=view_href variant=ButtonVariant::Default class="flex-1">
-            "View"
-        </ButtonLink>
-        <ButtonLink href=edit_href variant=ButtonVariant::Outline class="flex-1">
-            "Edit"
-        </ButtonLink>
-        <Button variant=ButtonVariant::GhostDestructive size=ButtonSize::IconSm
-            aria_label="Delete" on:click=handle_delete>
-            <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
-        </Button>
-    </div>
-</CardFooter>
-```
-
-**List items** (e.g., chat session rows): Hover-to-reveal with `opacity-0 group-hover:opacity-100 transition-opacity` and `group` on the row container. Keeps the list visually clean.
+1. **Hidden by default, visible on hover** — `opacity-0 group-hover:opacity-100 transition-opacity` on the button, `group` on the card container.
+2. **Red hover signal** — use `ButtonVariant::GhostDestructive` (`text-muted-foreground` at rest, `text-error-foreground` + `bg-error/10` on hover). This clearly communicates danger without drawing attention at rest.
+3. **Compact size** — use `ButtonSize::IconSm` (28px) for card action rows. Standard `Icon` (36px) is too large for inline card actions.
+4. **Confirm before executing** — all destructive actions MUST go through `<ConfirmDialog>` with `confirm_text="Delete"` and a message naming the item being deleted.
 
 ```rust
-<div class="group flex items-center ...">
-    // ... content ...
-    <Button variant=ButtonVariant::GhostDestructive size=ButtonSize::IconSm
-        aria_label="Delete" class="opacity-0 group-hover:opacity-100 transition-opacity"
-        on:click=handle_delete>
+// Card container
+<Card class="group ...">
+    // ... card content ...
+    <Button
+        variant=ButtonVariant::GhostDestructive
+        size=ButtonSize::IconSm
+        aria_label="Delete item"
+        class="opacity-0 group-hover:opacity-100 transition-opacity"
+        on:click=move |_| handle_delete()
+    >
         <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
     </Button>
-</div>
+</Card>
 ```
+
+This pattern applies to: chat session cards, dashboard cards, and any future list/grid item with a delete action.
 
 ### Overlay Decision Tree
 

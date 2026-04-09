@@ -718,7 +718,7 @@ fn DashboardCard(
     let dashboard_for_add = dashboard.clone();
 
     view! {
-        <Card class="hover:border-primary/30 transition-colors duration-200 flex flex-col">
+        <Card class="group hover:border-primary/30 transition-colors duration-200 flex flex-col">
             <CardHeader>
                 <div class="flex items-center justify-between">
                     <CardTitle class="text-xl flex-1 pr-2 line-clamp-2">
@@ -726,22 +726,41 @@ fn DashboardCard(
                             {title}
                         </a>
                     </CardTitle>
-                    // Add to Collection — only when collections are available
-                    {if has_available_collections {
-                        let dashboard_for_add = dashboard_for_add.clone();
-                        Some(view! {
-                            <Button
-                                variant=ButtonVariant::GhostMuted
-                                size=ButtonSize::IconSm
-                                aria_label="Add to collection"
-                                on:click=move |_| on_add_to_collection.run(dashboard_for_add.clone())
-                            >
-                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
-                            </Button>
-                        })
-                    } else {
-                        None
-                    }}
+                    <div class="flex gap-1">
+                        // Add to Collection — only when collections are available
+                        {if has_available_collections {
+                            let dashboard_for_add = dashboard_for_add.clone();
+                            Some(view! {
+                                <Button
+                                    variant=ButtonVariant::GhostMuted
+                                    size=ButtonSize::IconSm
+                                    aria_label="Add to collection"
+                                    class="opacity-0 group-hover:opacity-100 flex-shrink-0 transition-opacity"
+                                    on:click=move |_| on_add_to_collection.run(dashboard_for_add.clone())
+                                >
+                                    <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                </Button>
+                            })
+                        } else {
+                            None
+                        }}
+                        // Delete — hover-to-reveal, red hover (GhostDestructive)
+                        {
+                            let delete_id = delete_id.clone();
+                            let delete_title = delete_title.clone();
+                            view! {
+                                <Button
+                                    variant=ButtonVariant::GhostDestructive
+                                    size=ButtonSize::IconSm
+                                    aria_label="Delete dashboard"
+                                    class="opacity-0 group-hover:opacity-100 flex-shrink-0 transition-opacity"
+                                    on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
+                                >
+                                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+                                </Button>
+                            }
+                        }
+                    </div>
                 </div>
             </CardHeader>
 
@@ -817,28 +836,14 @@ fn DashboardCard(
 
             <CardFooter>
                 <div class="flex gap-2 w-full">
-                    <ButtonLink href=view_href_footer variant=ButtonVariant::Default class="flex-1">
+                    <ButtonLink href=view_href_footer variant=ButtonVariant::Default class="w-full flex-1">
                         <Icon icon=icondata_lu::LuEye width="14" height="14" />
                         "View"
                     </ButtonLink>
-                    <ButtonLink href=edit_href variant=ButtonVariant::Outline class="flex-1">
+                    <ButtonLink href=edit_href variant=ButtonVariant::Outline class="w-full flex-1">
                         <Icon icon=icondata_lu::LuPencil width="14" height="14" />
                         "Edit"
                     </ButtonLink>
-                    {
-                        let delete_id = delete_id.clone();
-                        let delete_title = delete_title.clone();
-                        view! {
-                            <Button
-                                variant=ButtonVariant::GhostDestructive
-                                size=ButtonSize::IconSm
-                                aria_label="Delete dashboard"
-                                on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
-                            >
-                                <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
-                            </Button>
-                        }
-                    }
                 </div>
             </CardFooter>
         </Card>
