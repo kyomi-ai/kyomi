@@ -327,16 +327,15 @@ fn SidebarHeader(
     on_new: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <div class="p-4 border-b border-border flex items-center justify-between flex-shrink-0">
+        <div class="px-4 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
             <h3 class="font-semibold text-foreground">"Collections"</h3>
             <Button
-                variant=ButtonVariant::Secondary
+                variant=ButtonVariant::GhostMuted
                 size=ButtonSize::Icon
                 aria_label="Close"
-                class="h-7 w-7"
                 on:click=move |_| on_close.run(())
             >
-                <Icon icon=icondata_lu::LuX width="16" height="16" />
+                <Icon icon=icondata_lu::LuX width="20" height="20" />
             </Button>
         </div>
 

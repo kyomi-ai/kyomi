@@ -747,6 +747,7 @@ pub fn CopilotSidebar(
                             icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
                             title="Ask me anything about your dashboard!"
                             description="I can help you improve charts, suggest changes, or make edits directly."
+                            class="border-0 bg-transparent"
                         />
                     </Show>
 
