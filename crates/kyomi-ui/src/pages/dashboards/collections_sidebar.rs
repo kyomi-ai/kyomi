@@ -400,7 +400,7 @@ fn ColorPicker(
                 <input
                     type="text"
                     prop:value=move || value.get()
-                    class="flex-1 px-4 py-2 border border-input rounded-lg bg-card text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono text-sm"
+                    class="flex-1 px-3 py-1 rounded-md border border-input bg-transparent text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono text-sm"
                     placeholder="#d97706"
                     on:input=move |ev| {
                         on_change.run(event_target_value(&ev));
@@ -565,7 +565,7 @@ fn CollectionModal(
                     <Label html_for="coll-desc">"Description"</Label>
                     <textarea
                         id="coll-desc"
-                        class="w-full px-4 py-2 border border-input rounded-lg bg-card text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
+                        class="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
                         placeholder="Dashboards for marketing team analytics"
                         rows="3"
                         prop:value=move || description.get()

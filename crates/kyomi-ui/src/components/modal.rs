@@ -31,6 +31,7 @@
 
 use leptos::ev;
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 /// Modal size variants.
 ///
@@ -148,15 +149,7 @@ pub fn Modal(
                             on:click=move |_| on_close.run(())
                             aria-label="Close"
                         >
-                            // React: SVG X icon — `w-6 h-6`, stroke path "M6 18L18 6M6 6l12 12"
-                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                    stroke-width="2"
-                                    d="M6 18L18 6M6 6l12 12"
-                                />
-                            </svg>
+                            <Icon icon=icondata_lu::LuX width="24" height="24" />
                         </button>
                     </div>
 
