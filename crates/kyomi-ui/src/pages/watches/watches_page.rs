@@ -20,8 +20,9 @@ use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::watches::{AlertsHistory, ExecutionLogViewer, WatchAgentSidebar, WatchModal};
 use crate::components::{
-    Alert, AlertDescription, AlertVariant, Card, CardContent, CardHeader, CardTitle, ConfirmDialog,
-    EmptyState, Modal, ModalSize, Spinner, StatusBadge, StatusBadgeVariant, Switch,
+    Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Card,
+    CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Spinner,
+    StatusBadge, StatusBadgeVariant, Switch,
 };
 use crate::server_fns::context::get_user_context;
 use crate::server_fns::watches::{
@@ -30,16 +31,6 @@ use crate::server_fns::watches::{
 };
 use crate::types::WatchListItem;
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
-
-// ─── Button CSS constants ───────────────────────────────────────────────────
-// From button.rs — used for raw <button> elements that need click handlers.
-
-const BTN_BASE: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";
-const BTN_DEFAULT: &str = "bg-primary text-primary-foreground shadow hover:bg-primary/90 transition-colors";
-const BTN_GHOST: &str = "text-foreground hover:bg-secondary hover:text-accent-foreground transition-colors";
-const BTN_DEFAULT_SIZE: &str = "h-9 px-4 py-2";
-const BTN_SM: &str = "h-8 rounded-md px-3 text-xs";
-
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -236,53 +227,62 @@ fn WatchCard(
 
                 // Actions
                 <div class="flex items-center gap-2 pt-2 border-t border-border">
-                    <button
-                        class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM}")
+                    <Button
+                        variant=ButtonVariant::GhostMuted
+                        size=ButtonSize::IconSm
                         on:click=move |_| on_run.run(wid_run.clone())
-                        disabled=move || run_pending.get()
+                        disabled=MaybeProp::derive(move || Some(run_pending.get()))
+                        aria_label="Run now"
                     >
                         <Icon icon=icondata_lu::LuPlay attr:class="h-4 w-4" />
-                    </button>
+                    </Button>
                     {has_last_run.then(|| {
                         let w = watch_for_log.clone();
                         view! {
-                            <button
-                                class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM}")
+                            <Button
+                                variant=ButtonVariant::GhostMuted
+                                size=ButtonSize::IconSm
                                 on:click=move |_| on_view_log.run(w.clone())
+                                aria_label="View execution log"
                             >
                                 <Icon icon=icondata_lu::LuFileText attr:class="h-4 w-4" />
-                            </button>
+                            </Button>
                         }
                     })}
-                    <button
-                        class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM}")
+                    <Button
+                        variant=ButtonVariant::GhostMuted
+                        size=ButtonSize::IconSm
                         on:click={
                             let w = watch_for_ai.clone();
                             move |_| on_edit_ai.run(w.clone())
                         }
-                        disabled=!ai_enabled
-                        title=if !ai_enabled { "AI features not available" } else { "Edit with AI" }
+                        disabled=MaybeProp::derive(move || Some(!ai_enabled))
+                        aria_label=if !ai_enabled { "AI features not available".to_string() } else { "Edit with AI".to_string() }
                     >
                         <Icon icon=icondata_lu::LuSparkles attr:class="h-4 w-4" />
-                    </button>
-                    <button
-                        class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM}")
+                    </Button>
+                    <Button
+                        variant=ButtonVariant::GhostMuted
+                        size=ButtonSize::IconSm
                         on:click={
                             let w = watch_for_edit.clone();
                             move |_| on_edit.run(w.clone())
                         }
+                        aria_label="Edit watch"
                     >
                         <Icon icon=icondata_lu::LuSettings attr:class="h-4 w-4" />
-                    </button>
-                    <button
-                        class=format!("{BTN_BASE} {BTN_GHOST} {BTN_SM} text-destructive hover:text-destructive")
+                    </Button>
+                    <Button
+                        variant=ButtonVariant::GhostDestructive
+                        size=ButtonSize::IconSm
                         on:click={
                             let w = watch_for_delete.clone();
                             move |_| on_delete.run(w.clone())
                         }
+                        aria_label="Delete watch"
                     >
                         <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4" />
-                    </button>
+                    </Button>
                 </div>
             </CardContent>
         </Card>
@@ -569,11 +569,8 @@ pub fn WatchesPage() -> impl IntoView {
             if !has_watch_capability.get() {
                 return view! {
                     <div class="h-full flex flex-col bg-background">
-                        <div class="flex items-center justify-between px-6 py-4 border-b border-border">
-                            <div class="flex items-center gap-3">
-                                <Icon icon=icondata_lu::LuEye attr:class="h-6 w-6 text-primary" />
-                                <h1 class="text-xl font-display text-foreground">"Kyomi Watch"</h1>
-                            </div>
+                        <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                            <h1 class="text-3xl font-display text-foreground">"Kyomi Watch"</h1>
                         </div>
                         <div class="flex-1 flex items-center justify-center p-6">
                             <Card class="max-w-lg".to_string()>
@@ -602,12 +599,9 @@ pub fn WatchesPage() -> impl IntoView {
                                         </li>
                                     </ul>
                                     <div class="pt-4">
-                                        <a
-                                            href="/settings/billing"
-                                            class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_DEFAULT_SIZE} w-full")
-                                        >
+                                        <ButtonLink href="/settings/billing" class="w-full">
                                             "Upgrade to Pro"
-                                        </a>
+                                        </ButtonLink>
                                         <p class="text-xs text-center text-muted-foreground mt-2">
                                             "Kyomi Watch is available on Pro and Team plans"
                                         </p>
@@ -623,58 +617,54 @@ pub fn WatchesPage() -> impl IntoView {
             let is_credits_exhausted = credits_exhausted.get();
 
             view! {
-                <div class="h-full flex bg-muted">
+                <div class="h-full flex bg-background">
                     // Main content area
                     <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
-                        // Header
-                        <div class="h-16 bg-card border-b border-border px-6 flex-shrink-0 flex items-center justify-between">
-                            <div class="flex items-center gap-3">
-                                <Icon icon=icondata_lu::LuEye attr:class="h-6 w-6 text-primary hidden sm:block" />
-                                <h1 class="text-lg sm:text-xl font-display text-foreground">"Kyomi Watch"</h1>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                // View toggle — Alerts first since it's the inbox
-                                <div class="flex items-center rounded-lg bg-muted p-1">
-                                    <button
-                                        on:click=move |_| nav_alerts.with_value(|f| f())
-                                        class=move || {
-                                            if active_view.get() == "alerts" {
-                                                "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors bg-background text-foreground shadow-sm"
-                                            } else {
-                                                "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors text-muted-foreground hover:text-foreground"
-                                            }
-                                        }
-                                    >
-                                        <Icon icon=icondata_lu::LuBell attr:class="h-4 w-4" />
-                                        <span class="hidden sm:inline">"Alerts"</span>
-                                    </button>
-                                    <button
-                                        on:click=move |_| nav_watches.with_value(|f| f())
-                                        class=move || {
-                                            if active_view.get() == "watches" {
-                                                "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors bg-background text-foreground shadow-sm"
-                                            } else {
-                                                "flex items-center gap-1.5 px-2 sm:px-3 py-1.5 text-sm rounded-md transition-colors text-muted-foreground hover:text-foreground"
-                                            }
-                                        }
-                                    >
-                                        <Icon icon=icondata_lu::LuEye attr:class="h-4 w-4" />
-                                        <span class="hidden sm:inline">"Watches"</span>
-                                    </button>
-                                </div>
-                                <button
-                                    class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_DEFAULT_SIZE}")
-                                    on:click=handle_create_watch
-                                    disabled=!is_ai_enabled
-                                    title=if !is_ai_enabled {
-                                        if is_credits_exhausted { "AI budget exhausted for this billing period" }
-                                        else { "AI features are not available" }
-                                    } else { "" }
-                                >
-                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4" />
-                                    <span class="hidden sm:inline">"Create Watch"</span>
-                                </button>
-                            </div>
+                        // Row 1: Header
+                        <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
+                            <h1 class="text-3xl font-display text-foreground">"Kyomi Watch"</h1>
+                            <Button
+                                size=ButtonSize::Sm
+                                on:click=handle_create_watch
+                                disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
+                                aria_label=if !is_ai_enabled {
+                                    if is_credits_exhausted { "AI budget exhausted for this billing period".to_string() }
+                                    else { "AI features are not available".to_string() }
+                                } else { "Create Watch".to_string() }
+                            >
+                                <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4" />
+                                <span class="hidden sm:inline">"Create Watch"</span>
+                            </Button>
+                        </div>
+
+                        // Row 2: Underline tabs
+                        <div class="px-4 md:px-6 border-b border-border flex items-center gap-4">
+                            <button
+                                on:click=move |_| nav_alerts.with_value(|f| f())
+                                class=move || {
+                                    if active_view.get() == "alerts" {
+                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-primary text-foreground transition-colors"
+                                    } else {
+                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors"
+                                    }
+                                }
+                            >
+                                <Icon icon=icondata_lu::LuBell attr:class="h-4 w-4" />
+                                "Alerts"
+                            </button>
+                            <button
+                                on:click=move |_| nav_watches.with_value(|f| f())
+                                class=move || {
+                                    if active_view.get() == "watches" {
+                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-primary text-foreground transition-colors"
+                                    } else {
+                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors"
+                                    }
+                                }
+                            >
+                                <Icon icon=icondata_lu::LuEye attr:class="h-4 w-4" />
+                                "Watches"
+                            </button>
                         </div>
 
                         // Budget exhausted warning
@@ -726,17 +716,16 @@ pub fn WatchesPage() -> impl IntoView {
                                                             title="No watches yet"
                                                             description=desc.to_string()
                                                             action=std::sync::Arc::new(move || view! {
-                                                                <button
-                                                                    class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_DEFAULT_SIZE}")
+                                                                <Button
                                                                     on:click=move |_| {
                                                                         set_agent_editing_watch.set(None);
                                                                         set_show_agent_sidebar.set(true);
                                                                     }
-                                                                    disabled=!is_ai_enabled
+                                                                    disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
                                                                 >
-                                                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4 mr-2" />
+                                                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4" />
                                                                     "Create Watch"
-                                                                </button>
+                                                                </Button>
                                                             }.into_any())
                                                         />
                                                     }
