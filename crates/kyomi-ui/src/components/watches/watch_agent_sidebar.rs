@@ -8,14 +8,14 @@
 //! - Desktop: Resizable sidebar with drag handle (320-600px, default 420px)
 //! - Mobile: Full-width slide-in panel with backdrop
 //! - Header with mode-dependent title ("Create Watch" / "Edit Watch")
-//! - Placeholder chat area with text input + send button
-//!   (full ChatInterface integration is a separate concern)
+//! - Live CopilotChat with `watch_copilot` context type and `watch_update` WS events
 //!
 //! Resize pattern follows `dashboard/copilot_sidebar.rs`.
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::components::chat::CopilotChat;
 use crate::components::dashboard::shared::use_is_mobile;
 use crate::types::WatchListItem;
 
@@ -31,8 +31,9 @@ const DEFAULT_WIDTH: f64 = 420.0;
 
 /// AI-powered sidebar for creating and editing watches.
 ///
-/// Uses a placeholder chat interface. The full `ChatInterface` integration
-/// with `watch_copilot` context type will be added in a later task.
+/// Uses the `CopilotChat` component with `watch_copilot` context type,
+/// providing full session management, WebSocket streaming, and `watch_update`
+/// event handling.
 #[component]
 pub fn WatchAgentSidebar(
     /// Whether the sidebar is open.
@@ -46,8 +47,6 @@ pub fn WatchAgentSidebar(
     editing_watch: Option<WatchListItem>,
 ) -> impl IntoView {
     let is_mobile = use_is_mobile();
-    // Will be used by the full ChatInterface integration.
-    let _ = on_watch_changed;
 
     // ── Resize state (desktop only) ──────────────────────────────────────
     let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
@@ -55,50 +54,63 @@ pub fn WatchAgentSidebar(
     let _ = set_panel_width;
     let (is_resizing, set_is_resizing) = signal(false);
 
-    // ── Chat placeholder state ───────────────────────────────────────────
-    // Input value is kept for layout fidelity but sending is disabled
-    // until full ChatInterface integration replaces this placeholder.
-    let (input_value, set_input_value) = signal(String::new());
-
-    let mode = if editing_watch.is_some() {
-        "update"
-    } else {
-        "create"
-    };
+    // ── Mode-dependent text ──────────────────────────────────────────────
+    let is_editing = editing_watch.is_some();
     let editing_watch_name = editing_watch
         .as_ref()
         .map(|w| w.name.clone())
         .unwrap_or_default();
-    let _editing_watch = StoredValue::new(editing_watch);
 
-    // ── Mode-dependent text ──────────────────────────────────────────────
-    let header_title = if mode == "create" {
-        "Create Watch"
-    } else {
+    let header_title = if is_editing {
         "Edit Watch"
+    } else {
+        "Create Watch"
     };
 
-    let empty_state_message: StoredValue<String> = StoredValue::new(if mode == "create" {
-        "What would you like to monitor?".to_string()
+    let placeholder_text = StoredValue::new(if is_editing {
+        "Make it run hourly instead...".to_string()
     } else {
-        format!("Editing: {}", editing_watch_name)
+        "Alert me when daily revenue drops more than 10%...".to_string()
     });
 
-    let empty_state_subtext = if mode == "create" {
-        "Describe what data to watch and when to alert you."
+    let empty_title_text = StoredValue::new(if is_editing {
+        format!("Editing: {editing_watch_name}")
     } else {
-        "Tell me what you'd like to change."
-    };
+        "What would you like to monitor?".to_string()
+    });
 
-    let placeholder = if mode == "create" {
-        "Alert me when daily revenue drops more than 10%..."
+    let empty_description_text = StoredValue::new(if is_editing {
+        "Tell me what you'd like to change.".to_string()
     } else {
-        "Make it run hourly instead..."
-    };
+        "Describe what data to watch and when to alert you.".to_string()
+    });
+
+    // ── Watch context signal for CopilotChat ─────────────────────────────
+    let editing_watch_stored = StoredValue::new(editing_watch);
+    let watch_context_signal = Signal::derive(move || {
+        editing_watch_stored.with_value(|w| {
+            w.as_ref()
+                .map(|watch| serde_json::to_string(watch).unwrap_or_default())
+                .unwrap_or_default()
+        })
+    });
+
+    // ── Custom WS event handler ──────────────────────────────────────────
+    let on_custom_ws =
+        Callback::new(move |(_event_name, _data): (String, serde_json::Value)| {
+            on_watch_changed.run(());
+        });
+
+    // ── Empty state icon ─────────────────────────────────────────────────
+    let empty_icon_fn = StoredValue::new(std::sync::Arc::new(move || {
+        view! {
+            <Icon icon=icondata_lu::LuEye attr:class="w-10 h-10 text-muted-foreground/50" />
+        }
+        .into_any()
+    }) as ChildrenFn);
 
     // ── Handle close ─────────────────────────────────────────────────────
     let handle_close = move || {
-        set_input_value.set(String::new());
         on_close.run(());
     };
 
@@ -210,7 +222,6 @@ pub fn WatchAgentSidebar(
     // Shared between mobile and desktop layouts.
     let panel_content = move || {
         let handle_close_clone = handle_close;
-        let empty_state_message = empty_state_message.get_value();
 
         view! {
             <div class=move || {
@@ -237,45 +248,19 @@ pub fn WatchAgentSidebar(
                     </button>
                 </div>
 
-                // Chat area — empty state placeholder
-                // Full ChatInterface integration will replace this with actual
-                // copilot session management and WebSocket streaming.
-                <div class="flex-1 overflow-y-auto p-4 space-y-4">
-                    <div class="flex flex-col items-center justify-center h-full text-center px-4">
-                        <Icon icon=icondata_lu::LuEye attr:class="w-12 h-12 text-muted-foreground/50 mb-3" />
-                        <p class="text-muted-foreground text-sm font-medium">
-                            {empty_state_message.clone()}
-                        </p>
-                        <p class="text-muted-foreground/70 text-xs mt-1">
-                            {empty_state_subtext}
-                        </p>
-                    </div>
-                </div>
-
-                // Input area — rendered for layout fidelity, send disabled until
-                // ChatInterface integration is complete.
-                // React: `border-t border-border p-4`
-                <div class="border-t border-border p-4">
-                    <div class="flex items-end gap-2">
-                        <textarea
-                            class="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[40px] max-h-[120px]"
-                            placeholder=placeholder
-                            rows="1"
-                            prop:value=move || input_value.get()
-                            on:input=move |ev| {
-                                set_input_value.set(event_target_value(&ev));
-                            }
-                        />
-                        <button
-                            class="inline-flex items-center justify-center rounded-md h-10 w-10 bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                            disabled=true
-                            aria-label="Send message"
-                            title="Chat integration coming soon"
-                        >
-                            <Icon icon=icondata_lu::LuSend attr:class="w-4 h-4" />
-                        </button>
-                    </div>
-                </div>
+                // Chat area — live CopilotChat with watch_copilot context
+                <CopilotChat
+                    context_type="watch_copilot"
+                    context_content=watch_context_signal
+                    context_label="Watch Configuration"
+                    active=Signal::derive(move || open.get())
+                    placeholder=placeholder_text.get_value()
+                    empty_icon=empty_icon_fn.get_value()
+                    empty_title=empty_title_text.get_value()
+                    empty_description=empty_description_text.get_value()
+                    custom_ws_events=vec!["watch_update".to_string()]
+                    on_custom_ws_event=on_custom_ws
+                />
             </div>
         }
     };
