@@ -1938,6 +1938,7 @@ pub async fn generate_chart_from_results(
     columns: Vec<String>,
     sample_rows: Vec<Vec<serde_json::Value>>,
     sql: String,
+    datasource_slug: String,
 ) -> Result<GeneratedChart, ServerFnError> {
     // Auth check — must be logged in.
     let _auth = extract_auth().await?;
@@ -1946,7 +1947,7 @@ pub async fn generate_chart_from_results(
         return Err(ServerFnError::new("No columns provided"));
     }
 
-    let chart_yaml = generate_chartml_with_rules(&sql, &columns, &sample_rows)?;
+    let chart_yaml = generate_chartml_with_rules(&sql, &columns, &sample_rows, &datasource_slug)?;
 
     // Extract title from the generated YAML.
     let title = serde_yaml::from_str::<serde_yaml::Value>(&chart_yaml)
@@ -2102,25 +2103,23 @@ fn yaml_str(s: &str) -> serde_yaml::Value {
 
 /// Build the `data:` section of the ChartML spec.
 #[cfg(feature = "ssr")]
-fn build_chart_data_section(sql_text: &str) -> serde_yaml::Mapping {
+fn build_chart_data_section(datasource_slug: &str, sql_text: &str) -> serde_yaml::Mapping {
     let mut data = serde_yaml::Mapping::new();
-    data.insert(yaml_str("query"), yaml_str(sql_text));
-    let mut cache = serde_yaml::Mapping::new();
-    cache.insert(yaml_str("ttl"), yaml_str("24h"));
-    data.insert(yaml_str("cache"), serde_yaml::Value::Mapping(cache));
+    data.insert(yaml_str("datasource"), yaml_str(datasource_slug));
+    data.insert(yaml_str("sql"), yaml_str(sql_text));
     data
 }
 
 /// Generate a metric card spec for single-value results.
 #[cfg(feature = "ssr")]
-fn generate_metric_card(column_name: &str, sql_text: &str) -> String {
+fn generate_metric_card(column_name: &str, datasource_slug: &str, sql_text: &str) -> String {
     let mut spec = serde_yaml::Mapping::new();
     spec.insert(yaml_str("type"), yaml_str("chart"));
     spec.insert(yaml_str("version"), serde_yaml::Value::Number(1.into()));
     spec.insert(yaml_str("title"), yaml_str(column_name));
     spec.insert(
         yaml_str("data"),
-        serde_yaml::Value::Mapping(build_chart_data_section(sql_text)),
+        serde_yaml::Value::Mapping(build_chart_data_section(datasource_slug, sql_text)),
     );
     let mut vis = serde_yaml::Mapping::new();
     vis.insert(yaml_str("type"), yaml_str("metric"));
@@ -2132,14 +2131,14 @@ fn generate_metric_card(column_name: &str, sql_text: &str) -> String {
 
 /// Generate a table fallback spec.
 #[cfg(feature = "ssr")]
-fn generate_table_fallback(sql_text: &str, columns: &[String]) -> String {
+fn generate_table_fallback(datasource_slug: &str, sql_text: &str, columns: &[String]) -> String {
     let mut spec = serde_yaml::Mapping::new();
     spec.insert(yaml_str("type"), yaml_str("chart"));
     spec.insert(yaml_str("version"), serde_yaml::Value::Number(1.into()));
     spec.insert(yaml_str("title"), yaml_str("Query Results"));
     spec.insert(
         yaml_str("data"),
-        serde_yaml::Value::Mapping(build_chart_data_section(sql_text)),
+        serde_yaml::Value::Mapping(build_chart_data_section(datasource_slug, sql_text)),
     );
     let mut vis = serde_yaml::Mapping::new();
     vis.insert(yaml_str("type"), yaml_str("table"));
@@ -2160,6 +2159,7 @@ fn generate_chartml_with_rules(
     sql_text: &str,
     columns: &[String],
     rows: &[Vec<serde_json::Value>],
+    datasource_slug: &str,
 ) -> Result<String, ServerFnError> {
     let analyses: Vec<ChartColumnAnalysis> = columns
         .iter()
@@ -2168,7 +2168,7 @@ fn generate_chartml_with_rules(
 
     // Single value -> metric card.
     if columns.len() == 1 && rows.len() == 1 {
-        return Ok(generate_metric_card(&columns[0], sql_text));
+        return Ok(generate_metric_card(&columns[0], datasource_slug, sql_text));
     }
 
     let chart_type = infer_chart_type(&analyses);
@@ -2183,7 +2183,7 @@ fn generate_chartml_with_rules(
         {
             y_axis = &alt.name;
         } else {
-            return Ok(generate_table_fallback(sql_text, columns));
+            return Ok(generate_table_fallback(datasource_slug, sql_text, columns));
         }
     }
 
@@ -2195,7 +2195,7 @@ fn generate_chartml_with_rules(
     spec.insert(yaml_str("title"), yaml_str(&title));
     spec.insert(
         yaml_str("data"),
-        serde_yaml::Value::Mapping(build_chart_data_section(sql_text)),
+        serde_yaml::Value::Mapping(build_chart_data_section(datasource_slug, sql_text)),
     );
     let mut vis = serde_yaml::Mapping::new();
     vis.insert(yaml_str("type"), yaml_str(chart_type));

@@ -11,8 +11,6 @@
 //! Page changes call `fetch_query_page()` via `spawn_local`. The page
 //! size change re-executes the query via `execute_sql_query()`.
 
-use std::sync::Arc;
-
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
@@ -20,7 +18,8 @@ use super::state::SqlEditorState;
 use super::tab_bar::TabBar;
 use super::results_table::ResultsTable;
 use super::types::{QueryStatus, ResultTab};
-use crate::components::{Button, ButtonVariant, ButtonSize, Modal, ModalSize, Spinner};
+use crate::components::dashboard::chart_builder::ChartBuilderModal;
+use crate::components::{Button, ButtonVariant, ButtonSize, Spinner};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::sql_editor::fetch_query_page;
 #[cfg(target_arch = "wasm32")]
@@ -331,11 +330,6 @@ pub fn ResultsContainer(
     let _ = set_chart_yaml;
     let (chart_error, set_chart_error) = signal(None::<String>);
     let (show_chart_modal, set_show_chart_modal) = signal(false);
-    // Track clipboard feedback.
-    let (copied, set_copied) = signal(false);
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = set_copied;
-
     let handle_create_chart = {
         Callback::new(move |_: ()| {
             let Some(tab) = active_tab.get() else { return };
@@ -358,9 +352,10 @@ pub fn ResultsContainer(
                     .cloned()
                     .collect();
                 let sql = tab.query.clone();
+                let ds_slug = tab.datasource_slug.clone().unwrap_or_default();
 
                 leptos::task::spawn_local(async move {
-                    match generate_chart_from_results(columns, sample_rows, sql).await {
+                    match generate_chart_from_results(columns, sample_rows, sql, ds_slug).await {
                         Ok(chart) => {
                             set_chart_yaml.set(Some(chart.chartml_yaml));
                             set_show_chart_modal.set(true);
@@ -425,29 +420,26 @@ pub fn ResultsContainer(
                 <TabBar on_restore_query=on_restore_query header_actions=chart_button />
                 {tab_content}
 
-                // ChartML preview modal
-                <ChartYamlModal
-                    show=Signal::derive(move || show_chart_modal.get())
-                    yaml=Signal::derive(move || chart_yaml.get().unwrap_or_default())
-                    copied=Signal::derive(move || copied.get())
-                    copy_handler=Callback::new(move |()| {
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            if let Some(yaml) = chart_yaml.get_untracked() {
-                                if let Some(window) = web_sys::window() {
-                                    let clipboard = window.navigator().clipboard();
-                                    let _ = clipboard.write_text(&yaml);
-                                    set_copied.set(true);
-                                    leptos::task::spawn_local(async move {
-                                        gloo_timers::future::TimeoutFuture::new(2000).await;
-                                        set_copied.set(false);
-                                    });
-                                }
-                            }
+                // Chart builder modal — mounted when YAML is ready
+                <Show when=move || show_chart_modal.get()>
+                    {move || {
+                        let yaml = chart_yaml.get().unwrap_or_default();
+                        view! {
+                            <ChartBuilderModal
+                                open=Signal::stored(true)
+                                existing_yaml=yaml
+                                on_close=Callback::new(move |()| {
+                                    set_show_chart_modal.set(false);
+                                    set_chart_yaml.set(None);
+                                })
+                                on_insert=Callback::new(move |_yaml: String| {
+                                    set_show_chart_modal.set(false);
+                                    set_chart_yaml.set(None);
+                                })
+                            />
                         }
-                    })
-                    close_handler=Callback::new(move |()| set_show_chart_modal.set(false))
-                />
+                    }}
+                </Show>
             </div>
         })
     }
@@ -519,23 +511,10 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
 
     // Success with result → table
     if let Some(result) = tab.result
-        && (tab.status == QueryStatus::Success || tab.status == QueryStatus::Streaming)
+        && tab.status == QueryStatus::Success
     {
-        let is_streaming = tab.status == QueryStatus::Streaming;
-        let row_count = result.row_count;
-
         return view! {
             <div class="flex-1 flex flex-col min-h-0 relative">
-                // Streaming indicator
-                {is_streaming.then(move || {
-                    view! {
-                        <div class="flex items-center gap-2 px-3 py-1.5 bg-primary/5 border-b border-border text-xs text-muted-foreground">
-                            <div class="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                            "Streaming rows... ("{row_count}" received)"
-                        </div>
-                    }
-                })}
-
                 <div class="flex-1 min-h-0">
                     <ResultsTable
                         result=result
@@ -675,63 +654,3 @@ fn ResultsError(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ChartML YAML preview modal
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Simple modal that displays generated ChartML YAML with a copy button.
-///
-/// This is a lightweight alternative to the full ChartBuilder — shows the raw
-/// YAML in a scrollable code block with copy-to-clipboard support.
-#[component]
-fn ChartYamlModal(
-    /// Whether the modal is visible.
-    #[prop(into)]
-    show: Signal<bool>,
-    /// The generated ChartML YAML string.
-    #[prop(into)]
-    yaml: Signal<String>,
-    /// Whether the "Copied!" feedback is active.
-    #[prop(into)]
-    copied: Signal<bool>,
-    /// Called when the copy button is clicked.
-    copy_handler: Callback<()>,
-    /// Called when the modal is closed.
-    close_handler: Callback<()>,
-) -> impl IntoView {
-    let copy_cb = copy_handler;
-
-    let footer_view: ChildrenFn = Arc::new(move || {
-        view! {
-            <Button
-                on:click=move |_| copy_cb.run(())
-            >
-                {move || if copied.get() {
-                    view! {
-                        <Icon icon=icondata_lu::LuCheck attr:class="w-3.5 h-3.5" />
-                        <span>"Copied!"</span>
-                    }.into_any()
-                } else {
-                    view! {
-                        <Icon icon=icondata_lu::LuClipboard attr:class="w-3.5 h-3.5" />
-                        <span>"Copy"</span>
-                    }.into_any()
-                }}
-            </Button>
-        }.into_any()
-    });
-
-    view! {
-        <Modal
-            show=show
-            on_close=close_handler
-            title="Generated ChartML"
-            size=ModalSize::Md
-            footer=footer_view
-        >
-            <pre class="text-xs font-mono text-foreground bg-muted rounded-md p-4 whitespace-pre-wrap break-words border border-border">
-                {move || yaml.get()}
-            </pre>
-        </Modal>
-    }
-}

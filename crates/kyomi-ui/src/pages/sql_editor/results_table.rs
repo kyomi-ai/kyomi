@@ -109,30 +109,32 @@ pub fn ResultsTable(
 ) -> impl IntoView {
     // ── Pagination calculations ──────────────────────────────────────────
 
-    let total_rows = result.total_rows.unwrap_or(result.row_count);
-    let total_pages = if total_rows == 0 {
+    let has_known_total = result.total_rows.is_some();
+    // When total_rows is unknown but has_more is true, we know there's at
+    // least one more page. Use a large sentinel so the "next" button stays
+    // enabled — the server returns empty rows when we go past the end.
+    let total_rows = result.total_rows.unwrap_or_else(|| {
+        if result.has_more {
+            // Unknown total — allow forward pagination
+            usize::MAX
+        } else {
+            result.row_count
+        }
+    });
+    let page_size = page_size.max(1);
+    let total_pages = if has_known_total {
+        ((total_rows as f64) / (page_size as f64)).ceil().max(1.0) as u32
+    } else if result.has_more {
+        u32::MAX // Unknown — don't limit
+    } else {
         1
-    } else {
-        (total_rows as f64 / page_size as f64).ceil() as u32
     };
+    let current_page = current_page.clamp(1, total_pages);
 
-    // Detect whether rows are already server-side paginated or contain the
-    // full result set (streaming). When all rows are present locally, slice
-    // to the current page client-side (matches React's ResizableTable).
-    let all_rows_local = result.rows.len() == total_rows;
-    let page_start = if all_rows_local {
-        ((current_page - 1) * page_size) as usize
-    } else {
-        0
-    };
-    let page_end = if all_rows_local {
-        (page_start + page_size as usize).min(result.rows.len())
-    } else {
-        result.rows.len()
-    };
-
+    // Server-side paginated: rows contain only the current page's data.
+    // Display offset is calculated from page number for the "X-Y of Z" label.
     let display_start = ((current_page - 1) * page_size) as usize;
-    let display_end = display_start + (page_end - page_start);
+    let display_end = (display_start + result.rows.len()).min(total_rows);
     let num_columns = result.columns.len();
 
     // ── Column widths (resizable) ────────────────────────────────────────
@@ -289,7 +291,7 @@ pub fn ResultsTable(
     // ── Render ───────────────────────────────────────────────────────────
 
     let columns = result.columns.clone();
-    let rows: Vec<Vec<serde_json::Value>> = result.rows[page_start..page_end].to_vec();
+    let rows: Vec<Vec<serde_json::Value>> = result.rows.clone();
     let columns_for_header = columns.clone();
     let columns_for_body = columns.clone();
 
@@ -299,9 +301,12 @@ pub fn ResultsTable(
             <div class="px-4 py-3 border-b text-sm flex-shrink-0 flex items-center justify-between bg-muted border-border text-muted-foreground">
                 <span>
                     "Results: Showing "
-                    {display_start + 1}"-"{display_end}" of "
-                    <strong>{total_rows}</strong>
-                    {if total_rows != 1 { " rows" } else { " row" }}
+                    {display_start + 1}"-"{display_end}
+                    {if has_known_total {
+                        format!(" of {total_rows}")
+                    } else {
+                        String::new()
+                    }}
                     " \u{00d7} "
                     {num_columns}
                     {if num_columns != 1 { " columns" } else { " column" }}
@@ -437,6 +442,7 @@ pub fn ResultsTable(
                 current_page=current_page
                 total_pages=total_pages
                 total_rows=total_rows
+                has_known_total=has_known_total
                 page_size=page_size
                 display_start=display_start
                 display_end=display_end
@@ -460,6 +466,7 @@ fn PaginationControls(
     current_page: u32,
     total_pages: u32,
     total_rows: usize,
+    has_known_total: bool,
     page_size: u32,
     display_start: usize,
     display_end: usize,
@@ -492,7 +499,12 @@ fn PaginationControls(
                 // Row range display
                 <div class="text-xs whitespace-nowrap overflow-hidden text-ellipsis text-muted-foreground">
                     <span class="hidden sm:inline">
-                        {display_start + 1}"-"{display_end}" of "{total_rows}
+                        {display_start + 1}"-"{display_end}
+                        {if has_known_total {
+                            format!(" of {total_rows}")
+                        } else {
+                            String::new()
+                        }}
                     </span>
                     <span class="sm:hidden">
                         {display_start + 1}"-"{display_end}
@@ -515,7 +527,12 @@ fn PaginationControls(
                         <Icon icon=icondata_lu::LuChevronLeft width="16" height="16" />
                     </Button>
                     <span class="text-xs px-2 text-muted-foreground">
-                        "Page "{current_page}" of "{total_pages}
+                        "Page "{current_page}
+                        {if has_known_total {
+                            format!(" of {total_pages}")
+                        } else {
+                            String::new()
+                        }}
                     </span>
                     <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
                         disabled=MaybeProp::derive(move || Some(is_last))

@@ -8,16 +8,15 @@
 //! Flow:
 //! 1. Validate inputs (datasource selected, query non-empty)
 //! 2. Create a new tab in `Running` state
-//! 3. Choose streaming vs paginated execution based on datasource type
-//! 4. For streaming: call `start_query_stream()` — WebSocket handler updates the tab
-//! 5. For paginated (BigQuery): call `execute_sql_query()` and update the tab directly
-//! 6. Fire-and-forget: save to query history
+//! 3. Call `execute_sql_query()` — returns first page of results
+//! 4. Update tab with results; subsequent pages fetched on demand
+//! 5. Fire-and-forget: save to query history
 
 use leptos::prelude::*;
 
 use super::state::SqlEditorState;
-use super::types::{NewTabData, QueryError, QueryResult, QueryStatus};
-use crate::server_fns::sql_editor::{execute_sql_query, save_query_history, start_query_stream};
+use super::types::{NewTabData, QueryError, QueryStatus};
+use crate::server_fns::sql_editor::{execute_sql_query, save_query_history};
 
 /// Execute a query: validate, create a tab, run async, update tab on completion.
 ///
@@ -66,89 +65,13 @@ pub fn run_query(
 
     query_running.set(true);
 
-    // ── Choose execution path ────────────────────────────────────────────
-    // Streaming for non-BigQuery datasources (matches React logic).
-    let use_streaming = datasource_type != "bigquery";
-
-    if use_streaming {
-        run_streaming_query(state, tab_id, query_text, datasource_slug, query_running);
-    } else {
-        run_paginated_query(state, tab_id, query_text, datasource_slug, query_running);
-    }
+    // ── Execute via paginated server function ─────────────────────────────
+    // All datasource types use the same path: execute server-side, return
+    // one page of results, paginate on demand. No WebSocket streaming.
+    run_paginated_query(state, tab_id, query_text, datasource_slug, query_running);
 }
 
-/// Start a streaming query — calls `start_query_stream()` and lets the
-/// WebSocket handler (in `streaming.rs`) update the tab progressively.
-fn run_streaming_query(
-    state: SqlEditorState,
-    tab_id: String,
-    query_text: String,
-    datasource_slug: String,
-    query_running: WriteSignal<bool>,
-) {
-    let sql = query_text.clone();
-    let ds_slug = datasource_slug.clone();
-
-    // Generate a request ID client-side so the WebSocket handler can
-    // filter events immediately — avoids a race where the WS event
-    // arrives before the HTTP response returns.
-    let request_id = generate_request_id();
-
-    // Store the request_id on the tab SYNCHRONOUSLY (before spawning the
-    // async HTTP call) so the WebSocket handler can correlate events the
-    // instant they arrive.
-    let rid = request_id.clone();
-    let handle_slug = datasource_slug.clone();
-    let handle_sql = query_text.clone();
-    state.update_tab(&tab_id, move |tab| {
-        tab.status = QueryStatus::Streaming;
-        tab.result = Some(QueryResult {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            row_count: 0,
-            total_rows: None,
-            query_handle: Some(super::types::QueryHandle {
-                datasource_type: String::new(),
-                datasource_slug: handle_slug,
-                sql: handle_sql,
-                job_id: Some(rid),
-            }),
-            execution_time: None,
-            bytes_processed: None,
-            has_more: false,
-        });
-    });
-
-    leptos::task::spawn_local(async move {
-        match start_query_stream(ds_slug, sql.clone(), request_id, Some(10_000)).await {
-            Ok(_stream_result) => {
-                // Stream started successfully. The WebSocket handler in
-                // streaming.rs will update the tab as events arrive.
-                // query_running will be cleared by the streaming handler
-                // on complete/error.
-            }
-            Err(e) => {
-                // HTTP request to start the stream failed.
-                let error_msg = e.to_string();
-                state.update_tab(&tab_id, move |tab| {
-                    tab.status = QueryStatus::Error;
-                    tab.error = Some(QueryError {
-                        message: error_msg,
-                        code: None,
-                        line: None,
-                        column: None,
-                    });
-                });
-                query_running.set(false);
-
-                // Fire-and-forget: save error to history.
-                save_to_history(sql, None, None, None, "error", Some(e.to_string()), Some(datasource_slug));
-            }
-        }
-    });
-}
-
-/// Execute a paginated (non-streaming) query — used for BigQuery.
+/// Execute a paginated query — calls `execute_sql_query` server function.
 fn run_paginated_query(
     state: SqlEditorState,
     tab_id: String,
@@ -254,7 +177,7 @@ pub(super) fn save_to_history(
 /// Generate a UUID-like request ID for correlating WebSocket events.
 ///
 /// Uses `crypto.randomUUID()` on WASM, falling back to a timestamp-based ID.
-fn generate_request_id() -> String {
+fn _generate_request_id() -> String {
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(crypto) = web_sys::window().and_then(|w| w.crypto().ok()) {

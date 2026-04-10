@@ -27,7 +27,6 @@ pub use results_table::ResultsTable;
 pub use sidebar::SqlEditorSidebar;
 pub use state::SqlEditorState;
 pub use status_bar::{DryRunStatus, StatusBar};
-pub use streaming::use_query_stream_handler;
 pub use tab_bar::TabBar;
 pub use types::{
     CatalogNode, CatalogNodeType, ColumnMetadata, ColumnSort, NewTabData, QueryError, QueryHandle,
@@ -44,7 +43,6 @@ use leptos_icons::Icon;
 use kode_leptos::EditorHandle;
 
 use crate::components::{ButtonSize, ButtonVariant, ToggleButton};
-use crate::server_fns::sql_editor::get_ws_connection_info;
 
 /// SQL Editor page — full-page component that assembles all sub-components.
 ///
@@ -97,25 +95,6 @@ pub fn SqlEditorPage() -> impl IntoView {
 
     // Track whether there are tabs (controls results panel visibility).
     let has_tabs = Memo::new(move |_| !state.tabs.get().is_empty());
-
-    // ── WebSocket streaming handler ──────────────────────────────────────
-    // Fetch user_id + workspace_id, then set up the WS listener.
-    let ws_info_resource = Resource::new(|| (), |_| async move {
-        get_ws_connection_info().await
-    });
-
-    // Once ws_info loads, start the streaming WS handler.
-    Effect::new(move |_| {
-        let Some(Ok(info)) = ws_info_resource.get() else {
-            return;
-        };
-        use_query_stream_handler(
-            info.user_id,
-            info.workspace_id,
-            state,
-            set_query_running,
-        );
-    });
 
     // ── Sidebar toggle ───────────────────────────────────────────────────
     // The sidebar open/close state is stored in SqlEditorState.active_right_tab.

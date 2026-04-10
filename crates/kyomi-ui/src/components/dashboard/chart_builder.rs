@@ -690,6 +690,53 @@ pub fn ChartBuilderModal(
     let (preview_loading, set_preview_loading) = signal(false);
     let (preview_error, set_preview_error) = signal(None::<String>);
 
+    // ── Auto-fetch preview data when opening with existing datasource + SQL ──
+    #[cfg(target_arch = "wasm32")]
+    {
+        let initial_ds = initial.datasource_slug.clone();
+        let initial_sql = initial.sql.clone();
+        if !initial_ds.is_empty() && !initial_sql.trim().is_empty() {
+            set_preview_loading.set(true);
+            leptos::task::spawn_local(async move {
+                match query_datasource_arrow(initial_ds, initial_sql, None).await {
+                    Ok(query_result) => {
+                        use base64::Engine;
+                        match base64::engine::general_purpose::STANDARD
+                            .decode(&query_result.ipc_base64)
+                        {
+                            Ok(ipc_bytes) => {
+                                match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
+                                    Ok(data_table) => {
+                                        let colors = kyomi_palette("balanced");
+                                        let mut chartml_inst = chartml_core::ChartML::new();
+                                        chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
+                                        chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
+                                        chartml_inst.register_renderer("area", chartml_chart_cartesian::CartesianRenderer::new());
+                                        chartml_inst.register_renderer("pie", chartml_chart_pie::PieRenderer::new());
+                                        chartml_inst.register_renderer("doughnut", chartml_chart_pie::PieRenderer::new());
+                                        chartml_inst.register_renderer("scatter", chartml_chart_scatter::ScatterRenderer::new());
+                                        chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
+                                        chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
+                                        chartml_inst.set_default_palette(colors);
+                                        chartml_inst.register_source("_remote", data_table);
+                                        set_preview_chartml.set(Some(Arc::new(chartml_inst)));
+                                    }
+                                    Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
+                                }
+                            }
+                            Err(e) => set_preview_error.set(Some(format!("Base64 decode error: {e}"))),
+                        }
+                        set_preview_loading.set(false);
+                    }
+                    Err(e) => {
+                        set_preview_error.set(Some(format!("Query error: {e}")));
+                        set_preview_loading.set(false);
+                    }
+                }
+            });
+        }
+    }
+
     // ── View ────────────────────────────────────────────────────────────
 
     let modal_title = if is_edit_mode {
@@ -1414,21 +1461,16 @@ pub fn ChartBuilderModal(
 fn rewrite_spec_for_remote(yaml: &str) -> String {
     match serde_yaml::from_str::<serde_json::Value>(yaml) {
         Ok(mut val) => {
-            // Handle sequence (list) format
             let doc = if let Some(arr) = val.as_array_mut() {
                 arr.first_mut()
             } else {
                 Some(&mut val)
             };
             if let Some(doc) = doc
-                && let Some(data) = doc.get_mut("data")
-                && let Some(obj) = data.as_object_mut()
+                && let Some(obj) = doc.as_object_mut()
             {
-                obj.remove("datasource");
-                obj.remove("sql");
-                obj.remove("query");
                 obj.insert(
-                    "source".to_string(),
+                    "data".to_string(),
                     serde_json::Value::String("_remote".to_string()),
                 );
             }
