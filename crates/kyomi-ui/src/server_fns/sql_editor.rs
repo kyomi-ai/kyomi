@@ -13,6 +13,38 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};
 
+// ---------------------------------------------------------------------------
+// Query count cache — avoids redundant COUNT(*) queries during pagination
+// ---------------------------------------------------------------------------
+
+/// Cache key for a query's total row count.
+/// Keyed by datasource + SQL hash so different queries get separate counts.
+#[cfg(feature = "ssr")]
+fn count_cache_key(datasource_slug: &str, sql: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sql.hash(&mut hasher);
+    let sql_hash = hasher.finish();
+    format!("sql_count:{datasource_slug}:{sql_hash:x}")
+}
+
+/// Cache a total row count in Redis (5 minute TTL).
+#[cfg(feature = "ssr")]
+async fn cache_total_rows(ctx: &super::ServerContext, datasource_slug: &str, sql: &str, total_rows: i64) {
+    if let Some(ref kv) = ctx.kv {
+        let key = count_cache_key(datasource_slug, sql);
+        let _ = kv.set(&key, &total_rows.to_string(), Some(300)).await;
+    }
+}
+
+/// Look up a cached total row count from Redis.
+#[cfg(feature = "ssr")]
+async fn get_cached_total_rows(ctx: &super::ServerContext, datasource_slug: &str, sql: &str) -> Option<i64> {
+    let kv = ctx.kv.as_ref()?;
+    let key = count_cache_key(datasource_slug, sql);
+    kv.get(&key).await.ok()?.and_then(|v| v.parse::<i64>().ok())
+}
+
 use crate::pages::sql_editor::types::{CatalogNode, QueryHistoryEntry, QueryResult};
 #[cfg(feature = "ssr")]
 use crate::pages::sql_editor::types::{CatalogNodeType, ColumnMetadata, QueryHandle};
@@ -116,9 +148,14 @@ pub async fn execute_sql_query(
         super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
 
     // First-page execution always requests the total row count.
-    let result = run_paginated_query(&*provider, &sql, page_size, page, true).await?;
+    let (result, elapsed) = run_paginated_query(&*provider, &sql, page_size, page, true).await?;
 
-    provider_result_to_query_result(result.0, result.1, &ds.slug, ds.datasource_type.as_ref(), &sql)
+    // Cache the total row count so subsequent page fetches skip the COUNT query.
+    if let Some(total) = result.total_rows {
+        cache_total_rows(&ctx, &datasource_slug, &sql, total).await;
+    }
+
+    provider_result_to_query_result(result, elapsed, &ds.slug, ds.datasource_type.as_ref(), &sql)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,10 +241,20 @@ pub async fn fetch_query_page(
     let (_ds, provider) =
         super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
 
-    let include_total = include_total.unwrap_or(false);
-    let result = run_paginated_query(&*provider, &sql, page_size, page, include_total).await?;
+    // Check cache for total row count — avoids a redundant COUNT(*) query.
+    let cached_total = get_cached_total_rows(&ctx, &datasource_slug, &sql).await;
+    let need_total = include_total.unwrap_or(false) && cached_total.is_none();
 
-    provider_result_to_query_result(result.0, result.1, &ds.slug, ds.datasource_type.as_ref(), &sql)
+    let (mut result, elapsed) = run_paginated_query(&*provider, &sql, page_size, page, need_total).await?;
+
+    // Use cached total if available, otherwise cache what the provider returned.
+    if let Some(cached) = cached_total {
+        result.total_rows = Some(cached);
+    } else if let Some(total) = result.total_rows {
+        cache_total_rows(&ctx, &datasource_slug, &sql, total).await;
+    }
+
+    provider_result_to_query_result(result, elapsed, &ds.slug, ds.datasource_type.as_ref(), &sql)
 }
 
 // ===========================================================================
