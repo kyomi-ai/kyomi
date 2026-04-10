@@ -37,16 +37,9 @@ The tracking script is ~1KB, loads asynchronously, and collects zero personal da
 
 This isn't a stripped-down version of analytics. It's a different philosophy: collect only what you need, make it queryable with AI, and skip the privacy headaches.
 
-### Included on Every Plan
+### Included With Kyomi
 
-Website analytics is available on all plans, including Free:
-
-| Plan | Events/Month | Retention |
-|------|-------------|-----------|
-| Free | 50,000 | 30 days |
-| Starter | 1,000,000 | 180 days |
-| Pro | 5,000,000 | 1 year |
-| Team | 25,000,000 | 2 years |
+Website analytics is included on every deployment — Cloud, self-hosted, and desktop. No separate subscription needed.
 
 Get started in Settings > Analytics. Full setup guide: [Website Analytics docs](/docs/analytics).
 

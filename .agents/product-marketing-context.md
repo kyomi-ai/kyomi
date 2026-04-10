@@ -6,8 +6,8 @@
 **One-liner:** Kyomi is the knowledge layer between you and all your data — it learns your business, unifies your databases, and makes your dashboards the source of truth.
 **What it does:** Kyomi sits between your team and their databases. It connects to all of them — Postgres, BigQuery, Snowflake, MySQL, ClickHouse, whatever — and brings them under a single umbrella of accumulated knowledge. Dashboards aren't just charts; they're curated sources of truth that ground every answer Kyomi gives, whether you're asking from Claude.ai, Claude Code, Slack, or the Kyomi app. Unlike individual MCP connectors with dispersed knowledge, Kyomi is the unified intelligence layer across all your data.
 **Product category:** Data intelligence layer / knowledge platform for databases
-**Product type:** Open-source with hosted, self-hosted, and standalone desktop options
-**Business model:** Open source (AGPL). Three deployment modes: (1) Hosted cloud — ~$5/user/month + AI costs; (2) Self-hosted — free, bring your own AI keys; (3) Standalone desktop app — free, single binary, no infrastructure needed. Pricing philosophy: keep the platform cheap, AI usage is the variable cost. Commercial license available for non-AGPL use cases.
+**Product type:** Open-source with hosted, self-hosted, and desktop options
+**Business model:** Open source (AGPL). See Pricing Strategy section below for full details. Commercial license available for non-AGPL use cases.
 
 ## Target Audience
 **Target companies:** Anyone with a database. From a solo founder with a Postgres instance to a mid-market company with BigQuery, Snowflake, and three other databases they need unified. Teams tired of dispersed knowledge across tools, analysts who are the only ones who know what's in the data.
@@ -25,7 +25,7 @@
 - Unify 3+ databases under a single knowledge umbrella instead of per-database MCP connectors
 - Onboarding new team members — the knowledge layer teaches them how the org thinks about data
 - Privacy-focused website analytics (no cookies, built-in)
-- Run as a standalone desktop app for personal analytics on local databases
+- Run as a desktop app for personal analytics on local databases
 
 ## Personas
 | Persona | Cares about | Challenge | Value we promise |
@@ -33,7 +33,7 @@
 | Data Analyst (User/Champion) | Reducing ad-hoc request backlog, accuracy, dashboards as documentation | Drowning in "can you pull this?" requests, knowledge locked in their head | Dashboards become the source of truth everyone references; define metrics once, they're used everywhere |
 | Product Manager (User) | Quick access to metrics from tools they already use | Blocked by analyst availability, has to context-switch to a BI tool | Ask from Claude.ai or Slack, get answers grounded in curated org dashboards |
 | Engineering Lead (Technical Influencer) | Unified data access, no per-database MCP setup | Multiple databases, each with its own connector and no shared context | One knowledge layer across all databases, accessible from Claude Code |
-| Founder/Operator (Decision Maker + User) | Simplicity, cost, runs anywhere | Can't justify enterprise BI, just needs to query their Postgres | Standalone desktop app or self-hosted, open source, affordable hosted option |
+| Founder/Operator (Decision Maker + User) | Simplicity, cost, runs anywhere | Can't justify enterprise BI, just needs to query their Postgres | Desktop desktop app or self-hosted, open source, affordable hosted option |
 | VP/Head of Data (Decision Maker) | Org-wide shared intelligence, not personal chatbots | Knowledge trapped in individual conversations, no org-wide source of truth | Shared knowledge layer where dashboards ARE the documentation |
 
 ## Problems & Pain Points
@@ -59,7 +59,7 @@
 - Shared org intelligence, not personal chatbots — knowledge is designed to be shared across the org. When you ask from Claude.ai, Claude Code, or Slack, you get answers grounded in the same org-wide knowledge. Not siloed in one person's chat history.
 - AI-native, not AI-bolted-on — Kyomi is next-gen BI, slimmed down and built to leverage AI from the ground up. Not a legacy dashboard tool with an AI chatbot stapled to the side.
 - Proactive AI Monitoring (Watches) — AI agents scan data on schedule, detect anomalies, send contextual alerts in plain English.
-- Open source, runs anywhere — hosted cloud, self-hosted, or standalone desktop app. No vendor lock-in.
+- Open source, runs anywhere — hosted cloud, self-hosted, or desktop app. No vendor lock-in.
 - Built-in website analytics — privacy-focused (no cookies, ~1KB script), queryable as a datasource.
 **How we do it differently:** Kyomi is the knowledge layer between you and all your data. You don't come to Kyomi to chat — you chat wherever you already are (Claude.ai, Claude Code, Slack) and Kyomi is the intelligence layer that grounds every answer in your org's curated dashboards and accumulated knowledge. It unifies multiple databases into a single context that the whole org shares.
 **Why that's better:** Individual MCP connectors give you one database at a time with no shared knowledge. Traditional BI gives you charts with no intelligence behind them. AI chatbots give you personal, stateless conversations. Kyomi gives you all your data, all your knowledge, shared across the org, grounded in curated dashboards.
@@ -69,7 +69,7 @@
 | Objection | Response |
 |-----------|----------|
 | "We already have a BI tool" | Kyomi is next-gen BI, not another legacy tool. Your current BI gives you charts. Kyomi gives you a knowledge layer — dashboards that are source of truth, answers grounded in org-approved metrics, intelligence shared across the whole team. It's what BI becomes when you build for AI from the ground up. |
-| "AI can't be trusted with our data" | Your data stays in your database. Kyomi sends the AI a schema + max 20 rows of results, never bulk data. Self-host it, run the standalone desktop app, or use hosted cloud. Open source — audit every line. |
+| "AI can't be trusted with our data" | Your data stays in your database. Kyomi sends the AI a schema + max 20 rows of results, never bulk data. Self-host it, run the desktop app, or use hosted cloud. Open source — audit every line. |
 | "We tried text-to-SQL and it was inaccurate" | Stateless text-to-SQL guesses every time. Kyomi grounds answers in your curated dashboards and accumulated knowledge — org-approved metric definitions, table relationships, business rules. Not hallucinated guesses from a bare schema. |
 | "We already use Claude/ChatGPT with MCP" | Individual MCP connectors give you one database at a time with zero shared context. Kyomi unifies all your databases under one knowledge layer, grounds answers in curated dashboards, and shares that intelligence across the whole org — not just one person's chat. |
 
@@ -116,7 +116,7 @@
 - Dashboard creation in minutes (vs. weeks), and they serve as source of truth not just charts
 - Knowledge compounds with every conversation, shared org-wide
 - ~1KB analytics script (vs. hundreds of KB for GA/others)
-- Standalone app runs on 2GB RAM, no infrastructure needed
+- Desktop app runs on 2GB RAM, no infrastructure needed
 **Customers:** [To be added as community grows]
 **Testimonials:**
 > [To be added]
@@ -126,13 +126,60 @@
 | Unified knowledge layer | All databases under one umbrella, shared org-wide, not per-person chatbot silos |
 | Dashboards as source of truth | Curated dashboards ground every answer — documentation and visualization in one stroke |
 | Works where you are | Ask from Claude.ai, Claude Code, Slack — Kyomi is the intelligence layer, not another app to log into |
-| Open source, runs anywhere | Hosted, self-hosted, standalone desktop. No vendor lock-in. Audit every line. |
+| Open source, runs anywhere | Hosted, self-hosted, desktop. No vendor lock-in. Audit every line. |
 | Next-gen BI | Slimmed down, built for AI from the ground up. Not a legacy tool with AI bolted on. |
 
 ## Goals
 **Business goal:** Establish Kyomi as the next-gen BI platform — the knowledge layer between people and their data. Grow open-source adoption, convert to hosted/paid tiers.
-**Conversion action:** Download standalone app or self-host → connect databases → curate first dashboard as source of truth → share with team → upgrade to hosted for convenience
+**Conversion action:** Download desktop app or self-host → connect databases → curate first dashboard as source of truth → share with team → upgrade to hosted for convenience
 **Current metrics:** [To be filled in]
+
+## Pricing Strategy
+
+*Last updated: 2026-04-10*
+
+### Principles
+- Optimize for adoption and growth, revenue is a bonus
+- One tier, no feature gating, no upsells, no annual contracts
+- Every deployment gets every feature
+- Month-to-month only
+
+### Deployment Modes
+
+| Mode | Price | AI | Analytics | Users |
+|------|-------|-----|-----------|-------|
+| **Cloud** | $5/user/month | BYOK or token bundles | 100K events/mo free, then $10/M/mo | Unlimited |
+| **Self-Hosted** | Free | BYOK | Unlimited (your infrastructure) | Unlimited |
+| **Desktop** | Free | BYOK | Unlimited (local) | Single user |
+
+Cloud includes a 30-day free trial, no credit card required.
+
+### AI — Three Options
+1. **Bring Your Own Key (BYOK)** — User connects their Anthropic, OpenAI, or Google API key. No markup. If a key is provided, it's used first.
+2. **Token Bundles** — Pre-paid AI credits purchased from Kyomi. 30% markup over provider cost (not disclosed publicly). Non-expiring. Fallback when no key is connected.
+3. **MCP (Claude Code, Cursor, Codex)** — User's existing AI subscription handles the LLM cost. Kyomi is the MCP server providing the knowledge layer. No additional AI cost from Kyomi.
+
+### Website Analytics
+- **$10 per million events per month**
+- 6 months data retention
+- Cloud includes 100K events/month free
+- Desktop and self-hosted: unlimited (user hosts their own storage)
+- Competitive positioning: undercuts PostHog ($50/M), Plausible ($69/M), Mixpanel ($280/M)
+
+### Competitive Pricing Position
+| Competitor | Their Price | Kyomi |
+|------------|-----------|-------|
+| Metabase Cloud | $85/mo + $6-12/user | $5/user, no base fee |
+| Looker | ~$5,000/mo+ | $5/user |
+| Power BI Pro | $10/user/mo | $5/user |
+| Hex | $28/user/mo | $5/user |
+| PostHog analytics | $50/1M events | $10/1M events |
+| Plausible | $69/1M pageviews | $10/1M events |
+
+### What We Don't Disclose Publicly
+- Token bundle markup percentage (30%)
+- Token bundle tier breakdown (just "purchase bundles")
+- The word "cheap" — use "affordable" or just state the price
 
 ## Site Architecture Notes
 
@@ -149,6 +196,6 @@
 *Content rewrite priority:*
 1. Homepage — lead with "knowledge layer between you and all your data"
 2. Features — reorganize around unified data layer, dashboards as source of truth, shared org intelligence
-3. Pricing — simplify to ~$5/user/mo + AI, free self-hosted/standalone
+3. Pricing — simplify to ~$5/user/mo + AI, free self-hosted/desktop
 4. Compare/MCP connectors — new page
 5. Blog/Docs — lower priority, update over time

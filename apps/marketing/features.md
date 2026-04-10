@@ -23,7 +23,7 @@ description: The knowledge layer between you and all your data
     </div>
     <div>
       <strong style="color: #166534;">Your data stays in your database.</strong>
-      <span style="color: #15803d; font-size: 0.9rem;"> Kyomi queries directly, AI sees max 20 rows. Self-host it, run the standalone app, or use hosted cloud. Open source (AGPL) — <a href="https://github.com/kyomi-ai/kyomi" style="color: #166534; text-decoration: underline;">audit every line</a>.</span>
+      <span style="color: #15803d; font-size: 0.9rem;"> Kyomi queries directly, AI sees max 20 rows. Self-host it, run the desktop app, or use hosted cloud. Open source (AGPL) — <a href="https://github.com/kyomi-ai/kyomi" style="color: #166534; text-decoration: underline;">audit every line</a>.</span>
     </div>
   </div>
 </div>
@@ -308,7 +308,7 @@ description: The knowledge layer between you and all your data
       <ul style="margin: 0; padding-left: 1.25rem; color: var(--color-muted-foreground); font-size: 0.9rem;">
         <li>Open source (AGPL) — <a href="https://github.com/kyomi-ai/kyomi">audit the code</a></li>
         <li><a href="/self-hosting">Self-host</a> on your own infrastructure</li>
-        <li>Standalone desktop app — single binary, 2GB RAM</li>
+        <li>Desktop app — single binary, 2GB RAM</li>
         <li>OAuth for cloud platforms, encrypted credentials</li>
         <li>Read-only queries, data never leaves your database</li>
       </ul>

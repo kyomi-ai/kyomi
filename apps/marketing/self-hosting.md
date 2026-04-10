@@ -50,7 +50,7 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
 
   <p style="font-size: 0.85rem; color: var(--color-muted-foreground); margin-bottom: 2rem;">The installer will prompt for your LLM API key and access URL, generate security keys, and start everything.</p>
 
-  <h3 style="font-size: 1.1rem; margin-bottom: 0.75rem;">Option 2: Standalone Binary</h3>
+  <h3 style="font-size: 1.1rem; margin-bottom: 0.75rem;">Option 2: Desktop (Standalone Binary)</h3>
   <p style="font-size: 0.9rem; color: var(--color-muted-foreground); margin-bottom: 0.75rem;">A single self-contained binary with the frontend, AI model, and server built in. Uses SQLite — no external database needed.</p>
 
   <div style="background: #1a1a2e; color: #e0e0e0; padding: 1.25rem; border-radius: 0.5rem; font-family: monospace; font-size: 0.875rem; overflow-x: auto; line-height: 1.8; margin-bottom: 1rem;">
@@ -117,7 +117,7 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
 
   <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;">
     <div>
-      <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Standalone Binary</h3>
+      <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Desktop (Standalone Binary)</h3>
       <ul style="margin: 0; padding-left: 1.25rem; color: var(--color-muted-foreground); font-size: 0.9rem; line-height: 1.8;">
         <li>2 GB RAM minimum</li>
         <li>1 GB disk space</li>

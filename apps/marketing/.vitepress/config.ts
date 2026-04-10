@@ -58,7 +58,7 @@ export default defineConfig({
         "Dashboards as source of truth and documentation",
         "Shared org-wide intelligence, not personal chatbots",
         "Open source (AGPL) — self-host or use hosted cloud",
-        "Standalone desktop app — single binary, no infrastructure",
+        "Desktop app — single binary, no infrastructure",
         "MCP integration for Claude Code, Claude.ai, and Cursor",
         "Slack integration with chart rendering",
         "9 database connectors (BigQuery, Snowflake, PostgreSQL, MySQL, ClickHouse, Redshift, Databricks, SQL Server, Azure Synapse)",

@@ -104,7 +104,7 @@ Metabase is an open-source BI tool built in the pre-AI era. It's good at what it
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi</h4>
     <ul style="margin-bottom: 0;">
-      <li><strong>Standalone</strong>: Free (single binary, SQLite)</li>
+      <li><strong>Desktop</strong>: Free (single binary, SQLite)</li>
       <li><strong>Self-Hosted</strong>: Free (Docker, AGPL)</li>
       <li><strong>Hosted Cloud</strong>: ~$5/user/mo + AI costs</li>
     </ul>
@@ -177,7 +177,7 @@ Metabase is an open-source BI tool built in the pre-AI era. It's good at what it
         <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
       </tr>
       <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Standalone Desktop App</strong></td>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Desktop App</strong></td>
         <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">— (requires Java + DB)</td>
         <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Single binary, 2GB RAM</td>
       </tr>
@@ -218,7 +218,7 @@ We believe in honest comparisons. Metabase is mature and well-established:
 - **Unified knowledge layer** — All your databases under one umbrella with shared context. Metabase treats each database separately.
 - **Dashboards as source of truth** — Kyomi dashboards ground every answer in org-approved metrics. Metabase dashboards are just charts.
 - **Works where you are** — Same intelligence in Claude.ai, Claude Code, Slack. Metabase is a standalone web app.
-- **Open source AND cheap cloud** — Both are AGPL. But Kyomi cloud is ~$5/user vs. Metabase's $85/mo + per-user. Kyomi also has a standalone desktop app.
+- **Open source AND affordable cloud** — Both are AGPL. But Kyomi cloud is ~$5/user vs. Metabase's $85/mo + per-user. Kyomi also has a desktop app.
 - **AI that learns** — Knowledge compounds over time, shared org-wide. Metabase starts from scratch each time.
 - **Proactive monitoring** — AI agents that scan data on schedule. Metabase only does threshold alerts.
 
@@ -243,7 +243,7 @@ We believe in honest comparisons. Metabase is mature and well-established:
       <li>Want dashboards that serve as source of truth, not just charts</li>
       <li>Want to ask from Claude.ai, Claude Code, or Slack</li>
       <li>Want org-wide shared intelligence, not personal queries</li>
-      <li>Want open source with a cheap cloud option</li>
+      <li>Want open source with an affordable cloud option</li>
     </ul>
   </div>
 </div>

@@ -22,8 +22,8 @@ Kyomi is the knowledge layer between you and all your databases. It connects to 
 
 ## Deployment
 - Hosted cloud: ~$5/user/month + AI costs
-- Self-hosted: Free, Docker or standalone, bring your own LLM key
-- Standalone desktop app: Free, single binary, SQLite, 2GB RAM
+- Self-hosted: Free, Docker, bring your own LLM key
+- Desktop app: Free, single binary, SQLite, 2GB RAM
 
 ## URL
 https://kyomi.ai

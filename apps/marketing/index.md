@@ -6,7 +6,14 @@ titleTemplate: false
 hero:
   name: "Kyomi"
   text: "The Knowledge Layer For Your Data"
-  tagline: "Unify all your databases under one layer of shared intelligence. Dashboards become your source of truth. Ask questions from Claude, Slack, or the Kyomi app — every answer grounded in your org's curated knowledge. Open source. Runs anywhere."
+  tagline: "Unify all your databases under one layer of shared intelligence. Dashboards become your source of truth. Ask from Claude, Slack, or the Kyomi app. Open source. Runs anywhere."
+  actions:
+    - theme: brand
+      text: Get Started Free
+      link: https://app.kyomi.ai/login
+    - theme: alt
+      text: View on GitHub
+      link: https://github.com/kyomi-ai/kyomi
 
 ---
 
@@ -17,9 +24,10 @@ hero:
   </p>
 </div>
 
-<div style="text-align: center; margin: 3rem auto 2rem; max-width: 48rem;">
-  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem;">One Knowledge Layer, All Your Data</h2>
-  <p style="color: var(--color-muted-foreground); font-size: 1.125rem;">Not another connector per database. One unified layer of intelligence across everything.</p>
+<div style="text-align: center; margin: 4rem auto 2rem; max-width: 48rem;">
+  <span class="section-label">Unified Intelligence</span>
+  <h2>One Knowledge Layer, <em>All Your Data</em></h2>
+  <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-top: 0.75rem;">Not another connector per database. One unified layer of intelligence across everything.</p>
 </div>
 
 <div style="max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem;">
@@ -38,9 +46,10 @@ hero:
 
 ---
 
-<div style="text-align: center; margin: 3rem auto 2rem; max-width: 48rem;">
-  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem;">Dashboards That Are Actually Useful</h2>
-  <p style="color: var(--color-muted-foreground); font-size: 1.125rem;">Not just charts. Source of truth and documentation in the same stroke.</p>
+<div style="text-align: center; margin: 4rem auto 2rem; max-width: 48rem;">
+  <span class="section-label">Source of Truth</span>
+  <h2>Dashboards That Are <em>Actually Useful</em></h2>
+  <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-top: 0.75rem;">Not just charts. Source of truth and documentation in the same stroke.</p>
 </div>
 
 <div style="max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem;">
@@ -59,9 +68,10 @@ hero:
 
 ---
 
-<div style="text-align: center; margin: 3rem auto 2rem; max-width: 48rem;">
-  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem;">Ask From Wherever You Already Are</h2>
-  <p style="color: var(--color-muted-foreground); font-size: 1.125rem;">Kyomi is the intelligence layer behind your tools, not another app to log into.</p>
+<div style="text-align: center; margin: 4rem auto 2rem; max-width: 48rem;">
+  <span class="section-label">Works Where You Are</span>
+  <h2>Ask From <em>Wherever You Already Are</em></h2>
+  <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-top: 0.75rem;">Kyomi is the intelligence layer behind your tools, not another app to log into.</p>
 </div>
 
 <div style="max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem;">
@@ -80,9 +90,10 @@ hero:
 
 ---
 
-<div style="text-align: center; margin: 3rem auto 2rem; max-width: 48rem;">
-  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem;">Always Watching</h2>
-  <p style="color: var(--color-muted-foreground); font-size: 1.125rem;">AI agents that monitor your metrics around the clock.</p>
+<div style="text-align: center; margin: 4rem auto 2rem; max-width: 48rem;">
+  <span class="section-label">Proactive Monitoring</span>
+  <h2><em>Always</em> Watching</h2>
+  <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-top: 0.75rem;">AI agents that monitor your metrics around the clock.</p>
 </div>
 
 <div style="max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem;">
@@ -93,9 +104,10 @@ hero:
 
 ---
 
-<div style="text-align: center; margin: 3rem auto 2rem; max-width: 48rem;">
-  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem;">Open Source. Runs Anywhere.</h2>
-  <p style="color: var(--color-muted-foreground); font-size: 1.125rem;">Three ways to run Kyomi. All of them yours.</p>
+<div style="text-align: center; margin: 4rem auto 2rem; max-width: 48rem;">
+  <span class="section-label">Open Source</span>
+  <h2>Runs <em>Anywhere</em></h2>
+  <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-top: 0.75rem;">Three ways to run Kyomi. All of them yours.</p>
 </div>
 
 <div style="max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem;">
@@ -110,7 +122,7 @@ hero:
     <p style="color: var(--color-muted-foreground); margin: 0; font-size: 0.9rem;">Free. Deploy on your infrastructure, bring your own AI keys.</p>
   </div>
   <div style="border: 1px solid var(--color-border); border-radius: 0.75rem; padding: 1.5rem; text-align: center;">
-    <h3 style="font-size: 1.125rem; font-weight: 600; margin: 0 0 0.5rem 0;">Standalone App</h3>
+    <h3 style="font-size: 1.125rem; font-weight: 600; margin: 0 0 0.5rem 0;">Desktop</h3>
     <p style="color: var(--color-muted-foreground); margin: 0; font-size: 0.9rem;">Free. Single binary, no infrastructure needed. 2GB RAM.</p>
   </div>
 </div>
@@ -138,40 +150,6 @@ hero:
 </div>
 
 <style>
-.VPHome {
-  padding-bottom: 0;
-}
-
-/* Hero background image with transparency */
-.VPHero {
-  position: relative !important;
-  background-image: url('/images/hero-screenshot.png') !important;
-  background-size: cover !important;
-  background-position: center !important;
-  background-repeat: no-repeat !important;
-}
-
-.VPHero::after {
-  content: '' !important;
-  position: absolute !important;
-  top: 0 !important;
-  left: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  background-color: rgba(255, 255, 255, 0.9) !important;
-  z-index: 0 !important;
-}
-
-.VPHero .container,
-.VPHero .main,
-.VPHero .name,
-.VPHero .text,
-.VPHero .tagline,
-.VPHero .actions {
-  position: relative !important;
-  z-index: 1 !important;
-}
-
 /* Responsive grid for deployment options */
 @media (max-width: 768px) {
   div[style*="grid-template-columns: repeat(3"] {
