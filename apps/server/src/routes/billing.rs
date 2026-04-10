@@ -716,7 +716,7 @@ async fn handle_checkout_completed(state: &AppState, session: &CheckoutSession) 
 
     // Only process one-time payments (bundle purchases). Subscription checkouts
     // are handled by the customer.subscription.created event.
-    if session.mode != Some(CheckoutSessionMode::Payment) {
+    if session.mode != CheckoutSessionMode::Payment {
         tracing::info!(
             workspace_id = %workspace_id,
             "Subscription checkout completed"

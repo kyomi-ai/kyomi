@@ -24,7 +24,10 @@ use crate::components::{
 };
 use crate::server_fns::billing::*;
 use crate::server_fns::context::UserContext;
-use kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED;
+/// Included analytics events per month for Cloud subscribers.
+/// Mirrors `kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED` — defined here
+/// because kyomi-core is SSR-only and not available on the WASM target.
+const ANALYTICS_EVENTS_INCLUDED: u64 = 100_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -902,7 +905,7 @@ pub(crate) fn format_number(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(ch);

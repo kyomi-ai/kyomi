@@ -19,7 +19,10 @@ use crate::components::{
 use crate::server_fns::usage::{get_ai_usage_status, UsageData};
 
 use super::billing::format_number;
-use kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED;
+/// Included analytics events per month for Cloud subscribers.
+/// Mirrors `kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED` — defined here
+/// because kyomi-core is SSR-only and not available on the WASM target.
+const ANALYTICS_EVENTS_INCLUDED: u64 = 100_000;
 
 /// Feature definition for the stacked bar chart legend.
 struct FeatureDef {
