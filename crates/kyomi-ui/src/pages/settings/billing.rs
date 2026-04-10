@@ -254,13 +254,14 @@ pub fn BillingPage() -> impl IntoView {
     // ── Actions ──────────────────────────────────────────────────────────
 
     let handle_upgrade = Action::new({
-        move |(tier, cycle): &(String, String)| {
-            let tier = tier.clone();
-            let cycle = cycle.clone();
+        move |(_tier, _cycle): &(String, String)| {
             async move {
                 set_checkout_loading.set(true);
                 set_error.set(None);
-                match create_checkout(tier, cycle, None).await {
+                // Cloud plan — single tier, per-seat pricing. Default to 1 seat
+                // for new subscriptions. The tier/cycle params from the UI are
+                // ignored since there is only one Cloud plan.
+                match create_checkout(1).await {
                     Ok(_redirect) => {
                         #[cfg(target_arch = "wasm32")]
                         {

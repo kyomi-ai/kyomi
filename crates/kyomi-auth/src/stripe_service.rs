@@ -23,7 +23,6 @@ use stripe_checkout::checkout_session::{
 };
 use stripe_checkout::CheckoutSessionMode;
 use stripe_core::customer::CreateCustomer;
-use stripe_product::product::RetrieveProduct;
 use stripe_shared::{
     Subscription, SubscriptionStatus,
 };
@@ -40,12 +39,9 @@ pub struct CheckoutParams {
     pub success_url: String,
     pub cancel_url: String,
     pub workspace_id: String,
-    pub tier: String,
-    pub billing_cycle: String,
+    /// Number of users (subscription quantity).
+    pub quantity: u64,
     pub trial_days: u32,
-    pub additional_users_price_id: Option<String>,
-    /// Number of additional Team users to add (beyond base 5).
-    pub additional_users_quantity: u64,
 }
 
 /// Result of creating a checkout session.
@@ -66,8 +62,6 @@ pub struct SubscriptionData {
     pub period_end: Option<DateTime<Utc>>,
     pub stripe_subscription_id: String,
     pub stripe_customer_id: String,
-    pub additional_users_item_id: Option<String>,
-    pub additional_users_quantity: i64,
 }
 
 /// A simplified invoice record for API responses.
@@ -80,6 +74,18 @@ pub struct InvoiceData {
     pub hosted_invoice_url: Option<String>,
     pub invoice_pdf: Option<String>,
     pub created: Option<i64>,
+}
+
+/// Parameters for creating a one-time payment checkout session (e.g. bundle purchases).
+#[derive(Debug)]
+pub struct PaymentCheckoutParams {
+    pub customer_id: String,
+    pub price_id: String,
+    pub success_url: String,
+    pub cancel_url: String,
+    pub workspace_id: String,
+    /// Type of purchase (e.g. "ai_bundle", "analytics_bundle").
+    pub purchase_type: String,
 }
 
 // ─── Service ────────────────────────────────────────────────────────────────
@@ -150,40 +156,23 @@ impl StripeService {
         &self,
         params: &CheckoutParams,
     ) -> Result<CheckoutResult, StripeError> {
-        // Build line items
-        let mut line_items = vec![CreateCheckoutSessionLineItems {
+        // Single line item — quantity is the number of users
+        let line_items = vec![CreateCheckoutSessionLineItems {
             price: Some(params.price_id.clone()),
-            quantity: Some(1),
+            quantity: Some(params.quantity),
             ..Default::default()
         }];
 
-        // Add additional users line item for Team tier
-        if let Some(ref additional_price_id) = params.additional_users_price_id
-            && params.additional_users_quantity > 0
-        {
-            line_items.push(CreateCheckoutSessionLineItems {
-                price: Some(additional_price_id.clone()),
-                quantity: Some(params.additional_users_quantity),
-                ..Default::default()
-            });
-        }
-
-        // Build subscription_data metadata
+        // Subscription metadata — just workspace_id and brand
         let sub_metadata: std::collections::HashMap<String, String> = [
             ("workspace_id".to_string(), params.workspace_id.clone()),
-            ("tier".to_string(), params.tier.clone()),
-            ("billing_cycle".to_string(), params.billing_cycle.clone()),
             ("brand".to_string(), "kyomi".to_string()),
-            ("source".to_string(), "kyomi_app".to_string()),
         ]
         .into_iter()
         .collect();
 
         let mut sub_data = CreateCheckoutSessionSubscriptionData {
-            description: Some(format!(
-                "Kyomi Analytics - {} Plan",
-                capitalize_first(&params.tier)
-            )),
+            description: Some("Kyomi Cloud".to_string()),
             metadata: Some(sub_metadata),
             ..Default::default()
         };
@@ -192,11 +181,10 @@ impl StripeService {
             sub_data.trial_period_days = Some(params.trial_days);
         }
 
-        // Build checkout session parameters
+        // Session metadata
         let session_metadata: std::collections::HashMap<String, String> = [
             ("workspace_id".to_string(), params.workspace_id.clone()),
             ("brand".to_string(), "kyomi".to_string()),
-            ("source".to_string(), "kyomi_app".to_string()),
         ]
         .into_iter()
         .collect();
@@ -211,7 +199,7 @@ impl StripeService {
             .subscription_data(sub_data)
             .metadata(session_metadata)
             .custom_text(CreateCheckoutSessionCustomText {
-                submit: Some(CustomTextPositionParam::new("Subscribe to Kyomi Analytics")),
+                submit: Some(CustomTextPositionParam::new("Subscribe to Kyomi Cloud")),
                 ..Default::default()
             })
             .automatic_tax(CreateCheckoutSessionAutomaticTax {
@@ -231,6 +219,59 @@ impl StripeService {
             session_id = %session.id,
             workspace_id = %params.workspace_id,
             "Created checkout session"
+        );
+
+        let checkout_url = session.url.ok_or_else(|| {
+            StripeError::ClientError(
+                "Checkout session created but no URL returned".into(),
+            )
+        })?;
+
+        Ok(CheckoutResult {
+            session_id: session.id.to_string(),
+            checkout_url,
+        })
+    }
+
+    /// Create a one-time payment checkout session (for bundle purchases).
+    pub async fn create_payment_checkout_session(
+        &self,
+        params: &PaymentCheckoutParams,
+    ) -> Result<CheckoutResult, StripeError> {
+        let line_items = vec![CreateCheckoutSessionLineItems {
+            price: Some(params.price_id.clone()),
+            quantity: Some(1),
+            ..Default::default()
+        }];
+
+        let session_metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), params.workspace_id.clone()),
+            ("brand".to_string(), "kyomi".to_string()),
+            ("purchase_type".to_string(), params.purchase_type.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        let session = CreateCheckoutSession::new()
+            .customer(&params.customer_id)
+            .mode(CheckoutSessionMode::Payment)
+            .payment_method_types(vec![CreateCheckoutSessionPaymentMethodTypes::Card])
+            .line_items(line_items)
+            .success_url(&params.success_url)
+            .cancel_url(&params.cancel_url)
+            .metadata(session_metadata)
+            .automatic_tax(CreateCheckoutSessionAutomaticTax {
+                enabled: true,
+                liability: None,
+            })
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            session_id = %session.id,
+            workspace_id = %params.workspace_id,
+            purchase_type = %params.purchase_type,
+            "Created payment checkout session"
         );
 
         let checkout_url = session.url.ok_or_else(|| {
@@ -360,6 +401,36 @@ impl StripeService {
         Ok(())
     }
 
+    /// Update the seat count on a Cloud subscription.
+    ///
+    /// Retrieves the subscription, finds the first item, and sets its quantity.
+    pub async fn update_seat_count(
+        &self,
+        subscription_id: &str,
+        total_users: u64,
+    ) -> Result<(), StripeError> {
+        let subscription = RetrieveSubscription::new(subscription_id)
+            .send(&self.client)
+            .await?;
+
+        let first_item = subscription.items.data.first().ok_or_else(|| {
+            StripeError::ClientError("Subscription has no items".into())
+        })?;
+
+        UpdateSubscriptionItem::new(first_item.id.clone())
+            .quantity(total_users)
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            subscription_id,
+            total_users,
+            "Updated seat count"
+        );
+
+        Ok(())
+    }
+
     /// Cancel a subscription.
     ///
     /// If `at_period_end` is true, the subscription remains active until the
@@ -419,48 +490,22 @@ impl StripeService {
     /// Parse a Stripe `Subscription` object into our application-level
     /// `SubscriptionData`.
     ///
-    /// Extracts tier and billing cycle from subscription metadata, determines
-    /// user limits based on tier, identifies additional-users line items,
-    /// and computes the effective status.
+    /// All subscriptions are Cloud tier. User limit equals the quantity
+    /// on the first subscription item.
     pub async fn parse_subscription_data(
         &self,
         subscription: &Subscription,
     ) -> Result<SubscriptionData, StripeError> {
         let items = &subscription.items.data;
 
-        // Read tier and billing cycle from subscription metadata
-        let metadata = &subscription.metadata;
-        let tier = metadata
-            .get("tier")
-            .cloned()
-            .unwrap_or_else(|| "free".to_string());
-        let billing_cycle = metadata.get("billing_cycle").cloned();
+        // Billing cycle from metadata (kept for display purposes)
+        let billing_cycle = subscription.metadata.get("billing_cycle").cloned();
 
-        // Determine base user limit
-        let mut user_limit: i32 = if tier == "team" { 5 } else { 1 };
-
-        let mut additional_users_item_id: Option<String> = None;
-        let mut additional_users_quantity: i64 = 0;
-
-        // Check for additional users line item (Team tier only)
-        if items.len() > 1 {
-            let additional_item = &items[1];
-            let product_id = match &additional_item.price.product {
-                Expandable::Id(id) => id.clone(),
-                Expandable::Object(p) => p.id.clone(),
-            };
-            // Retrieve the product to check its name
-            let product = RetrieveProduct::new(product_id)
-                .send(&self.client)
-                .await?;
-            if product.name.to_lowercase().contains("additional user") {
-                additional_users_item_id =
-                    Some(additional_item.id.to_string());
-                additional_users_quantity =
-                    additional_item.quantity.unwrap_or(0) as i64;
-                user_limit += additional_users_quantity as i32;
-            }
-        }
+        // User limit = quantity of the first (and only) subscription item
+        let user_limit = items
+            .first()
+            .and_then(|item| item.quantity)
+            .unwrap_or(1) as i32;
 
         // Determine status
         let status = if subscription.cancel_at_period_end {
@@ -495,7 +540,7 @@ impl StripeService {
         };
 
         Ok(SubscriptionData {
-            tier,
+            tier: "cloud".to_string(),
             status,
             billing_cycle,
             user_limit,
@@ -503,8 +548,6 @@ impl StripeService {
             period_end,
             stripe_subscription_id: subscription.id.to_string(),
             stripe_customer_id: customer_id,
-            additional_users_item_id,
-            additional_users_quantity,
         })
     }
 
@@ -565,33 +608,11 @@ impl StripeService {
     }
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/// Capitalise the first letter of a string.
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => {
-            let upper: String = first.to_uppercase().collect();
-            upper + chars.as_str()
-        }
-    }
-}
-
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_capitalize_first() {
-        assert_eq!(capitalize_first("pro"), "Pro");
-        assert_eq!(capitalize_first("team"), "Team");
-        assert_eq!(capitalize_first(""), "");
-        assert_eq!(capitalize_first("a"), "A");
-    }
 
     #[test]
     fn test_checkout_params_debug() {
@@ -602,11 +623,8 @@ mod tests {
             success_url: "https://example.com/success".to_string(),
             cancel_url: "https://example.com/cancel".to_string(),
             workspace_id: "ws-test".to_string(),
-            tier: "pro".to_string(),
-            billing_cycle: "monthly".to_string(),
+            quantity: 1,
             trial_days: 0,
-            additional_users_price_id: None,
-            additional_users_quantity: 0,
         };
         let debug_str = format!("{params:?}");
         assert!(debug_str.contains("cus_test"));
@@ -615,20 +633,18 @@ mod tests {
     #[test]
     fn test_subscription_data_serialization() {
         let data = SubscriptionData {
-            tier: "pro".to_string(),
+            tier: "cloud".to_string(),
             status: "active".to_string(),
             billing_cycle: Some("monthly".to_string()),
-            user_limit: 1,
+            user_limit: 3,
             period_start: None,
             period_end: None,
             stripe_subscription_id: "sub_test".to_string(),
             stripe_customer_id: "cus_test".to_string(),
-            additional_users_item_id: None,
-            additional_users_quantity: 0,
         };
         let json = serde_json::to_value(&data).expect("serialize");
-        assert_eq!(json["tier"], "pro");
+        assert_eq!(json["tier"], "cloud");
         assert_eq!(json["status"], "active");
-        assert_eq!(json["user_limit"], 1);
+        assert_eq!(json["user_limit"], 3);
     }
 }

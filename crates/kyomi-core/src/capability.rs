@@ -100,9 +100,6 @@ pub fn get_subscription_tier(workspace: &Workspace) -> SubscriptionTier {
 }
 
 /// Parse a tier string, mapping legacy names to enum variants.
-///
-/// `"cloud"` maps to `Enterprise` as a temporary bridge — will map to a
-/// dedicated `Cloud` variant when Task 10 adds it to the enum.
 fn parse_tier(s: &str) -> Option<SubscriptionTier> {
     match s {
         "free" => Some(SubscriptionTier::Free),
@@ -110,7 +107,8 @@ fn parse_tier(s: &str) -> Option<SubscriptionTier> {
         "starter" => Some(SubscriptionTier::Starter),
         "pro" | "regular" => Some(SubscriptionTier::Pro),
         "team" => Some(SubscriptionTier::Team),
-        "enterprise" | "cloud" => Some(SubscriptionTier::Enterprise),
+        "enterprise" => Some(SubscriptionTier::Enterprise),
+        "cloud" => Some(SubscriptionTier::Cloud),
         _ => None,
     }
 }

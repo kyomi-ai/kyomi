@@ -90,7 +90,6 @@ fn require_workspace_admin(
 #[cfg(feature = "ssr")]
 #[derive(Debug, sqlx::FromRow)]
 struct WorkspaceRow {
-    workspace_id: String,
     name: Option<String>,
     subscription_tier: String,
     subscription_status: String,
@@ -100,7 +99,6 @@ struct WorkspaceRow {
     user_limit: Option<i32>,
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
-    stripe_additional_users_item_id: Option<String>,
 }
 
 #[cfg(feature = "ssr")]
@@ -129,12 +127,12 @@ async fn load_workspace(
 ) -> Result<WorkspaceRow, ServerFnError> {
     kyomi_core::db_fetch_optional!(
         db, WorkspaceRow,
-        "SELECT workspace_id, name, subscription_tier, subscription_status, \
+        "SELECT name, subscription_tier, subscription_status, \
          billing_cycle, \
          CAST(subscription_period_start AS TEXT) AS subscription_period_start, \
          CAST(subscription_period_end AS TEXT) AS subscription_period_end, \
          user_limit, \
-         stripe_customer_id, stripe_subscription_id, stripe_additional_users_item_id \
+         stripe_customer_id, stripe_subscription_id \
          FROM workspaces WHERE workspace_id = $1",
         ws_id
     )
@@ -273,11 +271,12 @@ pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
 /// Create a Stripe checkout session and return the redirect URL.
 ///
 /// Mirrors `POST /api/v1/billing/create-checkout`.
+///
+/// Cloud plan — single tier, per-seat pricing. `quantity` is the number of
+/// seats (users) to subscribe for.
 #[server(prefix = "/leptos-api")]
 pub async fn create_checkout(
-    tier: String,
-    billing_cycle: String,
-    additional_users: Option<u64>,
+    quantity: u64,
 ) -> Result<RedirectUrl, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -286,8 +285,6 @@ pub async fn create_checkout(
 
     let stripe_service = require_stripe(&ctx.config)?;
     let workspace = load_workspace(&ctx.db, ws_id).await?;
-
-    let additional_users = additional_users.unwrap_or(0);
 
     // If user already has an active subscription, modify it directly
     if let Some(ref sub_id) = workspace.stripe_subscription_id
@@ -298,10 +295,8 @@ pub async fn create_checkout(
             &ctx.db,
             &ctx.config,
             &stripe_service,
-            &workspace,
             sub_id,
-            &tier,
-            &billing_cycle,
+            ws_id,
         )
         .await;
     }
@@ -309,11 +304,10 @@ pub async fn create_checkout(
     // New subscription flow
     let is_test = is_stripe_test_mode(&ctx.config);
 
-    let price_id = kyomi_auth::stripe_config::get_price_id(&tier, &billing_cycle, is_test)
+    // Cloud plan — single price, tier/billing_cycle params ignored by get_price_id
+    let price_id = kyomi_auth::stripe_config::get_price_id("cloud", "monthly", is_test)
         .ok_or_else(|| {
-            ServerFnError::new(format!(
-                "Invalid tier/billing_cycle combination: {tier}/{billing_cycle}"
-            ))
+            ServerFnError::new("Cloud price ID not configured")
         })?;
 
     // Create Stripe customer if workspace doesn't have one
@@ -339,14 +333,6 @@ pub async fn create_checkout(
         }
     };
 
-    // Build additional users line item for Team tier
-    let additional_users_price_id = if tier == "team" && additional_users > 0 {
-        kyomi_auth::stripe_config::get_additional_user_price_id(&billing_cycle, is_test)
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
-
     let frontend_url = &ctx.config.frontend_url;
     let success_url = format!("{frontend_url}/settings/billing?checkout=success");
     let cancel_url = format!("{frontend_url}/settings/billing?checkout=cancelled");
@@ -357,11 +343,8 @@ pub async fn create_checkout(
         success_url,
         cancel_url,
         workspace_id: ws_id.to_string(),
-        tier,
-        billing_cycle,
-        trial_days: 0,
-        additional_users_price_id,
-        additional_users_quantity: additional_users,
+        quantity,
+        trial_days: 30,
     };
 
     let checkout_result = stripe_service
@@ -374,53 +357,33 @@ pub async fn create_checkout(
     })
 }
 
-/// Modify an existing Stripe subscription (change plan).
+/// Modify an existing Stripe subscription (reactivate cancelled plan).
+///
+/// Cloud plan — single tier, so the only meaningful modification is
+/// reactivating a cancelled subscription on the same price. Tier changes
+/// are not applicable since there is only one Cloud tier.
 #[cfg(feature = "ssr")]
 async fn modify_existing_subscription(
     db: &kyomi_core::DbPool,
     config: &kyomi_core::Config,
     stripe_service: &kyomi_auth::stripe_service::StripeService,
-    workspace: &WorkspaceRow,
     subscription_id: &str,
-    tier: &str,
-    billing_cycle: &str,
+    workspace_id: &str,
 ) -> Result<RedirectUrl, ServerFnError> {
     let is_test = is_stripe_test_mode(config);
 
     let new_price_id =
-        kyomi_auth::stripe_config::get_price_id(tier, billing_cycle, is_test).ok_or_else(
-            || {
-                ServerFnError::new(format!(
-                    "Invalid tier/billing_cycle combination: {tier}/{billing_cycle}"
-                ))
-            },
+        kyomi_auth::stripe_config::get_price_id("cloud", "monthly", is_test).ok_or_else(
+            || ServerFnError::new("Cloud price ID not configured"),
         )?;
 
-    // If downgrading from Team, remove additional users item
-    if (tier == "starter" || tier == "pro")
-        && let Some(ref item_id) = workspace.stripe_additional_users_item_id
-    {
-        stripe_service
-            .update_subscription_quantity(subscription_id, item_id, 0)
-            .await
-            .map_err(|e| ServerFnError::new(format!("Failed to remove additional users: {e}")))?;
-
-        kyomi_core::db_execute!(
-            db,
-            "UPDATE workspaces SET stripe_additional_users_item_id = NULL \
-             WHERE workspace_id = $1",
-            &workspace.workspace_id
-        )
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    }
-
-    // Modify the subscription
+    // Modify the subscription to the Cloud price
     let sub_data = stripe_service
-        .update_subscription(subscription_id, new_price_id, tier, billing_cycle)
+        .update_subscription(subscription_id, new_price_id, "cloud", "monthly")
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to modify subscription: {e}")))?;
 
-    // Update workspace from Stripe data
+    // Write Stripe state back to DB immediately (don't wait for webhook)
     let period_start_str = sub_data.period_start.map(|dt| dt.to_rfc3339());
     let period_end_str = sub_data.period_end.map(|dt| dt.to_rfc3339());
     kyomi_core::db_execute!(
@@ -431,17 +394,15 @@ async fn modify_existing_subscription(
              billing_cycle = $3, \
              subscription_period_start = $4, \
              subscription_period_end = $5, \
-             user_limit = $6, \
-             stripe_additional_users_item_id = $7 \
-         WHERE workspace_id = $8",
+             user_limit = $6 \
+         WHERE workspace_id = $7",
         &sub_data.tier,
         &sub_data.status,
         sub_data.billing_cycle.as_deref(),
         period_start_str.as_deref(),
         period_end_str.as_deref(),
         sub_data.user_limit,
-        sub_data.additional_users_item_id.as_deref(),
-        &workspace.workspace_id
+        workspace_id
     )
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -526,9 +487,13 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
     })
 }
 
-/// Update the team size for a Team tier subscription.
+/// Update the user seat count for a Cloud subscription.
 ///
 /// Mirrors `POST /api/v1/billing/update-team-size`.
+///
+/// Cloud plan — per-seat pricing. Uses `update_subscription` to modify the
+/// subscription's primary line item quantity via a price update (same price,
+/// new quantity applied by Stripe). Works for all Cloud users (no tier gate).
 #[server(prefix = "/leptos-api")]
 pub async fn update_team_size(total_users: i32) -> Result<BillingResult, ServerFnError> {
     let auth = extract_auth().await?;
@@ -538,12 +503,6 @@ pub async fn update_team_size(total_users: i32) -> Result<BillingResult, ServerF
 
     let stripe_service = require_stripe(&ctx.config)?;
     let workspace = load_workspace(&ctx.db, ws_id).await?;
-
-    if workspace.subscription_tier != "team" {
-        return Err(ServerFnError::new(
-            "Team size can only be updated for Team tier subscriptions",
-        ));
-    }
 
     if workspace.subscription_status != "active" && workspace.subscription_status != "trialing" {
         return Err(ServerFnError::new(format!(
@@ -557,9 +516,9 @@ pub async fn update_team_size(total_users: i32) -> Result<BillingResult, ServerF
         .as_deref()
         .ok_or_else(|| ServerFnError::new("No active subscription found"))?;
 
-    if total_users < 5 {
+    if total_users < 1 {
         return Err(ServerFnError::new(
-            "Team tier requires a minimum of 5 users",
+            "At least 1 user seat is required",
         ));
     }
 
@@ -575,72 +534,29 @@ pub async fn update_team_size(total_users: i32) -> Result<BillingResult, ServerF
 
     if (total_users as i64) < current_member_count {
         return Err(ServerFnError::new(format!(
-            "Cannot reduce team size to {} users. You currently have {} active members. \
-             Please remove members first before reducing your team size.",
+            "Cannot reduce to {} seats. You currently have {} active members. \
+             Please remove members first before reducing your seat count.",
             total_users, current_member_count
         )));
     }
 
-    let additional_users = total_users - 5;
-    let is_test = is_stripe_test_mode(&ctx.config);
+    // Update the seat count on the subscription's main item.
+    stripe_service
+        .update_seat_count(sub_id, total_users as u64)
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to update user count: {e}")))?;
 
-    if workspace.stripe_additional_users_item_id.is_none() && additional_users > 0 {
-        // Need to add a new additional users subscription item
-        let add_price_id = kyomi_auth::stripe_config::get_additional_user_price_id(
-            workspace.billing_cycle.as_deref().unwrap_or("monthly"),
-            is_test,
-        )
-        .ok_or_else(|| {
-            ServerFnError::new(format!(
-                "Invalid billing cycle: {:?}",
-                workspace.billing_cycle
-            ))
-        })?;
-
-        let item_id_str = stripe_service
-            .add_subscription_item(sub_id, add_price_id, additional_users as u64)
-            .await
-            .map_err(|e| {
-                ServerFnError::new(format!("Failed to add additional users: {e}"))
-            })?;
-
-        kyomi_core::db_execute!(
-            &ctx.db,
-            "UPDATE workspaces SET user_limit = $1, stripe_additional_users_item_id = $2 \
-             WHERE workspace_id = $3",
-            total_users,
-            &item_id_str,
-            ws_id
-        )
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    } else if let Some(ref item_id) = workspace.stripe_additional_users_item_id {
-        // Update existing additional users item quantity
-        stripe_service
-            .update_subscription_quantity(sub_id, item_id, additional_users as i64)
-            .await
-            .map_err(|e| ServerFnError::new(format!("Failed to update team size: {e}")))?;
-
-        if additional_users == 0 {
-            kyomi_core::db_execute!(
-                &ctx.db,
-                "UPDATE workspaces SET user_limit = 5, stripe_additional_users_item_id = NULL \
-                 WHERE workspace_id = $1",
-                ws_id
-            )
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        } else {
-            kyomi_core::db_execute!(
-                &ctx.db,
-                "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
-                total_users,
-                ws_id
-            )
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        }
-    }
+    // Update workspace user_limit
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
+        total_users,
+        ws_id
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(BillingResult {
-        message: format!("Team size updated to {} users", total_users),
+        message: format!("Seat count updated to {} users", total_users),
     })
 }
 

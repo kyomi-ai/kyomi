@@ -51,7 +51,7 @@ const TABS: &[SettingsTab] = &[
 fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
     let is_admin = ctx.workspace_roles.iter().any(|r| r == "workspace_admin");
     let multi_user = ctx.capabilities.get("multi_user_enabled").copied().unwrap_or(false);
-    let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise");
+    let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise" | "cloud");
 
     let mut tabs = Vec::new();
 
