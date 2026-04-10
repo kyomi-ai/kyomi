@@ -25,7 +25,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use stripe_shared::{Invoice, Subscription};
+use stripe_shared::{CheckoutSession, CheckoutSessionMode, Invoice, Subscription};
 use stripe_types::Expandable;
 use stripe_webhook::EventObject;
 
@@ -33,7 +33,7 @@ use kyomi_auth::{
     billing_service::BillingService,
     middleware::AuthUser,
     stripe_config,
-    stripe_service::{CheckoutParams, StripeService},
+    stripe_service::{CheckoutParams, PaymentCheckoutParams, StripeService},
 };
 
 use crate::state::AppState;
@@ -53,7 +53,10 @@ pub fn routes() -> Router<AppState> {
         .route("/cancel-subscription", post(cancel_subscription))
         .route("/reactivate-subscription", post(reactivate_subscription))
         .route("/subscription-info", get(get_subscription_info))
-        .route("/update-team-size", post(update_team_size))
+        .route("/update-team-size", post(update_user_count))
+        .route("/update-user-count", post(update_user_count))
+        .route("/purchase-ai-bundle", post(purchase_ai_bundle))
+        .route("/purchase-analytics-bundle", post(purchase_analytics_bundle))
         .route("/ai-usage-status", get(get_ai_usage_status))
         .route("/invoices", get(get_invoices))
         .route("/create-portal-session", post(create_portal_session))
@@ -115,7 +118,7 @@ async fn load_workspace(
         db, WorkspaceRow,
         "SELECT workspace_id, name, subscription_tier, subscription_status, \
          billing_cycle, subscription_period_start::text, subscription_period_end::text, user_limit, \
-         stripe_customer_id, stripe_subscription_id, stripe_additional_users_item_id \
+         stripe_customer_id, stripe_subscription_id \
          FROM workspaces WHERE workspace_id = $1",
         workspace_id
     )?
@@ -131,7 +134,7 @@ async fn load_workspace_by_subscription(
         db, WorkspaceRow,
         "SELECT workspace_id, name, subscription_tier, subscription_status, \
          billing_cycle, subscription_period_start::text, subscription_period_end::text, user_limit, \
-         stripe_customer_id, stripe_subscription_id, stripe_additional_users_item_id \
+         stripe_customer_id, stripe_subscription_id \
          FROM workspaces WHERE stripe_subscription_id = $1",
         subscription_id
     )
@@ -159,7 +162,6 @@ struct WorkspaceRow {
     user_limit: Option<i32>,
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
-    stripe_additional_users_item_id: Option<String>,
 }
 
 impl WorkspaceRow {
@@ -187,15 +189,19 @@ impl WorkspaceRow {
 
 #[derive(Deserialize)]
 struct CreateCheckoutRequest {
-    tier: String,
-    billing_cycle: String,
-    #[serde(default)]
-    additional_users: u64,
+    /// Number of users for the subscription (defaults to 1).
+    quantity: Option<u64>,
 }
 
 #[derive(Deserialize)]
-struct UpdateTeamSizeRequest {
+struct UpdateUserCountRequest {
     total_users: i32,
+}
+
+#[derive(Deserialize)]
+struct PurchaseBundleRequest {
+    // No fields — URLs are always derived from frontend_url for security.
+    // Kept as a struct for future extensibility (e.g. bundle size selection).
 }
 
 // ===========================================================================
@@ -216,6 +222,12 @@ async fn create_checkout(
     let stripe_service = require_stripe(&state)?;
 
     let workspace = load_workspace(&state.db, workspace_id).await?;
+    let quantity = request.quantity.unwrap_or(1);
+    if quantity == 0 {
+        return Err(kyomi_core::Error::BadRequest(
+            "Quantity must be at least 1".into(),
+        ));
+    }
 
     // If user already has an active subscription, modify it directly
     if let Some(ref sub_id) = workspace.stripe_subscription_id
@@ -227,7 +239,6 @@ async fn create_checkout(
                 stripe_service,
                 &workspace,
                 sub_id,
-                &request,
             )
             .await;
         }
@@ -235,12 +246,11 @@ async fn create_checkout(
     // New subscription flow: create Stripe customer if needed + checkout session
     let is_test = is_stripe_test_mode(&state.config);
 
-    let price_id = stripe_config::get_price_id(&request.tier, &request.billing_cycle, is_test)
+    let price_id = stripe_config::get_price_id("cloud", "monthly", is_test)
         .ok_or_else(|| {
-            kyomi_core::Error::BadRequest(format!(
-                "Invalid tier/billing_cycle combination: {}/{}",
-                request.tier, request.billing_cycle
-            ))
+            kyomi_core::Error::BadRequest(
+                "Cloud price not configured".to_string(),
+            )
         })?;
 
     // Create Stripe customer if workspace doesn't have one
@@ -275,17 +285,12 @@ async fn create_checkout(
         }
     };
 
-    // Build additional users line item for Team tier
-    let additional_users_price_id = if request.tier == "team" && request.additional_users > 0 {
-        stripe_config::get_additional_user_price_id(&request.billing_cycle, is_test)
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
-
     let frontend_url = &state.config.frontend_url;
     let success_url = format!("{frontend_url}/settings/billing?success=true");
     let cancel_url = format!("{frontend_url}/settings/billing?cancelled=true");
+
+    // 30-day trial for new subscriptions
+    let trial_days = 30;
 
     let params = CheckoutParams {
         customer_id,
@@ -293,11 +298,8 @@ async fn create_checkout(
         success_url,
         cancel_url,
         workspace_id: workspace_id.to_string(),
-        tier: request.tier.clone(),
-        billing_cycle: request.billing_cycle.clone(),
-        trial_days: 0,
-        additional_users_price_id,
-        additional_users_quantity: request.additional_users,
+        quantity,
+        trial_days,
     };
 
     let checkout_result = stripe_service
@@ -310,9 +312,8 @@ async fn create_checkout(
 
     tracing::info!(
         workspace_id,
-        tier = %request.tier,
-        billing_cycle = %request.billing_cycle,
-        "Created checkout session"
+        quantity,
+        "Created checkout session for Cloud plan"
     );
 
     Ok(Json(json!({
@@ -321,56 +322,23 @@ async fn create_checkout(
     })))
 }
 
-/// Modify an existing Stripe subscription to change tier or billing cycle.
+/// Modify an existing Stripe subscription (update to current Cloud price).
 async fn modify_existing_subscription(
     state: &AppState,
     stripe_service: &StripeService,
     workspace: &WorkspaceRow,
     subscription_id: &str,
-    request: &CreateCheckoutRequest,
 ) -> Result<Json<Value>, kyomi_core::Error> {
     let is_test = is_stripe_test_mode(&state.config);
 
     let new_price_id =
-        stripe_config::get_price_id(&request.tier, &request.billing_cycle, is_test).ok_or_else(
-            || {
-                kyomi_core::Error::BadRequest(format!(
-                    "Invalid tier/billing_cycle combination: {}/{}",
-                    request.tier, request.billing_cycle
-                ))
-            },
+        stripe_config::get_price_id("cloud", "monthly", is_test).ok_or_else(
+            || kyomi_core::Error::BadRequest("Cloud price not configured".to_string()),
         )?;
 
-    // If downgrading from Team to Starter/Pro, remove additional users item
-    if (request.tier == "starter" || request.tier == "pro")
-        && let Some(ref item_id) = workspace.stripe_additional_users_item_id
-    {
-            tracing::info!(
-                item_id,
-                "Downgrading from Team tier — removing additional users item"
-            );
-
-            stripe_service
-                .update_subscription_quantity(subscription_id, item_id, 0)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to remove additional users item: {e}");
-                    kyomi_core::Error::Internal(format!(
-                        "Failed to remove additional users: {e}"
-                    ))
-                })?;
-
-            kyomi_core::db_execute!(
-                &state.db,
-                "UPDATE workspaces SET stripe_additional_users_item_id = NULL \
-                 WHERE workspace_id = $1",
-                &workspace.workspace_id
-            )?;
-        }
-
-    // Modify the subscription
+    // Modify the subscription to the Cloud price
     let sub_data = stripe_service
-        .update_subscription(subscription_id, new_price_id, &request.tier, &request.billing_cycle)
+        .update_subscription(subscription_id, new_price_id, "cloud", "monthly")
         .await
         .map_err(|e| {
             tracing::error!("Failed to modify subscription: {e}");
@@ -388,23 +356,20 @@ async fn modify_existing_subscription(
              billing_cycle = $3, \
              subscription_period_start = $4, \
              subscription_period_end = $5, \
-             user_limit = $6, \
-             stripe_additional_users_item_id = $7 \
-         WHERE workspace_id = $8",
+             user_limit = $6 \
+         WHERE workspace_id = $7",
         &sub_data.tier,
         &sub_data.status,
         sub_data.billing_cycle.as_deref(),
         period_start_str.as_deref(),
         period_end_str.as_deref(),
         sub_data.user_limit,
-        sub_data.additional_users_item_id.as_deref(),
         &workspace.workspace_id
     )?;
 
     tracing::info!(
         workspace_id = %workspace.workspace_id,
         tier = %sub_data.tier,
-        billing_cycle = ?sub_data.billing_cycle,
         "Modified existing subscription"
     );
 
@@ -485,11 +450,7 @@ async fn stripe_webhook(
             handle_invoice_payment_failed(&state, &inv).await;
         }
         EventObject::CheckoutSessionCompleted(session) => {
-            let ws_id = session.metadata.as_ref().and_then(|m| m.get("workspace_id"));
-            tracing::info!(
-                workspace_id = ?ws_id,
-                "Checkout completed"
-            );
+            handle_checkout_completed(&state, &session).await;
         }
         _ => {
             tracing::debug!(event_type = %event_type, "Unhandled Stripe event type");
@@ -545,9 +506,8 @@ async fn handle_subscription_event(
                  stripe_subscription_id = $6, \
                  stripe_customer_id = $7, \
                  user_limit = $8, \
-                 stripe_additional_users_item_id = $9, \
                  ai_credits_used_usd = 0.0 \
-             WHERE workspace_id = $10",
+             WHERE workspace_id = $9",
             &sub_data.tier,
             &sub_data.status,
             sub_data.billing_cycle.as_deref(),
@@ -556,7 +516,6 @@ async fn handle_subscription_event(
             &sub_data.stripe_subscription_id,
             &sub_data.stripe_customer_id,
             sub_data.user_limit,
-            sub_data.additional_users_item_id.as_deref(),
             &workspace_id
         )
     } else {
@@ -569,16 +528,14 @@ async fn handle_subscription_event(
                  billing_cycle = $3, \
                  subscription_period_start = $4, \
                  subscription_period_end = $5, \
-                 user_limit = $6, \
-                 stripe_additional_users_item_id = $7 \
-             WHERE workspace_id = $8",
+                 user_limit = $6 \
+             WHERE workspace_id = $7",
             &sub_data.tier,
             &sub_data.status,
             sub_data.billing_cycle.as_deref(),
             period_start_str.as_deref(),
             period_end_str.as_deref(),
             sub_data.user_limit,
-            sub_data.additional_users_item_id.as_deref(),
             &workspace_id
         )
     };
@@ -632,7 +589,6 @@ async fn handle_subscription_deleted(state: &AppState, subscription: &Subscripti
              subscription_period_start = NULL, \
              subscription_period_end = NULL, \
              stripe_subscription_id = NULL, \
-             stripe_additional_users_item_id = NULL, \
              user_limit = 1, \
              ai_credits_used_usd = 0.0 \
          WHERE workspace_id = $1",
@@ -738,6 +694,114 @@ async fn handle_invoice_payment_failed(state: &AppState, invoice: &Invoice) {
                 }
             }
         }
+}
+
+/// Handle `checkout.session.completed` — fulfill one-time bundle purchases.
+///
+/// Subscription checkouts are handled by `customer.subscription.created` instead.
+/// This handler only processes one-time payment sessions (bundle purchases).
+async fn handle_checkout_completed(state: &AppState, session: &CheckoutSession) {
+    let metadata = match &session.metadata {
+        Some(m) => m,
+        None => return,
+    };
+
+    let workspace_id = match metadata.get("workspace_id") {
+        Some(id) if !id.is_empty() => id.clone(),
+        _ => {
+            tracing::debug!("Checkout session has no workspace_id in metadata — skipping");
+            return;
+        }
+    };
+
+    // Only process one-time payments (bundle purchases). Subscription checkouts
+    // are handled by the customer.subscription.created event.
+    if session.mode != Some(CheckoutSessionMode::Payment) {
+        tracing::info!(
+            workspace_id = %workspace_id,
+            "Subscription checkout completed"
+        );
+        return;
+    }
+
+    let purchase_type = match metadata.get("purchase_type") {
+        Some(pt) => pt.clone(),
+        None => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                "Payment checkout completed but no purchase_type in metadata"
+            );
+            return;
+        }
+    };
+
+    match purchase_type.as_str() {
+        "ai_bundle" => {
+            // Credit AI bundle balance. Configurable via AI_BUNDLE_CREDIT_USD env var.
+            let credit_amount: f64 = std::env::var("AI_BUNDLE_CREDIT_USD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10.0);
+            let result = kyomi_core::db_execute!(
+                &state.db,
+                "UPDATE workspaces SET ai_bundle_balance_usd = ai_bundle_balance_usd + $1 \
+                 WHERE workspace_id = $2",
+                credit_amount,
+                &workspace_id
+            );
+            match result {
+                Ok(_) => {
+                    tracing::info!(
+                        workspace_id = %workspace_id,
+                        credit_amount,
+                        "AI bundle purchased — credited balance"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        workspace_id = %workspace_id,
+                        "Failed to credit AI bundle balance: {e}"
+                    );
+                }
+            }
+        }
+        "analytics_bundle" => {
+            // Credit analytics event bundle. Configurable via ANALYTICS_BUNDLE_CREDIT_EVENTS env var.
+            let credit_events: i64 = std::env::var("ANALYTICS_BUNDLE_CREDIT_EVENTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1_000_000);
+            let result = kyomi_core::db_execute!(
+                &state.db,
+                "UPDATE workspaces SET analytics_bundle_events = analytics_bundle_events + $1 \
+                 WHERE workspace_id = $2",
+                credit_events,
+                &workspace_id
+            );
+            match result {
+                Ok(_) => {
+                    tracing::info!(
+                        workspace_id = %workspace_id,
+                        credit_events,
+                        "Analytics bundle purchased — credited events"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        workspace_id = %workspace_id,
+                        "Failed to credit analytics bundle events: {e}"
+                    );
+                }
+            }
+        }
+        other => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                purchase_type = %other,
+                "Unknown purchase_type in checkout session metadata"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -885,13 +949,13 @@ fn calculate_ai_reset_date(
 }
 
 // ---------------------------------------------------------------------------
-// POST /update-team-size — Update Team tier user count (admin)
+// POST /update-team-size, /update-user-count — Update subscription user count (admin)
 // ---------------------------------------------------------------------------
 
-async fn update_team_size(
+async fn update_user_count(
     State(state): State<AppState>,
     user: AuthUser,
-    Json(request): Json<UpdateTeamSizeRequest>,
+    Json(request): Json<UpdateUserCountRequest>,
 ) -> Result<Json<Value>, kyomi_core::Error> {
     require_workspace_admin(&user)?;
     let workspace_id = get_workspace_id(&user)?;
@@ -899,17 +963,16 @@ async fn update_team_size(
 
     let workspace = load_workspace(&state.db, workspace_id).await?;
 
-    // Validate Team tier
-    if workspace.subscription_tier != "team" {
+    // Must have an active or trialing Cloud subscription
+    if workspace.subscription_tier == "free" {
         return Err(kyomi_core::Error::BadRequest(
-            "Team size can only be updated for Team tier subscriptions".into(),
+            "User count can only be updated for Cloud subscriptions".into(),
         ));
     }
 
-    // Validate active subscription
     if workspace.subscription_status != "active" && workspace.subscription_status != "trialing" {
         return Err(kyomi_core::Error::BadRequest(format!(
-            "Cannot update team size for subscription in '{}' status",
+            "Cannot update user count for subscription in '{}' status",
             workspace.subscription_status
         )));
     }
@@ -919,14 +982,14 @@ async fn update_team_size(
         .as_deref()
         .ok_or_else(|| kyomi_core::Error::BadRequest("No active subscription found".into()))?;
 
-    // Validate minimum 5 users for Team
-    if request.total_users < 5 {
+    // Minimum 1 user
+    if request.total_users < 1 {
         return Err(kyomi_core::Error::BadRequest(
-            "Team tier requires a minimum of 5 users".into(),
+            "Minimum user count is 1".into(),
         ));
     }
 
-    // Check current active member count
+    // Check current active member count — cannot reduce below active members
     let current_member_count: i64 = kyomi_core::db_fetch_scalar!(
         &state.db, i64,
         "SELECT COUNT(*) FROM workspace_users \
@@ -937,118 +1000,151 @@ async fn update_team_size(
 
     if (request.total_users as i64) < current_member_count {
         return Err(kyomi_core::Error::BadRequest(format!(
-            "Cannot reduce team size to {} users. You currently have {} active members. \
-             Please remove members first before reducing your team size.",
+            "Cannot reduce user count to {}. You currently have {} active members. \
+             Please remove members first.",
             request.total_users, current_member_count
         )));
     }
 
-    let additional_users = request.total_users - 5;
-    let is_test = is_stripe_test_mode(&state.config);
-
-    // Handle case where additional_users item doesn't exist yet
-    if workspace.stripe_additional_users_item_id.is_none() && additional_users > 0 {
-        let add_price_id = stripe_config::get_additional_user_price_id(
-            workspace.billing_cycle.as_deref().unwrap_or("monthly"),
-            is_test,
-        )
-        .ok_or_else(|| {
-            kyomi_core::Error::BadRequest(format!(
-                "Invalid billing cycle: {:?}",
-                workspace.billing_cycle
-            ))
+    // Update the seat count on the subscription's main item
+    stripe_service
+        .update_seat_count(sub_id, request.total_users as u64)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to update user count: {e}");
+            kyomi_core::Error::Internal(format!("Failed to update user count: {e}"))
         })?;
 
-        // Add additional users subscription item directly via Stripe
-        let item_id = {
-            let new_item = stripe_billing::subscription_item::CreateSubscriptionItem::new(sub_id)
-                .price(add_price_id)
-                .quantity(additional_users as u64)
-                .send(stripe_service.client())
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to add additional users item: {e}");
-                    kyomi_core::Error::Internal(format!(
-                        "Failed to add additional users: {e}"
-                    ))
-                })?;
+    // Update workspace user limit in DB
+    kyomi_core::db_execute!(
+        &state.db,
+        "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
+        request.total_users,
+        workspace_id
+    )?;
 
-            tracing::info!(
-                workspace_id,
-                additional_users,
-                "Added additional users item to subscription"
-            );
-
-            new_item.id
-        };
-
-        // Update workspace with new user limit and item ID
-        let item_id_str = item_id.to_string();
-        kyomi_core::db_execute!(
-            &state.db,
-            "UPDATE workspaces SET user_limit = $1, stripe_additional_users_item_id = $2 \
-             WHERE workspace_id = $3",
-            request.total_users,
-            &item_id_str,
-            workspace_id
-        )?;
-    } else if let Some(ref item_id) = workspace.stripe_additional_users_item_id {
-        // Update existing additional users item quantity
-        stripe_service
-            .update_subscription_quantity(sub_id, item_id, additional_users as i64)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to update team size: {e}");
-                kyomi_core::Error::Internal(format!("Failed to update team size: {e}"))
-            })?;
-
-        // Update workspace user limit
-        let new_limit = if additional_users == 0 {
-            // Item was removed; clear the reference
-            kyomi_core::db_execute!(
-                &state.db,
-                "UPDATE workspaces SET user_limit = 5, stripe_additional_users_item_id = NULL \
-                 WHERE workspace_id = $1",
-                workspace_id
-            )?;
-            5
-        } else {
-            kyomi_core::db_execute!(
-                &state.db,
-                "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
-                request.total_users,
-                workspace_id
-            )?;
-            request.total_users
-        };
-
-        tracing::info!(
-            workspace_id,
-            total_users = request.total_users,
-            additional_users,
-            "Updated team size"
-        );
-
-        return Ok(Json(json!({
-            "status": "success",
-            "message": format!("Team size updated to {} users", request.total_users),
-            "user_limit": new_limit,
-            "additional_users": additional_users,
-        })));
-    } else {
-        // additional_users == 0 and no item ID — nothing to do
-        return Ok(Json(json!({
-            "status": "success",
-            "message": "Team size is already at base level (5 users)",
-            "user_limit": 5,
-        })));
-    }
+    tracing::info!(
+        workspace_id,
+        total_users = request.total_users,
+        "Updated user count"
+    );
 
     Ok(Json(json!({
         "status": "success",
-        "message": format!("Team size updated to {} users", request.total_users),
+        "message": format!("User count updated to {}", request.total_users),
         "user_limit": request.total_users,
-        "additional_users": additional_users,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /purchase-ai-bundle — One-time AI token bundle purchase
+// ---------------------------------------------------------------------------
+
+async fn purchase_ai_bundle(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(_): Json<PurchaseBundleRequest>,
+) -> Result<Json<Value>, kyomi_core::Error> {
+    require_workspace_admin(&user)?;
+    let workspace_id = get_workspace_id(&user)?;
+    let stripe_service = require_stripe(&state)?;
+
+    let workspace = load_workspace(&state.db, workspace_id).await?;
+
+    let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
+        kyomi_core::Error::BadRequest(
+            "No Stripe customer found. Please subscribe to a plan first.".into(),
+        )
+    })?;
+
+    let is_test = is_stripe_test_mode(&state.config);
+    let price_id = stripe_config::get_ai_bundle_price_id(is_test).ok_or_else(|| {
+        kyomi_core::Error::BadRequest("AI bundle price not configured".to_string())
+    })?;
+
+    let frontend_url = &state.config.frontend_url;
+    let success_url = format!("{frontend_url}/settings/billing?ai_bundle=success");
+    let cancel_url = format!("{frontend_url}/settings/billing?ai_bundle=cancelled");
+
+    let params = PaymentCheckoutParams {
+        customer_id: customer_id.to_string(),
+        price_id: price_id.to_string(),
+        success_url,
+        cancel_url,
+        workspace_id: workspace_id.to_string(),
+        purchase_type: "ai_bundle".to_string(),
+    };
+
+    let result = stripe_service
+        .create_payment_checkout_session(&params)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create AI bundle checkout: {e}");
+            kyomi_core::Error::Internal(format!("Failed to create AI bundle checkout: {e}"))
+        })?;
+
+    tracing::info!(workspace_id, "Created AI bundle checkout session");
+
+    Ok(Json(json!({
+        "checkout_url": result.checkout_url,
+        "session_id": result.session_id,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// POST /purchase-analytics-bundle — Analytics event bundle purchase
+// ---------------------------------------------------------------------------
+
+async fn purchase_analytics_bundle(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(_): Json<PurchaseBundleRequest>,
+) -> Result<Json<Value>, kyomi_core::Error> {
+    require_workspace_admin(&user)?;
+    let workspace_id = get_workspace_id(&user)?;
+    let stripe_service = require_stripe(&state)?;
+
+    let workspace = load_workspace(&state.db, workspace_id).await?;
+
+    let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
+        kyomi_core::Error::BadRequest(
+            "No Stripe customer found. Please subscribe to a plan first.".into(),
+        )
+    })?;
+
+    let is_test = is_stripe_test_mode(&state.config);
+    let price_id = stripe_config::get_analytics_bundle_price_id(is_test).ok_or_else(|| {
+        kyomi_core::Error::BadRequest("Analytics bundle price not configured".to_string())
+    })?;
+
+    let frontend_url = &state.config.frontend_url;
+    let success_url = format!("{frontend_url}/settings/billing?analytics_bundle=success");
+    let cancel_url = format!("{frontend_url}/settings/billing?analytics_bundle=cancelled");
+
+    let params = PaymentCheckoutParams {
+        customer_id: customer_id.to_string(),
+        price_id: price_id.to_string(),
+        success_url,
+        cancel_url,
+        workspace_id: workspace_id.to_string(),
+        purchase_type: "analytics_bundle".to_string(),
+    };
+
+    let result = stripe_service
+        .create_payment_checkout_session(&params)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to create analytics bundle checkout: {e}");
+            kyomi_core::Error::Internal(format!(
+                "Failed to create analytics bundle checkout: {e}"
+            ))
+        })?;
+
+    tracing::info!(workspace_id, "Created analytics bundle checkout session");
+
+    Ok(Json(json!({
+        "checkout_url": result.checkout_url,
+        "session_id": result.session_id,
     })))
 }
 
@@ -1186,58 +1282,57 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn create_checkout_request_deserializes() {
-        let json = json!({
-            "tier": "pro",
-            "billing_cycle": "monthly",
-            "additional_users": 3
-        });
+    fn create_checkout_request_deserializes_with_quantity() {
+        let json = json!({ "quantity": 5 });
 
         let req: CreateCheckoutRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.tier, "pro");
-        assert_eq!(req.billing_cycle, "monthly");
-        assert_eq!(req.additional_users, 3);
+        assert_eq!(req.quantity, Some(5));
     }
 
     #[test]
-    fn create_checkout_request_defaults_additional_users() {
-        let json = json!({
-            "tier": "starter",
-            "billing_cycle": "annual"
-        });
+    fn create_checkout_request_defaults_quantity_to_none() {
+        let json = json!({});
 
         let req: CreateCheckoutRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.additional_users, 0);
-    }
-
-    #[test]
-    fn create_checkout_request_missing_tier_fails() {
-        let json = json!({"billing_cycle": "monthly"});
-        assert!(serde_json::from_value::<CreateCheckoutRequest>(json).is_err());
-    }
-
-    #[test]
-    fn create_checkout_request_missing_billing_cycle_fails() {
-        let json = json!({"tier": "pro"});
-        assert!(serde_json::from_value::<CreateCheckoutRequest>(json).is_err());
+        assert_eq!(req.quantity, None);
     }
 
     // -----------------------------------------------------------------------
-    // UpdateTeamSizeRequest contract tests
+    // UpdateUserCountRequest contract tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn update_team_size_request_deserializes() {
+    fn update_user_count_request_deserializes() {
         let json = json!({"total_users": 8});
 
-        let req: UpdateTeamSizeRequest = serde_json::from_value(json).unwrap();
+        let req: UpdateUserCountRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.total_users, 8);
     }
 
     #[test]
-    fn update_team_size_request_missing_total_users_fails() {
+    fn update_user_count_request_missing_total_users_fails() {
         let json = json!({});
-        assert!(serde_json::from_value::<UpdateTeamSizeRequest>(json).is_err());
+        assert!(serde_json::from_value::<UpdateUserCountRequest>(json).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // PurchaseBundleRequest contract tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn purchase_bundle_request_deserializes_empty() {
+        let json = json!({});
+        assert!(serde_json::from_value::<PurchaseBundleRequest>(json).is_ok());
+    }
+
+    #[test]
+    fn purchase_bundle_request_ignores_unknown_fields() {
+        // Callers may send extra fields; serde must not reject them.
+        let json = json!({
+            "success_url": "https://example.com/success",
+            "cancel_url": "https://example.com/cancel"
+        });
+        assert!(serde_json::from_value::<PurchaseBundleRequest>(json).is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -1293,22 +1388,22 @@ mod tests {
     #[test]
     fn subscription_info_response_shape() {
         let response = json!({
-            "tier": "pro",
+            "tier": "cloud",
             "status": "active",
             "billing_cycle": "monthly",
             "period_start": "2024-01-15T00:00:00+00:00",
             "period_end": "2024-02-15T00:00:00+00:00",
             "ai_reset_date": "2024-02-15T00:00:00+00:00",
-            "user_limit": 1
+            "user_limit": 3
         });
 
-        assert_eq!(response["tier"], "pro");
+        assert_eq!(response["tier"], "cloud");
         assert_eq!(response["status"], "active");
         assert_eq!(response["billing_cycle"], "monthly");
         assert!(response["period_start"].is_string());
         assert!(response["period_end"].is_string());
         assert!(response["ai_reset_date"].is_string());
-        assert_eq!(response["user_limit"], 1);
+        assert_eq!(response["user_limit"], 3);
     }
 
     #[test]
@@ -1369,16 +1464,25 @@ mod tests {
     }
 
     #[test]
-    fn update_team_size_response_shape() {
+    fn update_user_count_response_shape() {
         let response = json!({
             "status": "success",
-            "message": "Team size updated to 8 users",
-            "user_limit": 8,
-            "additional_users": 3
+            "message": "User count updated to 8",
+            "user_limit": 8
         });
 
         assert_eq!(response["status"], "success");
         assert_eq!(response["user_limit"], 8);
-        assert_eq!(response["additional_users"], 3);
+    }
+
+    #[test]
+    fn bundle_purchase_response_shape() {
+        let response = json!({
+            "checkout_url": "https://checkout.stripe.com/example",
+            "session_id": "cs_test_456"
+        });
+
+        assert!(response["checkout_url"].is_string());
+        assert!(response["session_id"].is_string());
     }
 }

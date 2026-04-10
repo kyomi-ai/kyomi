@@ -34,10 +34,10 @@ pub fn TeamPage() -> impl IntoView {
                 match user_ctx.await {
                     Ok(ctx) => {
                         let is_admin = ctx.workspace_roles.iter().any(|r| r == "workspace_admin");
-                        let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise");
+                        let is_team_tier = matches!(ctx.subscription_tier.as_str(), "team" | "enterprise" | "cloud");
                         if !is_admin || !is_team_tier {
                             let msg = if !is_team_tier {
-                                "Team management is only available on Team and Enterprise plans."
+                                "Team management requires a Cloud subscription."
                             } else {
                                 "You must be a workspace administrator to manage team members."
                             };

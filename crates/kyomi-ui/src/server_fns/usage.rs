@@ -14,6 +14,14 @@ use std::collections::HashMap;
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};
 
+/// Workspace bundle balances row (SSR only).
+#[cfg(feature = "ssr")]
+#[derive(Debug, sqlx::FromRow)]
+struct BundleRow {
+    ai_bundle_balance_usd: f64,
+    analytics_bundle_events: i64,
+}
+
 /// Per-user fair-share usage info (mirrors `kyomi_auth::billing_service::PerUserUsage`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PerUserUsage {
@@ -23,7 +31,8 @@ pub struct PerUserUsage {
 
 /// Full AI usage status for a workspace/user.
 ///
-/// Matches the JSON shape returned by `GET /billing/ai-usage-status`.
+/// Matches the JSON shape returned by `GET /billing/ai-usage-status`,
+/// extended with bundle balance and analytics event data.
 /// See `kyomi_auth::billing_service::AiUsageStatus`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UsageData {
@@ -35,6 +44,16 @@ pub struct UsageData {
     pub trial_ends_at: Option<String>,
     pub per_user: PerUserUsage,
     pub by_feature: HashMap<String, f64>,
+
+    // ── Bundle & analytics fields ──────────────────────────────────
+    /// Remaining purchased AI token bundle balance in USD.
+    pub ai_bundle_balance_usd: f64,
+    /// Analytics events used this month (from analytics quota tracking).
+    pub analytics_events_used: u64,
+    /// Analytics events included in the Cloud plan (100K).
+    pub analytics_events_included: u64,
+    /// Purchased analytics event bundle balance (non-expiring).
+    pub analytics_bundle_events: i64,
 }
 
 /// Fetch the AI usage status for the current user's workspace.
@@ -64,6 +83,10 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
                 ("chart_builder_copilot".to_string(), 0.0),
                 ("kyomi_watch".to_string(), 0.0),
             ]),
+            ai_bundle_balance_usd: 0.0,
+            analytics_events_used: 0,
+            analytics_events_included: kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED,
+            analytics_bundle_events: 0,
         });
     }
 
@@ -74,6 +97,36 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
         .get_ai_usage_status(&ctx.db, ws_id, &auth.user_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Fetch bundle balances from the workspace row.
+    let bundles = kyomi_core::db_fetch_optional!(
+        &ctx.db,
+        BundleRow,
+        "SELECT COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
+         COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
+         FROM workspaces WHERE workspace_id = $1",
+        ws_id
+    )
+    .map_err(|e| ServerFnError::new(format!("failed to fetch bundle balances: {e}")))?;
+
+    let (ai_bundle_balance_usd, analytics_bundle_events) = bundles
+        .map(|b| (b.ai_bundle_balance_usd, b.analytics_bundle_events))
+        .unwrap_or((0.0, 0));
+
+    // Get analytics events used this month from Redis.
+    let analytics_events_used: u64 = if let Some(ref redis_url) = ctx.config.redis_url {
+        match kyomi_core::redis::create_pool(redis_url).await {
+            Ok(mut conn) => {
+                kyomi_auth::analytics_quota::get_usage_count(&mut conn, ws_id)
+                    .await
+                    .unwrap_or(0)
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
+    let analytics_events_included: u64 = kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED;
 
     Ok(UsageData {
         percentage_used: status.percentage_used,
@@ -87,5 +140,9 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
             fair_share_percentage: status.per_user.fair_share_percentage,
         },
         by_feature: status.by_feature,
+        ai_bundle_balance_usd,
+        analytics_events_used,
+        analytics_events_included,
+        analytics_bundle_events,
     })
 }

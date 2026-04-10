@@ -528,13 +528,10 @@ async fn update_settings(
 
     // Update arrow_download_enabled if provided
     if let Some(arrow_enabled) = data.arrow_download_enabled {
-        // Ensure workspace is on Pro tier or higher (check raw DB tier, matching Python)
-        if !matches!(
-            workspace.subscription_tier,
-            SubscriptionTier::Pro | SubscriptionTier::Team | SubscriptionTier::Enterprise
-        ) {
+        // Ensure workspace has a paid subscription (Cloud or legacy paid tiers)
+        if matches!(workspace.subscription_tier, SubscriptionTier::Free) {
             return Err(kyomi_core::Error::Forbidden(
-                "Arrow download is only available on Pro, Team, and Enterprise plans".into(),
+                "Arrow download requires a Cloud subscription".into(),
             ));
         }
 
@@ -616,14 +613,15 @@ async fn get_billing(
     let credits = capability::get_credits_info(&workspace, tier);
 
     // Tier pricing table
-    let (tier_name, price_monthly, price_annual) = match tier {
-        SubscriptionTier::Free => ("Free", 0.0, 0.0),
-        SubscriptionTier::Basic => ("Basic", 12.0, 108.0),
-        SubscriptionTier::Starter => ("Starter", 12.0, 108.0),
-        SubscriptionTier::Pro => ("Pro", 25.0, 228.0),
-        SubscriptionTier::Team => ("Team", 65.0, 588.0),
-        SubscriptionTier::Enterprise => ("Enterprise", 299.0, 3588.0),
+    // Cloud plan: $5/user/month, no annual option.
+    let (tier_name, price_monthly) = match tier {
+        SubscriptionTier::Cloud => ("Cloud", 5.0),
+        SubscriptionTier::Free => ("Free", 0.0),
+        // Legacy tiers — map to Cloud pricing
+        SubscriptionTier::Basic | SubscriptionTier::Starter | SubscriptionTier::Pro
+        | SubscriptionTier::Team | SubscriptionTier::Enterprise => ("Cloud", 5.0),
     };
+    let price_annual = price_monthly * 12.0; // No annual discount — kept for compat
 
     let billing_cycle = workspace
         .billing_cycle

@@ -177,6 +177,7 @@ pub enum SubscriptionTier {
     Pro,
     Team,
     Enterprise,
+    Cloud,
 }
 
 impl_sqlx_varchar_enum!(SubscriptionTier);
@@ -196,6 +197,7 @@ impl AsRef<str> for SubscriptionTier {
             Self::Pro => "pro",
             Self::Team => "team",
             Self::Enterprise => "enterprise",
+            Self::Cloud => "cloud",
         }
     }
 }
@@ -210,6 +212,7 @@ impl FromStr for SubscriptionTier {
             "pro" => Ok(Self::Pro),
             "team" => Ok(Self::Team),
             "enterprise" => Ok(Self::Enterprise),
+            "cloud" => Ok(Self::Cloud),
             _ => Err(format!("unknown SubscriptionTier: {s}")),
         }
     }
@@ -928,5 +931,25 @@ mod tests {
         let s = TransferStatus::Declined;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"declined\"");
+    }
+
+    #[test]
+    fn test_subscription_tier_cloud_roundtrip() {
+        // Serde round-trip
+        let tier = SubscriptionTier::Cloud;
+        let json = serde_json::to_string(&tier).unwrap();
+        assert_eq!(json, "\"cloud\"");
+        let back: SubscriptionTier = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, tier);
+
+        // Display
+        assert_eq!(SubscriptionTier::Cloud.to_string(), "cloud");
+
+        // FromStr
+        let parsed: SubscriptionTier = "cloud".parse().unwrap();
+        assert_eq!(parsed, SubscriptionTier::Cloud);
+
+        // AsRef<str>
+        assert_eq!(SubscriptionTier::Cloud.as_ref(), "cloud");
     }
 }

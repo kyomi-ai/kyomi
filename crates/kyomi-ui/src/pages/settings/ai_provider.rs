@@ -21,8 +21,9 @@ use crate::server_fns::ai_provider::test_ai_provider;
 // Provider definitions — mirrors the React `PROVIDERS` object
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(target_arch = "wasm32")]
-const STORAGE_KEY: &str = "kyomi_llm_config";
+/// localStorage key for the user's LLM provider config (BYOK).
+/// Used by the AI Provider page to save/load, and by the Billing page to detect BYOK status.
+pub const LLM_CONFIG_STORAGE_KEY: &str = "kyomi_llm_config";
 
 #[derive(PartialEq)]
 struct ProviderInfo {
@@ -73,7 +74,7 @@ fn load_config() -> (String, String, String, String) {
         return default_config();
     };
 
-    let raw = match storage.get_item(STORAGE_KEY) {
+    let raw = match storage.get_item(LLM_CONFIG_STORAGE_KEY) {
         Ok(Some(val)) => val,
         _ => return default_config(),
     };
@@ -147,7 +148,7 @@ fn save_config_to_storage(provider: &str, api_key: &str, model_override: &str, b
         Err(_) => return false,
     };
 
-    storage.set_item(STORAGE_KEY, &String::from(json)).is_ok()
+    storage.set_item(LLM_CONFIG_STORAGE_KEY, &String::from(json)).is_ok()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
