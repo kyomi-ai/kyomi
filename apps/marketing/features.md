@@ -1,15 +1,15 @@
 ---
 layout: page
 title: Features
-description: Everything you need to analyze data with AI
+description: The knowledge layer between you and all your data
 ---
 
 <div class="features-page">
 
 <!-- Hero -->
 <div style="text-align: center; padding-top: 3rem; margin-bottom: 2rem;">
-  <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;">From Question to Insight in Seconds</h1>
-  <p style="font-size: 1.25rem; color: var(--color-muted-foreground); max-width: 40rem; margin: 0 auto;">A natural language data analytics platform and AI data assistant that learns your business, answers your questions, and watches your data while you sleep.</p>
+  <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;">Next-Gen BI, Built For AI</h1>
+  <p style="font-size: 1.25rem; color: var(--color-muted-foreground); max-width: 40rem; margin: 0 auto;">Kyomi unifies all your databases under one knowledge layer. Dashboards become your source of truth. Ask questions from wherever you already work.</p>
 </div>
 
 <!-- Security Trust Banner -->
@@ -22,63 +22,78 @@ description: Everything you need to analyze data with AI
       </svg>
     </div>
     <div>
-      <strong style="color: #166534;">Your data never leaves your warehouse.</strong>
-      <span style="color: #15803d; font-size: 0.9rem;"> Kyomi queries directly, AI sees max 20 rows, you control access with existing permissions.</span>
-      <br/><span style="color: #15803d; font-size: 0.9rem;"><strong>Need even more control?</strong> Deploy <a href="/docs/connect/" style="color: #166534; text-decoration: underline;">Kyomi Connect</a> inside your network — credentials stay on your infrastructure, only query results travel to Kyomi. Connect is <a href="https://github.com/kyomi-ai/kyomi-connect" style="color: #166534; text-decoration: underline;">open-source</a> (Apache 2.0) — audit every line of code yourself.</span>
+      <strong style="color: #166534;">Your data stays in your database.</strong>
+      <span style="color: #15803d; font-size: 0.9rem;"> Kyomi queries directly, AI sees max 20 rows. Self-host it, run the standalone app, or use hosted cloud. Open source (AGPL) — <a href="https://github.com/kyomi-ai/kyomi" style="color: #166534; text-decoration: underline;">audit every line</a>.</span>
     </div>
   </div>
 </div>
 
 <!-- Datasources -->
 <div style="text-align: center; margin-bottom: 3rem;">
-  <p style="font-size: 0.8rem; color: var(--color-muted-foreground); margin-bottom: 0.5rem;">Works with your existing data stack</p>
+  <p style="font-size: 0.8rem; color: var(--color-muted-foreground); margin-bottom: 0.5rem;">Connect any database</p>
   <p style="font-size: 0.9rem; color: var(--color-foreground);">
     BigQuery · Snowflake · PostgreSQL · MySQL · ClickHouse · Redshift · Databricks · SQL Server · Azure Synapse
   </p>
 </div>
 
-<!-- PILLAR 1: Ask Questions, Get Answers -->
+<!-- PILLAR 1: Unified Knowledge Layer -->
 <div style="margin: 3rem 0; padding: 2.5rem; background: var(--color-muted); border-radius: 1rem;">
   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
     <div style="width: 2.25rem; height: 2.25rem; background: var(--color-primary); border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
       </svg>
     </div>
-    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Ask Questions, Get Answers</h2>
+    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">One Knowledge Layer, All Your Databases</h2>
   </div>
 
   <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-bottom: 1.5rem; max-width: 40rem;">
-    No SQL required. No waiting on analysts. This self-service analytics tool lets anyone ask questions in plain English and get instant visualizations.
+    Not one connector per database with no shared context. One unified layer of intelligence across everything — where knowledge compounds and is shared org-wide.
   </p>
 
   <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Natural Language Queries</strong>
+      <strong style="color: var(--color-primary);">Unified Context</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        "Show me revenue by region last quarter" — Kyomi's text-to-SQL engine finds the right tables, writes optimized queries, and generates charts automatically.
+        Connect Postgres, BigQuery, Snowflake, and more. Kyomi learns the relationships between them. Ask a question that spans two databases and get a single, grounded answer.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Automatic Visualizations</strong>
+      <strong style="color: var(--color-primary);">Metric Definitions</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Charts appear alongside your data. Forecast lines with confidence bands, multi-source charts combining data from different databases, and all the standard types — beautifully rendered and interactive.
+        Define "MRR excludes trials" once — Kyomi applies it consistently everywhere, for everyone, across every surface.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">One-Click Dashboards</strong>
+      <strong style="color: var(--color-primary);">Table Knowledge</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Found an insight? Save it to a dashboard instantly. No rebuilding, no exporting.
+        "Customer data is in users table, not customers" — saved once, never forgotten. Which tables matter, what fields mean, how they relate.
       </p>
     </div>
-  </div>
-
-  <div style="margin-top: 1.5rem;">
-    <img src="/images/slack-mention-chart.png" alt="Asking Kyomi a question in Slack and getting a chart response" style="width: 100%; max-width: 500px; border-radius: 0.5rem; border: 1px solid var(--color-border);" />
+    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
+      <strong style="color: var(--color-primary);">Business Rules</strong>
+      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
+        "Exclude @test.com from user counts" — your rules, automatically applied to every query, every dashboard, every answer.
+      </p>
+    </div>
+    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
+      <strong style="color: var(--color-primary);">Shared Org-Wide</strong>
+      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
+        Knowledge isn't trapped in one person's chat history. New team members get access to years of accumulated understanding on day one.
+      </p>
+    </div>
+    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
+      <strong style="color: var(--color-primary);">Compounds Over Time</strong>
+      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
+        Every correction becomes a learning. Every definition becomes permanent context. Like compound interest for your data knowledge.
+      </p>
+    </div>
   </div>
 </div>
 
-<!-- PILLAR 2: Production Dashboards -->
+<!-- PILLAR 2: Dashboards as Source of Truth -->
 <div style="margin: 3rem 0; padding: 2.5rem; background: var(--color-muted); border-radius: 1rem;">
   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
     <div style="width: 2.25rem; height: 2.25rem; background: var(--color-primary); border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -88,42 +103,48 @@ description: Everything you need to analyze data with AI
         <line x1="9" y1="21" x2="9" y2="9"></line>
       </svg>
     </div>
-    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Production-Ready Dashboards</h2>
+    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Dashboards as Source of Truth</h2>
   </div>
 
   <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-bottom: 1.5rem; max-width: 40rem;">
-    Full dashboard builder with AI copilot. Edit code or use the visual builder — your choice.
+    Not just charts. Dashboards are documentation and source of truth in the same stroke — grounding every answer Kyomi gives.
   </p>
 
   <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
+      <strong style="color: var(--color-primary);">Grounded Answers</strong>
+      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
+        When someone asks a question, Kyomi references your curated dashboards. Org-approved metrics, the way your team defines them — not hallucinated guesses from a bare schema.
+      </p>
+    </div>
+    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
       <strong style="color: var(--color-primary);">AI Dashboard Copilot</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Describe what you want, copilot builds it. "Add a chart showing breakdown by country" — done.
+        Describe what you want, copilot builds it. "Add a chart showing breakdown by country" — done. Refine until it's right, then it serves the whole org.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
       <strong style="color: var(--color-primary);">Code-Based Control</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Dashboards are Markdown + ChartML. No proprietary formats, no vendor lock-in. Full control.
-      </p>
-    </div>
-    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Version History</strong>
-      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Every save creates a version. Preview, compare, restore with one click. Never lose work.
+        Dashboards are Markdown + <a href="/docs/chartml/">ChartML</a>. No proprietary formats, no vendor lock-in. Version-controllable, auditable, open.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
       <strong style="color: var(--color-primary);">Built-in Forecasting</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Forecast trends with confidence intervals. Ask about future metrics and get predictions with uncertainty bands — no Python notebooks required.
+        Forecast trends with confidence intervals. Predictions with uncertainty bands — no Python notebooks required.
+      </p>
+    </div>
+    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
+      <strong style="color: var(--color-primary);">Version History</strong>
+      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
+        Every save creates a version. Preview, compare, restore with one click. Your source of truth has a full audit trail.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
       <strong style="color: var(--color-primary);">PDF Export</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Download any dashboard as a professional PDF. High-resolution charts, clean formatting, page numbers — ready to email to executives.
+        Download any dashboard as a professional PDF. High-resolution charts, clean formatting — ready to share with stakeholders.
       </p>
     </div>
   </div>
@@ -133,49 +154,51 @@ description: Everything you need to analyze data with AI
   </div>
 </div>
 
-<!-- PILLAR 3: Learns Your Business -->
+<!-- PILLAR 3: Ask From Wherever You Are -->
 <div style="margin: 3rem 0; padding: 2.5rem; background: var(--color-muted); border-radius: 1rem;">
   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
     <div style="width: 2.25rem; height: 2.25rem; background: var(--color-primary); border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"></path>
-        <circle cx="12" cy="14" r="2"></circle>
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+        <line x1="8" y1="21" x2="16" y2="21"></line>
+        <line x1="12" y1="17" x2="12" y2="21"></line>
       </svg>
     </div>
-    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Learns Your Business</h2>
+    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Ask From Wherever You Already Are</h2>
   </div>
 
   <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-bottom: 1.5rem; max-width: 40rem;">
-    Kyomi remembers what "revenue" means in YOUR business. Every conversation makes it smarter.
+    Kyomi is the intelligence layer behind your tools, not another app to log into. One knowledge layer instead of five MCP connectors with no shared context.
   </p>
 
-  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Metric Definitions</strong>
+      <strong style="color: var(--color-primary);">Claude.ai & Claude Code</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Define formulas once — "MRR excludes trials" — Kyomi applies them consistently everywhere.
+        Ask data questions while you work. Every answer grounded in your org's curated dashboards and accumulated knowledge. No context switching.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Table Knowledge</strong>
+      <strong style="color: var(--color-primary);">Slack</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        "Customer data is in users table, not customers" — saved once, never forgotten.
+        @kyomi in any channel. Charts render in threads. The whole team sees the same answers, grounded in the same source of truth.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Business Context</strong>
+      <strong style="color: var(--color-primary);">Kyomi App</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        "Exclude @test.com from user counts" — your rules, automatically applied.
+        Full dashboard editor, SQL editor, knowledge management. When you need to curate the source of truth, this is where you do it.
       </p>
     </div>
   </div>
 
-  <p style="margin-top: 1.5rem; font-size: 0.95rem; color: var(--color-foreground);">
-    New team members get instant access to years of accumulated data knowledge. No more asking "which table has customer data?"
-  </p>
+  <div style="margin-top: 1.5rem;">
+    <img src="/images/claude-code-dashboard.png" alt="Querying data from Claude Code via Kyomi's knowledge layer" style="width: 100%; border-radius: 0.5rem; border: 1px solid var(--color-border);" />
+    <p style="font-size: 0.8rem; color: var(--color-muted-foreground); margin-top: 0.5rem; text-align: center;">Querying data from Claude Code — grounded in your org's curated knowledge</p>
+  </div>
 </div>
 
-<!-- PILLAR 4: Watches Your Data -->
+<!-- Proactive Monitoring -->
 <div style="margin: 3rem 0; padding: 2.5rem; background: var(--color-muted); border-radius: 1rem;">
   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
     <div style="width: 2.25rem; height: 2.25rem; background: var(--color-primary); border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -184,11 +207,11 @@ description: Everything you need to analyze data with AI
         <circle cx="12" cy="12" r="3"></circle>
       </svg>
     </div>
-    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Watches Your Data 24/7</h2>
+    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Always Watching</h2>
   </div>
 
   <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-bottom: 1.5rem; max-width: 40rem;">
-    AI agents monitor your data and alert you when something needs attention. No dashboards to check.
+    AI agents monitor your metrics around the clock and alert you when something needs attention.
   </p>
 
   <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
@@ -207,17 +230,17 @@ description: Everything you need to analyze data with AI
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
       <strong style="color: var(--color-primary);">Smart Notifications</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Alerts via Slack or email. Only notified when something is actually noteworthy.
+        Alerts via Slack or email. Only notified when something is actually noteworthy — no noise, just signal.
       </p>
     </div>
   </div>
 
   <div style="margin-top: 1.5rem;">
-    <img src="/images/slack-alert.png" alt="Kyomi Watch alert configuration in Slack" style="width: 100%; max-width: 500px; border-radius: 0.5rem; border: 1px solid var(--color-border);" />
+    <img src="/images/slack-alert.png" alt="Kyomi Watch alert in Slack" style="width: 100%; max-width: 500px; border-radius: 0.5rem; border: 1px solid var(--color-border);" />
   </div>
 </div>
 
-<!-- PILLAR 4.5: Built-in Website Analytics -->
+<!-- Website Analytics -->
 <div style="margin: 3rem 0; padding: 2.5rem; background: var(--color-muted); border-radius: 1rem;">
   <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
     <div style="width: 2.25rem; height: 2.25rem; background: var(--color-primary); border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
@@ -231,161 +254,78 @@ description: Everything you need to analyze data with AI
   </div>
 
   <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-bottom: 1.5rem; max-width: 40rem;">
-    Privacy-focused website analytics built right into Kyomi. One script tag, no cookies, and the same AI answers questions about your traffic.
-  </p>
-
-  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin-bottom: 1.5rem;">
-    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Lightweight & Private</strong>
-      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        ~1KB tracking script. No cookies, no personal data, no consent banners. IP-based visitor hashing that never stores raw IPs.
-      </p>
-    </div>
-    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">AI-Powered Traffic Insights</strong>
-      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Ask "where is my traffic coming from?" or "which blog posts convert best?" — the same AI that queries your data warehouse answers traffic questions too.
-      </p>
-    </div>
-    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Auto-Provisioned Datasource</strong>
-      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Create an analytics site and it appears as a queryable datasource. Write SQL against your traffic data, build dashboards, set up alerts — just like any other datasource.
-      </p>
-    </div>
-    <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Included on Every Plan</strong>
-      <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Free tier includes 50K events/month. Scale up to 25M events/month on Team. No separate analytics subscription needed.
-      </p>
-    </div>
-  </div>
-</div>
-
-<!-- PILLAR 5: Works Where You Work -->
-<div style="margin: 3rem 0; padding: 2.5rem; background: var(--color-muted); border-radius: 1rem;">
-  <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
-    <div style="width: 2.25rem; height: 2.25rem; background: var(--color-primary); border-radius: 0.5rem; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-        <line x1="8" y1="21" x2="16" y2="21"></line>
-        <line x1="12" y1="17" x2="12" y2="21"></line>
-      </svg>
-    </div>
-    <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0;">Works Where You Work</h2>
-  </div>
-
-  <p style="color: var(--color-muted-foreground); font-size: 1.05rem; margin-bottom: 1.5rem; max-width: 40rem;">
-    Slack, Claude Code, Cursor — same intelligence, same context, wherever you are.
+    Privacy-focused traffic analytics, queryable like any other datasource in your knowledge layer.
   </p>
 
   <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem;">
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Slack Integration</strong>
+      <strong style="color: var(--color-primary);">Lightweight & Private</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        @kyomi in any channel. Charts render in threads. Conversations sync to web app.
+        ~1KB tracking script. No cookies, no personal data, no consent banners.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">MCP for Claude Code / Cursor</strong>
+      <strong style="color: var(--color-primary);">Same AI, Same Knowledge</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Query your data while coding. Search catalog, run queries, save learnings — without leaving your IDE.
+        "Where is my traffic coming from?" — ask from Claude Code, Slack, or the app. Traffic data is just another datasource in your unified knowledge layer.
       </p>
     </div>
     <div style="background: var(--color-background); border-radius: 0.5rem; padding: 1.25rem; border: 1px solid var(--color-border);">
-      <strong style="color: var(--color-primary);">Context That Follows You</strong>
+      <strong style="color: var(--color-primary);">Dashboards & Alerts</strong>
       <p style="margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--color-muted-foreground);">
-        Your learnings and business context work everywhere — web, Slack, or Claude Code.
+        Build traffic dashboards, set up alerts on signups, combine with your product data — all in one place.
       </p>
     </div>
-  </div>
-
-  <div style="margin-top: 1.5rem;">
-    <img src="/images/claude-code-dashboard.png" alt="Creating a dashboard from Claude Code using Kyomi MCP integration" style="width: 100%; border-radius: 0.5rem; border: 1px solid var(--color-border);" />
-    <p style="font-size: 0.8rem; color: var(--color-muted-foreground); margin-top: 0.5rem; text-align: center;">Creating a dashboard directly from Claude Code via MCP</p>
   </div>
 </div>
 
 <!-- Quick Features Table -->
 <div style="margin: 4rem 0;">
-  <h2 style="text-align: center; margin-bottom: 2rem;">Everything Else You Need in an AI Analytics Tool</h2>
+  <h2 style="text-align: center; margin-bottom: 2rem;">Everything Else</h2>
 
   <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 2rem;">
     <div>
-      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Query Management</h3>
+      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Query & Explore</h3>
       <ul style="margin: 0; padding-left: 1.25rem; color: var(--color-muted-foreground); font-size: 0.9rem;">
-        <li>Full query history with search</li>
-        <li>Save and star favorite queries</li>
-        <li>Cost estimation with scan limits</li>
+        <li>Natural language to SQL — no SQL knowledge needed</li>
+        <li>Full SQL editor with autocomplete for power users</li>
+        <li>Query history with search</li>
+        <li>Automatic chart generation</li>
+        <li>Multi-source queries across databases</li>
       </ul>
     </div>
     <div>
-      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Team Collaboration</h3>
+      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Team & Collaboration</h3>
       <ul style="margin: 0; padding-left: 1.25rem; color: var(--color-muted-foreground); font-size: 0.9rem;">
         <li>Multi-user workspaces</li>
-        <li>Shared dashboards and knowledge</li>
+        <li>Shared dashboards, knowledge, and collections</li>
         <li>Team AI usage pools</li>
+        <li>Org-wide knowledge accessible to everyone</li>
       </ul>
     </div>
     <div>
-      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Security & Self-Hosting</h3>
+      <h3 style="font-size: 1rem; margin-bottom: 0.75rem;">Security & Deployment</h3>
       <ul style="margin: 0; padding-left: 1.25rem; color: var(--color-muted-foreground); font-size: 0.9rem;">
-        <li><a href="/self-hosting">Self-host Kyomi</a> on your own infrastructure — nothing leaves your network</li>
-        <li>Kyomi Connect: <a href="https://github.com/kyomi-ai/kyomi-connect">open-source</a>, credentials never leave your network</li>
-        <li>OAuth for cloud platforms</li>
-        <li>Encrypted credentials at rest</li>
-        <li>Read-only queries, audit logging</li>
+        <li>Open source (AGPL) — <a href="https://github.com/kyomi-ai/kyomi">audit the code</a></li>
+        <li><a href="/self-hosting">Self-host</a> on your own infrastructure</li>
+        <li>Standalone desktop app — single binary, 2GB RAM</li>
+        <li>OAuth for cloud platforms, encrypted credentials</li>
+        <li>Read-only queries, data never leaves your database</li>
       </ul>
-    </div>
-  </div>
-</div>
-
-<!-- Datasource Support -->
-<div style="margin: 3rem 0; padding: 2rem; border: 1px solid var(--color-border); border-radius: 0.75rem;">
-  <h3 style="text-align: center; margin-bottom: 1.5rem;">Same Features Across All 9 Datasources</h3>
-  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; font-size: 0.875rem;">
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      AI natural language queries
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      Automatic chart generation
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      Dashboard creation
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      SQL editor with autocomplete
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      Schema catalog indexing
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      Query history and caching
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      Built-in forecasting
-    </div>
-    <div style="display: flex; align-items: center; gap: 0.5rem;">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-success-foreground)" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
-      PDF dashboard export
     </div>
   </div>
 </div>
 
 <!-- CTA -->
 <div class="section" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%); color: white; border-radius: 1rem; text-align: center; padding: 4rem 1.5rem; margin: 4rem 0;">
-  <h2 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; color: white;">See it in action</h2>
-  <p style="font-size: 1.25rem; margin-bottom: 2rem; opacity: 0.95;">Start free with AI included. No credit card required.</p>
-  <div style="display: flex; justify-content: center; gap: 1rem; margin-top: 2rem;">
+  <h2 style="font-size: 2.25rem; font-weight: 700; margin-bottom: 0.75rem; color: white;">The knowledge layer between you and all your data.</h2>
+  <p style="font-size: 1.25rem; margin-bottom: 2rem; opacity: 0.95;">Open source. No credit card required.</p>
+  <div style="display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap; margin-top: 2rem;">
     <a href="https://app.kyomi.ai/login" style="display: inline-flex; align-items: center; justify-content: center; background: white; color: #d97706; font-weight: 700; font-size: 1.125rem; padding: 1rem 2.5rem; border-radius: 0.5rem; text-decoration: none; transition: background-color 0.2s;">
       Get Started Free →
+    </a>
+    <a href="https://github.com/kyomi-ai/kyomi" style="display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.15); color: white; font-weight: 600; font-size: 1.125rem; padding: 1rem 2.5rem; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); transition: background-color 0.2s;">
+      View on GitHub
     </a>
   </div>
 </div>

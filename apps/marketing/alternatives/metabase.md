@@ -1,195 +1,95 @@
 ---
 layout: page
 title: Metabase Alternative — Kyomi
-description: Looking for a Metabase alternative with AI that learns your business? Kyomi connects to your data warehouse, answers questions in plain English, and monitors your data 24/7.
+description: Looking for a Metabase alternative? Kyomi is next-gen BI — the knowledge layer between you and all your data. Open source, built for AI.
 head:
   - - meta
     - name: og:title
       content: "Metabase Alternative — Kyomi"
   - - meta
     - name: og:description
-      content: "AI-powered analytics that learns your business. Ask questions in plain English, build dashboards, monitor data 24/7. Connects to BigQuery, Snowflake, PostgreSQL, and more."
+      content: "Next-gen BI built for AI. Unified knowledge layer across all your databases. Dashboards as source of truth. Open source."
 ---
 
 <div class="alternatives-page">
 
 <div style="text-align: center; padding-top: 3rem; margin-bottom: 2rem;">
   <p style="font-size: 0.9rem; color: var(--color-muted-foreground); margin-bottom: 0.5rem;">METABASE ALTERNATIVE</p>
-  <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 0.75rem; line-height: 1.2;">Analytics That Learns Your Business,<br/>Not Just Displays Your Data</h1>
-  <p style="font-size: 1.25rem; color: var(--color-muted-foreground); max-width: 42rem; margin: 0 auto 2rem;">Metabase is great for building dashboards. But when you need answers, not just charts — when you need your analytics tool to <em>understand</em> your business — that's where Kyomi comes in.</p>
-  <a href="https://app.kyomi.ai/login" class="cta-primary" style="font-size: 1.125rem; padding: 0.875rem 2rem;">Try Kyomi Free →</a>
+  <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 0.75rem; line-height: 1.2;">What Metabase Would Be<br/>If You Built It For AI</h1>
+  <p style="font-size: 1.25rem; color: var(--color-muted-foreground); max-width: 42rem; margin: 0 auto 2rem;">Metabase is a dashboard tool. Kyomi is a knowledge layer. Metabase shows you charts. Kyomi learns your business, unifies your databases, and makes your dashboards the source of truth.</p>
+  <div style="display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap;">
+    <a href="https://app.kyomi.ai/login" class="cta-primary" style="font-size: 1.125rem; padding: 0.875rem 2rem;">Try Kyomi Free →</a>
+    <a href="https://github.com/kyomi-ai/kyomi" style="font-size: 1.125rem; padding: 0.875rem 2rem; color: var(--color-foreground); text-decoration: none; border: 1px solid var(--color-border); border-radius: 0.5rem;">View on GitHub</a>
+  </div>
 </div>
 
 ## TL;DR
 
-Metabase is an open-source BI tool focused on dashboards and visual query building. It's great at what it does — letting non-technical users explore data through a point-and-click interface, and it's free to self-host.
+Metabase is an open-source BI tool built in the pre-AI era. It's good at what it does — letting teams build dashboards with a visual query builder and self-host for free.
 
-**Kyomi takes a different approach.** Instead of building another dashboard tool, Kyomi builds a persistent intelligence layer on top of your data. Ask questions in plain English, get SQL-backed answers instantly. Every conversation teaches Kyomi something about your business — metric definitions, table relationships, business rules. That knowledge compounds over time and serves your whole team.
+**Kyomi is next-gen BI.** Instead of a dashboard tool, it's the knowledge layer between your team and all your databases. Dashboards are source of truth and documentation in the same stroke. Knowledge is shared org-wide, not trapped in one person's head. And you ask from wherever you already are — Claude.ai, Claude Code, Slack — not another app to log into.
 
-**Choose Metabase if** you want a self-hosted, open-source dashboard tool and your team is comfortable building and maintaining their own charts.
+**Choose Metabase if** you want a traditional dashboard builder and your team is comfortable creating and maintaining charts manually.
 
-**Choose Kyomi if** you want AI-powered analytics that learns your business context, monitors your data proactively, and works in your existing tools (Slack, Claude Code, Cursor).
+**Choose Kyomi if** you want a unified knowledge layer that learns your business, makes dashboards actually useful as source of truth, and works from the tools you already use.
 
 ---
 
 ## How They Compare
 
-### AI and Natural Language
+### The Core Difference
 
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
   <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Metabase</h4>
-    <p style="margin-bottom: 0;">Metabase has a natural language query feature, but it's limited to simple questions. It doesn't learn your business context — every session starts from scratch. There's no accumulated knowledge about how your team defines metrics, which tables matter, or what your business rules are.</p>
+    <p style="margin-bottom: 0;">A dashboard tool. Connect a database, build charts, share them. Each database is separate. Dashboards are charts, not documentation. No shared knowledge. Every user starts from scratch.</p>
   </div>
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi</h4>
-    <p style="margin-bottom: 0;">AI is the core experience, not a bolt-on. Ask complex questions in plain English and get SQL-backed answers with visualizations. Kyomi remembers your metric definitions, table relationships, and business rules across every conversation. The more you use it, the smarter it gets.</p>
+    <p style="margin-bottom: 0;">A knowledge layer. Connect ALL your databases under one umbrella. Dashboards become source of truth that ground every answer. Knowledge — metric definitions, business rules, table relationships — is shared org-wide and compounds over time.</p>
   </div>
 </div>
 
-### Dashboards and Visualization
+### Dashboards
 
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
   <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Metabase</h4>
-    <p style="margin-bottom: 0;">Strong visual query builder (point-and-click) and traditional dashboard experience. Drag-and-drop layout, filters, drill-down. Built for teams that want to manually create and maintain dashboards. Supports custom questions via SQL or the visual editor.</p>
+    <p style="margin-bottom: 0;">Drag-and-drop dashboard builder. Charts display data but are disconnected from the knowledge behind them. "What does this metric actually mean?" lives in someone's head, not in the dashboard.</p>
   </div>
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi</h4>
-    <p style="margin-bottom: 0;">Describe what you want to see and Kyomi builds the dashboard for you using <a href="/docs/chartml/">ChartML</a> — a code-based format that's version-controllable and AI-generated. Full SQL editor included for power users. Dashboards are shareable and exportable to PDF.</p>
+    <p style="margin-bottom: 0;">Dashboards are source of truth and documentation in the same stroke. When someone asks a question, Kyomi references curated dashboards to ground its answer in org-approved metrics. Built with an AI copilot using <a href="/docs/chartml/">ChartML</a> — version-controllable, no vendor lock-in.</p>
   </div>
 </div>
 
-### Proactive Monitoring
+### Knowledge & Intelligence
 
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
   <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Metabase</h4>
-    <p style="margin-bottom: 0;">Offers basic alerts on dashboard cards — set a threshold and get notified when a number goes above or below it. Useful but limited to simple conditions on existing charts.</p>
+    <p style="margin-bottom: 0;">No knowledge system. Each database is separate. No shared metric definitions. No learning between sessions. The basic NLP feature doesn't accumulate context.</p>
   </div>
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi</h4>
-    <p style="margin-bottom: 0;"><a href="/docs/watches">Kyomi Watch</a> is an AI agent that actively scans your data on a schedule. Describe what you want monitored in plain English — "alert me if daily signups drop below the 7-day average" — and Kyomi writes the query, runs it on schedule, and alerts you with context about what changed and why it might matter.</p>
+    <p style="margin-bottom: 0;">Unified knowledge layer across all databases. Define "MRR excludes trials" once — it's applied everywhere, for everyone. Knowledge compounds over time and is shared org-wide. New team members get years of accumulated understanding on day one.</p>
   </div>
 </div>
 
-### Workflow Integration
+### Where You Work
 
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
   <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Metabase</h4>
-    <p style="margin-bottom: 0;">Primarily a standalone web application. Offers an embedding SDK for building analytics into your own product (iframes or React SDK). Slack integration sends scheduled dashboard snapshots to channels.</p>
+    <p style="margin-bottom: 0;">Standalone web application. Slack integration sends dashboard snapshots. Embedding SDK for building analytics into your product.</p>
   </div>
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi</h4>
-    <p style="margin-bottom: 0;">Same AI intelligence available in the web app, <a href="/docs/slack">Slack</a> (@kyomi — ask questions and get charts right in your channels), and in your IDE via <a href="/docs/mcp">MCP</a> (Claude Code, Cursor). Your accumulated business knowledge follows you everywhere.</p>
+    <p style="margin-bottom: 0;">Ask from Claude.ai, Claude Code, Cursor, or Slack — same org-wide knowledge, same grounded answers. Kyomi is the intelligence layer behind your tools, not another app to log into.</p>
   </div>
 </div>
 
-### Deployment and Setup
-
-<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
-  <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
-    <h4 style="margin-top: 0;">Metabase</h4>
-    <p style="margin-bottom: 0;">Open-source (AGPL) and can be self-hosted for free — great for teams with infrastructure expertise. Cloud-hosted plans start at $85/month plus $6/user. Requires an application database (Postgres/MySQL) and ongoing maintenance for self-hosted deployments.</p>
-  </div>
-  <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
-    <h4 style="margin-top: 0;">Kyomi</h4>
-    <p style="margin-bottom: 0;">Cloud-hosted SaaS — sign up and connect your datasource in minutes. No infrastructure to manage. For maximum security, deploy <a href="/docs/connect/">Kyomi Connect</a> (open-source, Apache 2.0) inside your network so credentials never leave your infrastructure.</p>
-  </div>
-</div>
-
----
-
-## Side-by-Side Comparison
-
-<div style="overflow-x: auto; margin: 2rem 0;">
-  <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 0.5rem; overflow: hidden;">
-    <thead>
-      <tr style="background: var(--color-primary); color: white;">
-        <th style="padding: 1rem; text-align: left; border-bottom: 1px solid var(--color-border);">Feature</th>
-        <th style="padding: 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Metabase</th>
-        <th style="padding: 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Kyomi</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>AI Natural Language Queries</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Basic</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Core experience</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Accumulated Business Knowledge</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
-      </tr>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Visual Query Builder</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>SQL Editor</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
-      </tr>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Dashboards</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Drag-and-drop</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ AI-generated (ChartML)</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>AI Data Monitoring</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Basic alerts</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Kyomi Watch (AI agents)</td>
-      </tr>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Forecasting</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Built-in with confidence intervals</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Slack Integration</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Dashboard snapshots</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Interactive AI (@kyomi)</td>
-      </tr>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>IDE Integration (MCP)</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Claude Code, Cursor</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Embedded Analytics SDK</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
-      </tr>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Website Analytics</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Privacy-focused, built-in</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>PDF Export</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ (paid plans)</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ (Pro+)</td>
-      </tr>
-      <tr>
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Open Source</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ AGPL (self-host)</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Connector only (Apache 2.0)</td>
-      </tr>
-      <tr style="background: var(--color-muted);">
-        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Datasources</strong></td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">20+</td>
-        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">9</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
----
-
-## Pricing Comparison
+### Deployment & Pricing
 
 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 1.5rem 0;">
   <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
@@ -200,42 +100,127 @@ Metabase is an open-source BI tool focused on dashboards and visual query buildi
       <li><strong>Pro</strong>: $575/mo + $12/user/mo</li>
       <li><strong>Enterprise</strong>: $20,000+/year</li>
     </ul>
-    <p style="font-size: 0.85rem; color: var(--color-muted-foreground); margin-top: 0.75rem; margin-bottom: 0;">Self-hosting is free but requires infrastructure, maintenance, and upgrades. Cloud plans include hosting but scale quickly with per-user pricing.</p>
   </div>
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi</h4>
     <ul style="margin-bottom: 0;">
-      <li><strong>Free</strong>: $0/mo (limited AI, 5 dashboards)</li>
-      <li><strong>Starter</strong>: $15/mo (annual billing)</li>
-      <li><strong>Pro</strong>: $29/mo (annual billing)</li>
-      <li><strong>Team</strong>: $99/mo (up to 5 users)</li>
+      <li><strong>Standalone</strong>: Free (single binary, SQLite)</li>
+      <li><strong>Self-Hosted</strong>: Free (Docker, AGPL)</li>
+      <li><strong>Hosted Cloud</strong>: ~$5/user/mo + AI costs</li>
     </ul>
-    <p style="font-size: 0.85rem; color: var(--color-muted-foreground); margin-top: 0.75rem; margin-bottom: 0;">All plans include hosting, maintenance, and AI features. No infrastructure to manage. <a href="/pricing">Full pricing details →</a></p>
+    <p style="font-size: 0.85rem; color: var(--color-muted-foreground); margin-top: 0.75rem; margin-bottom: 0;">Open source. All features included on every deployment option. <a href="/pricing">Full pricing details →</a></p>
   </div>
+</div>
+
+---
+
+## Side-by-Side Comparison
+
+<div style="overflow-x: auto; margin: 2rem 0;">
+  <table style="width: 100%; border-collapse: collapse; background: var(--color-background); border-radius: 0.5rem; overflow: hidden;">
+    <thead>
+      <tr style="background: var(--color-primary); color: white;">
+        <th style="padding: 1rem; text-align: left; border-bottom: 1px solid var(--color-border);">Feature</th>
+        <th style="padding: 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Metabase</th>
+        <th style="padding: 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Kyomi</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Unified Knowledge Layer</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ All databases, shared org-wide</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Dashboards as Source of Truth</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">— (charts only)</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Grounds every answer</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>AI Natural Language Queries</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Basic</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Core experience, grounded in knowledge</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Accumulated Knowledge</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Compounds over time</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Visual Query Builder</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">— (plain English instead)</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Claude.ai / Claude Code</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ MCP integration</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Slack Integration</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Dashboard snapshots</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Interactive AI (@kyomi)</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>AI Monitoring</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">Basic threshold alerts</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Kyomi Watch (AI agents)</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Forecasting</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Built-in with confidence intervals</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Embedded Analytics SDK</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">—</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Standalone Desktop App</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">— (requires Java + DB)</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ Single binary, 2GB RAM</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Open Source</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ AGPL</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">✓ AGPL</td>
+      </tr>
+      <tr>
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Datasources</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">20+</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">9</td>
+      </tr>
+      <tr style="background: var(--color-muted);">
+        <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Cloud Pricing</strong></td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">$85/mo + $6-12/user</td>
+        <td style="padding: 0.75rem 1rem; text-align: center; border-bottom: 1px solid var(--color-border);">~$5/user/mo + AI</td>
+      </tr>
+    </tbody>
+  </table>
 </div>
 
 ---
 
 ## Where Metabase Wins
 
-We believe in honest comparisons. Metabase is a mature, well-established tool and there are areas where it's the better choice:
+We believe in honest comparisons. Metabase is mature and well-established:
 
-- **Self-hosting and open source** — If you need to run analytics entirely on your own infrastructure with full source code access, Metabase's AGPL-licensed open-source edition is hard to beat.
-- **Embedded analytics** — Metabase's embedding SDK (Data Studio) lets you build analytics directly into your product for your end users. Kyomi doesn't offer embedding.
-- **Visual query builder** — Metabase's point-and-click interface lets non-technical users build queries without writing SQL or relying on AI. Some teams prefer this deterministic approach.
-- **Datasource breadth** — Metabase supports 20+ databases out of the box. Kyomi currently supports 9 of the most common platforms.
-- **Maturity** — Metabase has been around since 2015 with a large community, extensive documentation, and a proven track record at scale.
+- **Embedded analytics** — Metabase's Data Studio SDK lets you build analytics into your own product. Kyomi doesn't offer embedding.
+- **Visual query builder** — Point-and-click interface for teams that prefer deterministic query building over AI.
+- **Datasource breadth** — 20+ databases vs. Kyomi's 9.
+- **Maturity** — Around since 2015 with a large community and proven track record at scale.
 
 ---
 
 ## Where Kyomi Wins
 
-- **AI that learns your business** — Kyomi accumulates institutional knowledge — metric definitions, table relationships, business rules — across every conversation. This knowledge compounds over time and serves your whole team. Metabase starts from scratch each time.
-- **Proactive monitoring** — Kyomi Watch deploys AI agents that scan your data on a schedule and alert you when something needs attention. Metabase only alerts on simple thresholds.
-- **Built-in forecasting** — Generate forecasts with confidence intervals directly from your data. Metabase doesn't offer forecasting.
-- **Workflow integration** — Same intelligence in Slack (interactive AI, not just snapshots), Claude Code, and Cursor via MCP. Your data knowledge follows you.
-- **Zero maintenance** — No servers to manage, no upgrades to apply, no application database to maintain. Sign up and connect your datasource.
-- **Website analytics** — Privacy-focused traffic analytics included on every plan. No separate tool needed.
+- **Unified knowledge layer** — All your databases under one umbrella with shared context. Metabase treats each database separately.
+- **Dashboards as source of truth** — Kyomi dashboards ground every answer in org-approved metrics. Metabase dashboards are just charts.
+- **Works where you are** — Same intelligence in Claude.ai, Claude Code, Slack. Metabase is a standalone web app.
+- **Open source AND cheap cloud** — Both are AGPL. But Kyomi cloud is ~$5/user vs. Metabase's $85/mo + per-user. Kyomi also has a standalone desktop app.
+- **AI that learns** — Knowledge compounds over time, shared org-wide. Metabase starts from scratch each time.
+- **Proactive monitoring** — AI agents that scan data on schedule. Metabase only does threshold alerts.
 
 ---
 
@@ -245,31 +230,33 @@ We believe in honest comparisons. Metabase is a mature, well-established tool an
   <div style="padding: 1.5rem; background: var(--color-muted); border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Metabase is a better fit if you:</h4>
     <ul style="margin-bottom: 0;">
-      <li>Need to self-host on your own infrastructure</li>
-      <li>Want to embed analytics in your product</li>
+      <li>Need to embed analytics in your product</li>
       <li>Prefer a visual query builder over AI</li>
-      <li>Have a dedicated BI team to build and maintain dashboards</li>
-      <li>Need to connect to niche or legacy databases</li>
+      <li>Have a dedicated BI team for dashboard maintenance</li>
+      <li>Need niche or legacy database connectors</li>
     </ul>
   </div>
   <div style="padding: 1.5rem; background: #fffbeb; border: 1px solid #f59e0b; border-radius: 0.75rem;">
     <h4 style="margin-top: 0;">Kyomi is a better fit if you:</h4>
     <ul style="margin-bottom: 0;">
-      <li>Want AI-powered analytics that gets smarter over time</li>
-      <li>Need answers from your data without writing SQL</li>
-      <li>Want proactive monitoring, not just dashboards</li>
-      <li>Work across Slack, IDE, and web — and want the same context everywhere</li>
-      <li>Don't want to manage BI infrastructure</li>
+      <li>Want a unified knowledge layer across all your databases</li>
+      <li>Want dashboards that serve as source of truth, not just charts</li>
+      <li>Want to ask from Claude.ai, Claude Code, or Slack</li>
+      <li>Want org-wide shared intelligence, not personal queries</li>
+      <li>Want open source with a cheap cloud option</li>
     </ul>
   </div>
 </div>
 
 <div style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%); color: white; border-radius: 1rem; text-align: center; padding: 4rem 1.5rem; margin: 3rem auto;">
-  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 1rem; color: white;">See Kyomi in Action</h2>
-  <p style="font-size: 1.125rem; margin-bottom: 2rem; opacity: 0.95;">Start free. Connect your data warehouse. Ask your first question in minutes.</p>
-  <div style="display: flex; justify-content: center; gap: 1rem;">
+  <h2 style="font-size: 2rem; font-weight: 700; margin-bottom: 0.75rem; color: white;">Next-gen BI, built for AI.</h2>
+  <p style="font-size: 1.125rem; margin-bottom: 2rem; opacity: 0.95;">The knowledge layer between you and all your data.</p>
+  <div style="display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap;">
     <a href="https://app.kyomi.ai/login" style="display: inline-flex; align-items: center; justify-content: center; background: white; color: #d97706; font-weight: 700; font-size: 1.125rem; padding: 1rem 2.5rem; border-radius: 0.5rem; text-decoration: none; transition: background-color 0.2s;">
       Try Kyomi Free →
+    </a>
+    <a href="https://github.com/kyomi-ai/kyomi" style="display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.15); color: white; font-weight: 600; font-size: 1.125rem; padding: 1rem 2.5rem; border-radius: 0.5rem; text-decoration: none; border: 1px solid rgba(255,255,255,0.3); transition: background-color 0.2s;">
+      View on GitHub
     </a>
   </div>
 </div>

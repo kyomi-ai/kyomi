@@ -7,8 +7,8 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
 <div class="self-hosting-page">
 
 <div style="text-align: center; padding-top: 3rem; margin-bottom: 2rem;">
-  <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;">Self-Host Kyomi</h1>
-  <p style="font-size: 1.25rem; color: var(--color-muted-foreground); max-width: 40rem; margin: 0 auto;">Run the full platform on your own infrastructure. Your data, your LLM key, your rules.</p>
+  <h1 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 0.5rem;">Run Kyomi Anywhere</h1>
+  <p style="font-size: 1.25rem; color: var(--color-muted-foreground); max-width: 40rem; margin: 0 auto;">The full knowledge layer on your infrastructure. Open source (AGPL). All features included. Bring your own LLM key.</p>
 </div>
 
 <!-- Why Self-Host -->
@@ -18,7 +18,7 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display: inline-block;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
     </div>
     <strong>Full Control</strong>
-    <p style="font-size: 0.875rem; color: var(--color-muted-foreground); margin-top: 0.25rem;">Nothing leaves your network. Data, queries, and AI conversations stay on your infrastructure.</p>
+    <p style="font-size: 0.875rem; color: var(--color-muted-foreground); margin-top: 0.25rem;">Data, queries, knowledge, and AI conversations stay on your infrastructure.</p>
   </div>
   <div style="text-align: center; padding: 1.5rem;">
     <div style="font-size: 1.5rem; margin-bottom: 0.5rem;">
@@ -72,7 +72,7 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
   <p style="text-align: center; color: var(--color-muted-foreground); margin-bottom: 2rem;">Pre-built binaries for every major platform. All releases available on <a href="https://github.com/kyomi-ai/kyomi/releases" style="color: var(--color-primary);">GitHub Releases</a>.</p>
 
   <div style="max-width: 40rem; margin: 0 auto;">
-    <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 0.5rem; overflow: hidden;">
+    <table style="width: 100%; border-collapse: collapse; background: var(--color-background); border-radius: 0.5rem; overflow: hidden;">
       <thead>
         <tr style="background: var(--color-primary); color: white;">
           <th style="padding: 0.75rem 1rem; text-align: left;">Platform</th>
@@ -144,7 +144,7 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
   <h2 style="text-align: center; margin-bottom: 2rem;">Self-Hosted vs Cloud</h2>
 
   <div style="overflow-x: auto;">
-    <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 0.5rem; overflow: hidden;">
+    <table style="width: 100%; border-collapse: collapse; background: var(--color-background); border-radius: 0.5rem; overflow: hidden;">
       <thead>
         <tr style="background: var(--color-primary); color: white;">
           <th style="padding: 1rem; text-align: left;">Feature</th>
@@ -156,12 +156,12 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
         <tr>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>AI Chat & Analysis</strong></td>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Your LLM key, unlimited</td>
-          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Included (per-tier budget)</td>
+          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Included (usage-based)</td>
         </tr>
         <tr style="background: var(--color-muted);">
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Dashboards</strong></td>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Unlimited</td>
-          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Per plan</td>
+          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Unlimited</td>
         </tr>
         <tr>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Datasources</strong></td>
@@ -181,17 +181,17 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
         <tr style="background: var(--color-muted);">
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Kyomi Watch</strong></td>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Included</td>
-          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Pro & Team</td>
+          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Included</td>
         </tr>
         <tr>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>MCP Support</strong></td>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Included</td>
-          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">All plans</td>
+          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Included</td>
         </tr>
         <tr style="background: var(--color-muted);">
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Users</strong></td>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Unlimited</td>
-          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Per plan</td>
+          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Per user (~$5/mo)</td>
         </tr>
         <tr>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Data Residency</strong></td>
@@ -211,7 +211,7 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
         <tr style="background: var(--color-muted);">
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border);"><strong>Cost</strong></td>
           <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;">Free (+ your LLM costs)</td>
-          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;"><a href="/pricing" style="color: var(--color-primary);">From $0/month</a></td>
+          <td style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--color-border); text-align: center;"><a href="/pricing" style="color: var(--color-primary);">~$5/user/mo + AI</a></td>
         </tr>
       </tbody>
     </table>
@@ -256,8 +256,8 @@ description: Run Kyomi on your own infrastructure. Full control, your LLM API ke
 
 <!-- CTA -->
 <div class="section" style="background: linear-gradient(135deg, #d97706 0%, #b45309 100%); color: white; border-radius: 1rem; text-align: center; padding: 4rem 1.5rem; margin: 4rem 0;">
-  <h2 style="font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; color: white;">Try It Now</h2>
-  <p style="font-size: 1.25rem; margin-bottom: 2rem; opacity: 0.95;">One command to install. Five minutes to your first insight.</p>
+  <h2 style="font-size: 2.25rem; font-weight: 700; margin-bottom: 0.75rem; color: white;">The knowledge layer, on your terms.</h2>
+  <p style="font-size: 1.25rem; margin-bottom: 2rem; opacity: 0.95;">Open source. One command to install. All features included.</p>
   <div style="display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap; margin-top: 2rem;">
     <a href="https://github.com/kyomi-ai/kyomi/releases" style="display: inline-flex; align-items: center; justify-content: center; background: white; color: #d97706; font-weight: 700; font-size: 1.125rem; padding: 1rem 2.5rem; border-radius: 0.5rem; text-decoration: none; transition: background-color 0.2s;">
       Download Binary

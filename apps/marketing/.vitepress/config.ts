@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: "Kyomi",
-  description: "AI-powered data analytics that speaks your language",
+  description: "The knowledge layer between you and all your data",
   lang: 'en-US',
 
   // Disable dark mode toggle
@@ -21,6 +21,9 @@ export default defineConfig({
 
   // Head tags for SEO
   head: [
+    ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
+    ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
+    ['link', { href: 'https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@400;500&display=swap', rel: 'stylesheet' }],
     ['link', { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' }],
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/kyomi_small_logo.svg' }],
     ['meta', { name: 'theme-color', content: '#d97706' }], // Primary brand color
@@ -30,7 +33,7 @@ export default defineConfig({
     ['meta', { name: 'og:image', content: '/images/og-image.png' }],
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
     ['meta', { name: 'twitter:image', content: '/images/og-image.png' }],
-    ['meta', { name: 'keywords', content: 'AI analytics, BigQuery, Snowflake, PostgreSQL, MySQL, ClickHouse, Redshift, Databricks, SQL Server, Azure Synapse, data visualization, natural language SQL, AI dashboards, multi-datasource analytics, website analytics, privacy-focused analytics' }],
+    ['meta', { name: 'keywords', content: 'open source BI, data intelligence, knowledge layer, AI analytics, BigQuery, Snowflake, PostgreSQL, MySQL, ClickHouse, natural language SQL, AI dashboards, multi-datasource, MCP, source of truth, self-hosted analytics' }],
     // Kyomi Analytics — signed key mode
     ['script', { defer: '', 'data-key': 'eyJzIjoiYzAzNGRkZTU3YTRiM2I0NiIsInciOiJ3b3Jrc3BhY2UtOTlmMjRkMDUtNjczZDI1YjgiLCJkIjpbImt5b21pLmFpIl19.PrxwbaLdZ-4amhpCBU01EU5Reb_J0-zg8NZERzWm2X4', src: 'https://analytics.kyomi.ai/k.js' }],
     // Schema.org structured data for AI and search engine discoverability
@@ -38,30 +41,31 @@ export default defineConfig({
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "name": "Kyomi",
-      "description": "AI-powered data analytics platform that learns your business, answers questions in plain English, monitors your data 24/7, and integrates with Slack and developer tools. Connect BigQuery, Snowflake, PostgreSQL, and 6 more datasources.",
+      "description": "Open-source data intelligence platform. The knowledge layer between you and all your databases. Unify Postgres, BigQuery, Snowflake, and more under one layer of shared intelligence. Dashboards as source of truth. Ask from Claude, Slack, or the Kyomi app.",
       "url": "https://kyomi.ai",
       "applicationCategory": "BusinessApplication",
-      "applicationSubCategory": "AI Analytics Platform, Business Intelligence Tool, Natural Language SQL",
+      "applicationSubCategory": "Data Intelligence Platform, Open Source Business Intelligence, Knowledge Layer",
       "operatingSystem": "Web",
       "offers": {
         "@type": "AggregateOffer",
         "lowPrice": "0",
-        "highPrice": "129",
+        "highPrice": "5",
         "priceCurrency": "USD",
         "offerCount": "3"
       },
       "featureList": [
-        "Natural language data queries (text-to-SQL)",
-        "AI-powered dashboard creation",
-        "Proactive data monitoring with AI agents",
+        "Unified knowledge layer across all databases",
+        "Dashboards as source of truth and documentation",
+        "Shared org-wide intelligence, not personal chatbots",
+        "Open source (AGPL) — self-host or use hosted cloud",
+        "Standalone desktop app — single binary, no infrastructure",
+        "MCP integration for Claude Code, Claude.ai, and Cursor",
         "Slack integration with chart rendering",
-        "MCP integration for Claude Code and Cursor",
+        "9 database connectors (BigQuery, Snowflake, PostgreSQL, MySQL, ClickHouse, Redshift, Databricks, SQL Server, Azure Synapse)",
+        "Proactive data monitoring with AI agents",
         "Built-in forecasting with confidence intervals",
-        "9 datasource connectors (BigQuery, Snowflake, PostgreSQL, MySQL, ClickHouse, Redshift, Databricks, SQL Server, Azure Synapse)",
-        "Accumulated business knowledge that compounds over time",
         "Built-in privacy-focused website analytics",
-        "PDF dashboard export",
-        "Multi-source charts combining data from different databases"
+        "Natural language to SQL with accumulated knowledge grounding"
       ],
       "screenshot": "https://kyomi.ai/images/og-image.png"
     })],
@@ -78,13 +82,24 @@ export default defineConfig({
       { text: 'Pricing', link: '/pricing' },
       { text: 'Self-Host', link: '/self-hosting' },
       { text: 'Blog', link: '/blog' },
-      { text: 'Docs', link: '/docs/' }, // Kyomi documentation
-      { text: 'Alternatives', link: '/alternatives/metabase' },
+      { text: 'Docs', link: '/docs/' },
+      {
+        text: 'Compare',
+        items: [
+          { text: 'vs Metabase', link: '/alternatives/metabase' },
+          { text: 'vs MCP Connectors', link: '/alternatives/mcp-connectors' },
+        ]
+      },
       {
         text: 'Sign In',
         link: 'https://app.kyomi.ai/login',
         target: '_self'
       }
+    ],
+
+    // GitHub link in nav bar
+    socialLinks: [
+      { icon: 'github', link: 'https://github.com/kyomi-ai/kyomi' }
     ],
 
     // Sidebar - only shows on /docs/ pages
@@ -175,7 +190,7 @@ export default defineConfig({
 
     // Footer
     footer: {
-      message: 'Built with privacy in mind. <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/security">Security</a> · <a href="/cookies">Cookies</a>',
+      message: 'Open source (AGPL). <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a> · <a href="/security">Security</a> · <a href="/cookies">Cookies</a>',
       copyright: '© 2026 Alytic Pty Ltd. All rights reserved.'
     },
 

@@ -4,7 +4,7 @@
  * This stylesheet imports design tokens from the main app to ensure
  * consistent branding between kyomi.ai (marketing) and app.kyomi.ai (product).
  *
- * Design System Reference: docs/DESIGN_SYSTEM.md
+ * Design System Reference: DESIGN.md (root)
  * App CSS Variables: crates/kyomi-ui/style/main.css
  */
 
@@ -16,32 +16,33 @@
   --vp-c-brand-3: #92400e;
   --vp-c-brand-soft: #fef3c7;
 
-  /* From app design system */
+  /* From DESIGN.md — warm gray palette */
   --color-primary: #d97706;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #cbd5e1;
-  --color-secondary-foreground: #334155;
-  --color-accent: #f1f5f9;
-  --color-accent-foreground: #0f172a;
-  --color-background: #ffffff;
-  --color-foreground: #0f172a;
-  --color-border: #e2e8f0;
-  --color-muted: #f1f5f9;
-  --color-muted-foreground: #64748b;
+  --color-secondary: #D4D0C8;
+  --color-secondary-foreground: #1C1917;
+  --color-accent: #F5F3EF;
+  --color-accent-foreground: #1C1917;
+  --color-background: #FAFAF8;
+  --color-foreground: #1C1917;
+  --color-border: #E8E5DE;
+  --color-muted: #F5F3EF;
+  --color-muted-foreground: #6B6660;
 
-  /* Status colors matching app */
-  --color-warning: #fef8e7;
-  --color-warning-foreground: #947600;
-  --color-error: #fce8e6;
-  --color-error-foreground: #cd2b31;
-  --color-success: #e3f8f0;
-  --color-success-foreground: #008060;
-  --color-info: #f0f5fa;
-  --color-info-foreground: #0073e6;
+  /* Semantic colors from DESIGN.md */
+  --color-warning: #FEFCE8;
+  --color-warning-foreground: #CA8A04;
+  --color-error: #FEF2F2;
+  --color-error-foreground: #DC2626;
+  --color-success: #F0FDF4;
+  --color-success-foreground: #15803D;
+  --color-info: #EFF6FF;
+  --color-info-foreground: #2563EB;
 
-  /* Typography - Match app font stack */
-  --vp-font-family-base: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --vp-font-family-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  /* Typography from DESIGN.md */
+  --vp-font-family-base: 'DM Sans', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --vp-font-family-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-display: 'Instrument Serif', Georgia, 'Times New Roman', serif;
 
   /* Override VitePress defaults with our colors */
   --vp-c-default-1: var(--color-foreground);
@@ -81,6 +82,14 @@
 }
 
 /* === Marketing-Specific Overrides === */
+
+/* Instrument Serif for display headings (DESIGN.md) */
+.VPHero .text,
+.VPHero .name,
+h1,
+.section-title {
+  font-family: var(--font-display) !important;
+}
 
 /* Hero Section - Bigger, bolder for landing page */
 .hero {
@@ -203,24 +212,19 @@
 /* Pricing Cards - Compact layout like Sleek */
 .pricing-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 1.25rem;
   margin: 2rem 0;
   box-sizing: border-box;
 }
 
-@media (max-width: 900px) {
-  .pricing-grid {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-  }
-}
-
-@media (max-width: 560px) {
+@media (max-width: 768px) {
   .pricing-grid {
     grid-template-columns: 1fr;
     gap: 1rem;
-    max-width: 320px;
+    max-width: 400px;
+    margin-left: auto;
+    margin-right: auto;
   }
 }
 

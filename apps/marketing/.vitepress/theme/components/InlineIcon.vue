@@ -20,7 +20,9 @@ import {
   PresentationChartBarIcon,
   RectangleGroupIcon,
   ViewColumnsIcon,
-  CheckIcon
+  CheckIcon,
+  ShieldCheckIcon,
+  CodeBracketIcon
 } from '@heroicons/vue/24/outline'
 
 const props = defineProps({
@@ -49,7 +51,9 @@ const iconMap = {
   PresentationChartBarIcon,
   RectangleGroupIcon,
   ViewColumnsIcon,
-  CheckIcon
+  CheckIcon,
+  ShieldCheckIcon,
+  CodeBracketIcon
 }
 
 const iconComponent = computed(() => {

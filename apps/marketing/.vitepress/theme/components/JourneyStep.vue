@@ -26,7 +26,15 @@ import {
   CogIcon,
   UserGroupIcon,
   BoltIcon,
-  ShieldCheckIcon
+  ShieldCheckIcon,
+  CircleStackIcon,
+  ArrowTrendingUpIcon,
+  DocumentTextIcon,
+  CommandLineIcon,
+  ChatBubbleLeftRightIcon,
+  ComputerDesktopIcon,
+  BellAlertIcon,
+  CodeBracketIcon
 } from '@heroicons/vue/24/outline'
 
 const props = defineProps({
@@ -53,7 +61,15 @@ const iconMap = {
   CogIcon,
   UserGroupIcon,
   BoltIcon,
-  ShieldCheckIcon
+  ShieldCheckIcon,
+  CircleStackIcon,
+  ArrowTrendingUpIcon,
+  DocumentTextIcon,
+  CommandLineIcon,
+  ChatBubbleLeftRightIcon,
+  ComputerDesktopIcon,
+  BellAlertIcon,
+  CodeBracketIcon
 }
 
 const iconComponent = computed(() => {
