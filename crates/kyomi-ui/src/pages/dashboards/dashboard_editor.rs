@@ -1022,8 +1022,10 @@ fn DashboardCodeEditor(
     #[cfg(target_arch = "wasm32")]
     {
         use kode_leptos::{CodeEditor, Language};
+        use crate::components::dashboard::chartml_completion::chartml_markdown_completion_provider;
 
         let editor_theme = crate::pages::sql_editor::code_editor::use_editor_theme();
+        let completion_providers = Signal::stored(vec![chartml_markdown_completion_provider()]);
 
         view! {
             <CodeEditor
@@ -1031,6 +1033,7 @@ fn DashboardCodeEditor(
                 content=content
                 theme=editor_theme
                 on_change=on_change
+                completion_providers=completion_providers
             />
         }
         .into_any()
