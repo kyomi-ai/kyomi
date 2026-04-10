@@ -19,9 +19,11 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 use wasm_bindgen::JsCast;
 
 use super::types::{ColumnMetadata, QueryResult};
+use crate::components::{Button, ButtonSize, ButtonVariant, StyledSelect};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -31,7 +33,10 @@ use super::types::{ColumnMetadata, QueryResult};
 const MIN_COL_WIDTH: f64 = 50.0;
 const DEFAULT_COL_WIDTH: f64 = 150.0;
 
-const PAGE_SIZE_OPTIONS: [u32; 5] = [10, 25, 50, 100, 200];
+/// Page size options as static string pairs for `StyledSelect`.
+const PAGE_SIZE_OPTIONS: [(&str, &str); 5] = [
+    ("10", "10"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"),
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cell rendering helpers
@@ -327,7 +332,7 @@ pub fn ResultsTable(
                     <thead class="sticky top-0 z-10">
                         <tr class="resizable-table-row" style="display: flex; width: 100%;">
                             // Row number header
-                            <th class="resizable-table-row-number-header bg-accent border-b border-r-2 border-input text-center font-normal text-muted-foreground"
+                            <th class="resizable-table-row-number-header bg-muted border-b border-r-2 border-border text-center font-normal text-muted-foreground"
                                 style="flex: 0 0 50px; width: 50px; min-width: 50px; max-width: 50px; padding: 6px 4px; position: sticky; top: 0; font-size: 0.75rem;"
                             />
                             {columns_for_header
@@ -337,7 +342,7 @@ pub fn ResultsTable(
                                     let col_name = col.name.clone();
                                     view! {
                                         <th
-                                            class="resizable-table-header text-left relative transition-colors bg-accent border-b border-border font-semibold text-foreground"
+                                            class="resizable-table-header text-left relative transition-colors bg-muted border-b border-border font-semibold text-foreground"
                                             style=move || format!("{} padding: 6px 8px; position: sticky; top: 0; overflow: hidden;", col_style(idx))
                                         >
                                             <div class="truncate pr-2 flex items-center">
@@ -404,7 +409,7 @@ pub fn ResultsTable(
 
                                                 view! {
                                                     <td
-                                                        class="resizable-table-cell border-b border-accent text-foreground"
+                                                        class="resizable-table-cell border-b border-border text-foreground"
                                                         style=move || format!(
                                                             "{} padding: 4px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; {text_align}", col_style(cell_idx)
                                                         )
@@ -469,28 +474,17 @@ fn PaginationControls(
             // Page size selector
             <div class="flex items-center gap-1 sm:gap-2 text-xs whitespace-nowrap text-muted-foreground">
                 <span class="hidden sm:inline">"Rows per page:"</span>
-                <select
-                    class="h-7 text-xs rounded-md border border-input bg-transparent px-2 py-1 text-foreground cursor-pointer focus:outline-none focus:ring-1 focus:ring-ring"
-                    aria-label="Rows per page"
-                    on:change=move |ev| {
-                        let value = event_target_value(&ev);
-                        if let Ok(size) = value.parse::<u32>() {
-                            on_page_size_change.run(size);
-                        }
-                    }
-                >
-                    {PAGE_SIZE_OPTIONS
-                        .iter()
-                        .map(|&size| {
-                            let selected = size == page_size;
-                            view! {
-                                <option value=size.to_string() selected=selected>
-                                    {size}
-                                </option>
+                <div class="w-20">
+                    <StyledSelect
+                        value=page_size.to_string()
+                        options=PAGE_SIZE_OPTIONS.to_vec()
+                        on_change=move |val: String| {
+                            if let Ok(size) = val.parse::<u32>() {
+                                on_page_size_change.run(size);
                             }
-                        })
-                        .collect_view()}
-                </select>
+                        }
+                    />
+                </div>
             </div>
 
             // Page info + navigation
@@ -507,62 +501,35 @@ fn PaginationControls(
 
                 // Navigation buttons
                 <div class="flex items-center gap-1 flex-shrink-0">
-                    // First page
-                    <button
-                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                        disabled=is_first
-                        aria-label="First page"
-                        on:click=move |_| on_page_change.run(1)
+                    <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
+                        disabled=MaybeProp::derive(move || Some(is_first))
+                        aria_label="First page" on:click=move |_| on_page_change.run(1)
                     >
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-                        </svg>
-                    </button>
-
-                    // Previous page
-                    <button
-                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                        disabled=is_first
-                        aria-label="Previous page"
-                        on:click=move |_| {
-                            on_page_change.run(current_page.saturating_sub(1).max(1))
-                        }
+                        <Icon icon=icondata_lu::LuChevronsLeft width="16" height="16" />
+                    </Button>
+                    <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
+                        disabled=MaybeProp::derive(move || Some(is_first))
+                        aria_label="Previous page"
+                        on:click=move |_| on_page_change.run(current_page.saturating_sub(1).max(1))
                     >
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
-                        </svg>
-                    </button>
-
-                    // Page X of Y
+                        <Icon icon=icondata_lu::LuChevronLeft width="16" height="16" />
+                    </Button>
                     <span class="text-xs px-2 text-muted-foreground">
                         "Page "{current_page}" of "{total_pages}
                     </span>
-
-                    // Next page
-                    <button
-                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                        disabled=is_last
-                        aria-label="Next page"
-                        on:click=move |_| {
-                            on_page_change.run((current_page + 1).min(total_pages))
-                        }
+                    <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
+                        disabled=MaybeProp::derive(move || Some(is_last))
+                        aria_label="Next page"
+                        on:click=move |_| on_page_change.run((current_page + 1).min(total_pages))
                     >
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                        </svg>
-                    </button>
-
-                    // Last page
-                    <button
-                        class="p-1 rounded-md text-muted-foreground hover:bg-foreground/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                        disabled=is_last
-                        aria-label="Last page"
-                        on:click=move |_| on_page_change.run(total_pages)
+                        <Icon icon=icondata_lu::LuChevronRight width="16" height="16" />
+                    </Button>
+                    <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
+                        disabled=MaybeProp::derive(move || Some(is_last))
+                        aria_label="Last page" on:click=move |_| on_page_change.run(total_pages)
                     >
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                        </svg>
-                    </button>
+                        <Icon icon=icondata_lu::LuChevronsRight width="16" height="16" />
+                    </Button>
                 </div>
             </div>
         </div>

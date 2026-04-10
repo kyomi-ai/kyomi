@@ -90,9 +90,7 @@ pub fn CatalogTree(
                         // No datasource selected
                         view! {
                             <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                <svg class="w-12 h-12 text-muted-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                                </svg>
+                                <Icon icon=icondata_lu::LuDatabase attr:class="w-12 h-12 text-muted-foreground mb-2" />
                                 <p class="text-sm text-muted-foreground">"Select a datasource"</p>
                                 <p class="text-xs text-muted-foreground mt-1">"Choose a datasource to browse its catalog"</p>
                             </div>
@@ -102,9 +100,7 @@ pub fn CatalogTree(
                         // Error state
                         view! {
                             <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                <svg class="w-12 h-12 text-error-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                                </svg>
+                                <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-12 h-12 text-error-foreground mb-2" />
                                 <p class="text-sm text-error-foreground">"Failed to load catalog"</p>
                                 <p class="text-xs text-muted-foreground mt-1">{e}</p>
                             </div>
@@ -115,9 +111,7 @@ pub fn CatalogTree(
                             // Empty catalog
                             view! {
                                 <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                    <svg class="w-12 h-12 text-muted-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-                                    </svg>
+                                    <Icon icon=icondata_lu::LuInbox attr:class="w-12 h-12 text-muted-foreground mb-2" />
                                     <p class="text-sm text-muted-foreground">"No tables indexed"</p>
                                     <p class="text-xs text-muted-foreground mt-1">"Index the catalog in datasource settings"</p>
                                 </div>
@@ -185,9 +179,7 @@ fn CatalogTreeView(
                     // Empty search results — matches React "No tables found" state
                     view! {
                         <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                            <svg class="w-12 h-12 text-muted-foreground mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                            </svg>
+                            <Icon icon=icondata_lu::LuSearch attr:class="w-12 h-12 text-muted-foreground mb-2" />
                             <p class="text-sm text-muted-foreground">"No tables found"</p>
                             <p class="text-xs text-muted-foreground mt-1">"Try a different search term"</p>
                         </div>
@@ -287,8 +279,9 @@ fn CatalogNodeView(
                 {if has_children && !is_column {
                     let nid = node_id.clone();
                     view! {
-                        <svg
-                            class=move || {
+                        <Icon
+                            icon=icondata_lu::LuChevronRight
+                            attr:class=move || {
                                 let expanded = expanded_nodes.get().contains(&nid);
                                 if expanded {
                                     "w-3 h-3 flex-shrink-0 text-muted-foreground transition-transform rotate-90"
@@ -296,13 +289,8 @@ fn CatalogNodeView(
                                     "w-3 h-3 flex-shrink-0 text-muted-foreground transition-transform"
                                 }
                             }
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
                             on:click=handle_arrow_click
-                        >
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                        </svg>
+                        />
                     }.into_any()
                 } else if !is_column {
                     view! { <div class="w-3" /> }.into_any()

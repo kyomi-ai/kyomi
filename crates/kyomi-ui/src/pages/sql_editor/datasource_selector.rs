@@ -12,7 +12,7 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
-use crate::components::Spinner;
+use crate::components::{DynSelect, Spinner};
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
 /// localStorage key for persisting the last selected datasource slug.
@@ -126,7 +126,7 @@ pub fn DatasourceSelector() -> impl IntoView {
         </Show>
 
         <Show when=move || has_error.get()>
-            <div class="px-3 py-2 text-sm text-destructive">
+            <div class="px-3 py-2 text-sm text-error-foreground">
                 "Error loading datasources"
             </div>
         </Show>
@@ -145,39 +145,35 @@ pub fn DatasourceSelector() -> impl IntoView {
         </Show>
 
         <Show when=move || !is_loading.get() && !has_error.get() && !accessible_datasources.get().is_empty()>
-            <select
-                class="w-[140px] sm:w-[240px] h-9 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                on:change=move |ev| {
-                    let new_slug = event_target_value(&ev);
-                    if new_slug.is_empty() {
-                        selection.select(None, None);
-                    } else {
-                        let ds_type = accessible_datasources
-                            .get_untracked()
+            <div class="w-[140px] sm:w-[240px]">
+                <DynSelect
+                    value=Signal::derive(move || selection.slug.get().unwrap_or_default())
+                    options=Signal::derive(move || {
+                        accessible_datasources
+                            .get()
                             .iter()
-                            .find(|d| d.slug == new_slug)
-                            .map(|d| d.datasource_type.clone());
-                        selection.select(Some(new_slug), ds_type);
-                    }
-                }
-                prop:value=move || selection.slug.get().unwrap_or_default()
-            >
-                <For
-                    each=move || accessible_datasources.get()
-                    key=|ds| ds.slug.clone()
-                    let:ds
-                >
-                    {
-                        let slug = ds.slug.clone();
-                        let label = format!("{} ({})", ds.name, ds.type_display_name);
-                        view! {
-                            <option value={slug}>
-                                {label}
-                            </option>
+                            .map(|ds| {
+                                (
+                                    ds.slug.clone(),
+                                    format!("{} ({})", ds.name, ds.type_display_name),
+                                )
+                            })
+                            .collect::<Vec<(String, String)>>()
+                    })
+                    on_change=move |new_slug: String| {
+                        if new_slug.is_empty() {
+                            selection.select(None, None);
+                        } else {
+                            let ds_type = accessible_datasources
+                                .get_untracked()
+                                .iter()
+                                .find(|d| d.slug == new_slug)
+                                .map(|d| d.datasource_type.clone());
+                            selection.select(Some(new_slug), ds_type);
                         }
                     }
-                </For>
-            </select>
+                />
+            </div>
         </Show>
     }
 }

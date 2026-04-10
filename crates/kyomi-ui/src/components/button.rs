@@ -37,6 +37,8 @@ pub enum ButtonSize {
     Icon,
     /// Compact icon-only: 28px square — for dense UI like panel action rows.
     IconSm,
+    /// Extra-small icon-only: 20px square — for inline actions in tabs, chips.
+    IconXs,
 }
 
 /// Base classes shared by all button variants.
@@ -80,6 +82,8 @@ fn size_classes(size: ButtonSize) -> &'static str {
         ButtonSize::Icon => "h-9 w-9 p-0",
         // Compact icon-only: 28px square for dense action rows
         ButtonSize::IconSm => "h-7 w-7 p-0",
+        // Extra-small icon-only: 20px square for inline tab/chip actions
+        ButtonSize::IconXs => "h-5 w-5 p-0",
     }
 }
 

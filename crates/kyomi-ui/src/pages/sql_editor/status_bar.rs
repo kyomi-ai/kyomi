@@ -17,7 +17,7 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
-use crate::components::Spinner;
+use crate::components::{Button, ButtonSize, Spinner};
 use crate::server_fns::sql_editor::DryRunResult;
 
 // ─── Dry run status display ──────────────────────────────────────────────────
@@ -129,13 +129,14 @@ pub fn StatusBar(
                 <div class="text-xs text-muted-foreground font-mono">
                     {move || format!("Ln {}, Col {}", cursor_line.get(), cursor_col.get())}
                 </div>
-                <button
+                <Button
+                    size=ButtonSize::Sm
+                    class="flex-shrink-0"
+                    disabled=MaybeProp::derive(move || Some(query_running.get() || run_disabled.get()))
                     on:click=move |_| on_run_query.run(())
-                    disabled=move || query_running.get() || run_disabled.get()
-                    class="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                 >
                     {move || if query_running.get() { "Running..." } else { "Run Query" }}
-                </button>
+                </Button>
             </div>
         </div>
     }

@@ -11,13 +11,16 @@
 //! Page changes call `fetch_query_page()` via `spawn_local`. The page
 //! size change re-executes the query via `execute_sql_query()`.
 
+use std::sync::Arc;
+
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use super::state::SqlEditorState;
 use super::tab_bar::TabBar;
 use super::results_table::ResultsTable;
 use super::types::{QueryStatus, ResultTab};
-use crate::components::Spinner;
+use crate::components::{Button, ButtonVariant, ButtonSize, Modal, ModalSize, Spinner};
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::sql_editor::fetch_query_page;
 #[cfg(target_arch = "wasm32")]
@@ -302,14 +305,7 @@ pub fn ResultsContainer(
                 view! {
                     <div class="flex-1 flex items-center justify-center text-muted-foreground">
                         <div class="text-center">
-                            <svg class="w-16 h-16 mx-auto mb-4 text-muted-foreground/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                    stroke-width="1.5"
-                                    d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                                />
-                            </svg>
+                            <Icon icon=icondata_lu::LuFileText attr:class="w-16 h-16 mx-auto mb-4 text-muted-foreground/50" />
                             <p class="text-sm">"No active result tab"</p>
                         </div>
                     </div>
@@ -379,28 +375,6 @@ pub fn ResultsContainer(
         })
     };
 
-    let handle_copy_yaml = move |_| {
-        #[cfg(target_arch = "wasm32")]
-        {
-            if let Some(yaml) = chart_yaml.get_untracked() {
-                if let Some(window) = web_sys::window() {
-                    let clipboard = window.navigator().clipboard();
-                    let _ = clipboard.write_text(&yaml);
-                    set_copied.set(true);
-                    // Reset after 2 seconds.
-                    leptos::task::spawn_local(async move {
-                        gloo_timers::future::TimeoutFuture::new(2000).await;
-                        set_copied.set(false);
-                    });
-                }
-            }
-        }
-    };
-
-    let close_chart_modal = move |_| {
-        set_show_chart_modal.set(false);
-    };
-
     // ── Render ───────────────────────────────────────────────────────────
 
     // Don't render at all if there are no tabs.
@@ -417,55 +391,64 @@ pub fn ResultsContainer(
             let create_chart = handle_create_chart;
 
             view! {
-                <button
-                    class="px-2.5 py-1 text-xs font-medium text-muted-foreground hover:text-foreground bg-background border border-input rounded-md hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
-                    disabled=move || generating.get()
-                    aria-label="Create chart from results"
+                <Button
+                    variant=ButtonVariant::Outline
+                    size=ButtonSize::Sm
+                    class=""
+                    disabled=MaybeProp::derive(move || Some(generating.get()))
+                    aria_label="Create chart from results"
                     on:click=move |_| create_chart.run(())
                 >
                     {move || if generating.get() {
                         view! {
-                            <Spinner class="!h-3 !w-3" />
+                            <Spinner size="h-3 w-3" />
                             <span>"Generating..."</span>
                         }.into_any()
                     } else {
                         view! {
-                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                    stroke-width="2"
-                                    d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
-                                />
-                            </svg>
+                            <Icon icon=icondata_lu::LuChartBar attr:class="w-3.5 h-3.5" />
                             <span>"Create Chart"</span>
                         }.into_any()
                     }}
-                </button>
+                </Button>
                 // Inline error message.
                 {move || error.get().map(|msg| {
                     let title = msg.clone();
                     view! {
-                        <span class="text-xs text-destructive truncate max-w-[200px]" title=title>{msg}</span>
+                        <span class="text-xs text-error-foreground truncate max-w-[200px]" title=title>{msg}</span>
                     }
                 })}
             }
         };
 
         Some(view! {
-            <div class="flex-1 flex flex-col min-h-0 border border-input rounded-md overflow-hidden bg-card" role="tabpanel" aria-label="Query results">
+            <div class="flex-1 flex flex-col min-h-0 border border-border rounded-md overflow-hidden bg-card" role="tabpanel" aria-label="Query results">
                 <TabBar on_restore_query=on_restore_query header_actions=chart_button />
                 {tab_content}
 
                 // ChartML preview modal
-                <Show when=move || show_chart_modal.get()>
-                    <ChartYamlModal
-                        yaml=Signal::derive(move || chart_yaml.get().unwrap_or_default())
-                        copied=Signal::derive(move || copied.get())
-                        on_copy=handle_copy_yaml
-                        on_close=close_chart_modal
-                    />
-                </Show>
+                <ChartYamlModal
+                    show=Signal::derive(move || show_chart_modal.get())
+                    yaml=Signal::derive(move || chart_yaml.get().unwrap_or_default())
+                    copied=Signal::derive(move || copied.get())
+                    copy_handler=Callback::new(move |()| {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            if let Some(yaml) = chart_yaml.get_untracked() {
+                                if let Some(window) = web_sys::window() {
+                                    let clipboard = window.navigator().clipboard();
+                                    let _ = clipboard.write_text(&yaml);
+                                    set_copied.set(true);
+                                    leptos::task::spawn_local(async move {
+                                        gloo_timers::future::TimeoutFuture::new(2000).await;
+                                        set_copied.set(false);
+                                    });
+                                }
+                            }
+                        }
+                    })
+                    close_handler=Callback::new(move |()| set_show_chart_modal.set(false))
+                />
             </div>
         })
     }
@@ -633,19 +616,7 @@ fn ResultsError(
             <div class="flex-1 flex items-center justify-center p-6">
                 <div class="text-center max-w-lg">
                     // Info circle icon
-                    <svg
-                        class="w-12 h-12 mx-auto mb-4 text-muted-foreground/60"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                    >
-                        <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="1.5"
-                            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                        />
-                    </svg>
+                    <Icon icon=icondata_lu::LuInfo attr:class="w-12 h-12 mx-auto mb-4 text-muted-foreground/60" />
 
                     <h3 class="text-sm font-semibold text-foreground mb-2">
                         "Results No Longer Available"
@@ -656,9 +627,8 @@ fn ResultsError(
 
                     {on_rerun.map(|cb| {
                         view! {
-                            <button
-                                class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                disabled=move || is_rerunning.get()
+                            <Button
+                                disabled=MaybeProp::derive(move || Some(is_rerunning.get()))
                                 on:click=move |_| {
                                     if !is_rerunning.get_untracked() {
                                         cb.run(());
@@ -666,7 +636,7 @@ fn ResultsError(
                                 }
                             >
                                 {move || if is_rerunning.get() { "Re-running Query..." } else { "Re-run Query" }}
-                            </button>
+                            </Button>
                         }
                     })}
                 </div>
@@ -679,29 +649,16 @@ fn ResultsError(
             <div class="flex-1 flex items-center justify-center p-6">
                 <div class="text-center max-w-lg">
                     // Warning triangle icon
-                    <svg
-                        class="w-12 h-12 mx-auto mb-4 text-destructive/60"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                    >
-                        <path
-                            stroke-linecap="round"
-                            stroke-linejoin="round"
-                            stroke-width="1.5"
-                            d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
-                        />
-                    </svg>
+                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-12 h-12 mx-auto mb-4 text-error-foreground/60" />
 
-                    <p class="text-sm text-destructive mb-4 font-mono whitespace-pre-wrap break-words">
+                    <p class="text-sm text-error-foreground mb-4 font-mono whitespace-pre-wrap break-words">
                         {message}
                     </p>
 
                     {on_rerun.map(|cb| {
                         view! {
-                            <button
-                                class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                disabled=move || is_rerunning.get()
+                            <Button
+                                disabled=MaybeProp::derive(move || Some(is_rerunning.get()))
                                 on:click=move |_| {
                                     if !is_rerunning.get_untracked() {
                                         cb.run(());
@@ -709,7 +666,7 @@ fn ResultsError(
                                 }
                             >
                                 {move || if is_rerunning.get() { "Re-running Query..." } else { "Re-run Query" }}
-                            </button>
+                            </Button>
                         }
                     })}
                 </div>
@@ -729,6 +686,9 @@ fn ResultsError(
 /// YAML in a scrollable code block with copy-to-clipboard support.
 #[component]
 fn ChartYamlModal(
+    /// Whether the modal is visible.
+    #[prop(into)]
+    show: Signal<bool>,
     /// The generated ChartML YAML string.
     #[prop(into)]
     yaml: Signal<String>,
@@ -736,72 +696,43 @@ fn ChartYamlModal(
     #[prop(into)]
     copied: Signal<bool>,
     /// Called when the copy button is clicked.
-    on_copy: impl Fn(web_sys::MouseEvent) + Send + Sync + 'static,
-    /// Called when the close button or backdrop is clicked.
-    on_close: impl Fn(web_sys::MouseEvent) + Send + Sync + Clone + 'static,
+    copy_handler: Callback<()>,
+    /// Called when the modal is closed.
+    close_handler: Callback<()>,
 ) -> impl IntoView {
-    let on_close_backdrop = on_close.clone();
+    let copy_cb = copy_handler;
+
+    let footer_view: ChildrenFn = Arc::new(move || {
+        view! {
+            <Button
+                on:click=move |_| copy_cb.run(())
+            >
+                {move || if copied.get() {
+                    view! {
+                        <Icon icon=icondata_lu::LuCheck attr:class="w-3.5 h-3.5" />
+                        <span>"Copied!"</span>
+                    }.into_any()
+                } else {
+                    view! {
+                        <Icon icon=icondata_lu::LuClipboard attr:class="w-3.5 h-3.5" />
+                        <span>"Copy"</span>
+                    }.into_any()
+                }}
+            </Button>
+        }.into_any()
+    });
 
     view! {
-        // Backdrop
-        <div
-            class="fixed inset-0 bg-[var(--color-overlay)] z-50 flex items-center justify-center p-4"
-            on:click=move |ev: web_sys::MouseEvent| {
-                // Only close on direct backdrop click, not bubbled clicks.
-                if ev.target() == ev.current_target() {
-                    on_close_backdrop(ev);
-                }
-            }
-            role="dialog"
-            aria-modal="true"
-            aria-label="Generated ChartML"
+        <Modal
+            show=show
+            on_close=close_handler
+            title="Generated ChartML"
+            size=ModalSize::Md
+            footer=footer_view
         >
-            <div class="bg-card rounded-lg shadow-xl border border-border w-full max-w-2xl max-h-[80vh] flex flex-col">
-                // Header
-                <div class="flex items-center justify-between px-4 py-3 border-b border-border flex-shrink-0">
-                    <h2 class="text-sm font-semibold text-foreground">"Generated ChartML"</h2>
-                    <div class="flex items-center gap-2">
-                        // Copy button
-                        <button
-                            class="px-3 py-1.5 text-xs font-medium bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors flex items-center gap-1.5"
-                            on:click=on_copy
-                            aria-label="Copy ChartML to clipboard"
-                        >
-                            {move || if copied.get() {
-                                view! {
-                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                                    </svg>
-                                    <span>"Copied!"</span>
-                                }.into_any()
-                            } else {
-                                view! {
-                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                                    </svg>
-                                    <span>"Copy"</span>
-                                }.into_any()
-                            }}
-                        </button>
-                        // Close button
-                        <button
-                            class="p-1 text-muted-foreground hover:text-foreground rounded-md transition-colors"
-                            on:click=on_close
-                            aria-label="Close modal"
-                        >
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                        </button>
-                    </div>
-                </div>
-                // Body — scrollable YAML code block
-                <div class="flex-1 overflow-auto p-4">
-                    <pre class="text-xs font-mono text-foreground bg-muted rounded-md p-4 whitespace-pre-wrap break-words border border-border">
-                        {move || yaml.get()}
-                    </pre>
-                </div>
-            </div>
-        </div>
+            <pre class="text-xs font-mono text-foreground bg-muted rounded-md p-4 whitespace-pre-wrap break-words border border-border">
+                {move || yaml.get()}
+            </pre>
+        </Modal>
     }
 }

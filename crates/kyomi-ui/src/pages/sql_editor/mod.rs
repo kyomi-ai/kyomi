@@ -334,7 +334,7 @@ pub fn SqlEditorPage() -> impl IntoView {
     let has_datasource = Memo::new(move |_| ds_selection.slug.get().is_some());
 
     view! {
-        <div class="flex flex-col h-full bg-background">
+        <div class="flex flex-col h-full bg-background @container">
             // ── Header ───────────────────────────────────────────────────
             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                 // Left: title + datasource selector

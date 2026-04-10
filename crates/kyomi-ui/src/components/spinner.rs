@@ -17,9 +17,12 @@ pub fn Spinner(
     /// Additional CSS classes to apply (e.g., "text-white", "text-muted-foreground")
     #[prop(into, optional)]
     class: String,
+    /// Size classes override — e.g., "h-3 w-3" or "h-8 w-8". Default: "h-4 w-4".
+    #[prop(into, optional)]
+    size: Option<String>,
 ) -> impl IntoView {
-    // Default size is sm (h-4 w-4) matching the React Spinner's default
-    let classes = format!("animate-spin h-4 w-4 {class}");
+    let size_class = size.as_deref().unwrap_or("h-4 w-4");
+    let classes = format!("animate-spin {size_class} {class}");
 
     view! {
         <svg
