@@ -9,8 +9,7 @@
 //! - Two tabs: Alerts (inbox) and Watches (config)
 //! - Alerts tab shows `AlertsHistory` component
 //! - Watches tab shows watch cards with toggle, run, edit, delete actions
-//! - WatchAgentSidebar slides in for AI-powered watch creation/editing
-//! - WatchModal opens for direct (quick) edit of an existing watch
+//! - WatchModal opens for creating/editing watches (Configure + AI sub-tabs)
 //! - Execution log modal for viewing watch run history
 
 use leptos::prelude::*;
@@ -18,7 +17,7 @@ use leptos_icons::Icon;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
 use crate::components::toast::{toast_error, toast_success};
-use crate::components::watches::{AlertsHistory, ExecutionLogViewer, WatchAgentSidebar, WatchModal};
+use crate::components::watches::{AlertsHistory, ExecutionLogViewer, WatchModal};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Card,
     CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Spinner,
@@ -344,18 +343,15 @@ pub fn WatchesPage() -> impl IntoView {
         }
     });
 
-    // ── Watch Modal state (for quick editing) ────────────────────────────
+    // ── Unified Watch Modal state ──────────────────────────────────────
     let (show_watch_modal, set_show_watch_modal) = signal(false);
-    let (editing_watch, set_editing_watch) = signal(Option::<WatchListItem>::None);
+    let (modal_watch, set_modal_watch) = signal(Option::<WatchListItem>::None);
+    let (modal_initial_tab, set_modal_initial_tab) = signal("configure".to_string());
 
     // ── Execution log modal state ────────────────────────────────────────
     let (show_execution_log, set_show_execution_log) = signal(false);
     let (viewing_watch_id, set_viewing_watch_id) = signal(Option::<String>::None);
     let (selected_execution_id, set_selected_execution_id) = signal(Option::<i32>::None);
-
-    // ── AI Sidebar state ─────────────────────────────────────────────────
-    let (show_agent_sidebar, set_show_agent_sidebar) = signal(false);
-    let (agent_editing_watch, set_agent_editing_watch) = signal(Option::<WatchListItem>::None);
 
     // ── Delete confirmation ──────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
@@ -438,13 +434,15 @@ pub fn WatchesPage() -> impl IntoView {
     });
 
     let handle_edit_watch = Callback::new(move |watch: WatchListItem| {
-        set_editing_watch.set(Some(watch));
+        set_modal_watch.set(Some(watch));
+        set_modal_initial_tab.set("configure".to_string());
         set_show_watch_modal.set(true);
     });
 
     let handle_edit_with_ai = Callback::new(move |watch: WatchListItem| {
-        set_agent_editing_watch.set(Some(watch));
-        set_show_agent_sidebar.set(true);
+        set_modal_watch.set(Some(watch));
+        set_modal_initial_tab.set("ai".to_string());
+        set_show_watch_modal.set(true);
     });
 
     let handle_request_delete = Callback::new(move |watch: WatchListItem| {
@@ -484,26 +482,11 @@ pub fn WatchesPage() -> impl IntoView {
     // Watch modal callbacks.
     let on_watch_modal_close = Callback::new(move |()| {
         set_show_watch_modal.set(false);
-        set_editing_watch.set(None);
+        set_modal_watch.set(None);
     });
 
     let on_watch_saved = Callback::new(move |()| {
-        set_show_watch_modal.set(false);
-        set_editing_watch.set(None);
         set_refetch_counter.update(|c| *c += 1);
-    });
-
-    // Agent sidebar callbacks.
-    let on_agent_close = Callback::new(move |()| {
-        set_show_agent_sidebar.set(false);
-        set_agent_editing_watch.set(None);
-    });
-
-    let on_watch_changed_by_agent = Callback::new(move |()| {
-        // Read editing state before it might be cleared by on_agent_close.
-        let was_editing = agent_editing_watch.get_untracked().is_some();
-        set_refetch_counter.update(|c| *c += 1);
-        toast_success(if was_editing { "Watch updated" } else { "Watch created" });
     });
 
     // Execution log callbacks.
@@ -550,8 +533,9 @@ pub fn WatchesPage() -> impl IntoView {
         }
     });
     let handle_create_watch = move |_: leptos::ev::MouseEvent| {
-        set_agent_editing_watch.set(None);
-        set_show_agent_sidebar.set(true);
+        set_modal_watch.set(None);
+        set_modal_initial_tab.set("ai".to_string());
+        set_show_watch_modal.set(true);
     };
 
     view! {
@@ -718,8 +702,9 @@ pub fn WatchesPage() -> impl IntoView {
                                                             action=std::sync::Arc::new(move || view! {
                                                                 <Button
                                                                     on:click=move |_| {
-                                                                        set_agent_editing_watch.set(None);
-                                                                        set_show_agent_sidebar.set(true);
+                                                                        set_modal_watch.set(None);
+                                                                        set_modal_initial_tab.set("ai".to_string());
+                                                                        set_show_watch_modal.set(true);
                                                                     }
                                                                     disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
                                                                 >
@@ -771,12 +756,15 @@ pub fn WatchesPage() -> impl IntoView {
                     }}
                 </div>
 
-                // Watch Modal — only for editing existing watches
+                // Watch Modal — create or edit
                 {move || {
-                    editing_watch.get().map(|watch| {
+                    show_watch_modal.get().then(|| {
+                        let watch = modal_watch.get();
+                        let tab = modal_initial_tab.get();
                         view! {
                             <WatchModal
                                 watch=watch
+                                initial_tab=tab
                                 open=Signal::derive(move || show_watch_modal.get())
                                 on_close=on_watch_modal_close
                                 on_saved=on_watch_saved
@@ -850,18 +838,6 @@ pub fn WatchesPage() -> impl IntoView {
                 }}
             </div>
 
-            // AI Agent Sidebar — reactive so editing_watch prop updates
-            {move || {
-                let ew = agent_editing_watch.get();
-                view! {
-                    <WatchAgentSidebar
-                        open=Signal::derive(move || show_agent_sidebar.get())
-                        on_close=on_agent_close
-                        on_watch_changed=on_watch_changed_by_agent
-                        editing_watch=ew
-                    />
-                }
-            }}
         </div>
             }.into_any()
         }}

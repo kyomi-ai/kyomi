@@ -25,6 +25,11 @@ pub enum ButtonVariant {
     Link,
     /// Active/toggled-on state — amber tint.
     Active,
+    /// Pill sub-tab — inactive state. Transparent, muted text.
+    /// Use with `ToggleButton` for pill-style sub-tab switchers (chart builder, watch modal).
+    Pill,
+    /// Pill sub-tab — active state. White bg, shadow, foreground text.
+    PillActive,
 }
 
 /// Button size.
@@ -39,6 +44,8 @@ pub enum ButtonSize {
     IconSm,
     /// Extra-small icon-only: 20px square — for inline actions in tabs, chips.
     IconXs,
+    /// Pill sub-tab size: compact padding, xs font.
+    Pill,
 }
 
 /// Base classes shared by all button variants.
@@ -67,6 +74,10 @@ fn variant_classes(variant: ButtonVariant) -> &'static str {
         ButtonVariant::Link => "text-primary underline-offset-4 hover:underline",
         // Active/toggled: amber tint
         ButtonVariant::Active => "bg-primary/10 text-primary border border-primary/20",
+        // Pill sub-tab: inactive — transparent, muted text
+        ButtonVariant::Pill => "bg-transparent text-muted-foreground hover:text-foreground",
+        // Pill sub-tab: active — elevated surface
+        ButtonVariant::PillActive => "bg-background text-foreground shadow-sm",
     }
 }
 
@@ -84,6 +95,8 @@ fn size_classes(size: ButtonSize) -> &'static str {
         ButtonSize::IconSm => "h-7 w-7 p-0",
         // Extra-small icon-only: 20px square for inline tab/chip actions
         ButtonSize::IconXs => "h-5 w-5 p-0",
+        // Pill sub-tab: compact padding, xs font, rounded
+        ButtonSize::Pill => "px-3 py-1 text-xs rounded",
     }
 }
 
