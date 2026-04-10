@@ -107,9 +107,8 @@ pub fn DashboardsListPage() -> impl IntoView {
             match create_dashboard("Untitled Dashboard".to_string(), None).await {
                 Ok(dashboard_id) => {
                     let url = format!("/dashboard/{dashboard_id}/edit");
-                    if let Some(window) = web_sys::window() {
-                        let _ = window.location().set_href(&url);
-                    }
+                    let nav = leptos_router::hooks::use_navigate();
+                    nav(&url, leptos_router::NavigateOptions::default());
                 }
                 Err(e) => {
                     leptos::logging::error!("Failed to create dashboard: {e}");

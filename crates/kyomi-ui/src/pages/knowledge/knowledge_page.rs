@@ -79,9 +79,8 @@ pub fn KnowledgePage() -> impl IntoView {
             match create_knowledge_doc("Untitled Document".to_string(), None).await {
                 Ok(doc_id) => {
                     let url = format!("/dashboard/{doc_id}/edit");
-                    if let Some(window) = web_sys::window() {
-                        let _ = window.location().set_href(&url);
-                    }
+                    let nav = leptos_router::hooks::use_navigate();
+                    nav(&url, leptos_router::NavigateOptions::default());
                 }
                 Err(e) => {
                     leptos::logging::error!("Failed to create knowledge doc: {e}");
