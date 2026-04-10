@@ -354,6 +354,16 @@ For secondary contextual content (history, filters, details, comments) that can 
 - Closed: `transform: translateX(100%)`
 - Transition: `transition-transform duration-300 ease-in-out`
 
+### Copilot Sidebar Pattern
+
+AI copilot sidebars (dashboard copilot, chart builder copilot, watch copilot) share a unified `ChatEngine` and `CopilotChat` component. All copilots follow the same rules:
+
+- **No confirmation dialogs.** The AI applies changes directly via WebSocket events (`dashboard_update`, `chart_update`, `watch_update`). No "Apply to Dashboard" button or approval step.
+- **Document history is the safety net.** Users can revert any unwanted AI changes via the document version history panel. This is simpler and more trustworthy than manual apply/reject flows.
+- **Session lifecycle is ephemeral.** Sessions are created when the sidebar opens and deleted when it closes. No persistent copilot history.
+- **Layout follows the Side Panel Pattern** above (resizable desktop sidebar, slide-in mobile panel).
+- **Chat UI uses `CopilotChat` component** which delegates all state to `ChatEngine` (session, WS subscriptions, messages, thinking, scroll, send/cancel).
+
 ### Empty State Pattern (In-Page)
 
 When page content is empty (e.g., empty dashboard, no results), show a centered empty state inside the content area.

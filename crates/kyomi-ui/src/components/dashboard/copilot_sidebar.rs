@@ -73,21 +73,8 @@ pub fn CopilotSidebar(
         }
     });
 
-    // ── Assistant message action: "Apply to Dashboard" button ──────────
-    let apply_action: std::sync::Arc<dyn Fn(String) -> AnyView + Send + Sync> =
-        std::sync::Arc::new(move |content: String| {
-            view! {
-                <Button variant=ButtonVariant::Link size=ButtonSize::Sm
-                    class="mt-2"
-                    on:click=move |_| {
-                        on_apply_content.run(content.clone());
-                    }
-                >
-                    "Apply to Dashboard"
-                </Button>
-            }
-            .into_any()
-        });
+    // No per-message "Apply to Dashboard" button — the AI applies changes
+    // automatically via the `dashboard_update` WS event (handled by on_custom_ws).
 
     // ── Resize drag handling (desktop) ──────────────────────────────────
     // Stores active drag cleanup so on_cleanup can remove listeners if the
@@ -197,10 +184,8 @@ pub fn CopilotSidebar(
 
     // ── Panel content builder ───────────────────────────────────────────
     // Both mobile and desktop layouts share this inner content.
-    let apply_action_stored = StoredValue::new(apply_action);
     let panel_content = move || {
         let handle_close_clone = handle_close;
-        let apply_action_clone = apply_action_stored.get_value();
 
         view! {
             <div class="flex flex-col flex-1 min-w-0 h-full">
@@ -231,7 +216,6 @@ pub fn CopilotSidebar(
                     empty_description="I can help you improve charts, suggest changes, or make edits directly."
                     custom_ws_events=vec!["dashboard_update".to_string()]
                     on_custom_ws_event=on_custom_ws
-                    assistant_message_action=apply_action_clone
                 />
             </div>
         }
