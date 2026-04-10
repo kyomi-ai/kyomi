@@ -100,14 +100,15 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     // ── Create new dashboard ────────────────────────────────────────────
     let (creating, set_creating) = signal(false);
+    let navigate_create = StoredValue::new(leptos_router::hooks::use_navigate());
 
     let handle_create = move |_| {
         set_creating.set(true);
+        let nav = navigate_create.get_value();
         leptos::task::spawn_local(async move {
             match create_dashboard("Untitled Dashboard".to_string(), None).await {
                 Ok(dashboard_id) => {
                     let url = format!("/dashboard/{dashboard_id}/edit");
-                    let nav = leptos_router::hooks::use_navigate();
                     nav(&url, leptos_router::NavigateOptions::default());
                 }
                 Err(e) => {

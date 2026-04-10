@@ -72,14 +72,15 @@ pub fn KnowledgePage() -> impl IntoView {
 
     // ── Create new knowledge document ───────────────────────────────────
     let (creating, set_creating) = signal(false);
+    let navigate_create = StoredValue::new(leptos_router::hooks::use_navigate());
 
     let handle_create = move |_| {
         set_creating.set(true);
+        let nav = navigate_create.get_value();
         leptos::task::spawn_local(async move {
             match create_knowledge_doc("Untitled Document".to_string(), None).await {
                 Ok(doc_id) => {
                     let url = format!("/dashboard/{doc_id}/edit");
-                    let nav = leptos_router::hooks::use_navigate();
                     nav(&url, leptos_router::NavigateOptions::default());
                 }
                 Err(e) => {
