@@ -2,34 +2,21 @@
 
 //! Dashboard copilot sidebar — conversational AI for editing dashboards.
 //!
-//! Matches every feature of the React `DashboardCopilotSidebar.jsx`:
+//! Provides the sidebar chrome (header, resize handle, mobile layout) around the
+//! shared `CopilotChat` component. All chat internals (session lifecycle, WebSocket
+//! streaming, message rendering, input) are handled by `CopilotChat`.
+//!
+//! Layout:
 //! - Desktop: resizable inline sidebar (320-600px) on the right, with drag handle
 //! - Mobile: slide-in panel with backdrop overlay
-//! - Session management: create on open, delete on close
-//! - Chat interface with user/assistant messages and WebSocket streaming
-//! - Agent thinking events with live animation
-//! - "Apply to Dashboard" action for AI responses with suggested content
-//!
-//! WebSocket streaming uses `context_type = "dashboard_copilot"` to filter
-//! events, matching React's `ChatInterface` with `contextType` prop.
-
-use std::collections::HashMap;
 
 use leptos::prelude::*;
 use leptos_icons::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
-use crate::components::chat::websocket_client::WebSocketContext;
-use crate::components::chat::{
-    AgentThinking, ThinkingState,
-};
-#[cfg(feature = "hydrate")]
-use crate::components::chat::{ThinkingEvent, TokenUsage, process_thinking_event};
-use crate::components::{Button, ButtonSize, ButtonVariant, EmptyState, Spinner};
-use crate::server_fns::copilot::{
-    create_copilot_session, delete_copilot_session, send_copilot_message,
-};
+use crate::components::chat::CopilotChat;
+use crate::components::{Button, ButtonSize, ButtonVariant};
 
 use super::shared::use_is_mobile;
 
@@ -41,31 +28,13 @@ const MIN_WIDTH: f64 = 320.0;
 const MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 384.0;
 
-// ─── Chat message types ─────────────────────────────────────────────────────
-
-/// A single chat message in the copilot conversation.
-#[derive(Clone, Debug)]
-struct CopilotMessage {
-    /// Unique message ID (from WebSocket events for assistant, generated for user).
-    message_id: String,
-    /// "user" or "assistant"
-    role: String,
-    /// The message content.
-    content: String,
-    /// Optional suggested content from the AI (for "Apply to Dashboard").
-    suggested_content: Option<String>,
-}
-
 // ─── Main component ─────────────────────────────────────────────────────────
 
 /// Copilot sidebar for dashboard editing.
 ///
-/// Matches every feature of the React `DashboardCopilotSidebar`:
-/// - Session lifecycle (create on open, delete on close)
-/// - Chat interface with user/assistant messages and WebSocket streaming
-/// - Agent thinking events displayed per assistant message
-/// - Resizable desktop sidebar, mobile slide-in panel
-/// - "Apply to Dashboard" action for AI suggestions
+/// Wraps the shared `CopilotChat` component with dashboard-specific sidebar
+/// chrome: resizable desktop panel, mobile slide-in, header with close button,
+/// and an "Apply to Dashboard" action on assistant messages.
 #[component]
 pub fn CopilotSidebar(
     /// Dashboard ID to associate the copilot session with.
@@ -81,7 +50,7 @@ pub fn CopilotSidebar(
     /// Callback when the user clicks "Apply to Dashboard" on an AI response.
     on_apply_content: Callback<String>,
 ) -> impl IntoView {
-    let dashboard_id = StoredValue::new(dashboard_id);
+    let _dashboard_id = StoredValue::new(dashboard_id);
     let is_mobile = use_is_mobile();
 
     // ── Panel width (desktop resize) ────────────────────────────────────
@@ -90,513 +59,35 @@ pub fn CopilotSidebar(
     let _ = set_panel_width;
     let (is_resizing, set_is_resizing) = signal(false);
 
-    // ── Session state ───────────────────────────────────────────────────
-    let (session_id, set_session_id) = signal(Option::<String>::None);
-
-    // ── Chat state ──────────────────────────────────────────────────────
-    let (messages, set_messages) = signal(Vec::<CopilotMessage>::new());
-    let (is_loading, set_is_loading) = signal(false);
-    let (input_value, set_input_value) = signal(String::new());
-    let (error, set_error) = signal(Option::<String>::None);
-
-    // Track whether the first message has been sent (for context prefix).
-    let (has_sent_first, set_has_sent_first) = signal(false);
-
-    // Monotonic counter for user message IDs (user messages don't get WS IDs).
-    let (user_msg_counter, set_user_msg_counter) = signal(0u32);
-
-    // ── Thinking state (per message_id) ─────────────────────────────────
-    // NOTE: Thinking events are processed inline rather than through ThinkingManager
-    // because the copilot sidebar has its own independent thinking_map signal.
-    // This is intentional — the ThinkingManager pattern is used in chat_page.rs
-    // where the lifecycle is more complex.
-    let (thinking_map, set_thinking_map) = signal(HashMap::<String, ThinkingState>::new());
-
-    // ── WebSocket context ────────────────────────────────────────────────
-    #[allow(unused_variables)] // used in cfg-gated blocks (debug_assertions, wasm32)
-    let ws_ctx = use_context::<WebSocketContext>();
-
-    #[cfg(debug_assertions)]
-    {
-        if ws_ctx.is_none() {
-            leptos::logging::warn!("CopilotSidebar: WebSocketContext not found — WebSocket features will be disabled");
-        }
-    }
-
-    // ── Create session when sidebar opens ───────────────────────────────
-    Effect::new(move || {
-        if open.get() {
-            // Reset state for fresh session.
-            set_messages.set(Vec::new());
-            set_error.set(None);
-            set_input_value.set(String::new());
-            set_has_sent_first.set(false);
-            set_thinking_map.set(HashMap::new());
-
-            let _did = dashboard_id.get_value();
-            leptos::task::spawn_local(async move {
-                match create_copilot_session("dashboard_copilot".to_string()).await {
-                    Ok(sid) => {
-                        set_session_id.set(Some(sid));
-                    }
-                    Err(e) => {
-                        set_error.set(Some(format!("Failed to start copilot: {e}")));
-                    }
-                }
-            });
-        }
-    });
-
-    // ── Cleanup session on component unmount ────────────────────────────
-    on_cleanup(move || {
-        let sid = session_id.get_untracked();
-        if let Some(sid) = sid {
-            leptos::task::spawn_local(async move {
-                let _ = delete_copilot_session(sid).await;
-            });
-        }
-    });
-
-    // ── Handle close with cleanup ───────────────────────────────────────
+    // ── Handle close ───────────────────────────────────────────────────
+    // CopilotChat handles its own session lifecycle via the `active` prop.
+    // When `open` becomes false, CopilotChat will delete its session.
     let handle_close = move || {
-        let sid = session_id.get_untracked();
-        set_session_id.set(None);
-
-        if let Some(sid) = sid {
-            leptos::task::spawn_local(async move {
-                let _ = delete_copilot_session(sid).await;
-            });
-        }
-
         on_close.run(());
     };
 
-    // ── WebSocket subscriptions ─────────────────────────────────────────
-    // Matches React ChatInterface.jsx lines 207-381 with contextType="dashboard_copilot".
-    // Filters all events by context_type and session_id.
-    #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move |_| {
-            let Some(ws) = ws_ctx.as_ref().cloned() else {
-                return;
-            };
-
-            // Helper: check if event belongs to this copilot instance.
-            // Matches React: ChatInterface.jsx lines 209-213
-            // This closure captures only `session_id` (a ReadSignal, which is Copy),
-            // so the closure itself is Copy and can be used directly in all subscription
-            // callbacks without renaming or duplicating.
-            let should_handle =
-                move |event_context_type: Option<&str>, msg_session_id: Option<&str>| -> bool {
-                    // Must be dashboard_copilot context
-                    if event_context_type != Some("dashboard_copilot") {
-                        return false;
-                    }
-                    // No session established yet — reject all events
-                    let current_sid = session_id.get_untracked();
-                    let Some(sid) = &current_sid else {
-                        return false;
-                    };
-                    if let Some(msg_sid) = msg_session_id {
-                        if msg_sid != sid.as_str() {
-                            return false;
-                        }
-                    }
-                    true
-                };
-
-            // ── agent_thinking ──────────────────────────────────────────
-            // Matches React: ChatInterface.jsx lines 216-271
-            let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
-                let data = match &msg.data {
-                    Some(d) => d,
-                    None => return,
-                };
-
-                let thinking_event: ThinkingEvent = match data
-                    .get("event")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                {
-                    Some(e) => e,
-                    None => return,
-                };
-
-                // NOTE: For agent_thinking events, context_type is nested at
-                // data.event.context_type (not data.context_type like chat_stream/chat_complete).
-                // This matches the backend: kyomi-agent/src/thinking.rs send_event() wraps
-                // the thinking payload in {"event": {..."context_type": ...}} before passing
-                // it to send_agent_thinking(), which sets that as the message data directly.
-                let event_context_type = data
-                    .get("event")
-                    .and_then(|v| v.get("context_type"))
-                    .and_then(|v| v.as_str());
-
-                if !should_handle(event_context_type, msg.session_id.as_deref()) {
-                    return;
-                }
-
-                let token_usage: Option<TokenUsage> = data
-                    .get("token_usage")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // Transition to streaming: create assistant message placeholder if needed.
-                // Matches React: ChatInterface.jsx lines 235-253
-                set_messages.update(|msgs| {
-                    if !msgs.iter().any(|m| m.message_id == msg_message_id) {
-                        msgs.push(CopilotMessage {
-                            message_id: msg_message_id.clone(),
-                            role: "assistant".to_string(),
-                            content: String::new(),
-                            suggested_content: None,
-                        });
-                    }
-                });
-
-                // Mark as streaming (no longer in loading/sending state)
-                set_is_loading.set(false);
-
-                // Update thinking state. Matches React: ChatInterface.jsx lines 257-271
-                set_thinking_map.update(|map| {
-                    let current = map.get(&msg_message_id).cloned().unwrap_or_default();
-
-                    if current.cancelled {
-                        return;
-                    }
-
-                    let updated_events =
-                        process_thinking_event(&current.events, thinking_event);
-                    map.insert(
-                        msg_message_id,
-                        ThinkingState {
-                            events: updated_events,
-                            is_active: true,
-                            cancelled: false,
-                            token_usage: token_usage.or(current.token_usage),
-                        },
-                    );
-                });
-            });
-
-            // ── chat_stream ─────────────────────────────────────────────
-            // Matches React: ChatInterface.jsx lines 275-288
-            let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
-                let event_context_type = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("context_type"))
-                    .and_then(|v| v.as_str());
-
-                if !should_handle(event_context_type, msg.session_id.as_deref()) {
-                    return;
-                }
-
-                let content = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str());
-
-                let content = match content {
-                    Some(c) if !c.is_empty() => c.to_string(),
-                    _ => return,
-                };
-
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                set_messages.update(|msgs| {
-                    if let Some(existing) = msgs
-                        .iter_mut()
-                        .find(|m| m.message_id == msg_message_id && m.role == "assistant")
-                    {
-                        existing.content.push_str(&content);
-                    } else {
-                        msgs.push(CopilotMessage {
-                            message_id: msg_message_id,
-                            role: "assistant".to_string(),
-                            content,
-                            suggested_content: None,
-                        });
-                    }
-                });
-            });
-
-            // ── chat_complete ───────────────────────────────────────────
-            // Matches React: ChatInterface.jsx lines 291-321
-            let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
-                let event_context_type = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("context_type"))
-                    .and_then(|v| v.as_str());
-
-                if !should_handle(event_context_type, msg.session_id.as_deref()) {
-                    return;
-                }
-
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                let full_content = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                // Update message with full content.
-                set_messages.update(|msgs| {
-                    for m in msgs.iter_mut() {
-                        if m.message_id == msg_message_id && m.role == "assistant" {
-                            if let Some(ref content) = full_content {
-                                m.content = content.clone();
-                            }
-                        }
-                    }
-                });
-
-                // Stop thinking animation.
-                set_thinking_map.update(|map| {
-                    if let Some(entry) = map.get_mut(&msg_message_id) {
-                        if !entry.cancelled {
-                            entry.is_active = false;
-                        }
-                    }
-                });
-
-                set_is_loading.set(false);
-            });
-
-            // ── token_usage_update ──────────────────────────────────────
-            let unsub_token_usage = ws.subscribe("token_usage_update", move |msg| {
-                let data = match &msg.data {
-                    Some(d) => d,
-                    None => return,
-                };
-
-                let token_update: TokenUsage = match data
-                    .get("token_usage")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                {
-                    Some(t) => t,
-                    None => return,
-                };
-
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // Filter by session_id
-                let current_sid = session_id.get_untracked();
-                if let Some(sid) = &current_sid {
-                    if msg.session_id.as_deref() != Some(sid.as_str()) {
-                        return;
-                    }
-                }
-
-                set_thinking_map.update(|map| {
-                    let current = map.get(&msg_message_id).cloned().unwrap_or_default();
-                    if current.cancelled {
-                        return;
-                    }
-                    map.insert(
-                        msg_message_id,
-                        ThinkingState {
-                            token_usage: Some(token_update),
-                            ..current
-                        },
-                    );
-                });
-            });
-
-            // ── error ───────────────────────────────────────────────────
-            // Matches React: ChatInterface.jsx lines 359-363
-            let unsub_error = ws.subscribe("error", move |msg| {
-                let event_context_type = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("context_type"))
-                    .and_then(|v| v.as_str());
-
-                // Only handle dashboard_copilot errors
-                if event_context_type != Some("dashboard_copilot") {
-                    return;
-                }
-
-                let error_msg = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("message"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("An error occurred")
-                    .to_string();
-
-                set_error.set(Some(error_msg));
-                set_is_loading.set(false);
-            });
-
-            // ── request_cancelled ───────────────────────────────────────
-            let unsub_request_cancelled = ws.subscribe("request_cancelled", move |msg| {
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                set_messages.update(|msgs| {
-                    for m in msgs.iter_mut() {
-                        if m.message_id == msg_message_id && m.role == "assistant" {
-                            m.content = "_Request cancelled by user._".to_string();
-                        }
-                    }
-                });
-
-                set_thinking_map.update(|map| {
-                    if let Some(entry) = map.get_mut(&msg_message_id) {
-                        entry.is_active = false;
-                        entry.cancelled = true;
-                    }
-                });
-
-                set_is_loading.set(false);
-            });
-
-            // ── dashboard_update ────────────────────────────────────────
-            // Matches React: DashboardCopilotSidebar.jsx lines 92-104
-            let unsub_dashboard_update = ws.subscribe("dashboard_update", move |msg| {
-                let event_context_type = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("context_type"))
-                    .and_then(|v| v.as_str());
-
-                if event_context_type != Some("dashboard_copilot") {
-                    return;
-                }
-
-                // Check session_id filter
-                let current_sid = session_id.get_untracked();
-                if let Some(sid) = &current_sid {
-                    if msg.session_id.as_deref() != Some(sid.as_str()) {
-                        return;
-                    }
-                }
-
-                if let Some(content) = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                {
-                    on_apply_content.run(content.to_string());
-                }
-            });
-
-            // ── Cleanup: unsubscribe all on component unmount ───────────
-            // Wrap in SendWrapper because Box<dyn FnOnce()> is !Send but
-            // on_cleanup requires Send+Sync.
-            let unsub_agent_thinking = send_wrapper::SendWrapper::new(unsub_agent_thinking);
-            let unsub_chat_stream = send_wrapper::SendWrapper::new(unsub_chat_stream);
-            let unsub_chat_complete = send_wrapper::SendWrapper::new(unsub_chat_complete);
-            let unsub_token_usage = send_wrapper::SendWrapper::new(unsub_token_usage);
-            let unsub_error = send_wrapper::SendWrapper::new(unsub_error);
-            let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
-            let unsub_dashboard_update = send_wrapper::SendWrapper::new(unsub_dashboard_update);
-            on_cleanup(move || {
-                unsub_agent_thinking.take()();
-                unsub_chat_stream.take()();
-                unsub_chat_complete.take()();
-                unsub_token_usage.take()();
-                unsub_error.take()();
-                unsub_request_cancelled.take()();
-                unsub_dashboard_update.take()();
-            });
-        });
-    }
-
-    // ── Send message handler ────────────────────────────────────────────
-    let handle_send = move || {
-        let msg = input_value.get_untracked().trim().to_string();
-        if msg.is_empty() {
-            return;
-        }
-
-        let sid = match session_id.get_untracked() {
-            Some(sid) => sid,
-            None => return,
-        };
-
-        // Generate a user-side message ID for the user message.
-        let counter = user_msg_counter.get_untracked();
-        set_user_msg_counter.set(counter + 1);
-        let user_msg_id = format!("user_{}", counter);
-
-        // Add user message to the list.
-        set_messages.update(|msgs| {
-            msgs.push(CopilotMessage {
-                message_id: user_msg_id,
-                role: "user".to_string(),
-                content: msg.clone(),
-                suggested_content: None,
-            });
-        });
-
-        set_input_value.set(String::new());
-        set_is_loading.set(true);
-        set_error.set(None);
-
-        // Build context: first message uses "[Dashboard Content]" prefix,
-        // subsequent messages use "[Dashboard has been updated]" prefix.
-        let is_first = !has_sent_first.get_untracked();
-        let content = dashboard_content.get_untracked();
-        let content_opt = if content.is_empty() {
-            None
-        } else if is_first {
-            Some(format!("[Dashboard Content]\n{content}"))
-        } else {
-            Some(format!("[Dashboard has been updated]\n{content}"))
-        };
-
-        set_has_sent_first.set(true);
-
-        // Send the message via server function. The AI response arrives
-        // asynchronously via WebSocket streaming events (chat_stream,
-        // chat_complete, agent_thinking) — not in the HTTP response.
-        leptos::task::spawn_local(async move {
-            if let Err(e) = send_copilot_message(sid, msg, "dashboard_copilot".to_string(), content_opt).await {
-                set_error.set(Some(format!("Failed to send message: {e}")));
-                set_is_loading.set(false);
-            }
-            // Don't set is_loading to false here — it stays true until
-            // the first agent_thinking or chat_complete event arrives.
-        });
-    };
-
-    // ── Scroll to bottom on new messages ────────────────────────────────
-    let message_list_ref = NodeRef::<leptos::html::Div>::new();
-
-    Effect::new(move || {
-        // Track message changes.
-        let _ = messages.get();
-
-        #[cfg(feature = "hydrate")]
-        if let Some(guard) = message_list_ref.try_read_untracked() {
-            if let Some(el) = guard.as_ref() {
-                // Use requestAnimationFrame to scroll after DOM updates.
-                let scroll_height = el.scroll_height();
-                el.set_scroll_top(scroll_height);
-            }
+    // ── Custom WS event handler for dashboard_update ───────────────────
+    let on_custom_ws = Callback::new(move |(_event_name, data): (String, serde_json::Value)| {
+        if let Some(content) = data.get("content").and_then(|v| v.as_str()) {
+            on_apply_content.run(content.to_string());
         }
     });
+
+    // ── Assistant message action: "Apply to Dashboard" button ──────────
+    let apply_action: std::sync::Arc<dyn Fn(String) -> AnyView + Send + Sync> =
+        std::sync::Arc::new(move |content: String| {
+            view! {
+                <Button variant=ButtonVariant::Link size=ButtonSize::Sm
+                    class="mt-2"
+                    on:click=move |_| {
+                        on_apply_content.run(content.clone());
+                    }
+                >
+                    "Apply to Dashboard"
+                </Button>
+            }
+            .into_any()
+        });
 
     // ── Resize drag handling (desktop) ──────────────────────────────────
     // Stores active drag cleanup so on_cleanup can remove listeners if the
@@ -706,10 +197,10 @@ pub fn CopilotSidebar(
 
     // ── Panel content builder ───────────────────────────────────────────
     // Both mobile and desktop layouts share this inner content.
+    let apply_action_stored = StoredValue::new(apply_action);
     let panel_content = move || {
-        let current_error = error.get();
-        let handle_send_clone = handle_send;
         let handle_close_clone = handle_close;
+        let apply_action_clone = apply_action_stored.get_value();
 
         view! {
             <div class="flex flex-col flex-1 min-w-0 h-full">
@@ -728,155 +219,20 @@ pub fn CopilotSidebar(
                     </Button>
                 </div>
 
-                // Error banner
-                {current_error.map(|err| view! {
-                    <div class="p-4 text-center">
-                        <p class="text-error-foreground mb-2">{err}</p>
-                    </div>
-                })}
-
-                // Message list
-                // React: `flex-1 overflow-y-auto p-4 space-y-4`
-                <div
-                    class="flex-1 overflow-y-auto p-4 space-y-4"
-                    node_ref=message_list_ref
-                >
-                    // Empty state
-                    <Show when=move || messages.get().is_empty() && !is_loading.get()>
-                        <EmptyState
-                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuSparkles width="48" height="48" /> }.into_any())
-                            title="Ask me anything about your dashboard!"
-                            description="I can help you improve charts, suggest changes, or make edits directly."
-                            class="border-0 bg-transparent"
-                        />
-                    </Show>
-
-                    // Messages
-                    {move || {
-                        let msgs = messages.get();
-                        let thinking = thinking_map.get();
-
-                        msgs.iter().map(|msg| {
-                            let is_user = msg.role == "user";
-                            let content = msg.content.clone();
-                            let suggested = msg.suggested_content.clone();
-                            let has_suggested = suggested.is_some();
-                            let full_message = msg.content.clone();
-                            let msg_id = msg.message_id.clone();
-
-                            // Get thinking state for this message (assistant only)
-                            let thinking_state = if !is_user {
-                                thinking.get(&msg_id).cloned()
-                            } else {
-                                None
-                            };
-                            let has_thinking = thinking_state.as_ref().is_some_and(|t| !t.events.is_empty());
-                            let thinking_events = thinking_state.as_ref().map(|t| t.events.clone()).unwrap_or_default();
-                            let thinking_active = thinking_state.as_ref().is_some_and(|t| t.is_active);
-                            let thinking_token_usage = thinking_state.as_ref().and_then(|t| t.token_usage.clone());
-
-                            view! {
-                                <div class=if is_user {
-                                    "flex justify-end"
-                                } else {
-                                    "flex justify-start"
-                                }>
-                                    <div class=if is_user {
-                                        "bg-primary text-primary-foreground rounded-lg p-3 max-w-[85%]"
-                                    } else {
-                                        "bg-muted rounded-lg p-3 max-w-[85%]"
-                                    }>
-                                        // Agent thinking panel — shown for assistant messages with thinking events
-                                        {has_thinking.then(move || {
-                                            if let Some(tu) = thinking_token_usage.clone() {
-                                                view! {
-                                                    <div class="mb-2">
-                                                        <AgentThinking
-                                                            thinking_events=thinking_events.clone()
-                                                            is_active=thinking_active
-                                                            token_usage=tu
-                                                        />
-                                                    </div>
-                                                }.into_any()
-                                            } else {
-                                                view! {
-                                                    <div class="mb-2">
-                                                        <AgentThinking
-                                                            thinking_events=thinking_events.clone()
-                                                            is_active=thinking_active
-                                                        />
-                                                    </div>
-                                                }.into_any()
-                                            }
-                                        })}
-
-                                        // Message content — show if non-empty or if user message
-                                        {(!content.is_empty() || is_user).then(|| {
-                                            view! {
-                                                <p class="text-sm whitespace-pre-wrap">{content.clone()}</p>
-                                            }
-                                        })}
-
-                                        // "Apply to Dashboard" button — only shown for assistant
-                                        // messages that have suggested_content.
-                                        {(!is_user && has_suggested).then(|| {
-                                            let apply_content = suggested
-                                                .unwrap_or_else(|| full_message.clone());
-                                            view! {
-                                                <Button variant=ButtonVariant::Link size=ButtonSize::Sm
-                                                    class="mt-2"
-                                                    on:click=move |_| {
-                                                        on_apply_content.run(apply_content.clone());
-                                                    }
-                                                >
-                                                    "Apply to Dashboard"
-                                                </Button>
-                                            }
-                                        })}
-                                    </div>
-                                </div>
-                            }
-                        }).collect_view()
-                    }}
-
-                    // Loading indicator — shown when waiting for first thinking event
-                    <Show when=move || is_loading.get()>
-                        <div class="flex justify-start">
-                            <div class="bg-muted rounded-lg p-3 flex items-center gap-2">
-                                <Spinner class="text-muted-foreground" />
-                                <span class="text-sm text-muted-foreground">"Thinking..."</span>
-                            </div>
-                        </div>
-                    </Show>
-                </div>
-
-                // Input area
-                <div class="border-t border-border px-4 py-3">
-                    <div class="flex items-center gap-2">
-                        <textarea
-                            class="flex-1 resize-none rounded-md border border-input bg-background px-3.5 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[36px] max-h-[120px]"
-                            placeholder="Ask about your dashboard..."
-                            rows="1"
-                            prop:value=move || input_value.get()
-                            on:input=move |ev| {
-                                set_input_value.set(event_target_value(&ev));
-                            }
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" && !ev.shift_key() {
-                                    ev.prevent_default();
-                                    handle_send_clone();
-                                }
-                            }
-                        />
-                        <Button size=ButtonSize::Icon
-                            disabled=Signal::derive(move || is_loading.get() || input_value.get().trim().is_empty())
-                            on:click=move |_| handle_send()
-                            aria_label="Send message".to_string()
-                        >
-                            <Icon icon=icondata_lu::LuSend width="16" height="16" />
-                        </Button>
-                    </div>
-                </div>
+                // Chat interface — replaces duplicated chat logic with shared CopilotChat
+                <CopilotChat
+                    context_type="dashboard_copilot"
+                    context_content=dashboard_content
+                    context_label="Dashboard Content"
+                    active=Signal::derive(move || open.get())
+                    placeholder="Ask about your dashboard..."
+                    empty_icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuSparkles width="48" height="48" /> }.into_any())
+                    empty_title="Ask me anything about your dashboard!"
+                    empty_description="I can help you improve charts, suggest changes, or make edits directly."
+                    custom_ws_events=vec!["dashboard_update".to_string()]
+                    on_custom_ws_event=on_custom_ws
+                    assistant_message_action=apply_action_clone
+                />
             </div>
         }
     };
