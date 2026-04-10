@@ -69,11 +69,12 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
             continue;
         }
 
-        // Typst passthrough (pre-rendered Typst blocks from metric/table/chart renderers)
+        // Typst passthrough (pre-rendered Typst blocks from metric/table/chart/grid renderers)
         if stripped.starts_with("#image(")
             || stripped.starts_with("#block(")
             || stripped.starts_with("#table(")
             || stripped.starts_with("#align(")
+            || stripped.starts_with("#grid(")
             || stripped.starts_with("#v(")
             || stripped.starts_with("#text(")
         {
@@ -165,7 +166,7 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
 
         // Horizontal rule
         if re_hr.is_match(stripped) {
-            output.push(r##"#line(length: 100%, stroke: 0.5pt + rgb("#e5e7eb"))"##.to_string());
+            output.push(r##"#line(length: 100%, stroke: 0.5pt + rgb("#E8E5DE"))"##.to_string());
             continue;
         }
 
@@ -206,10 +207,10 @@ fn emit_table(
         return;
     }
 
-    // Header cells: uppercase, small, muted-foreground — matching th { uppercase tracking-wider }
+    // Header cells: uppercase, small, muted-foreground — warm design system colors
     let header_row = header_cells
         .iter()
-        .map(|c| format!(r##"[#text(7pt, weight: "medium", fill: rgb("#6b7280"), tracking: 0.08em)[#upper[{}]]]"##, c))
+        .map(|c| format!(r##"[#text(7pt, weight: "medium", fill: rgb("#6B6660"), tracking: 0.08em, font: "DM Sans")[#upper[{}]]]"##, c))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -218,10 +219,10 @@ fn emit_table(
   columns: (1fr,) * {columns},
   stroke: none,
   inset: (x: 12pt, y: 9pt),
-  fill: (_, y) => if y == 0 {{ rgb("#f9fafb") }} else {{ white }},
-  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
+  fill: (_, y) => if y == 0 {{ rgb("#F5F3EF") }} else {{ white }},
+  table.hline(stroke: 0.5pt + rgb("#E8E5DE")),
   table.header({header_row}),
-  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
+  table.hline(stroke: 0.5pt + rgb("#E8E5DE")),
 "##
     );
 
@@ -230,7 +231,7 @@ fn emit_table(
         // Bottom border after each body row
         let y = i + 1; // row 0 is header
         table.push_str(&format!(
-            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#e5e7eb")),
+            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#E8E5DE")),
 "##,
             y + 1
         ));
@@ -302,23 +303,25 @@ pub fn render_metric_typst(
     let trend_line = match trend {
         Some((pct, positive)) => {
             let (arrow, color) = if positive {
-                ("▲", "#059669")
+                ("▲", "#15803D") // --success
             } else {
-                ("▼", "#dc2626")
+                ("▼", "#DC2626") // --error
             };
             format!(
-                r##"    #text(10pt, fill: rgb("{color}"))[{arrow} {pct}]"##,
+                r##"
+    #v(2pt)
+    #text(10pt, fill: rgb("{color}"), font: "DM Sans")[{arrow} {pct}]"##,
             )
         }
         None => String::new(),
     };
 
     format!(
-        r##"#block(fill: rgb("#f9fafb"), stroke: rgb("#e5e7eb"), radius: 8pt, inset: 16pt, width: 100%, breakable: false)[
+        r##"#block(fill: rgb("#F5F3EF"), stroke: rgb("#E8E5DE"), radius: 6pt, inset: (x: 12pt, y: 10pt), width: 100%, breakable: false)[
   #align(center)[
-    #text(11pt, fill: rgb("#6b7280"))[{escaped_title}]
-    #v(4pt)
-    #text(28pt, weight: "bold")[{escaped_value}]
+    #text(9pt, fill: rgb("#6B6660"), font: "DM Sans", weight: "medium")[{escaped_title}]
+    #v(3pt)
+    #text(24pt, weight: "bold", font: "Geist Mono")[{escaped_value}]
 {trend_line}
   ]
 ]"##
@@ -338,40 +341,43 @@ pub fn render_data_table_typst(
     let escaped_title = typst_escape(title);
     let columns = headers.len();
 
-    // Header cells: uppercase, small, muted-foreground — matching th { uppercase tracking-wider }
+    // Header cells: uppercase, small, warm muted — design system colors
     let header_cells = headers
         .iter()
         .map(|h| format!(
-            r##"[#text(7pt, weight: "medium", fill: rgb("#6b7280"), tracking: 0.08em)[#upper[{}]]]"##,
+            r##"[#text(7pt, weight: "medium", fill: rgb("#6B6660"), tracking: 0.08em, font: "DM Sans")[#upper[{}]]]"##,
             typst_escape(h)
         ))
         .collect::<Vec<_>>()
         .join(", ");
 
     let mut table = format!(
-        r##"#text(12pt, weight: "semibold", fill: rgb("#111827"))[{escaped_title}]
+        r##"#text(12pt, weight: "semibold", fill: rgb("#1C1917"), font: "DM Sans")[{escaped_title}]
 #v(6pt)
 #table(
   columns: (1fr,) * {columns},
   stroke: none,
   inset: (x: 12pt, y: 9pt),
-  fill: (_, y) => if y == 0 {{ rgb("#f9fafb") }} else {{ white }},
-  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
+  fill: (_, y) => if y == 0 {{ rgb("#F5F3EF") }} else {{ white }},
+  table.hline(stroke: 0.5pt + rgb("#E8E5DE")),
   table.header({header_cells}),
-  table.hline(stroke: 0.5pt + rgb("#e5e7eb")),
+  table.hline(stroke: 0.5pt + rgb("#E8E5DE")),
 "##
     );
 
     for (i, row) in rows.iter().enumerate() {
         let cells = row
             .iter()
-            .map(|c| format!("[#text(9pt, fill: rgb(\"#111827\"))[{}]]", typst_escape(c)))
+            .map(|c| {
+                let font = if is_numeric_cell(c) { "Geist Mono" } else { "DM Sans" };
+                format!("[#text(9pt, fill: rgb(\"#1C1917\"), font: \"{font}\")[{}]]", typst_escape(c))
+            })
             .collect::<Vec<_>>()
             .join(", ");
         table.push_str(&format!("  {cells},\n"));
         let y = i + 1;
         table.push_str(&format!(
-            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#e5e7eb")),
+            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#E8E5DE")),
 "##,
             y + 1
         ));
@@ -380,12 +386,33 @@ pub fn render_data_table_typst(
 
     if total_rows > max_rows {
         table.push_str(&format!(
-            "\n#v(4pt)\n#text(8pt, fill: rgb(\"#6b7280\"))[Showing {} of {} rows]",
+            "\n#v(4pt)\n#text(8pt, fill: rgb(\"#9C9790\"), font: \"DM Sans\")[Showing {} of {} rows]",
             max_rows, total_rows
         ));
     }
 
     table
+}
+
+/// Detect whether a cell value looks numeric (for Geist Mono font selection).
+///
+/// Matches currency values ($620K, €1.2M), percentages (+15%, -3.1%),
+/// plain numbers (12,847), and signed values. Text labels get DM Sans.
+fn is_numeric_cell(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    // Strip leading sign and currency symbols
+    let v = v.trim_start_matches(['+', '-', '(']);
+    let v = v.trim_start_matches(['$', '€', '£', '¥']);
+    // Must start with a digit after stripping
+    let Some(first) = v.chars().next() else {
+        return false;
+    };
+    first.is_ascii_digit()
+        && v.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | ',' | '%' | ')' | 'K' | 'M' | 'B' | 'T' | ' '))
 }
 
 #[cfg(test)]
@@ -449,8 +476,9 @@ mod tests {
         let md = "| Name | Value |\n|------|-------|\n| A | 1 |\n| B | 2 |";
         let result = markdown_to_typst(md);
         assert!(result.contains("#table("));
-        assert!(result.contains("columns: 2"));
-        assert!(result.contains("[*Name*]"));
+        assert!(result.contains("(1fr,) * 2"), "columns spec missing: {result}");
+        // Header cells are uppercase with warm design system styling
+        assert!(result.contains("#upper[Name]"), "header missing: {result}");
         assert!(result.contains("[A]"));
         assert!(result.contains("[B]"));
     }
@@ -467,14 +495,14 @@ mod tests {
         assert!(result.contains("Revenue"));
         assert!(result.contains("\\$42,000"));
         assert!(result.contains("▲ 20.0%"));
-        assert!(result.contains("#059669"));
+        assert!(result.contains("#15803D"), "success color missing: {result}");
     }
 
     #[test]
     fn metric_card_negative_trend() {
         let result = render_metric_typst("Costs", "$10,000", Some(("5.0%", false)));
         assert!(result.contains("▼ 5.0%"));
-        assert!(result.contains("#dc2626"));
+        assert!(result.contains("#DC2626"), "error color missing: {result}");
     }
 
     #[test]
@@ -490,5 +518,21 @@ mod tests {
     fn special_chars_escaped_in_paragraph() {
         let result = markdown_to_typst("Revenue is $100 & growing");
         assert!(result.contains("\\$100"));
+    }
+
+    #[test]
+    fn numeric_cell_detection() {
+        // Numeric values → Geist Mono
+        assert!(is_numeric_cell("$620K"));
+        assert!(is_numeric_cell("+15%"));
+        assert!(is_numeric_cell("-3.1%"));
+        assert!(is_numeric_cell("12,847"));
+        assert!(is_numeric_cell("$1.45M"));
+        assert!(is_numeric_cell("100"));
+        // Text labels → DM Sans
+        assert!(!is_numeric_cell("North America"));
+        assert!(!is_numeric_cell("Revenue"));
+        assert!(!is_numeric_cell(""));
+        assert!(!is_numeric_cell("Q3 2026"));
     }
 }

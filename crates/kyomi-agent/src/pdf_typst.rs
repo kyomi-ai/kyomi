@@ -9,6 +9,35 @@ use std::collections::HashMap;
 use typst::layout::PagedDocument;
 use typst_as_lib::{typst_kit_options::TypstKitFontOptions, TypstEngine};
 
+// ---------------------------------------------------------------------------
+// Compile-time embedded assets — fonts + logo
+// ---------------------------------------------------------------------------
+
+/// The Kyomi full logo SVG (starburst icon + geometric lettering), dark variant.
+const KYOMI_LOGO_SVG: &[u8] = include_bytes!("../../kyomi-ui/public/kyomi_full_logo.svg");
+
+// Design system fonts embedded at compile time so PDFs render identically
+// regardless of the host environment (Docker, k8s, NAS, dev machine).
+static FONT_DM_SANS_REGULAR: &[u8] = include_bytes!("../fonts/DMSans-Regular.ttf");
+static FONT_DM_SANS_MEDIUM: &[u8] = include_bytes!("../fonts/DMSans-Medium.ttf");
+static FONT_DM_SANS_SEMIBOLD: &[u8] = include_bytes!("../fonts/DMSans-SemiBold.ttf");
+static FONT_DM_SANS_BOLD: &[u8] = include_bytes!("../fonts/DMSans-Bold.ttf");
+static FONT_DM_SANS_ITALIC: &[u8] = include_bytes!("../fonts/DMSans-Italic.ttf");
+static FONT_INSTRUMENT_SERIF_REGULAR: &[u8] = include_bytes!("../fonts/InstrumentSerif-Regular.ttf");
+static FONT_INSTRUMENT_SERIF_ITALIC: &[u8] = include_bytes!("../fonts/InstrumentSerif-Italic.ttf");
+static FONT_GEIST_MONO_REGULAR: &[u8] = include_bytes!("../fonts/GeistMono-Regular.ttf");
+static FONT_GEIST_MONO_MEDIUM: &[u8] = include_bytes!("../fonts/GeistMono-Medium.ttf");
+
+/// All bundled font bytes for the Typst engine.
+fn bundled_fonts() -> Vec<&'static [u8]> {
+    vec![
+        FONT_DM_SANS_REGULAR, FONT_DM_SANS_MEDIUM, FONT_DM_SANS_SEMIBOLD,
+        FONT_DM_SANS_BOLD, FONT_DM_SANS_ITALIC,
+        FONT_INSTRUMENT_SERIF_REGULAR, FONT_INSTRUMENT_SERIF_ITALIC,
+        FONT_GEIST_MONO_REGULAR, FONT_GEIST_MONO_MEDIUM,
+    ]
+}
+
 /// Generate a PDF from a Typst document string and a set of named images.
 ///
 /// Images are referenced in the Typst source as `#image("chart_0.png")` etc.
@@ -19,24 +48,26 @@ pub fn generate_pdf(
     typst_source: &str,
     images: &HashMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
-    // Build image file entries for the static file resolver
-    let image_entries: Vec<(&str, &[u8])> = images
+    // Build image file entries for the static file resolver.
+    // Always include the Kyomi logo SVG for the page header.
+    let mut image_entries: Vec<(&str, &[u8])> = images
         .iter()
         .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
         .collect();
+    image_entries.push(("kyomi_logo.svg", KYOMI_LOGO_SVG));
 
-    // Build the Typst engine with embedded fonts and image resolver.
-    // search_fonts_with() is required — without it no fonts are loaded and
-    // the PDF renders with no text.
-    let mut builder = TypstEngine::builder()
+    // Include embedded typst-assets fonts as fallback for symbols (▲, ▼, etc.)
+    // but not system fonts (ensures identical rendering everywhere).
+    let font_options = TypstKitFontOptions::new()
+        .include_system_fonts(false)
+        .include_embedded_fonts(true);
+
+    let engine = TypstEngine::builder()
         .main_file(typst_source)
-        .search_fonts_with(TypstKitFontOptions::new());
-
-    if !image_entries.is_empty() {
-        builder = builder.with_static_file_resolver(image_entries);
-    }
-
-    let engine = builder.build();
+        .search_fonts_with(font_options)
+        .fonts(bundled_fonts())
+        .with_static_file_resolver(image_entries)
+        .build();
 
     // Compile the document
     let warned = engine.compile::<PagedDocument>();
@@ -60,52 +91,78 @@ pub fn generate_pdf(
 
 /// Build a complete Typst document with page setup, styling, and body content.
 ///
-/// This wraps the body content with consistent page layout, fonts,
-/// heading styles, and footer.
+/// Uses the Kyomi design system: Instrument Serif for headings, DM Sans for
+/// body text, Geist Mono for data, warm grays, and amber (#D97706) accent.
+/// Includes a branded header with logo and amber rule, and a branded footer.
 pub fn wrap_document(title: &str, body: &str) -> String {
     let escaped_title = typst_escape(title);
     format!(
-        r##"#set page(
+        r##"// -- Kyomi Design System PDF Template --
+// Fonts: Instrument Serif (display), DM Sans (body), Geist Mono (data/code)
+// Colors: warm grays, amber accent (#D97706)
+
+#set page(
   paper: "a4",
-  margin: (top: 2cm, bottom: 2.5cm, left: 2cm, right: 2cm),
-  footer: context {{
-    line(length: 100%, stroke: 0.5pt + rgb("#e5e7eb"))
+  margin: (top: 3cm, bottom: 2.5cm, left: 2.5cm, right: 2.5cm),
+  header: context {{
+    set text(font: "DM Sans")
+    grid(
+      columns: (auto, 1fr),
+      align: (left + horizon, right + horizon),
+      column-gutter: 8pt,
+      [#image("kyomi_logo.svg", height: 28pt)],
+      [#text(9pt, fill: rgb("#9C9790"))[{escaped_title}]],
+    )
     v(4pt)
-    set text(8pt, fill: rgb("#9ca3af"), font: "Open Sans")
-    [Generated by kyomi.ai]
-    h(1fr)
-    counter(page).display()
+    line(length: 100%, stroke: 1pt + rgb("#D97706"))
   }},
+  header-ascent: 15%,
+  footer: context {{
+    line(length: 100%, stroke: 0.5pt + rgb("#E8E5DE"))
+    v(4pt)
+    set text(8pt, fill: rgb("#9C9790"), font: "DM Sans")
+    grid(
+      columns: (1fr, 1fr),
+      align: (left, right),
+      [Generated by kyomi.ai],
+      [Page #counter(page).display("1 of 1", both: true)],
+    )
+  }},
+  footer-descent: 20%,
 )
 
-#set text(10.5pt, font: "Open Sans", fill: rgb("#374151"))
-#set par(leading: 0.65em, spacing: 1em)
+// Body defaults — tighter leading for editorial density
+#set text(10.5pt, font: "DM Sans", fill: rgb("#374151"))
+#set par(leading: 0.55em, spacing: 0.8em)
 
+// Heading styles — Instrument Serif for H1/H2, DM Sans for H3
 #set heading(numbering: none)
 #show heading.where(level: 1): it => {{
-  v(4pt)
-  set text(20pt, weight: "bold", fill: rgb("#111827"), font: "Open Sans")
+  v(2pt)
+  set text(22pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
   it.body
   v(2pt)
-  line(length: 100%, stroke: 1.5pt + rgb("#e5e7eb"))
-  v(8pt)
+  line(length: 100%, stroke: 0.5pt + rgb("#E8E5DE"))
+  v(6pt)
 }}
 #show heading.where(level: 2): it => {{
-  v(8pt)
-  set text(14pt, weight: "semibold", fill: rgb("#1f2937"), font: "Open Sans")
+  v(6pt)
+  set text(15pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
   it.body
-  v(4pt)
+  v(3pt)
 }}
 #show heading.where(level: 3): it => {{
   v(4pt)
-  set text(12pt, weight: "semibold", fill: rgb("#374151"), font: "Open Sans")
+  set text(12pt, weight: "semibold", fill: rgb("#374151"), font: "DM Sans")
   it.body
   v(2pt)
 }}
 
-#show link: set text(fill: rgb("#2563eb"))
+// Links in amber accent
+#show link: set text(fill: rgb("#D97706"))
 
-= {escaped_title}
+// Raw/code blocks in Geist Mono
+#show raw: set text(font: "Geist Mono", size: 9.5pt)
 
 {body}
 "##
@@ -192,6 +249,12 @@ This is a test document with some content.
 
         let metric1 = render_metric_typst("Total Revenue", "$1.45M", Some(("20.3%", true)));
         let metric2 = render_metric_typst("Active Users", "12,847", Some(("3.1%", false)));
+        let metric3 = render_metric_typst("Avg Deal Size", "$31K", Some(("8.7%", true)));
+
+        // Metrics in a side-by-side grid (simulates what replace_chartml_with_typst produces)
+        let metric_grid = format!(
+            "#grid(\n  columns: (1fr, 1fr, 1fr),\n  column-gutter: 12pt,\n  [{metric1}],\n  [{metric2}],\n  [{metric3}]\n)"
+        );
 
         let table = render_data_table_typst(
             "Top Regions",
@@ -205,8 +268,10 @@ This is a test document with some content.
             50,
         );
 
+        // No leading H1 — the branded page header already shows the title.
+        // In real exports, strip_leading_title() removes the duplicate H1.
         let markdown = format!(
-            "# Monthly Revenue Report\n\n{metric1}\n\n{metric2}\n\n\
+            "{metric_grid}\n\n\
             ## Highlights\n\n\
             - Enterprise deals closed: **12**\n\
             - New customers acquired: **47**\n\
@@ -294,10 +359,9 @@ visualize:
         let metric = render_metric_typst("Total Revenue", "$343K", Some(("18.2%", true)));
 
         let markdown = format!(
-            "# Revenue Dashboard\n\n\
-            {metric}\n\n\
+            "{metric}\n\n\
             ## Monthly Revenue\n\n\
-            #image(\"chart_0.png\", width: 100%)\n\n\
+            #block(stroke: 0.5pt + rgb(\"#E8E5DE\"), radius: 4pt, clip: true, width: 100%)[#image(\"chart_0.png\", width: 100%)]\n\n\
             ## Summary\n\n\
             Revenue grew consistently through H1, with June showing a slight dip from May's peak.\n"
         );

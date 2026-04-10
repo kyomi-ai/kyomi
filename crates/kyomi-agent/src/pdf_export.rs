@@ -158,6 +158,10 @@ pub async fn generate_dashboard_pdf(
         &typst_rendered,
     );
 
+    // 5b. Strip the leading H1 if it matches the dashboard title — the branded
+    // page header already displays the title, so the duplicate H1 wastes space.
+    let processed_content = strip_leading_title(&processed_content, title);
+
     // 6. Convert processed markdown to Typst markup
     let typst_body = markdown_to_typst::markdown_to_typst(&processed_content);
 
@@ -235,6 +239,10 @@ fn apply_parameters(spec: &Value, params: &Value) -> Value {
 // ---------------------------------------------------------------------------
 
 /// Replace ChartML code blocks with Typst image references or rendered Typst markup.
+///
+/// When a block contains multiple metric specs, they are laid out side-by-side
+/// in a Typst grid, respecting each spec's `layout.colSpan` value (out of 12
+/// columns, matching the web dashboard grid). Charts and tables remain full-width.
 fn replace_chartml_with_typst(
     content: &str,
     extraction: &chartml_utils::ExtractionResult,
@@ -253,40 +261,106 @@ fn replace_chartml_with_typst(
             continue;
         }
 
-        let parts: Vec<String> = block
-            .spec_indices
-            .iter()
-            .map(|&spec_idx| {
-                // Native Typst rendering (metric, table)
-                if let Some(typst) = typst_rendered.get(&spec_idx) {
-                    return typst.clone();
-                }
-                // PNG chart image reference
-                if let Some(filename) = chart_image_refs.get(&spec_idx) {
-                    format!(
-                        "#align(center)[#image(\"{filename}\", width: 100%)]",
-                    )
-                } else {
-                    let chart_title = if spec_idx < extraction.specs.len() {
-                        chartml_utils::get_chart_title(&extraction.specs[spec_idx])
-                    } else {
-                        "Chart".to_string()
-                    };
-                    let escaped = pdf_typst::typst_escape(&chart_title);
-                    format!(
-                        r##"#block(fill: rgb("#f9fafb"), stroke: rgb("#e5e7eb"), radius: 6pt, inset: 24pt, width: 100%)[
-  #align(center)[#text(fill: rgb("#6b7280"), style: "italic")[Chart unavailable: {escaped}]]
-]"##
-                    )
-                }
-            })
-            .collect();
+        // Classify each spec in this block as metric or non-metric
+        let mut metrics: Vec<(usize, String)> = Vec::new(); // (spec_idx, typst)
+        let mut others: Vec<String> = Vec::new();
 
-        let block_replacement = parts.join("\n");
+        for &spec_idx in &block.spec_indices {
+            let is_metric = spec_idx < extraction.specs.len()
+                && chartml_utils::get_visualize_type(&extraction.specs[spec_idx]).as_deref()
+                    == Some("metric");
+
+            if is_metric && let Some(typst) = typst_rendered.get(&spec_idx) {
+                metrics.push((spec_idx, typst.clone()));
+                continue;
+            }
+
+            // Non-metric: table, chart image, or unavailable
+            if let Some(typst) = typst_rendered.get(&spec_idx) {
+                others.push(typst.clone());
+            } else if let Some(filename) = chart_image_refs.get(&spec_idx) {
+                others.push(format!(
+                    r##"#block(stroke: 0.5pt + rgb("#E8E5DE"), radius: 4pt, clip: true, width: 100%)[
+  #image("{filename}", width: 100%)
+]"##,
+                ));
+            } else {
+                let chart_title = if spec_idx < extraction.specs.len() {
+                    chartml_utils::get_chart_title(&extraction.specs[spec_idx])
+                } else {
+                    "Chart".to_string()
+                };
+                let escaped = pdf_typst::typst_escape(&chart_title);
+                others.push(format!(
+                    r##"#block(fill: rgb("#F5F3EF"), stroke: rgb("#E8E5DE"), radius: 6pt, inset: 24pt, width: 100%)[
+  #align(center)[#text(fill: rgb("#6B6660"), style: "italic", font: "DM Sans")[Chart unavailable: {escaped}]]
+]"##
+                ));
+            }
+        }
+
+        let mut block_parts: Vec<String> = Vec::new();
+
+        // Lay out metrics in a grid if there are 2+
+        if metrics.len() >= 2 {
+            let col_spans: Vec<u32> = metrics
+                .iter()
+                .map(|(idx, _)| get_col_span(&extraction.specs[*idx]))
+                .collect();
+
+            // Build Typst grid columns as fractional widths from colSpan values
+            let columns = col_spans
+                .iter()
+                .map(|s| format!("{}fr", s))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let cells = metrics
+                .iter()
+                .map(|(_, typst)| format!("  [{}]", typst))
+                .collect::<Vec<_>>()
+                .join(",\n");
+
+            block_parts.push(format!(
+                "#grid(\n  columns: ({columns}),\n  column-gutter: 12pt,\n{cells}\n)"
+            ));
+        } else if metrics.len() == 1 {
+            block_parts.push(metrics[0].1.clone());
+        }
+
+        block_parts.extend(others);
+
+        let block_replacement = block_parts.join("\n");
         result.replace_range(block.range.clone(), &block_replacement);
     }
 
     result
+}
+
+/// Get the colSpan value from a chart spec's layout section (default: 4 = 1/3 width).
+fn get_col_span(spec: &Value) -> u32 {
+    spec.get("layout")
+        .and_then(|l| l.get("colSpan").or_else(|| l.get("col_span")))
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32)
+        .unwrap_or(4) // default: 4 of 12 = 1/3 width (3 metrics per row)
+}
+
+/// Strip the leading `# Title` heading from dashboard content if it matches
+/// the dashboard title. The PDF header already displays the title, so the
+/// duplicate H1 wastes vertical space.
+fn strip_leading_title(content: &str, title: &str) -> String {
+    let trimmed = content.trim_start();
+    // Match "# Title" or "# Title\n"
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        let first_line = rest.lines().next().unwrap_or("");
+        if first_line.trim() == title.trim() {
+            // Skip the heading line and any immediately following blank lines
+            let after_heading = rest[first_line.len()..].trim_start_matches(['\n', '\r']);
+            return after_heading.to_string();
+        }
+    }
+    content.to_string()
 }
 
 /// Render a metric spec as Typst markup for PDF export.
