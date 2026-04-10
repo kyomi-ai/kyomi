@@ -329,6 +329,11 @@ Detail/viewer pages show a metadata footer at the bottom with created/updated ti
 
 For secondary contextual content (history, filters, details, comments) that can be shown/hidden. The dashboard viewer's History panel is the reference.
 
+**Animation — CRITICAL:**
+- The panel is **always in the DOM**. Never use `<Show>` to mount/unmount — this prevents CSS transitions.
+- Matches the left nav sidebar pattern: animate width between 0 and the target width.
+- Inner content container has a fixed `min-width` equal to the default panel width, so content doesn't reflow during the width transition — it clips via `overflow: hidden` on the outer div.
+
 **Desktop (768px+):**
 - Inline resizable sidebar on the right side of the content area
 - Width range: 320-600px, default 384px
@@ -336,14 +341,18 @@ For secondary contextual content (history, filters, details, comments) that can 
 - Drag handle for resize (4px wide, centered, `bg-border` → `bg-muted-foreground/50` on hover)
 - Width controlled by inline `style` (dynamic from drag), not a Tailwind class
 - Sits inside the `flex-1 overflow-hidden flex` content zone alongside the main scroll area
-- Transition: `transition-[width]` with `duration-slow`
+- Open: `width: {panel_width}px`
+- Closed: `width: 0px` with `overflow: hidden`
+- Transition: `transition-[width] duration-300 ease-in-out`
 
 **Mobile (below 768px):**
 - Fixed overlay panel from the right
 - `fixed top-32 right-0 bottom-0`, max-width 85vw
-- Backdrop: `bg-[var(--color-overlay)]`, click to close
+- Backdrop: `bg-[var(--color-overlay)]`, click to close, `transition-opacity duration-300 ease-in-out`
 - `bg-muted`, `shadow-xl`
-- Transition: `transition-transform` with `duration-slow`
+- Open: `transform: translateX(0)`
+- Closed: `transform: translateX(100%)`
+- Transition: `transition-transform duration-300 ease-in-out`
 
 ### Empty State Pattern (In-Page)
 

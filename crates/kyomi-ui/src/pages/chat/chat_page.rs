@@ -35,8 +35,6 @@
 //!   watch creation context (Phase 11)
 //! - Empty states: no datasources, personal mode without LLM (Phase 12)
 
-use std::collections::HashMap;
-
 use leptos::prelude::*;
 use leptos_icons::Icon;
 use leptos_router::components::Outlet;
@@ -46,8 +44,7 @@ use super::chat_message::ChatMessage;
 use crate::components::chat::websocket_client::{ConnectionState, WebSocketContext};
 use crate::components::chat::ChatInput;
 use crate::components::chat::{
-    ChatStateMachine, InlineEditableTitle, ThinkingEvent, ThinkingManager, ThinkingState,
-    TokenUsage,
+    ChatEngine, ChatEngineConfig, InlineEditableTitle, SessionMode, ThinkingEvent, TokenUsage,
 };
 use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
@@ -254,9 +251,7 @@ pub fn ChatPage() -> impl IntoView {
     // The location is used on WASM for query parameter parsing (Phase 11).
     let _location = use_location();
 
-    // ── State signals ───────────────────────────────────────────────────
-    // Matches React's useState declarations (Chat.jsx lines 216-233)
-    let (messages, set_messages) = signal(Vec::<ChatMessageItem>::new());
+    // ── Page-specific state signals ────────────────────────────────────
     let (current_session_id, set_current_session_id) = signal(Option::<String>::None);
     let (session_title, set_session_title) = signal(String::new());
     let (session_metadata, set_session_metadata) = signal(SessionDetail::default());
@@ -295,21 +290,24 @@ pub fn ChatPage() -> impl IntoView {
     // query parameter handling)
     let (_watch_context, _set_watch_context) = signal(false);
 
-    // Thinking state per message — keyed by message_id.
-    // Populated when loading stored thinking events from session messages,
-    // and updated live by WebSocket agent_thinking events.
-    let (thinking_map, set_thinking_map) =
-        signal(HashMap::<String, ThinkingState>::new());
+    // ── ChatEngine — unified state container ────────────────────────────
+    // Owns messages, thinking state, chat state machine, and the 6 standard
+    // WS subscriptions (agent_thinking, chat_stream, chat_complete,
+    // token_usage_update, error, request_cancelled).
+    let engine = ChatEngine::new(ChatEngineConfig {
+        session_mode: SessionMode::External {
+            session_id: Signal::derive(move || current_session_id.get()),
+        },
+        context_type: None, // Main chat doesn't filter by context_type
+        custom_ws_events: vec![],
+        on_custom_ws_event: None,
+        context_content: None,
+        context_label: None,
+    });
 
-    // ── Chat state machine ──────────────────────────────────────────────
-    // Replaces fragmented state (is_loading, is_processing, etc.) with a
-    // single source of truth. Matches React's useChatState() hook.
-    let chat_state = ChatStateMachine::new();
-
-    // ── Thinking manager ────────────────────────────────────────────────
-    // Processes and deduplicates thinking events, matching React's
-    // useAgentThinking() hook. Only used on WASM (WebSocket subscriptions).
-    let _thinking_manager = ThinkingManager::new();
+    // Convenience aliases for engine-owned state used throughout the component.
+    let messages = engine.messages();
+    let chat_state = engine.chat_state().clone();
 
     // Wire is_streaming and active_message_id from ChatStateMachine.
     let is_streaming = chat_state.is_streaming;
@@ -369,7 +367,7 @@ pub fn ChatPage() -> impl IntoView {
     // Handles the two navigation cases:
     //   1. Navigating TO a session — set is_loading, clear messages
     //   2. Navigating AWAY from all sessions — clear all state (new chat)
-    let chat_state_for_load = chat_state.clone();
+    let engine_for_load = engine.clone();
     Effect::new(move |_| {
         let new_session_id = url_session_id.get();
         let current = current_session_id.get_untracked();
@@ -403,24 +401,22 @@ pub fn ChatPage() -> impl IntoView {
                 // be set yet when this Effect first fires. The state check provides a
                 // second safety net: never reset if we're mid-conversation.
                 let actively_chatting = matches!(
-                    chat_state_for_load.state().get_untracked(),
+                    engine_for_load.chat_state().state().get_untracked(),
                     crate::components::chat::ChatState::Sending
                     | crate::components::chat::ChatState::Streaming
                     | crate::components::chat::ChatState::Cancelling
                 );
                 if !is_just_created && !actively_chatting {
-                    chat_state_for_load.reset();
+                    engine_for_load.chat_state().reset();
                 }
             }
             // URL has no session ID but we have a current session — clear state (new chat)
             (None, Some(_)) => {
                 just_created_session.set(None);
                 set_current_session_id.set(None);
-                set_messages.set(Vec::new());
+                engine_for_load.reset();
                 set_session_title.set(String::new());
                 set_session_metadata.set(SessionDetail::default());
-                set_thinking_map.set(HashMap::new());
-                chat_state_for_load.reset();
                 set_current_greeting.set(generate_greeting(&user_display_name.get()));
             }
             _ => {}
@@ -430,6 +426,7 @@ pub fn ChatPage() -> impl IntoView {
     // ── Resource sync effect: apply loaded session data to signals ───────
     // Fires when session_messages_resource resolves. Populates messages,
     // session metadata, thinking state, and clears is_loading.
+    let engine_for_resource = engine.clone();
     Effect::new(move |_| {
         match session_messages_resource.get() {
             Some(Some((sid, Ok(response)))) => {
@@ -440,8 +437,9 @@ pub fn ChatPage() -> impl IntoView {
                 let is_shared = response.session.shared;
                 set_session_metadata.set(response.session);
 
-                // Build thinking state from stored events
-                let mut thinking = HashMap::new();
+                // Populate thinking state from stored events via the engine's
+                // ThinkingManager. Replay each message's events, then mark complete.
+                engine_for_resource.thinking().clear_all();
                 for msg in &response.messages {
                     let events: Vec<ThinkingEvent> =
                         msg.thinking_events
@@ -454,23 +452,30 @@ pub fn ChatPage() -> impl IntoView {
                             .as_ref()
                             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-                    if !events.is_empty() || token_usage.is_some() {
-                        thinking.insert(
-                            msg.message_id.clone(),
-                            ThinkingState {
-                                events,
-                                is_active: false,
-                                cancelled: false,
-                                token_usage,
-                            },
+                    // Replay events through ThinkingManager for dedup/sorting
+                    for event in events {
+                        engine_for_resource.thinking().handle_thinking_event(
+                            &msg.message_id,
+                            event,
+                            None, // token_usage set separately below
                         );
                     }
+
+                    // Set token usage if present (works even when no events exist)
+                    if let Some(usage) = token_usage {
+                        engine_for_resource.thinking().update_token_usage(
+                            &msg.message_id,
+                            usage,
+                        );
+                    }
+
+                    // Mark as complete (history events are not active)
+                    engine_for_resource.thinking().complete_thinking(&msg.message_id);
                 }
-                set_thinking_map.set(thinking);
 
                 // M16 — Capture last message ID before the move
                 let last_msg_id = response.messages.last().map(|m| m.message_id.clone());
-                set_messages.set(response.messages);
+                engine_for_resource.set_messages(response.messages);
                 set_is_loading.set(false);
 
                 // M16 — Mark session read for shared conversations
@@ -484,7 +489,7 @@ pub fn ChatPage() -> impl IntoView {
             Some(Some((_, Err(_e)))) => {
                 // Gracefully handle by setting empty messages
                 // (matches React's catch block in loadSessionMessages)
-                set_messages.set(Vec::new());
+                engine_for_resource.set_messages(Vec::new());
                 set_is_loading.set(false);
             }
             Some(None) => {
@@ -527,62 +532,24 @@ pub fn ChatPage() -> impl IntoView {
 
     // ── Smart scroll ────────────────────────────────────────────────────
     // Auto-scroll to bottom when messages change, but only if user is
-    // near the bottom (within 100px). Matches React's scrollToBottom
-    // with isNearBottom check (Chat.jsx lines 272-296).
-    #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move |_| {
-            // Track messages to trigger on change
-            let _ = messages.get();
+    // near the bottom (within 100px). Delegated to the engine which
+    // matches React's scrollToBottom with isNearBottom check.
+    engine.setup_scroll(messages_container_ref);
 
-            // Use try_read_untracked to avoid panicking if NodeRefs are disposed
-            // (e.g., when the chat component unmounts while this Effect is pending).
-            let container_guard = messages_container_ref.try_read_untracked();
-            let end_guard = messages_end_ref.try_read_untracked();
-
-            let (Some(container_guard), Some(end_guard)) = (container_guard, end_guard) else {
-                return;
-            };
-            let (Some(container), Some(end_el)) = (container_guard.as_ref(), end_guard.as_ref())
-            else {
-                return;
-            };
-
-            let scroll_top = container.scroll_top();
-            let scroll_height = container.scroll_height();
-            let client_height = container.client_height();
-            let distance_from_bottom = scroll_height - scroll_top - client_height;
-
-            // Only auto-scroll if within 100px of bottom.
-            // MINOR: 50ms debounce matches React's scrollToBottom behavior.
-            if distance_from_bottom < 100 {
-                let end_el = end_el.clone();
-                gloo_timers::callback::Timeout::new(50, move || {
-                    let opts = web_sys::ScrollIntoViewOptions::new();
-                    opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-                    end_el.scroll_into_view_with_scroll_into_view_options(&opts);
-                })
-                .forget();
-            }
-        });
-    }
-
-    // ── WebSocket subscriptions (Phase 8) ───────────────────────────────
-    // Subscribe to all relevant WebSocket events for streaming, thinking,
-    // cancellation, session creation, and errors.
-    //
-    // Matches React's useEffect in Chat.jsx (lines 345-694) and
-    // ChatInterface.jsx (lines 206-381).
-    //
-    // All subscriptions are set up in this block and cleaned up on unmount
-    // via on_cleanup().
+    // ── Page-specific WebSocket subscriptions ─────────────────────────────
+    // The 6 standard WS events (agent_thinking, chat_stream, chat_complete,
+    // token_usage_update, error, request_cancelled) are handled by the engine.
+    // Here we subscribe only to the 3 page-specific events:
+    //   - session_created: navigates to new session URL
+    //   - title_update: updates session title
+    //   - shared_chat_message: handles messages from other users
     #[cfg(target_arch = "wasm32")]
     {
         let chat_state_ws = chat_state.clone();
-        let thinking_manager_ws = _thinking_manager.clone();
         let navigate_ws = navigate.clone();
 
         let ws_ctx_for_effect = ws_ctx.clone();
+        let engine_for_ws = engine.clone();
         Effect::new(move |_| {
             let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
                 return;
@@ -667,397 +634,17 @@ pub fn ChatPage() -> impl IntoView {
                 }
             });
 
-            // ── agent_thinking ──────────────────────────────────────────
-            // Matches React: Chat.jsx lines 386-498 and ChatInterface.jsx lines 216-271
-            let chat_state_thinking = chat_state_ws.clone();
-            let thinking_manager_thinking = thinking_manager_ws.clone();
-            let unsub_agent_thinking = ws.subscribe("agent_thinking", move |msg| {
-                let data = match &msg.data {
-                    Some(d) => d,
-                    None => return,
-                };
-
-                let thinking_event: ThinkingEvent = match data.get("event").and_then(|v| {
-                    serde_json::from_value(v.clone()).ok()
-                }) {
-                    Some(e) => e,
-                    None => return,
-                };
-
-                let token_usage: Option<TokenUsage> = data
-                    .get("token_usage")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                let msg_session_id = match &msg.session_id {
-                    Some(s) => s.clone(),
-                    None => return,
-                };
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // CRITICAL: Ignore events from other sessions (prevents chat bleed).
-                // BUT: Allow events when currentSession is null (new chat race condition).
-                // Matches React: Chat.jsx lines 395-397
-                let current_sid = current_session_id.get_untracked();
-                if current_sid.is_some() && current_sid.as_deref() != Some(&msg_session_id) {
-                    return;
-                }
-
-                let state = chat_state_thinking.state().get_untracked();
-
-                // If this is a new chat (currentSession is null) and we're in SENDING state,
-                // we need to buffer/process the event. Matches React: Chat.jsx lines 401-444
-                if current_sid.is_none() && state == crate::components::chat::ChatState::Sending {
-                    // Create assistant message placeholder if it doesn't exist
-                    set_messages.update(|msgs| {
-                        if !msgs.iter().any(|m| m.message_id == msg_message_id) {
-                            msgs.push(ChatMessageItem {
-                                message_id: msg_message_id.clone(),
-                                message_type: "assistant".to_string(),
-                                content: String::new(),
-                                timestamp: msg.timestamp.clone().unwrap_or_default(),
-                                pinned: false,
-                                sent_by: None,
-                                thinking_events: Vec::new(),
-                                token_usage: None,
-                            });
-                        }
-                    });
-
-                    // Transition to streaming when first thinking event arrives
-                    let current_state = chat_state_thinking.state().get_untracked();
-                    if current_state == crate::components::chat::ChatState::Sending {
-                        chat_state_thinking.start_streaming(&msg_message_id);
-                    }
-
-                    // Process the thinking event via the thinking manager
-                    thinking_manager_thinking.handle_thinking_event(
-                        &msg_message_id,
-                        thinking_event.clone(),
-                        token_usage.clone(),
-                    );
-
-                    // Also update thinking_map for ChatMessage display
-                    set_thinking_map.update(|map| {
-                        let current = map
-                            .get(&msg_message_id)
-                            .cloned()
-                            .unwrap_or_default();
-                        let updated_events =
-                            crate::components::chat::process_thinking_event(&current.events, thinking_event);
-                        map.insert(
-                            msg_message_id.clone(),
-                            ThinkingState {
-                                events: updated_events,
-                                is_active: true,
-                                cancelled: false,
-                                token_usage: token_usage.or(current.token_usage),
-                            },
-                        );
-                    });
-
-                    return; // Buffered and displayed — done
-                } else if current_sid.is_none() {
-                    // Not in SENDING state and no session — ignore
-                    return;
-                }
-
-                // Transition to STREAMING state when first thinking event arrives.
-                // Matches React: Chat.jsx lines 449-453
-                if state == crate::components::chat::ChatState::Sending {
-                    chat_state_thinking.start_streaming(&msg_message_id);
-                }
-
-                // Create assistant message immediately if it doesn't exist yet.
-                // Matches React: Chat.jsx lines 456-469
-                set_messages.update(|msgs| {
-                    if !msgs.iter().any(|m| m.message_id == msg_message_id) {
-                        msgs.push(ChatMessageItem {
-                            message_id: msg_message_id.clone(),
-                            message_type: "assistant".to_string(),
-                            content: String::new(),
-                            timestamp: msg.timestamp.clone().unwrap_or_default(),
-                            pinned: false,
-                            sent_by: None,
-                            thinking_events: Vec::new(),
-                            token_usage: None,
-                        });
-                    }
-                });
-
-                // Process the thinking event. Matches React: Chat.jsx lines 472-497
-                thinking_manager_thinking.handle_thinking_event(
-                    &msg_message_id,
-                    thinking_event.clone(),
-                    token_usage.clone(),
-                );
-
-                // Update thinking_map for ChatMessage display
-                set_thinking_map.update(|map| {
-                    let current = map
-                        .get(&msg_message_id)
-                        .cloned()
-                        .unwrap_or_default();
-
-                    // Don't restart animation if message was cancelled
-                    if current.cancelled {
-                        return;
-                    }
-
-                    let updated_events =
-                        crate::components::chat::process_thinking_event(&current.events, thinking_event);
-                    map.insert(
-                        msg_message_id.clone(),
-                        ThinkingState {
-                            events: updated_events,
-                            is_active: true,
-                            cancelled: false,
-                            token_usage: token_usage.or(current.token_usage),
-                        },
-                    );
-                });
-            });
-
-            // ── token_usage_update ──────────────────────────────────────
-            // Matches React: Chat.jsx lines 501-528
-            let unsub_token_usage = ws.subscribe("token_usage_update", move |msg| {
-                let data = match &msg.data {
-                    Some(d) => d,
-                    None => return,
-                };
-
-                let token_update: TokenUsage = match data
-                    .get("token_usage")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                {
-                    Some(t) => t,
-                    None => return,
-                };
-
-                let msg_session_id = match &msg.session_id {
-                    Some(s) => s.as_str(),
-                    None => return,
-                };
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // CRITICAL: Ignore events from other sessions.
-                // Allow events when currentSession is null (new chat race condition).
-                let current_sid = current_session_id.get_untracked();
-                if current_sid.is_some() && current_sid.as_deref() != Some(msg_session_id) {
-                    return;
-                }
-
-                set_thinking_map.update(|map| {
-                    let current = map
-                        .get(&msg_message_id)
-                        .cloned()
-                        .unwrap_or_default();
-
-                    // Don't update if message was cancelled
-                    if current.cancelled {
-                        return;
-                    }
-
-                    map.insert(
-                        msg_message_id,
-                        ThinkingState {
-                            token_usage: Some(token_update),
-                            ..current
-                        },
-                    );
-                });
-            });
-
-            // ── chat_stream ─────────────────────────────────────────────
-            // Matches React: Chat.jsx lines 530-568 and ChatInterface.jsx lines 275-288
-            let chat_state_stream = chat_state_ws.clone();
-            let unsub_chat_stream = ws.subscribe("chat_stream", move |msg| {
-                let content = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str());
-
-                let content = match content {
-                    Some(c) if !c.is_empty() => c.to_string(),
-                    _ => return,
-                };
-
-                let msg_session_id = match &msg.session_id {
-                    Some(s) => s.as_str(),
-                    None => return,
-                };
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // CRITICAL: Ignore events from other sessions.
-                let current_sid = current_session_id.get_untracked();
-                if current_sid.is_some() && current_sid.as_deref() != Some(msg_session_id) {
-                    return;
-                }
-
-                // Recover streaming state if it was lost during URL change.
-                // During new chat creation, the URL transitions from /chat to
-                // /chat/:session_id. Reactive effects may reset the chat state
-                // to Idle before all WS events are processed. If we're receiving
-                // stream data but the state isn't Streaming, restore it.
-                // Only transition Idle→Streaming (Sending is fine, Cancelling should not be overridden).
-                let stream_state = chat_state_stream.state().get_untracked();
-                if stream_state == crate::components::chat::ChatState::Idle {
-                    chat_state_stream.start_streaming(&msg_message_id);
-                }
-
-                set_messages.update(|msgs| {
-                    if let Some(existing) = msgs
-                        .iter_mut()
-                        .find(|m| m.message_id == msg_message_id && m.message_type == "assistant")
-                    {
-                        // Append content chunk to existing message
-                        existing.content.push_str(&content);
-                    } else {
-                        // Create new assistant message
-                        msgs.push(ChatMessageItem {
-                            message_id: msg_message_id,
-                            message_type: "assistant".to_string(),
-                            content,
-                            timestamp: msg.timestamp.unwrap_or_default(),
-                            pinned: false,
-                            sent_by: None,
-                            thinking_events: Vec::new(),
-                            token_usage: None,
-                        });
-                    }
-                });
-            });
-
-            // ── chat_complete ───────────────────────────────────────────
-            // Matches React: Chat.jsx lines 570-637 and ChatInterface.jsx lines 291-321
-            let chat_state_complete = chat_state_ws.clone();
-            let unsub_chat_complete = ws.subscribe("chat_complete", move |msg| {
-                let msg_session_id = match &msg.session_id {
-                    Some(s) => s.clone(),
-                    None => return,
-                };
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // CRITICAL: Ignore events from other sessions.
-                let current_sid = current_session_id.get_untracked();
-                if current_sid.is_some() && current_sid.as_deref() != Some(&msg_session_id) {
-                    return;
-                }
-
-                let state = chat_state_complete.state().get_untracked();
-
-                // Ignore chat_complete if we're in cancelling/cancelled state.
-                // The error message from backend should not overwrite our cancellation message.
-                // Matches React: Chat.jsx lines 588-591
-                if state == crate::components::chat::ChatState::Cancelling
-                    || state == crate::components::chat::ChatState::Cancelled
-                {
-                    return;
-                }
-
-                // Complete the chat state if this is the active session.
-                // Matches React: Chat.jsx lines 593-597
-                if current_sid.as_deref() == Some(&msg_session_id)
-                    && (state == crate::components::chat::ChatState::Sending
-                        || state == crate::components::chat::ChatState::Streaming)
-                {
-                    chat_state_complete.complete();
-                }
-
-                let full_content = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                // Update message with full content and mark as not streaming.
-                // Matches React: Chat.jsx lines 599-612
-                set_messages.update(|msgs| {
-                    for m in msgs.iter_mut() {
-                        if m.message_id == msg_message_id && m.message_type == "assistant" {
-                            if let Some(ref content) = full_content {
-                                m.content = content.clone();
-                            }
-                            // Note: ChatMessageItem doesn't have is_streaming/model/usage fields
-                            // Those are handled through the chat_state machine signals
-                        }
-                    }
-                });
-
-                // Stop thinking animation if request wasn't cancelled.
-                // Matches React: Chat.jsx lines 622-637
-                set_thinking_map.update(|map| {
-                    if let Some(entry) = map.get_mut(&msg_message_id) {
-                        if !entry.cancelled {
-                            entry.is_active = false;
-                        }
-                    }
-                });
-            });
-
-            // ── error ───────────────────────────────────────────────────
-            // Matches React: Chat.jsx lines 641-653 and ChatInterface.jsx lines 358-363
-            let chat_state_error = chat_state_ws.clone();
-            let unsub_error = ws.subscribe("error", move |msg| {
-                let error_message = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("message"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("An error occurred");
-
-                chat_state_error.set_error(error_message);
+            // ── error (page-specific addition) ─────────────────────────
+            // The engine handles state transition for errors; we also clear
+            // the page-level is_loading flag as a safety net.
+            let unsub_error = ws.subscribe("error", move |_msg| {
                 set_is_loading.set(false);
-            });
-
-            // ── request_cancelled ───────────────────────────────────────
-            // Matches React: Chat.jsx lines 656-694 and ChatInterface.jsx lines 337-356
-            let chat_state_cancelled = chat_state_ws.clone();
-            let unsub_request_cancelled = ws.subscribe("request_cancelled", move |msg| {
-                let msg_message_id = match &msg.message_id {
-                    Some(m) => m.clone(),
-                    None => return,
-                };
-
-                // Confirm cancellation if this is the active message.
-                if chat_state_cancelled.is_active_message(&msg_message_id) {
-                    chat_state_cancelled.confirm_cancelled();
-                }
-
-                // Update the assistant message to show it was cancelled.
-                set_messages.update(|msgs| {
-                    for m in msgs.iter_mut() {
-                        if m.message_id == msg_message_id && m.message_type == "assistant" {
-                            m.content = "_Request cancelled by user._".to_string();
-                        }
-                    }
-                });
-
-                // Mark thinking as cancelled.
-                set_thinking_map.update(|map| {
-                    if let Some(entry) = map.get_mut(&msg_message_id) {
-                        entry.is_active = false;
-                        entry.cancelled = true;
-                    }
-                });
             });
 
             // ── shared_chat_message ────────────────────────────────────
             // Phase 9 — Handle messages from other users in shared conversations.
             // Matches React: Chat.jsx lines 695-744.
+            let engine_for_shared = engine_for_ws.clone();
             let unsub_shared_chat_message = ws.subscribe("shared_chat_message", move |msg| {
                 let data = match &msg.data {
                     Some(d) => d,
@@ -1103,20 +690,25 @@ pub fn ChatPage() -> impl IntoView {
                     .get("sent_by")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-                set_messages.update(|msgs| {
-                    // Dedup by client_msg_id (optimistic message from this user)
-                    if let Some(ref cid) = client_msg_id {
-                        if let Some(existing) = msgs.iter_mut().find(|m| m.message_id == *cid) {
-                            existing.message_id = message_id.clone();
-                            return;
-                        }
-                    }
+                let mut msgs = engine_for_shared.messages().get_untracked();
 
+                // Dedup by client_msg_id (optimistic message from this user)
+                let mut deduped = false;
+                if let Some(ref cid) = client_msg_id {
+                    if let Some(existing) = msgs.iter_mut().find(|m| m.message_id == *cid) {
+                        existing.message_id = message_id.clone();
+                        deduped = true;
+                    }
+                }
+
+                if !deduped {
                     // Dedup by message_id
                     if msgs.iter().any(|m| m.message_id == message_id) {
-                        return;
+                        deduped = true;
                     }
+                }
 
+                if !deduped {
                     // Add new message from other user
                     msgs.push(ChatMessageItem {
                         message_id,
@@ -1128,7 +720,9 @@ pub fn ChatPage() -> impl IntoView {
                         thinking_events: Vec::new(),
                         token_usage: None,
                     });
-                });
+                }
+
+                engine_for_shared.set_messages(msgs);
 
                 // Mark session as read (fire-and-forget)
                 let sid = msg_session_id;
@@ -1137,27 +731,16 @@ pub fn ChatPage() -> impl IntoView {
                 });
             });
 
-            // ── Cleanup: unsubscribe all on component unmount ───────────
-            // Wrap in SendWrapper because Box<dyn FnOnce()> is !Send but
-            // on_cleanup requires Send+Sync.
+            // ── Cleanup: unsubscribe page-specific events on unmount ────
+            // The 6 standard events are cleaned up by the engine.
             let unsub_session_created = send_wrapper::SendWrapper::new(unsub_session_created);
             let unsub_title_update = send_wrapper::SendWrapper::new(unsub_title_update);
-            let unsub_agent_thinking = send_wrapper::SendWrapper::new(unsub_agent_thinking);
-            let unsub_token_usage = send_wrapper::SendWrapper::new(unsub_token_usage);
-            let unsub_chat_stream = send_wrapper::SendWrapper::new(unsub_chat_stream);
-            let unsub_chat_complete = send_wrapper::SendWrapper::new(unsub_chat_complete);
             let unsub_error = send_wrapper::SendWrapper::new(unsub_error);
-            let unsub_request_cancelled = send_wrapper::SendWrapper::new(unsub_request_cancelled);
             let unsub_shared_chat_message = send_wrapper::SendWrapper::new(unsub_shared_chat_message);
             on_cleanup(move || {
                 unsub_session_created.take()();
                 unsub_title_update.take()();
-                unsub_agent_thinking.take()();
-                unsub_token_usage.take()();
-                unsub_chat_stream.take()();
-                unsub_chat_complete.take()();
                 unsub_error.take()();
-                unsub_request_cancelled.take()();
                 unsub_shared_chat_message.take()();
             });
         });
@@ -1186,6 +769,7 @@ pub fn ChatPage() -> impl IntoView {
     {
         let location_search_chart = _location.search.clone();
         let navigate_chart = navigate.clone();
+        let engine_for_chart = engine.clone();
         Effect::new(move |_| {
             let search = location_search_chart.get();
             if search.is_empty() {
@@ -1201,6 +785,7 @@ pub fn ChatPage() -> impl IntoView {
 
             // Fetch chart context from KV via server function
             let navigate_inner = navigate_chart.clone();
+            let engine_inner = engine_for_chart.clone();
             leptos::task::spawn_local(async move {
                 match get_chart_context(chart_id).await {
                     Ok(Some(ctx)) => {
@@ -1225,7 +810,7 @@ pub fn ChatPage() -> impl IntoView {
                             token_usage: None,
                         };
 
-                        set_messages.set(vec![initial_message]);
+                        engine_inner.set_messages(vec![initial_message]);
                         set_session_title.set(
                             if ctx.title.is_empty() {
                                 "Chart Exploration".to_string()
@@ -1251,7 +836,7 @@ pub fn ChatPage() -> impl IntoView {
                             token_usage: None,
                         };
 
-                        set_messages.set(vec![initial_message]);
+                        engine_inner.set_messages(vec![initial_message]);
                         set_current_greeting.set(String::new());
                     }
                     Err(e) => {
@@ -1270,7 +855,7 @@ pub fn ChatPage() -> impl IntoView {
                             token_usage: None,
                         };
 
-                        set_messages.set(vec![initial_message]);
+                        engine_inner.set_messages(vec![initial_message]);
                         set_current_greeting.set(String::new());
                     }
                 }
@@ -1297,6 +882,7 @@ pub fn ChatPage() -> impl IntoView {
     {
         let location_search = _location.search.clone();
         let navigate_explore = navigate.clone();
+        let engine_for_explore = engine.clone();
         Effect::new(move |_| {
             let search = location_search.get();
             if search.is_empty() {
@@ -1334,7 +920,7 @@ pub fn ChatPage() -> impl IntoView {
                         token_usage: None,
                     };
 
-                    set_messages.set(vec![initial_message]);
+                    engine_for_explore.set_messages(vec![initial_message]);
                     set_session_title.set(
                         chart_title
                             .map(|t| format!("Exploring: {}", t))
@@ -1364,7 +950,7 @@ pub fn ChatPage() -> impl IntoView {
                     token_usage: None,
                 };
 
-                set_messages.set(vec![initial_message]);
+                engine_for_explore.set_messages(vec![initial_message]);
                 set_session_title.set("Setting up a Watch".to_string());
                 set_current_greeting.set(String::new());
             }
@@ -1392,13 +978,14 @@ pub fn ChatPage() -> impl IntoView {
 
     // Phase 9 — Toggle pin: update local state + call server function
     // Matches React: Chat.jsx lines 1345-1359
+    let engine_for_pin = engine.clone();
     let on_toggle_pin = Callback::new(move |message_id: String| {
         // Optimistically toggle local state
-        set_messages.update(|msgs| {
-            if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
-                msg.pinned = !msg.pinned;
-            }
-        });
+        let mut msgs = engine_for_pin.messages().get_untracked();
+        if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
+            msg.pinned = !msg.pinned;
+        }
+        engine_for_pin.set_messages(msgs);
 
         // Call server function (fire-and-forget)
         let sid = current_session_id.get_untracked();
@@ -1430,14 +1017,14 @@ pub fn ChatPage() -> impl IntoView {
 
     // Phase 9 — Update message content via server function
     // Matches React: Chat.jsx lines 1361-1377
+    let engine_for_update = engine.clone();
     let on_message_update = Callback::new(move |(message_id, new_content): (String, String)| {
         // Update local state immediately
-        let updated_content = new_content.clone();
-        set_messages.update(|msgs| {
-            if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
-                msg.content = updated_content;
-            }
-        });
+        let mut msgs = engine_for_update.messages().get_untracked();
+        if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
+            msg.content = new_content.clone();
+        }
+        engine_for_update.set_messages(msgs);
 
         // Call server function
         let sid = current_session_id.get_untracked();
@@ -1518,6 +1105,7 @@ pub fn ChatPage() -> impl IntoView {
     let chat_state_send = chat_state.clone();
     let navigate_send = navigate.clone();
     let ws_ctx_for_send = ws_ctx.clone();
+    let engine_for_send = engine.clone();
     let on_send = Callback::new(move |input_text: String| {
         // Validate: input not empty, can_send, WebSocket connected
         if input_text.trim().is_empty() {
@@ -1534,23 +1122,8 @@ pub fn ChatPage() -> impl IntoView {
             return;
         }
 
-        // Create optimistic user message with generated ID
-        let user_message_id = generate_user_message_id();
-        let user_message = ChatMessageItem {
-            message_id: user_message_id.clone(),
-            message_type: "user".to_string(),
-            content: input_text.clone(),
-            timestamp: String::new(), // Will be set by server
-            pinned: false,
-            sent_by: None,
-            thinking_events: Vec::new(),
-            token_usage: None,
-        };
-
-        // Add optimistic user message to messages
-        set_messages.update(|msgs| {
-            msgs.push(user_message);
-        });
+        // Add optimistic user message via engine (returns generated message_id)
+        let user_message_id = engine_for_send.add_user_message(&input_text);
 
         // Phase 11 — If this is the first message in a chart exploration context,
         // prepend the chart markdown. Matches React: Chat.jsx lines 1121-1126.
@@ -1580,6 +1153,7 @@ pub fn ChatPage() -> impl IntoView {
         // Call send_chat_message server function
         let chat_state_inner = chat_state_send.clone();
         let navigate_inner = navigate_send.clone();
+        let engine_inner = engine_for_send.clone();
         // C4 — Keep optimistic message ID for updating after server response
         let optimistic_id = user_message_id.clone();
         // M9 — Pass client_msg_id for shared conversation deduplication
@@ -1606,11 +1180,11 @@ pub fn ChatPage() -> impl IntoView {
                     // React does: response.user_message_id → update optimistic msg.
                     if !response.user_message_id.is_empty() {
                         let server_id = response.user_message_id.clone();
-                        set_messages.update(|msgs| {
-                            if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == optimistic_id) {
-                                msg.message_id = server_id;
-                            }
-                        });
+                        let mut msgs = engine_inner.messages().get_untracked();
+                        if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == optimistic_id) {
+                            msg.message_id = server_id;
+                        }
+                        engine_inner.set_messages(msgs);
                     }
 
                     // Phase 9 — If skip_ai was enabled, reset state and return
@@ -1673,9 +1247,9 @@ pub fn ChatPage() -> impl IntoView {
                         thinking_events: Vec::new(),
                         token_usage: None,
                     };
-                    set_messages.update(|msgs| {
-                        msgs.push(error_msg);
-                    });
+                    let mut msgs = engine_inner.messages().get_untracked();
+                    msgs.push(error_msg);
+                    engine_inner.set_messages(msgs);
 
                     chat_state_inner.set_error(&error_text);
                 }
@@ -1685,42 +1259,20 @@ pub fn ChatPage() -> impl IntoView {
 
     // ── Cancel handler (Task 8.4) ───────────────────────────────────────
     // Matches React's handleCancel() in ChatInterface.jsx (lines 471-480).
-    let chat_state_cancel = chat_state.clone();
-    let ws_ctx_for_cancel = ws_ctx.clone();
+    // Delegated to engine.cancel() which handles state transition and WS send.
+    let engine_for_cancel = engine.clone();
     let on_cancel = Callback::new(move |_: ()| {
-        // Request cancellation via state machine — returns false if invalid state
-        if !chat_state_cancel.request_cancel() {
-            return;
-        }
-
-        // Check WebSocket connected
-        let ws_connected = ws_ctx_for_cancel
-            .as_ref()
-            .map(|ctx| ctx.connection_state.get_untracked() == ConnectionState::Connected)
-            .unwrap_or(false);
-        if !ws_connected {
-            return;
-        }
-
-        // Get the active message ID for the cancel request
-        let message_id = chat_state_cancel
-            .active_message_id()
-            .get_untracked()
-            .unwrap_or_default();
-
-        // Send cancel_request via WebSocket
-        // Matches React: `sendWebSocketMessage({ type: 'cancel_request', message_id: ... })`
-        if let Some(ws) = ws_ctx_for_cancel.as_ref() {
-            ws.send(serde_json::json!({
-                "type": "cancel_request",
-                "message_id": message_id,
-            }));
-        }
+        engine_for_cancel.cancel();
     });
 
     // ── Derived signals for ChatInput ───────────────────────────────────
     let can_send_signal = chat_state.can_send;
     let show_stop_button_signal = chat_state.show_stop_button;
+
+    // Extract thinking state ReadSignal (Copy) for use in the view template.
+    // Must be extracted here rather than inside the view to avoid moving `engine`
+    // into non-FnMut closures.
+    let thinking_state_signal = engine.thinking().state();
 
     // Credits exhausted — disable chat input when workspace has no AI budget.
     // Matches React: Chat.jsx uses `creditsExhausted` from useCapabilities() to
@@ -2113,7 +1665,7 @@ pub fn ChatPage() -> impl IntoView {
                                                     let thinking_signal = Signal::derive({
                                                         let msg_id = msg_id.clone();
                                                         move || {
-                                                            thinking_map.get()
+                                                            thinking_state_signal.get()
                                                                 .get(&msg_id)
                                                                 .cloned()
                                                                 .unwrap_or_default()

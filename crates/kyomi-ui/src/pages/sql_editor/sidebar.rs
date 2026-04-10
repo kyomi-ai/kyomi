@@ -361,58 +361,83 @@ pub fn SqlEditorSidebar(
     };
 
     // ── Render ───────────────────────────────────────────────────────────
+    //
+    // The sidebar is always in the DOM to enable CSS transitions (matching
+    // the left nav sidebar pattern). When closed, desktop width → 0 and
+    // mobile panel slides off-screen via transform.
 
     view! {
-        <Show when=move || is_open.get()>
-            {move || {
-                if is_mobile.get() {
-                    // Mobile: Fixed overlay with backdrop
-                    // React offsets: top-[7.5rem] sm:top-[8rem]
-                    view! {
-                        <div>
-                            <div
-                                class="fixed top-[7.5rem] sm:top-[8rem] left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
-                                on:click=close_sidebar_backdrop
-                            />
-                            <div class="fixed top-[7.5rem] sm:top-[8rem] right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl">
-                                {panel_content()}
-                            </div>
-                        </div>
-                    }.into_any()
+        // ── Desktop sidebar (always mounted, width animates) ────────────
+        <div
+            class=move || {
+                let base = "h-full overflow-hidden flex-shrink-0 transition-[width] duration-300 ease-in-out";
+                if is_resizing.get() {
+                    format!("{base} select-none")
                 } else {
-                    // Desktop: Inline resizable sidebar
-                    let width_style = move || format!("width: {}px", sidebar_width.get());
-
-                    let outer_class = move || {
-                        if is_resizing.get() {
-                            "border-l border-border bg-card flex h-full overflow-hidden flex-shrink-0 select-none"
-                        } else {
-                            "border-l border-border bg-card flex h-full overflow-hidden flex-shrink-0"
-                        }
-                    };
-
-                    view! {
-                        <div
-                            class=outer_class
-                            style=width_style
-                        >
-                            // Resize handle
-                            <div
-                                class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                on:mousedown=handle_resize_start
-                                role="separator"
-                                aria-orientation="vertical"
-                                aria-label="Drag to resize sidebar"
-                                tabindex="0"
-                            >
-                                <div class="w-1 h-12 bg-border hover:bg-muted-foreground rounded-md transition-colors" />
-                            </div>
-
-                            {panel_content()}
-                        </div>
-                    }.into_any()
+                    base.to_string()
                 }
-            }}
+            }
+            style=move || {
+                let open = is_open.get();
+                let mobile = is_mobile.get();
+                if mobile {
+                    // Hide desktop sidebar on mobile
+                    "width: 0px; display: none".to_string()
+                } else if open {
+                    format!("width: {}px", sidebar_width.get())
+                } else {
+                    "width: 0px".to_string()
+                }
+            }
+        >
+            // Inner container with fixed min-width prevents content from
+            // collapsing during the width transition. Only mounted on desktop
+            // to avoid double-rendering panel_content on mobile.
+            <Show when=move || !is_mobile.get()>
+                <div
+                    class="flex h-full border-l border-t border-border bg-muted"
+                    style=move || format!("min-width: {}px", DEFAULT_WIDTH)
+                >
+                    // Resize handle
+                    <div
+                        class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
+                        on:mousedown=handle_resize_start
+                        role="separator"
+                        aria-orientation="vertical"
+                        aria-label="Drag to resize sidebar"
+                        tabindex="0"
+                    >
+                        <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded-md transition-colors" />
+                    </div>
+
+                    {panel_content()}
+                </div>
+            </Show>
+        </div>
+
+        // ── Mobile overlay (always mounted, slides in/out) ──────────────
+        <Show when=move || is_mobile.get()>
+            // Backdrop — fade in/out
+            <div
+                class="fixed top-[7.5rem] sm:top-[8rem] left-0 right-0 bottom-0 z-40 transition-opacity duration-300 ease-in-out"
+                class:opacity-0=move || !is_open.get()
+                class:pointer-events-none=move || !is_open.get()
+                style="background: var(--color-overlay)"
+                on:click=close_sidebar_backdrop
+            />
+            // Panel — slide from right
+            <div
+                class="fixed top-[7.5rem] sm:top-[8rem] right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-muted flex flex-col shadow-xl transition-transform duration-300 ease-in-out"
+                style=move || {
+                    if is_open.get() {
+                        "transform: translateX(0)"
+                    } else {
+                        "transform: translateX(100%)"
+                    }
+                }
+            >
+                {panel_content()}
+            </div>
         </Show>
     }
 }
