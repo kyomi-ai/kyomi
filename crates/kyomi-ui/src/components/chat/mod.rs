@@ -5,6 +5,7 @@
 pub mod agent_thinking;
 pub mod chat_input;
 pub mod chat_state;
+pub mod copilot_chat;
 pub mod inline_editable_title;
 pub mod thinking;
 pub mod tool_schema_renderer;
@@ -13,6 +14,7 @@ pub mod websocket_client;
 pub use agent_thinking::AgentThinking;
 pub use chat_input::ChatInput;
 pub use chat_state::{ChatState, ChatStateMachine};
+pub use copilot_chat::CopilotChat;
 pub use inline_editable_title::InlineEditableTitle;
 pub use thinking::{
     ThinkingEvent, ThinkingManager, ThinkingState, TokenUsage, process_thinking_event,
