@@ -138,17 +138,24 @@ impl ChatEngine {
                 let active_signal = *active;
                 let chat_state_for_session = chat_state.clone();
                 let thinking_for_session = thinking.clone();
+                // Guard against concurrent session creation (Effect can fire
+                // multiple times before the async create completes).
+                let is_creating = RwSignal::new(false);
 
                 Effect::new(move || {
                     let should_be_active =
                         active_signal.is_none_or(|s| s.get());
 
-                    if should_be_active && session_id.get_untracked().is_none() {
+                    if should_be_active
+                        && session_id.get_untracked().is_none()
+                        && !is_creating.get_untracked()
+                    {
                         // Reset all state for fresh session.
                         messages.set(Vec::new());
                         chat_state_for_session.reset();
                         thinking_for_session.clear_all();
                         has_sent_first.set(false);
+                        is_creating.set(true);
 
                         let ctx_type = ctx_type_stored.get_value();
                         let chat_state_err = chat_state_for_session.clone();
@@ -161,6 +168,7 @@ impl ChatEngine {
                                     ));
                                 }
                             }
+                            is_creating.set(false);
                         });
                     } else if !should_be_active
                         && let Some(sid) = session_id.get_untracked()
