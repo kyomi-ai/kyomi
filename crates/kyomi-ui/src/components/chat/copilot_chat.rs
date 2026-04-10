@@ -201,13 +201,16 @@ pub fn CopilotChat(
                 return;
             };
 
-            let ctx_type = context_type_stored.get_value();
+            let ctx_type_ws = StoredValue::new(context_type_stored.get_value());
 
             // Helper: check if event belongs to this copilot instance.
+            // Uses StoredValue for ctx_type so the closure is Copy and can be
+            // captured by multiple ws.subscribe callbacks on WASM.
             let should_handle =
                 move |event_context_type: Option<&str>,
                       msg_session_id: Option<&str>|
                       -> bool {
+                    let ctx_type = ctx_type_ws.get_value();
                     if event_context_type != Some(ctx_type.as_str()) {
                         return false;
                     }
