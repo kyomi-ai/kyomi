@@ -18,6 +18,9 @@ use crate::components::{
 };
 use crate::server_fns::usage::{get_ai_usage_status, UsageData};
 
+use super::billing::format_number;
+use kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED;
+
 /// Feature definition for the stacked bar chart legend.
 struct FeatureDef {
     key: &'static str,
@@ -111,6 +114,10 @@ pub fn UsagePage() -> impl IntoView {
                                         fair_share_percentage: 100.0,
                                     },
                                     by_feature: std::collections::HashMap::new(),
+                                    ai_bundle_balance_usd: 0.0,
+                                    analytics_events_used: 0,
+                                    analytics_events_included: ANALYTICS_EVENTS_INCLUDED,
+                                    analytics_bundle_events: 0,
                                 }/>
                             }.into_any()
                         }
@@ -132,6 +139,18 @@ fn UsageLoadingSkeleton() -> impl IntoView {
                 <CardHeader>
                     <Skeleton class="h-5 w-48"/>
                     <Skeleton class="h-4 w-32 mt-1"/>
+                </CardHeader>
+                <CardContent>
+                    <div class="space-y-2">
+                        <Skeleton class="h-4 w-full"/>
+                        <Skeleton class="h-2 w-full"/>
+                    </div>
+                </CardContent>
+            </Card>
+            <Card>
+                <CardHeader>
+                    <Skeleton class="h-5 w-40"/>
+                    <Skeleton class="h-4 w-56 mt-1"/>
                 </CardHeader>
                 <CardContent>
                     <div class="space-y-2">
@@ -166,6 +185,10 @@ fn UsageContent(data: UsageData) -> impl IntoView {
     let is_exhausted = data.blocked;
     let ai_reset_date = data.ai_reset_date.clone();
     let by_feature = data.by_feature.clone();
+    let ai_bundle_balance_usd = data.ai_bundle_balance_usd;
+    let analytics_events_used = data.analytics_events_used;
+    let analytics_events_included = data.analytics_events_included;
+    let analytics_bundle_events = data.analytics_bundle_events;
 
     view! {
         <div class="space-y-6" style:display="block">
@@ -174,6 +197,14 @@ fn UsageContent(data: UsageData) -> impl IntoView {
                 percentage=percentage
                 is_exhausted=is_exhausted
                 ai_reset_date=ai_reset_date
+                ai_bundle_balance_usd=ai_bundle_balance_usd
+            />
+
+            // Analytics Events card
+            <AnalyticsEventsCard
+                events_used=analytics_events_used
+                events_included=analytics_events_included
+                bundle_events=analytics_bundle_events
             />
 
             // Feature Breakdown card
@@ -184,19 +215,19 @@ fn UsageContent(data: UsageData) -> impl IntoView {
                 let (variant, message) = match level.as_str() {
                     "blocked" => (
                         AlertVariant::Error,
-                        "AI budget exhausted. Upgrade to continue using AI features.".to_string(),
+                        "AI budget exhausted. Add an AI token bundle or connect your own API key to continue.".to_string(),
                     ),
                     "critical" => (
                         AlertVariant::Warning,
                         format!(
-                            "AI budget critically low ({:.1}% used). Consider upgrading to avoid interruption.",
+                            "AI budget critically low ({:.1}% used). Consider purchasing an AI token bundle to avoid interruption.",
                             percentage,
                         ),
                     ),
                     "warning" => (
                         AlertVariant::Warning,
                         format!(
-                            "AI budget at {:.1}%. You may want to upgrade your plan soon.",
+                            "AI budget at {:.1}%. Consider purchasing an AI token bundle.",
                             percentage,
                         ),
                     ),
@@ -223,6 +254,7 @@ fn WorkspaceUsageCard(
     percentage: f64,
     is_exhausted: bool,
     ai_reset_date: Option<String>,
+    ai_bundle_balance_usd: f64,
 ) -> impl IntoView {
     let bar_class = usage_bar_class(percentage, is_exhausted);
     let bar_width = format!("{}%", percentage.min(100.0));
@@ -249,9 +281,14 @@ fn WorkspaceUsageCard(
                             style:width=bar_width
                         />
                     </div>
+                    {(ai_bundle_balance_usd > 0.0).then(|| view! {
+                        <p class="text-sm text-muted-foreground mt-2">
+                            {format!("Token Bundle Balance: ${:.2} remaining", ai_bundle_balance_usd)}
+                        </p>
+                    })}
                     {is_exhausted.then(|| view! {
                         <p class="text-sm text-error-foreground mt-2">
-                            "AI budget exhausted. Upgrade to continue using AI features."
+                            "AI budget exhausted. Add an AI token bundle or connect your own API key to continue."
                         </p>
                     })}
                     {ai_reset_date.map(|date| view! {
@@ -326,6 +363,68 @@ fn FeatureBreakdownCard(by_feature: std::collections::HashMap<String, f64>) -> i
                             </div>
                         }
                     }).collect_view()}
+                </div>
+            </CardContent>
+        </Card>
+    }
+}
+
+/// Analytics Events card — shows monthly event usage against the included quota.
+///
+/// Mirrors the workspace AI usage card pattern: progress bar with color thresholds,
+/// optional bundle balance display.
+#[component]
+fn AnalyticsEventsCard(
+    events_used: u64,
+    events_included: u64,
+    bundle_events: i64,
+) -> impl IntoView {
+    let total_available = events_included as i64 + bundle_events.max(0);
+    let percentage = if total_available > 0 {
+        ((events_used as f64 / total_available as f64) * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    let is_exhausted = events_used as i64 >= total_available;
+    let bar_class = usage_bar_class(percentage, is_exhausted);
+    let bar_width = format!("{}%", percentage.min(100.0));
+
+    view! {
+        <Card>
+            <CardHeader>
+                <CardTitle>"Analytics Events"</CardTitle>
+                <CardDescription>"Track your analytics event usage"</CardDescription>
+            </CardHeader>
+            <CardContent>
+                <div>
+                    <div class="flex justify-between mb-2">
+                        <span class="text-sm font-medium text-foreground">
+                            "Events This Month"
+                        </span>
+                        <span class="text-sm font-medium text-foreground">
+                            {format!(
+                                "{} / {} used",
+                                format_number(events_used),
+                                format_number(events_included),
+                            )}
+                        </span>
+                    </div>
+                    <div class="w-full bg-muted rounded-full h-2">
+                        <div
+                            class=bar_class
+                            style:width=bar_width
+                        />
+                    </div>
+                    {(bundle_events > 0).then(|| view! {
+                        <p class="text-sm text-muted-foreground mt-2">
+                            {format!("Bundle balance: {} events remaining", format_number(bundle_events as u64))}
+                        </p>
+                    })}
+                    {is_exhausted.then(|| view! {
+                        <p class="text-sm text-error-foreground mt-2">
+                            "Analytics event quota exhausted. Purchase an analytics event bundle to continue."
+                        </p>
+                    })}
                 </div>
             </CardContent>
         </Card>

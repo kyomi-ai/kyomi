@@ -1,31 +1,37 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Billing settings page — subscription management and plan selection.
+//! Billing settings page — single-tier Cloud plan at $5/user/month.
 //!
-//! Replaces `apps/frontend/src/components/BillingPanel.jsx` (887 lines).
+//! Replaces the old multi-tier plan comparison UI with a streamlined
+//! single-plan view.
 //!
 //! Features:
-//! - Current plan card (tier name, status badge, billing period, next invoice date)
-//! - Team size controls (for team tier — increment/decrement with update button)
-//! - Plan comparison cards (Free, Pro, Team with feature lists and pricing)
-//! - Cancel/Reactivate subscription buttons
+//! - Current plan card (Cloud — $5/user/month, status badge, renewal info)
+//! - User seats card (adjust seat count, min 1)
+//! - AI Credits card (BYOK key status, token bundle balance, purchase)
+//! - Analytics card (event usage, bundle balance, purchase)
 //! - Invoice history table
-//! - Stripe portal link ("Manage Payment Method")
+//! - Stripe portal link ("Manage Billing")
 //! - Checkout redirect handling (checks URL params for ?checkout=success)
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton,
-    StatusBadge, StatusBadgeVariant,
+    CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Skeleton, StatusBadge,
+    StatusBadgeVariant,
 };
 use crate::server_fns::billing::*;
 use crate::server_fns::context::UserContext;
+use kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Price per user per month (Cloud plan).
+const PRICE_PER_USER: f64 = 5.0;
 
 /// Format an ISO date string to "Month Day, Year" display format.
 ///
@@ -45,124 +51,14 @@ fn format_epoch_date(epoch: i64) -> String {
     if let Some(dt) = chrono::DateTime::from_timestamp(epoch, 0) {
         dt.format("%-m/%-d/%Y").to_string()
     } else {
-        "—".to_string()
+        "\u{2014}".to_string()
     }
 }
 
-/// Capitalize the first letter of a string.
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => {
-            let upper: String = first.to_uppercase().collect();
-            upper + chars.as_str()
-        }
-    }
-}
-
-/// Calculate the next charge amount based on tier, billing cycle, and user limit.
-///
-/// Matches the React inline calculation in the "Next charge" row.
-fn calculate_next_charge(tier: &str, billing_cycle: Option<&str>, user_limit: Option<i32>) -> String {
-    let is_annual = billing_cycle == Some("annual");
-    let base_price: f64 = match tier {
-        "basic" | "starter" => {
-            if is_annual { 180.0 } else { 20.0 }
-        }
-        "pro" => {
-            if is_annual { 348.0 } else { 39.0 }
-        }
-        "team" => {
-            let mut base = if is_annual { 1188.0 } else { 129.0 };
-            let additional_users = user_limit.unwrap_or(5).max(5) - 5;
-            if additional_users > 0 {
-                let per_user_cost: f64 = if is_annual { 180.0 } else { 20.0 };
-                base += additional_users as f64 * per_user_cost;
-            }
-            base
-        }
-        _ => 0.0,
-    };
-    format!("${:.2}", base_price)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SVG icon paths (inline to avoid leptos_icons class prop limitation)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// CreditCard icon (lucide).
-fn credit_card_icon() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <rect width="20" height="14" x="2" y="5" rx="2"/>
-            <line x1="2" x2="22" y1="10" y2="10"/>
-        </svg>
-    }
-}
-
-/// Check icon (lucide) for plan feature lists.
-fn check_icon() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4 text-primary mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20 6 9 17l-5-5"/>
-        </svg>
-    }
-}
-
-/// Minus icon (lucide).
-fn minus_icon() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14"/>
-        </svg>
-    }
-}
-
-/// Plus icon (lucide).
-fn plus_icon() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14"/>
-            <path d="M12 5v14"/>
-        </svg>
-    }
-}
-
-/// Users icon (lucide).
-fn users_icon() -> impl IntoView {
-    view! {
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
-            <circle cx="9" cy="7" r="4"/>
-            <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
-            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-        </svg>
-    }
-}
-
-/// FileText icon (lucide).
-fn file_text_icon() -> impl IntoView {
-    view! {
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/>
-            <path d="M14 2v4a2 2 0 0 0 2 2h4"/>
-            <path d="M10 9H8"/>
-            <path d="M16 13H8"/>
-            <path d="M16 17H8"/>
-        </svg>
-    }
-}
-
-/// ExternalLink icon (lucide).
-fn external_link_icon() -> impl IntoView {
-    view! {
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 3h6v6"/>
-            <path d="M10 14 21 3"/>
-            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1-2-2h6"/>
-        </svg>
-    }
+/// Format a dollar amount from cents or a float.
+fn format_charge(user_count: i32) -> String {
+    let total = PRICE_PER_USER * user_count as f64;
+    format!("${:.2}", total)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,8 +72,6 @@ pub fn BillingPage() -> impl IntoView {
     let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
 
     // Resources for subscription info (reload via version signal).
-    // get_subscription_info() returns Ok(None) when Stripe is not configured —
-    // not an error, just "not available for this deployment".
     let (sub_version, set_sub_version) = signal(0u32);
     let subscription = Resource::new(
         move || sub_version.get(),
@@ -190,9 +84,8 @@ pub fn BillingPage() -> impl IntoView {
     let (error, set_error) = signal(Option::<String>::None);
     let (success, set_success) = signal(Option::<String>::None);
     let (checkout_loading, set_checkout_loading) = signal(false);
-    let (show_plans_modal, set_show_plans_modal) = signal(false);
     let (team_size_loading, set_team_size_loading) = signal(false);
-    let (desired_team_size, set_desired_team_size) = signal(5i32);
+    let (desired_team_size, set_desired_team_size) = signal(1i32);
 
     // Confirm dialog state
     let dialog_open = RwSignal::new(false);
@@ -253,15 +146,13 @@ pub fn BillingPage() -> impl IntoView {
 
     // ── Actions ──────────────────────────────────────────────────────────
 
-    let handle_upgrade = Action::new({
-        move |(_tier, _cycle): &(String, String)| {
+    let handle_subscribe = Action::new({
+        move |quantity: &u64| {
+            let quantity = *quantity;
             async move {
                 set_checkout_loading.set(true);
                 set_error.set(None);
-                // Cloud plan — single tier, per-seat pricing. Default to 1 seat
-                // for new subscriptions. The tier/cycle params from the UI are
-                // ignored since there is only one Cloud plan.
-                match create_checkout(1).await {
+                match create_checkout(quantity).await {
                     Ok(_redirect) => {
                         #[cfg(target_arch = "wasm32")]
                         {
@@ -351,6 +242,46 @@ pub fn BillingPage() -> impl IntoView {
         }
     });
 
+    let handle_purchase_ai = Action::new({
+        move |(): &()| async move {
+            set_error.set(None);
+            match purchase_ai_bundle().await {
+                Ok(_redirect) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = web_sys::window()
+                            .unwrap()
+                            .location()
+                            .set_href(&_redirect.url);
+                    }
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Failed to start AI bundle purchase: {e}")));
+                }
+            }
+        }
+    });
+
+    let handle_purchase_analytics = Action::new({
+        move |(): &()| async move {
+            set_error.set(None);
+            match purchase_analytics_bundle().await {
+                Ok(_redirect) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = web_sys::window()
+                            .unwrap()
+                            .location()
+                            .set_href(&_redirect.url);
+                    }
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Failed to start analytics bundle purchase: {e}")));
+                }
+            }
+        }
+    });
+
     // ── Confirm dialog callbacks ─────────────────────────────────────────
 
     let on_confirm = Callback::new(move |()| {
@@ -420,11 +351,11 @@ pub fn BillingPage() -> impl IntoView {
                                             team_size_loading=team_size_loading
                                             desired_team_size=desired_team_size
                                             set_desired_team_size=set_desired_team_size
-                                            show_plans_modal=show_plans_modal
-                                            set_show_plans_modal=set_show_plans_modal
-                                            handle_upgrade=handle_upgrade
+                                            handle_subscribe=handle_subscribe
                                             handle_manage_billing=handle_manage_billing
                                             handle_team_size_update=handle_team_size_update
+                                            handle_purchase_ai=handle_purchase_ai
+                                            handle_purchase_analytics=handle_purchase_analytics
                                             dialog_open=dialog_open
                                             set_dialog_title=set_dialog_title
                                             set_dialog_message=set_dialog_message
@@ -481,11 +412,11 @@ fn BillingContent(
     team_size_loading: ReadSignal<bool>,
     desired_team_size: ReadSignal<i32>,
     set_desired_team_size: WriteSignal<i32>,
-    show_plans_modal: ReadSignal<bool>,
-    set_show_plans_modal: WriteSignal<bool>,
-    handle_upgrade: Action<(String, String), ()>,
+    handle_subscribe: Action<u64, ()>,
     handle_manage_billing: Action<(), ()>,
     handle_team_size_update: Action<i32, ()>,
+    handle_purchase_ai: Action<(), ()>,
+    handle_purchase_analytics: Action<(), ()>,
     dialog_open: RwSignal<bool>,
     set_dialog_title: WriteSignal<String>,
     set_dialog_message: WriteSignal<String>,
@@ -494,32 +425,27 @@ fn BillingContent(
     set_pending_confirm_action: WriteSignal<Option<ConfirmAction>>,
 ) -> impl IntoView {
     let current_tier = info.tier.clone();
-    let billing_cycle = info.billing_cycle.clone();
     let status = info.status.clone();
     let period_end = info.period_end.clone();
     let user_limit = info.user_limit;
 
-    // Pre-clone billing_cycle for team size card (before it's moved into closures)
-    let billing_cycle_for_team = billing_cycle.clone();
+    // Fields for AI and analytics sections
+    let has_byok_key = info.has_byok_key.unwrap_or(false);
+    let ai_token_balance = info.ai_token_balance_cents.unwrap_or(0);
+    let analytics_events_used = info.analytics_events_used.unwrap_or(0).max(0) as u64;
+    let analytics_bundle_balance = info.analytics_bundle_balance.unwrap_or(0);
 
     // Clones for closures
-    let tier_for_header = current_tier.clone();
     let tier_for_status = current_tier.clone();
-    let tier_for_actions = current_tier.clone();
-    let tier_for_team = current_tier.clone();
-    let tier_for_plans = current_tier.clone();
+    let tier_for_seats = current_tier.clone();
     let tier_for_invoices = current_tier.clone();
-    let tier_for_annual_note = current_tier.clone();
-    let tier_for_modal = current_tier.clone();
-    let billing_cycle_for_header = billing_cycle.clone();
-    let billing_cycle_for_modal = billing_cycle.clone();
     let status_for_badge = status.clone();
     let status_for_info = status.clone();
     let status_for_actions = status.clone();
-    let status_for_team = status.clone();
+    let status_for_seats = status.clone();
 
-    // Modal close callback
-    let on_close_modal = Callback::new(move |()| set_show_plans_modal.set(false));
+    let is_subscribed = current_tier == "cloud";
+    let is_free = current_tier == "free";
 
     view! {
         <div class="space-y-6" style:display="block">
@@ -530,30 +456,23 @@ fn BillingContent(
                         <div>
                             <CardTitle>"Current Plan"</CardTitle>
                             <CardDescription class="mt-1">
-                                {move || {
-                                    if tier_for_header == "free" {
-                                        "Free Plan".to_string()
-                                    } else {
-                                        let cycle_label = if billing_cycle_for_header.as_deref() == Some("annual") {
-                                            "Annual"
-                                        } else {
-                                            "Monthly"
-                                        };
-                                        format!("{} - {}", capitalize_first(&tier_for_header), cycle_label)
-                                    }
+                                {if is_subscribed {
+                                    format!("Cloud Plan \u{2014} ${:.0}/user/month", PRICE_PER_USER)
+                                } else {
+                                    "Free Plan".to_string()
                                 }}
                             </CardDescription>
                         </div>
                         <div class="flex items-center gap-3">
                             // Status Badge
-                            {(current_tier != "free" && !status_for_badge.is_empty()).then(|| {
+                            {(is_subscribed && !status_for_badge.is_empty()).then(|| {
                                 let (variant, label) = match status_for_badge.as_str() {
                                     "active" => (StatusBadgeVariant::Success, "Active"),
+                                    "trialing" => (StatusBadgeVariant::Info, "Trial"),
                                     "cancelled" => (StatusBadgeVariant::Warning, "Cancelled"),
                                     "past_due" => (StatusBadgeVariant::Error, "Past Due"),
                                     _ => (StatusBadgeVariant::Default, status_for_badge.as_str()),
                                 };
-                                // Need to own the label for the non-static case
                                 let label_owned = label.to_string();
                                 view! {
                                     <StatusBadge variant=variant>
@@ -562,14 +481,14 @@ fn BillingContent(
                                 }
                             })}
                             // Manage Billing Button
-                            {(current_tier != "free").then(|| view! {
+                            {is_subscribed.then(|| view! {
                                 <Button
                                     variant=ButtonVariant::Outline
                                     size=ButtonSize::Sm
                                     disabled=checkout_loading.get_untracked()
                                     on:click=move |_| { handle_manage_billing.dispatch(()); }
                                 >
-                                    {credit_card_icon()}
+                                    <Icon icon=icondata_lu::LuCreditCard width="16" height="16" attr:class="mr-2"/>
                                     "Manage Billing"
                                 </Button>
                             })}
@@ -578,23 +497,25 @@ fn BillingContent(
                 </CardHeader>
                 <CardContent>
                     <div class="space-y-4">
-                        // Subscription Status Info
-                        {(tier_for_status != "free" && period_end.is_some()).then(|| {
+                        // Subscription details (subscribed users only)
+                        {(tier_for_status == "cloud" && period_end.is_some()).then(|| {
                             let period_end_for_active = period_end.clone();
                             let period_end_for_cancelled = period_end.clone();
-                            let billing_cycle_cl = billing_cycle.clone();
-                            let user_limit_cl = user_limit;
-                            let tier_cl = tier_for_status.clone();
+                            let user_count = user_limit.unwrap_or(1);
 
                             view! {
                                 <div class="bg-muted/50 border border-border rounded-lg p-4 space-y-2">
-                                    {(status_for_info == "active").then(move || {
+                                    // User count row
+                                    <div class="flex justify-between text-sm">
+                                        <span class="text-muted-foreground">"User seats"</span>
+                                        <span class="font-medium text-foreground">
+                                            {format!("{} {}", user_count, if user_count == 1 { "user" } else { "users" })}
+                                        </span>
+                                    </div>
+
+                                    {(status_for_info == "active" || status_for_info == "trialing").then(move || {
                                         period_end_for_active.as_ref().map(|pe| {
-                                            let next_charge = calculate_next_charge(
-                                                &tier_cl,
-                                                billing_cycle_cl.as_deref(),
-                                                user_limit_cl,
-                                            );
+                                            let next_charge = format_charge(user_count);
                                             view! {
                                                 <div>
                                                     <div class="flex justify-between text-sm">
@@ -624,7 +545,7 @@ fn BillingContent(
                                                         </span>
                                                     </div>
                                                     <div class="text-sm text-muted-foreground">
-                                                        "Your subscription has been cancelled. You'll retain access to paid features until the end of your billing period."
+                                                        "Your subscription has been cancelled. You\u{2019}ll retain access until the end of your billing period."
                                                     </div>
                                                 </div>
                                             }
@@ -635,17 +556,29 @@ fn BillingContent(
                         })}
 
                         // Action Buttons
-                        {(tier_for_actions != "free").then(|| {
+                        {if is_free {
+                            // Free tier — show subscribe CTA
+                            view! {
+                                <div class="mt-4">
+                                    <Button
+                                        variant=ButtonVariant::Default
+                                        disabled=checkout_loading.get_untracked()
+                                        on:click=move |_| {
+                                            handle_subscribe.dispatch(1);
+                                        }
+                                    >
+                                        {format!("Subscribe \u{2014} ${:.0}/user/month", PRICE_PER_USER)}
+                                    </Button>
+                                    <p class="text-xs text-muted-foreground mt-2">
+                                        "Includes a 30-day free trial. All features included."
+                                    </p>
+                                </div>
+                            }.into_any()
+                        } else {
                             let status_cl = status.clone();
                             view! {
                                 <div class="flex gap-2 mt-4">
-                                    {(status_cl == "active").then(|| view! {
-                                        <Button
-                                            variant=ButtonVariant::Default
-                                            on:click=move |_| set_show_plans_modal.set(true)
-                                        >
-                                            "Change Plan"
-                                        </Button>
+                                    {(status_cl == "active" || status_cl == "trialing").then(|| view! {
                                         <Button
                                             variant=ButtonVariant::Outline
                                             on:click=move |_| {
@@ -663,7 +596,6 @@ fn BillingContent(
                                     {(status_cl == "cancelled").then(|| view! {
                                         <Button
                                             variant=ButtonVariant::Default
-                                            class="w-full"
                                             on:click=move |_| {
                                                 set_dialog_title.set("Reactivate Subscription?".to_string());
                                                 set_dialog_message.set("Reactivate your subscription? Your subscription will continue after the current billing period.".to_string());
@@ -677,21 +609,19 @@ fn BillingContent(
                                         </Button>
                                     })}
                                 </div>
-                            }
-                        })}
+                            }.into_any()
+                        }}
                     </div>
                 </CardContent>
             </Card>
 
-            // Team Size Management
-            {(tier_for_team == "team" && status_for_team == "active").then(|| {
-                let billing_cycle_team = billing_cycle_for_team.clone();
-                let user_limit_team = user_limit.unwrap_or(5);
+            // User Seats Card (visible for active/trialing Cloud subscriptions)
+            {(tier_for_seats == "cloud" && (status_for_seats == "active" || status_for_seats == "trialing")).then(|| {
+                let user_limit_seats = user_limit.unwrap_or(1);
 
                 view! {
-                    <TeamSizeCard
-                        billing_cycle=billing_cycle_team
-                        user_limit=user_limit_team
+                    <UserSeatsCard
+                        user_limit=user_limit_seats
                         desired_team_size=desired_team_size
                         set_desired_team_size=set_desired_team_size
                         team_size_loading=team_size_loading
@@ -700,204 +630,92 @@ fn BillingContent(
                 }
             })}
 
-            // Available Plans (free tier only)
-            {(tier_for_plans == "free").then(|| {
+            // AI Credits Card (visible for subscribed users)
+            {is_subscribed.then(|| {
                 view! {
-                    <div style:display="block">
-                        <h3 class="text-lg font-semibold mb-4 text-foreground">"Available Plans"</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4" style:display="grid">
-                            <PlanCard
-                                name="Starter"
-                                annual_price="$15"
-                                annual_total="$180/year"
-                                monthly_price="$20/month"
-                                features=starter_features()
-                                recommended=false
-                                current_tier="free".to_string()
-                                current_billing_cycle=None
-                                checkout_loading=checkout_loading
-                                handle_upgrade=handle_upgrade
-                            />
-                            <PlanCard
-                                name="Pro"
-                                annual_price="$29"
-                                annual_total="$348/year"
-                                monthly_price="$39/month"
-                                features=pro_features()
-                                recommended=true
-                                current_tier="free".to_string()
-                                current_billing_cycle=None
-                                checkout_loading=checkout_loading
-                                handle_upgrade=handle_upgrade
-                            />
-                            <PlanCard
-                                name="Team"
-                                annual_price="$99"
-                                annual_total="$1,188/year"
-                                monthly_price="$129/month"
-                                features=team_features()
-                                recommended=false
-                                current_tier="free".to_string()
-                                current_billing_cycle=None
-                                checkout_loading=checkout_loading
-                                handle_upgrade=handle_upgrade
-                            />
-                        </div>
-                    </div>
+                    <AiCreditsCard
+                        has_byok_key=has_byok_key
+                        token_balance_cents=ai_token_balance
+                        handle_purchase_ai=handle_purchase_ai
+                    />
+                }
+            })}
+
+            // Analytics Card (visible for subscribed users)
+            {is_subscribed.then(|| {
+                view! {
+                    <AnalyticsCard
+                        events_used=analytics_events_used
+                        bundle_balance=analytics_bundle_balance
+                        handle_purchase_analytics=handle_purchase_analytics
+                    />
                 }
             })}
 
             // Invoices Section
             <InvoicesSection invoices=invoices current_tier=tier_for_invoices.clone()/>
-
-            // Annual billing note (free tier only)
-            {(tier_for_annual_note == "free").then(|| view! {
-                <Card class="bg-muted/50">
-                    <CardContent class="pt-6">
-                        <p class="text-sm text-muted-foreground">
-                            <strong>"Annual billing saves 25-30%"</strong>
-                            " compared to monthly billing."
-                        </p>
-                    </CardContent>
-                </Card>
-            })}
-
-            // Change Plan Modal
-            <Modal
-                show=Signal::from(show_plans_modal)
-                on_close=on_close_modal
-                title="Change Plan"
-                size=ModalSize::Xl
-            >
-                <p class="text-sm text-muted-foreground mb-6">
-                    "Select a new plan to upgrade or downgrade your subscription"
-                </p>
-                <div style:display="block">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6" style:display="grid">
-                        <PlanCard
-                            name="Starter"
-                            annual_price="$15"
-                            annual_total="$180/year"
-                            monthly_price="$20/month"
-                            features=starter_features()
-                            recommended=false
-                            current_tier=tier_for_modal.clone()
-                            current_billing_cycle=billing_cycle_for_modal.clone()
-                            checkout_loading=checkout_loading
-                            handle_upgrade=handle_upgrade
-                        />
-                        <PlanCard
-                            name="Pro"
-                            annual_price="$29"
-                            annual_total="$348/year"
-                            monthly_price="$39/month"
-                            features=pro_features()
-                            recommended=true
-                            current_tier=tier_for_modal.clone()
-                            current_billing_cycle=billing_cycle_for_modal.clone()
-                            checkout_loading=checkout_loading
-                            handle_upgrade=handle_upgrade
-                        />
-                        <PlanCard
-                            name="Team"
-                            annual_price="$99"
-                            annual_total="$1,188/year"
-                            monthly_price="$129/month"
-                            features=team_features()
-                            recommended=false
-                            current_tier=tier_for_modal.clone()
-                            current_billing_cycle=billing_cycle_for_modal.clone()
-                            checkout_loading=checkout_loading
-                            handle_upgrade=handle_upgrade
-                        />
-                    </div>
-                    <Card class="bg-muted/50">
-                        <CardContent class="pt-6">
-                            <p class="text-sm text-muted-foreground">
-                                <strong>"Annual billing saves 25-30%"</strong>
-                                " compared to monthly billing."
-                            </p>
-                        </CardContent>
-                    </Card>
-                </div>
-            </Modal>
         </div>
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Team Size Card
+// User Seats Card
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn TeamSizeCard(
-    billing_cycle: Option<String>,
+fn UserSeatsCard(
     user_limit: i32,
     desired_team_size: ReadSignal<i32>,
     set_desired_team_size: WriteSignal<i32>,
     team_size_loading: ReadSignal<bool>,
     handle_team_size_update: Action<i32, ()>,
 ) -> impl IntoView {
-    let is_annual = billing_cycle.as_deref() == Some("annual");
-    let per_user_label = if is_annual {
-        "$15/month (billed $180/year)"
-    } else {
-        "$20/month"
-    };
-    let per_user_short = if is_annual { "$15/mo" } else { "$20/mo" };
-    let base_monthly = if is_annual { "$99/mo" } else { "$129/mo" };
-    let per_user_cost: f64 = if is_annual { 15.0 } else { 20.0 };
-    let base_cost: f64 = if is_annual { 99.0 } else { 129.0 };
-
     view! {
         <Card>
             <CardHeader>
                 <CardTitle class="flex items-center gap-2">
-                    {users_icon()}
-                    "Team Size"
+                    <Icon icon=icondata_lu::LuUsers width="20" height="20"/>
+                    "User Seats"
                 </CardTitle>
                 <CardDescription>
                     {format!(
-                        "Manage your team size. Base plan includes 5 users, additional users are {} each.",
-                        per_user_label
+                        "Manage your user seats. Each seat costs ${:.0}/month.",
+                        PRICE_PER_USER
                     )}
                 </CardDescription>
             </CardHeader>
             <CardContent>
                 <div class="space-y-4">
-                    // Current Team Info
+                    // Current seat info
                     <div class="bg-muted/50 border border-border rounded-lg p-4">
-                        <div class="flex justify-between text-sm mb-2">
-                            <span class="text-muted-foreground">"Current team size"</span>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">"Current seats"</span>
                             <span class="font-medium text-foreground">
                                 {format!("{} {}", user_limit, if user_limit == 1 { "user" } else { "users" })}
                             </span>
                         </div>
-                        {(user_limit > 5).then(|| view! {
-                            <div class="flex justify-between text-sm">
-                                <span class="text-muted-foreground">"Additional users"</span>
-                                <span class="font-medium text-foreground">
-                                    {format!("{} \u{00d7} {}", user_limit - 5, per_user_short)}
-                                </span>
-                            </div>
-                        })}
+                        <div class="flex justify-between text-sm mt-1">
+                            <span class="text-muted-foreground">"Monthly cost"</span>
+                            <span class="font-medium text-foreground">
+                                {format_charge(user_limit)}
+                            </span>
+                        </div>
                     </div>
 
-                    // Team Size Adjuster
+                    // Seat count adjuster
                     <div>
                         <label class="text-sm font-medium text-foreground block mb-2">
-                            "Adjust team size"
+                            "Adjust seats"
                         </label>
                         <div class="flex items-center gap-3">
-                            // Minus button — uses raw <button> for reactive disabled
                             <button
                                 class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
-                                disabled=move || desired_team_size.get() <= 5 || team_size_loading.get()
+                                disabled=move || desired_team_size.get() <= 1 || team_size_loading.get()
                                 on:click=move |_| {
-                                    set_desired_team_size.update(|v| *v = (*v - 1).max(5));
+                                    set_desired_team_size.update(|v| *v = (*v - 1).max(1));
                                 }
                             >
-                                {minus_icon()}
+                                <Icon icon=icondata_lu::LuMinus width="16" height="16"/>
                             </button>
                             <input
                                 type="number"
@@ -905,15 +723,14 @@ fn TeamSizeCard(
                                 on:input=move |ev| {
                                     let val: i32 = event_target_value(&ev)
                                         .parse()
-                                        .unwrap_or(5)
-                                        .max(5);
+                                        .unwrap_or(1)
+                                        .max(1);
                                     set_desired_team_size.set(val);
                                 }
-                                min="5"
+                                min="1"
                                 class="w-20 px-3 py-2 text-center border border-border rounded-md bg-background text-foreground"
                                 disabled=move || team_size_loading.get()
                             />
-                            // Plus button — uses raw <button> for reactive disabled
                             <button
                                 class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                                 disabled=move || team_size_loading.get()
@@ -921,41 +738,27 @@ fn TeamSizeCard(
                                     set_desired_team_size.update(|v| *v += 1);
                                 }
                             >
-                                {plus_icon()}
+                                <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
                             </button>
                             <span class="text-sm text-muted-foreground">"users"</span>
                         </div>
                     </div>
 
-                    // Cost Preview (when team size differs from current)
+                    // Cost preview (when seat count differs from current)
                     {move || {
                         let desired = desired_team_size.get();
                         (desired != user_limit).then(|| {
-                            let additional = (desired - 5).max(0);
-                            let additional_cost = additional as f64 * per_user_cost;
-                            let total = base_cost + additional_cost;
+                            let total = PRICE_PER_USER * desired as f64;
                             let is_increase = desired > user_limit;
 
                             view! {
                                 <div class="bg-primary/10 border border-primary/20 rounded-lg p-4">
                                     <div class="text-sm space-y-2">
                                         <div class="flex justify-between">
-                                            <span class="text-foreground">"Base Team plan (5 users)"</span>
-                                            <span class="font-medium text-foreground">{format!("{}/mo", base_monthly)}</span>
-                                        </div>
-                                        {(desired > 5).then(|| view! {
-                                            <div class="flex justify-between">
-                                                <span class="text-foreground">
-                                                    {format!("Additional users ({})", desired - 5)}
-                                                </span>
-                                                <span class="font-medium text-foreground">
-                                                    {format!("${:.2}/mo", additional_cost)}
-                                                </span>
-                                            </div>
-                                        })}
-                                        <div class="pt-2 border-t border-primary/20 flex justify-between font-semibold">
-                                            <span class="text-foreground">"New monthly total"</span>
                                             <span class="text-foreground">
+                                                {format!("{} {} \u{00d7} ${:.0}/mo", desired, if desired == 1 { "user" } else { "users" }, PRICE_PER_USER)}
+                                            </span>
+                                            <span class="font-medium text-foreground">
                                                 {format!("${:.2}/mo", total)}
                                             </span>
                                         </div>
@@ -972,7 +775,7 @@ fn TeamSizeCard(
                         })
                     }}
 
-                    // Update Button — uses raw <button> for reactive disabled
+                    // Update button
                     <button
                         class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-9 px-4 py-2 w-full"
                         disabled=move || desired_team_size.get() == user_limit || team_size_loading.get()
@@ -980,7 +783,7 @@ fn TeamSizeCard(
                             handle_team_size_update.dispatch(desired_team_size.get_untracked());
                         }
                     >
-                        {move || if team_size_loading.get() { "Updating..." } else { "Update Team Size" }}
+                        {move || if team_size_loading.get() { "Updating..." } else { "Update Seats" }}
                     </button>
                 </div>
             </CardContent>
@@ -989,142 +792,162 @@ fn TeamSizeCard(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Plan Card
+// AI Credits Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Feature lists — shared between inline plan cards and modal plan cards.
-fn starter_features() -> Vec<&'static str> {
-    vec![
-        "AI chat and analysis",
-        "30 days query history",
-        "Unlimited dashboards",
-        "Website analytics (1M events/mo)",
-        "MCP support",
-        "1 user",
-        "Email support",
-    ]
-}
-
-fn pro_features() -> Vec<&'static str> {
-    vec![
-        "3x more AI usage vs Starter",
-        "Kyomi Watch \u{2014} proactive data monitoring",
-        "Website analytics (5M events/mo)",
-        "Unlimited query history",
-        "PDF dashboard export",
-        "1 user",
-        "Priority email support",
-    ]
-}
-
-fn team_features() -> Vec<&'static str> {
-    vec![
-        "Shared AI pool for team",
-        "Kyomi Watch \u{2014} proactive data monitoring",
-        "Website analytics (25M events/mo)",
-        "Slack integration \u{2014} alerts & @kyomi mentions",
-        "Up to 5 users ($15-20/mo per additional)",
-        "Dashboard sharing & collaboration",
-        "Priority chat support",
-    ]
-}
-
-/// Individual plan display with pricing and features.
-///
-/// Matches React `PlanCard` sub-component (lines 804-887).
 #[component]
-fn PlanCard(
-    name: &'static str,
-    annual_price: &'static str,
-    annual_total: &'static str,
-    monthly_price: &'static str,
-    features: Vec<&'static str>,
-    #[prop(default = false)]
-    recommended: bool,
-    current_tier: String,
-    current_billing_cycle: Option<String>,
-    checkout_loading: ReadSignal<bool>,
-    handle_upgrade: Action<(String, String), ()>,
+fn AiCreditsCard(
+    has_byok_key: bool,
+    token_balance_cents: i64,
+    handle_purchase_ai: Action<(), ()>,
 ) -> impl IntoView {
-    let plan_tier = name.to_lowercase();
-    let is_current_annual =
-        current_tier == plan_tier && current_billing_cycle.as_deref() == Some("annual");
-    let is_current_monthly =
-        current_tier == plan_tier && current_billing_cycle.as_deref() == Some("monthly");
-
-    let card_class = if recommended {
-        "relative border-primary border-2"
-    } else {
-        "relative"
-    };
-
-    // Clone for closures
-    let plan_tier_annual = plan_tier.clone();
-    let plan_tier_monthly = plan_tier.clone();
+    let balance_dollars = token_balance_cents as f64 / 100.0;
 
     view! {
-        <Card class=card_class>
-            {recommended.then(|| view! {
-                <div class="absolute -top-3 left-1/2 -translate-x-1/2">
-                    <span class="bg-primary text-primary-foreground px-3 py-1 rounded-full text-xs font-semibold">
-                        "Best Value"
-                    </span>
-                </div>
-            })}
+        <Card>
             <CardHeader>
-                <CardTitle class="text-xl">{name}</CardTitle>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuSparkles width="20" height="20"/>
+                    "AI Credits"
+                </CardTitle>
                 <CardDescription>
-                    <div class="mt-2">
-                        <div class="text-xl font-semibold text-foreground">
-                            {annual_price}<span class="text-sm font-normal text-muted-foreground">"/month*"</span>
-                        </div>
-                        <div class="text-xs text-muted-foreground">{annual_total}</div>
-                        <div class="text-sm text-muted-foreground mt-1">
-                            {format!("or {}", monthly_price)}
-                        </div>
-                    </div>
+                    "Use your own API key (BYOK) or purchase token bundles."
                 </CardDescription>
             </CardHeader>
             <CardContent>
-                <ul class="space-y-2 mb-6">
-                    {features.into_iter().map(|feature| {
-                        view! {
-                            <li class="flex items-start gap-2 text-sm">
-                                {check_icon()}
-                                <span class="text-foreground">{feature}</span>
-                            </li>
-                        }
-                    }).collect_view()}
-                </ul>
+                <div class="space-y-4">
+                    // BYOK Key status
+                    <div class="bg-muted/50 border border-border rounded-lg p-4">
+                        <div class="flex justify-between items-center text-sm">
+                            <div class="flex items-center gap-2">
+                                <Icon icon=icondata_lu::LuKey width="16" height="16"/>
+                                <span class="text-muted-foreground">"BYOK API Key"</span>
+                            </div>
+                            {if has_byok_key {
+                                view! {
+                                    <StatusBadge variant=StatusBadgeVariant::Success>
+                                        "Configured"
+                                    </StatusBadge>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <StatusBadge variant=StatusBadgeVariant::Default>
+                                        "Not configured"
+                                    </StatusBadge>
+                                }.into_any()
+                            }}
+                        </div>
+                    </div>
 
-                <div class="space-y-2">
+                    // Token bundle balance
+                    <div class="bg-muted/50 border border-border rounded-lg p-4">
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-muted-foreground">"Token Bundle Balance"</span>
+                            <span class="font-medium text-foreground">
+                                {format!("${:.2} remaining", balance_dollars)}
+                            </span>
+                        </div>
+                        <p class="text-xs text-muted-foreground mt-2">
+                            "Token bundles never expire."
+                        </p>
+                    </div>
+
+                    // Purchase button
                     <Button
-                        variant=if is_current_annual { ButtonVariant::Outline } else { ButtonVariant::Default }
+                        variant=ButtonVariant::Outline
                         class="w-full"
-                        disabled=checkout_loading.get_untracked() || is_current_annual
-                        on:click=move |_| {
-                            handle_upgrade.dispatch((plan_tier_annual.clone(), "annual".to_string()));
-                        }
+                        disabled=Signal::derive(move || handle_purchase_ai.pending().get())
+                        on:click=move |_| { handle_purchase_ai.dispatch(()); }
                     >
-                        {if is_current_annual {
-                            "Current Plan".to_string()
-                        } else {
-                            "Choose Annual".to_string()
-                        }}
+                        {move || if handle_purchase_ai.pending().get() { "Redirecting..." } else { "Buy AI Tokens" }}
                     </Button>
+                </div>
+            </CardContent>
+        </Card>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Format a large number with comma separators (e.g. 100000 -> "100,000").
+pub(crate) fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
+}
+
+#[component]
+fn AnalyticsCard(
+    events_used: u64,
+    bundle_balance: i64,
+    handle_purchase_analytics: Action<(), ()>,
+) -> impl IntoView {
+    let total_available = ANALYTICS_EVENTS_INCLUDED as i64 + bundle_balance.max(0);
+    let usage_pct = if total_available > 0 {
+        ((events_used as f64 / total_available as f64) * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+
+    view! {
+        <Card>
+            <CardHeader>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuChartBar width="20" height="20"/>
+                    "Analytics"
+                </CardTitle>
+                <CardDescription>
+                    {format!("{} events/month included. Purchase bundles for additional capacity.", format_number(ANALYTICS_EVENTS_INCLUDED))}
+                </CardDescription>
+            </CardHeader>
+            <CardContent>
+                <div class="space-y-4">
+                    // Usage this month
+                    <div class="bg-muted/50 border border-border rounded-lg p-4 space-y-3">
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">"Events this month"</span>
+                            <span class="font-medium text-foreground">
+                                {format!("{} / {}", format_number(events_used), format_number(ANALYTICS_EVENTS_INCLUDED))}
+                            </span>
+                        </div>
+                        // Progress bar
+                        <div class="w-full bg-border rounded-full h-2">
+                            <div
+                                class="bg-primary rounded-full h-2 transition-all"
+                                style:width=format!("{}%", usage_pct)
+                            />
+                        </div>
+                    </div>
+
+                    // Bundle balance
+                    <div class="bg-muted/50 border border-border rounded-lg p-4">
+                        <div class="flex justify-between items-center text-sm">
+                            <span class="text-muted-foreground">"Bundle balance"</span>
+                            <span class="font-medium text-foreground">
+                                {format!("{} events remaining", format_number(bundle_balance.max(0) as u64))}
+                            </span>
+                        </div>
+                        <p class="text-xs text-muted-foreground mt-2">
+                            "Event bundles never expire."
+                        </p>
+                    </div>
+
+                    // Purchase button
                     <Button
-                        variant=if is_current_monthly { ButtonVariant::Default } else { ButtonVariant::Outline }
+                        variant=ButtonVariant::Outline
                         class="w-full"
-                        disabled=checkout_loading.get_untracked() || is_current_monthly
-                        on:click=move |_| {
-                            handle_upgrade.dispatch((plan_tier_monthly.clone(), "monthly".to_string()));
-                        }
+                        disabled=Signal::derive(move || handle_purchase_analytics.pending().get())
+                        on:click=move |_| { handle_purchase_analytics.dispatch(()); }
                     >
-                        {if is_current_monthly {
-                            "Current Plan".to_string()
-                        } else {
-                            "Choose Monthly".to_string()
-                        }}
+                        {move || if handle_purchase_analytics.pending().get() { "Redirecting..." } else { "Buy Event Bundle" }}
                     </Button>
                 </div>
             </CardContent>
@@ -1223,9 +1046,9 @@ fn InvoicesSection(
                                                                                     rel="noopener noreferrer"
                                                                                     class="inline-flex items-center gap-1 text-primary hover:text-primary/80 transition-colors"
                                                                                 >
-                                                                                    {file_text_icon()}
+                                                                                    <Icon icon=icondata_lu::LuFileText width="16" height="16"/>
                                                                                     <span>"PDF"</span>
-                                                                                    {external_link_icon()}
+                                                                                    <Icon icon=icondata_lu::LuExternalLink width="12" height="12"/>
                                                                                 </a>
                                                                             })}
                                                                         </td>

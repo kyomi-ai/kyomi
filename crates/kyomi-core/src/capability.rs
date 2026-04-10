@@ -18,6 +18,9 @@ use serde::Serialize;
 use crate::enums::{SubscriptionStatus, SubscriptionTier};
 use crate::models::Workspace;
 
+/// Included analytics events per month for all Cloud subscribers.
+pub const ANALYTICS_EVENTS_INCLUDED: u64 = 100_000;
+
 // ─── Public types ────────────────────────────────────────────────────────────
 
 /// Full capabilities response matching the Python JSON shape exactly.

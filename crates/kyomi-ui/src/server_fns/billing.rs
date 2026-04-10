@@ -25,7 +25,9 @@ use super::{extract_auth, extract_context, workspace_id};
 
 /// Subscription information for the current workspace.
 ///
-/// Matches the JSON shape returned by `GET /billing/subscription-info`.
+/// Cloud plan — single tier at $5/user/month. The `billing_cycle` field is
+/// retained for backward compatibility but is always "monthly" for new
+/// subscriptions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubscriptionInfo {
     pub tier: String,
@@ -35,6 +37,14 @@ pub struct SubscriptionInfo {
     pub period_end: Option<String>,
     pub ai_reset_date: Option<String>,
     pub user_limit: Option<i32>,
+    /// Whether the user has configured a BYOK (Bring Your Own Key) API key.
+    pub has_byok_key: Option<bool>,
+    /// AI token bundle balance in cents (e.g. 1500 = $15.00). Non-expiring.
+    pub ai_token_balance_cents: Option<i64>,
+    /// Number of analytics events consumed this month.
+    pub analytics_events_used: Option<i64>,
+    /// Remaining purchased analytics event bundle balance (non-expiring).
+    pub analytics_bundle_balance: Option<i64>,
 }
 
 /// A single invoice record.
@@ -99,6 +109,10 @@ struct WorkspaceRow {
     user_limit: Option<i32>,
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
+    #[sqlx(default)]
+    ai_bundle_balance_usd: Option<f64>,
+    #[sqlx(default)]
+    analytics_bundle_events: Option<i64>,
 }
 
 #[cfg(feature = "ssr")]
@@ -132,7 +146,9 @@ async fn load_workspace(
          CAST(subscription_period_start AS TEXT) AS subscription_period_start, \
          CAST(subscription_period_end AS TEXT) AS subscription_period_end, \
          user_limit, \
-         stripe_customer_id, stripe_subscription_id \
+         stripe_customer_id, stripe_subscription_id, \
+         COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
+         COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
          FROM workspaces WHERE workspace_id = $1",
         ws_id
     )
@@ -212,6 +228,23 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         }
     };
 
+    // BYOK key is stored client-side (localStorage) — not queryable from server.
+    // The frontend checks this directly. Pass None here.
+    let has_byok_key: Option<bool> = None;
+
+    // AI bundle balance from the workspace row (already loaded)
+    let ai_bundle_balance_usd = workspace.ai_bundle_balance_usd.unwrap_or(0.0);
+    // Convert to cents for the frontend
+    let ai_token_balance_cents = (ai_bundle_balance_usd * 100.0) as i64;
+
+    // Analytics events this month — tracked in Redis/ClickHouse, not Postgres.
+    // The analytics quota service handles this. Pass 0 here; the usage page
+    // fetches real counts separately via get_ai_usage_status.
+    let analytics_events_used: i64 = 0;
+
+    // Analytics bundle balance from the workspace row (already loaded)
+    let analytics_bundle_balance = workspace.analytics_bundle_events.unwrap_or(0);
+
     Ok(SubscriptionInfo {
         tier: workspace.subscription_tier,
         status: workspace.subscription_status,
@@ -220,6 +253,10 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         period_end: workspace.subscription_period_end,
         ai_reset_date,
         user_limit: workspace.user_limit,
+        has_byok_key,
+        ai_token_balance_cents: Some(ai_token_balance_cents),
+        analytics_events_used: Some(analytics_events_used),
+        analytics_bundle_balance: Some(analytics_bundle_balance),
     })
 }
 
@@ -584,4 +621,104 @@ pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("Failed to create portal session: {e}")))?;
 
     Ok(RedirectUrl { url: portal_url })
+}
+
+/// Purchase an AI token bundle via Stripe checkout.
+///
+/// Creates a one-time Stripe checkout session for a predefined AI token
+/// bundle product. The webhook handler credits the workspace's
+/// `ai_token_balance_cents` upon successful payment.
+#[server(prefix = "/leptos-api")]
+pub async fn purchase_ai_bundle() -> Result<RedirectUrl, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+    let ws_id = workspace_id(&auth)?;
+
+    let stripe_service = require_stripe(&ctx.config)?;
+    let workspace = load_workspace(&ctx.db, ws_id).await?;
+
+    let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
+        ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
+    })?;
+
+    let is_test = is_stripe_test_mode(&ctx.config);
+    let price_id =
+        kyomi_auth::stripe_config::get_ai_bundle_price_id(is_test).ok_or_else(|| {
+            ServerFnError::new("AI token bundle price not configured")
+        })?;
+
+    let frontend_url = &ctx.config.frontend_url;
+    let success_url = format!("{frontend_url}/settings/billing?checkout=success");
+    let cancel_url = format!("{frontend_url}/settings/billing?checkout=cancelled");
+
+    let params = kyomi_auth::stripe_service::PaymentCheckoutParams {
+        customer_id: customer_id.to_string(),
+        price_id: price_id.to_string(),
+        success_url,
+        cancel_url,
+        workspace_id: ws_id.to_string(),
+        purchase_type: "ai_bundle".to_string(),
+    };
+
+    let checkout_result = stripe_service
+        .create_payment_checkout_session(&params)
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to create AI bundle checkout: {e}")))?;
+
+    Ok(RedirectUrl {
+        url: checkout_result.checkout_url,
+    })
+}
+
+/// Purchase an analytics event bundle via Stripe checkout.
+///
+/// Creates a one-time Stripe checkout session for a predefined analytics
+/// event bundle product. The webhook handler credits the workspace's
+/// `analytics_bundle_balance` upon successful payment.
+#[server(prefix = "/leptos-api")]
+pub async fn purchase_analytics_bundle() -> Result<RedirectUrl, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+    let ws_id = workspace_id(&auth)?;
+
+    let stripe_service = require_stripe(&ctx.config)?;
+    let workspace = load_workspace(&ctx.db, ws_id).await?;
+
+    let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
+        ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
+    })?;
+
+    let is_test = is_stripe_test_mode(&ctx.config);
+    let price_id = kyomi_auth::stripe_config::get_analytics_bundle_price_id(is_test)
+        .ok_or_else(|| {
+            ServerFnError::new("Analytics event bundle price not configured")
+        })?;
+
+    let frontend_url = &ctx.config.frontend_url;
+    let success_url = format!("{frontend_url}/settings/billing?checkout=success");
+    let cancel_url = format!("{frontend_url}/settings/billing?checkout=cancelled");
+
+    let params = kyomi_auth::stripe_service::PaymentCheckoutParams {
+        customer_id: customer_id.to_string(),
+        price_id: price_id.to_string(),
+        success_url,
+        cancel_url,
+        workspace_id: ws_id.to_string(),
+        purchase_type: "analytics_bundle".to_string(),
+    };
+
+    let checkout_result = stripe_service
+        .create_payment_checkout_session(&params)
+        .await
+        .map_err(|e| {
+            ServerFnError::new(format!(
+                "Failed to create analytics bundle checkout: {e}"
+            ))
+        })?;
+
+    Ok(RedirectUrl {
+        url: checkout_result.checkout_url,
+    })
 }
