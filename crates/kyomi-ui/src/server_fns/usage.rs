@@ -113,9 +113,19 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
         .map(|b| (b.ai_bundle_balance_usd, b.analytics_bundle_events))
         .unwrap_or((0.0, 0));
 
-    // Analytics event counting is not yet wired up (events live in ClickHouse).
-    // Expose 0 until the analytics quota service is implemented.
-    let analytics_events_used: u64 = 0;
+    // Get analytics events used this month from Redis.
+    let analytics_events_used: u64 = if let Some(ref redis_url) = ctx.config.redis_url {
+        match kyomi_core::redis::create_pool(redis_url).await {
+            Ok(mut conn) => {
+                kyomi_auth::analytics_quota::get_usage_count(&mut conn, ws_id)
+                    .await
+                    .unwrap_or(0)
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
     let analytics_events_included: u64 = kyomi_core::capability::ANALYTICS_EVENTS_INCLUDED;
 
     Ok(UsageData {

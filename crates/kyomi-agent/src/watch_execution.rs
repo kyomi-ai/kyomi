@@ -1024,7 +1024,6 @@ async fn execute_watch_inner(
                ai_credits_used_usd, \
                user_limit, \
                stripe_customer_id, stripe_subscription_id, \
-               stripe_additional_users_item_id, \
                settings, \
                business_knowledge, knowledge_updated_at, \
                last_catalog_refresh, \

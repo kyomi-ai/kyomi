@@ -430,7 +430,6 @@ fn BillingContent(
     let user_limit = info.user_limit;
 
     // Fields for AI and analytics sections
-    let has_byok_key = info.has_byok_key.unwrap_or(false);
     let ai_token_balance = info.ai_token_balance_cents.unwrap_or(0);
     let analytics_events_used = info.analytics_events_used.unwrap_or(0).max(0) as u64;
     let analytics_bundle_balance = info.analytics_bundle_balance.unwrap_or(0);
@@ -634,7 +633,6 @@ fn BillingContent(
             {is_subscribed.then(|| {
                 view! {
                     <AiCreditsCard
-                        has_byok_key=has_byok_key
                         token_balance_cents=ai_token_balance
                         handle_purchase_ai=handle_purchase_ai
                     />
@@ -795,13 +793,41 @@ fn UserSeatsCard(
 // AI Credits Card
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Check localStorage for a BYOK API key.
+fn check_byok_key() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::pages::settings::ai_provider::LLM_CONFIG_STORAGE_KEY;
+        let storage = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten());
+        if let Some(storage) = storage {
+            if let Ok(Some(val)) = storage.get_item(LLM_CONFIG_STORAGE_KEY) {
+                if let Ok(parsed) = js_sys::JSON::parse(&val) {
+                    let key = js_sys::Reflect::get(
+                        &parsed,
+                        &wasm_bindgen::JsValue::from_str("api_key"),
+                    )
+                    .ok()
+                    .and_then(|v| v.as_string());
+                    return key.map_or(false, |k| !k.is_empty());
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    false
+}
+
 #[component]
 fn AiCreditsCard(
-    has_byok_key: bool,
     token_balance_cents: i64,
     handle_purchase_ai: Action<(), ()>,
 ) -> impl IntoView {
     let balance_dollars = token_balance_cents as f64 / 100.0;
+
+    // Detect BYOK key from localStorage (client-side only).
+    let has_byok_key = Signal::derive(check_byok_key);
 
     view! {
         <Card>
@@ -823,7 +849,7 @@ fn AiCreditsCard(
                                 <Icon icon=icondata_lu::LuKey width="16" height="16"/>
                                 <span class="text-muted-foreground">"BYOK API Key"</span>
                             </div>
-                            {if has_byok_key {
+                            {move || if has_byok_key.get() {
                                 view! {
                                     <StatusBadge variant=StatusBadgeVariant::Success>
                                         "Configured"

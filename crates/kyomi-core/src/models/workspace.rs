@@ -79,7 +79,6 @@ pub struct Workspace {
     // ── Stripe integration ──────────────────────────────────────────
     pub stripe_customer_id: Option<String>,
     pub stripe_subscription_id: Option<String>,
-    pub stripe_additional_users_item_id: Option<String>,
 
     // ── Settings / knowledge ────────────────────────────────────────
     /// JSON settings blob (WorkspaceSettings in Python).

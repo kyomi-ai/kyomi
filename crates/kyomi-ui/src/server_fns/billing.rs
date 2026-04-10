@@ -37,8 +37,6 @@ pub struct SubscriptionInfo {
     pub period_end: Option<String>,
     pub ai_reset_date: Option<String>,
     pub user_limit: Option<i32>,
-    /// Whether the user has configured a BYOK (Bring Your Own Key) API key.
-    pub has_byok_key: Option<bool>,
     /// AI token bundle balance in cents (e.g. 1500 = $15.00). Non-expiring.
     pub ai_token_balance_cents: Option<i64>,
     /// Number of analytics events consumed this month.
@@ -228,19 +226,25 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         }
     };
 
-    // BYOK key is stored client-side (localStorage) — not queryable from server.
-    // The frontend checks this directly. Pass None here.
-    let has_byok_key: Option<bool> = None;
-
     // AI bundle balance from the workspace row (already loaded)
     let ai_bundle_balance_usd = workspace.ai_bundle_balance_usd.unwrap_or(0.0);
     // Convert to cents for the frontend
     let ai_token_balance_cents = (ai_bundle_balance_usd * 100.0) as i64;
 
-    // Analytics events this month — tracked in Redis/ClickHouse, not Postgres.
-    // The analytics quota service handles this. Pass 0 here; the usage page
-    // fetches real counts separately via get_ai_usage_status.
-    let analytics_events_used: i64 = 0;
+    // Analytics events this month from Redis (same pattern as usage.rs).
+    // Falls back to 0 if Redis is unavailable.
+    let analytics_events_used: i64 = if let Some(ref redis_url) = ctx.config.redis_url {
+        match kyomi_core::redis::create_pool(redis_url).await {
+            Ok(mut conn) => {
+                kyomi_auth::analytics_quota::get_usage_count(&mut conn, ws_id)
+                    .await
+                    .unwrap_or(0) as i64
+            }
+            Err(_) => 0,
+        }
+    } else {
+        0
+    };
 
     // Analytics bundle balance from the workspace row (already loaded)
     let analytics_bundle_balance = workspace.analytics_bundle_events.unwrap_or(0);
@@ -253,7 +257,6 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         period_end: workspace.subscription_period_end,
         ai_reset_date,
         user_limit: workspace.user_limit,
-        has_byok_key,
         ai_token_balance_cents: Some(ai_token_balance_cents),
         analytics_events_used: Some(analytics_events_used),
         analytics_bundle_balance: Some(analytics_bundle_balance),

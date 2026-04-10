@@ -409,7 +409,6 @@ mod tests {
             user_limit: None,
             stripe_customer_id: None,
             stripe_subscription_id: None,
-            stripe_additional_users_item_id: None,
             settings: None,
             business_knowledge: None,
             knowledge_updated_at: None,
