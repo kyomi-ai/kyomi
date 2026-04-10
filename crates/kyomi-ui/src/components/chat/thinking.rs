@@ -187,6 +187,27 @@ impl ThinkingManager {
         });
     }
 
+    /// Update only the token usage for a message without modifying events or active state.
+    ///
+    /// Used by the `token_usage_update` WS event which carries token counts
+    /// independently of thinking events.
+    pub fn update_token_usage(&self, message_id: &str, usage: TokenUsage) {
+        let message_id = message_id.to_string();
+        self.state.update(|map| {
+            let current = map.get(&message_id).cloned().unwrap_or_default();
+            if current.cancelled {
+                return;
+            }
+            map.insert(
+                message_id,
+                ThinkingState {
+                    token_usage: Some(usage),
+                    ..current
+                },
+            );
+        });
+    }
+
     /// Clear all thinking state (e.g., when switching sessions).
     ///
     /// Matches React's `clearThinking()`. Note: React also resets
