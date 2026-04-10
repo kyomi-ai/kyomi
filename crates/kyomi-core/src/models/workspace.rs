@@ -61,8 +61,19 @@ pub struct Workspace {
     #[sqlx(default)]
     pub ai_credits_used_usd: f64,
 
+    // ── Bundle balances ────────────────────────────────────────────
+    /// Purchased AI token bundle balance in USD. Non-expiring.
+    /// Deducted as AI features are used. 0.0 = no purchased credits.
+    #[sqlx(default)]
+    pub ai_bundle_balance_usd: f64,
+
+    /// Purchased analytics event bundle balance. Non-expiring.
+    /// Additional events beyond the included 100K/month.
+    #[sqlx(default)]
+    pub analytics_bundle_events: i64,
+
     // ── User limits ─────────────────────────────────────────────────
-    /// Maximum users allowed in this workspace. NULL means default (1).
+    /// Maximum users allowed in this workspace. NULL means unlimited (999_999).
     pub user_limit: Option<i32>,
 
     // ── Stripe integration ──────────────────────────────────────────
