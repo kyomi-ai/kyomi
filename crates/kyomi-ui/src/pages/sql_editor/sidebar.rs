@@ -9,6 +9,7 @@
 //! - On mobile (<768px): slide-in overlay with backdrop
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -17,6 +18,7 @@ use super::query_history::QueryHistory;
 use super::state::SqlEditorState;
 use super::types::SidebarTab;
 use crate::components::dashboard::shared::use_is_mobile;
+use crate::components::{Button, ButtonSize, ButtonVariant, SearchInput};
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -214,11 +216,11 @@ pub fn SqlEditorSidebar(
         });
     }
 
-    // ── Tab button class helper ─────────────────────────────────────────
+    // ── Tab button class helper (segmented control pattern from watches_page.rs) ──
     let tab_class = move |tab: SidebarTab| {
-        let base = "px-3 py-1.5 text-sm font-medium rounded-md transition-colors";
+        let base = "flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors";
         if active_tab.get() == tab {
-            format!("{base} bg-card text-foreground shadow")
+            format!("{base} bg-background text-foreground shadow-sm")
         } else {
             format!("{base} text-muted-foreground hover:text-foreground")
         }
@@ -252,7 +254,7 @@ pub fn SqlEditorSidebar(
             <div class="flex flex-col flex-1 min-w-0 h-full">
                 // Sidebar header with tabs
                 <div class="p-3 border-b border-border flex items-center justify-between flex-shrink-0">
-                    <div class="flex items-center gap-1 bg-accent rounded-lg p-1" role="tablist" aria-label="Sidebar panels">
+                    <div class="flex items-center rounded-lg bg-muted p-1" role="tablist" aria-label="Sidebar panels">
                         <button
                             class=move || tab_class(SidebarTab::Catalog)
                             on:click=set_catalog_tab
@@ -273,49 +275,29 @@ pub fn SqlEditorSidebar(
                     <div class="flex items-center gap-1">
                         // Refresh button (catalog tab only)
                         <Show when=move || active_tab.get() == SidebarTab::Catalog>
-                            <button
-                                class="p-1.5 text-muted-foreground hover:text-primary hover:bg-secondary rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                                aria-label=move || {
-                                    if refreshing_catalog.get() {
-                                        "Refreshing catalog..."
-                                    } else {
-                                        "Refresh catalog"
-                                    }
-                                }
-                                disabled=move || refreshing_catalog.get()
+                            <Button
+                                variant=ButtonVariant::GhostMuted
+                                size=ButtonSize::IconSm
+                                disabled=MaybeProp::derive(move || Some(refreshing_catalog.get()))
+                                aria_label="Refresh catalog"
                                 on:click=handle_refresh_catalog
                             >
-                                <svg
-                                    class=move || {
-                                        if refreshing_catalog.get() {
-                                            "w-4 h-4 animate-spin"
-                                        } else {
-                                            "w-4 h-4"
-                                        }
-                                    }
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                >
-                                    <path
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                        stroke-width="2"
-                                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                                    />
-                                </svg>
-                            </button>
+                                <Icon
+                                    icon=icondata_lu::LuRefreshCw
+                                    width="14" height="14"
+                                    attr:class=move || if refreshing_catalog.get() { "animate-spin" } else { "" }
+                                />
+                            </Button>
                         </Show>
                         // Close button
-                        <button
-                            class="p-1 text-muted-foreground hover:text-foreground rounded-md transition-colors"
-                            aria-label="Close"
+                        <Button
+                            variant=ButtonVariant::GhostMuted
+                            size=ButtonSize::IconSm
+                            aria_label="Close sidebar"
                             on:click=close_sidebar
                         >
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                        </button>
+                            <Icon icon=icondata_lu::LuX width="16" height="16" />
+                        </Button>
                     </div>
                 </div>
 
@@ -328,28 +310,11 @@ pub fn SqlEditorSidebar(
                         <div class="flex flex-col h-full">
                             // Catalog search input
                             <div class="px-3 py-2 border-b border-border">
-                                <div class="relative">
-                                    <input
-                                        type="text"
-                                        placeholder="Search tables..."
-                                        prop:value=move || catalog_search_input.get()
-                                        on:input=move |ev| {
-                                            set_catalog_search_input.set(event_target_value(&ev));
-                                        }
-                                        class="w-full px-3 py-2 pr-8 text-sm border border-border rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-background text-foreground"
-                                    />
-                                    <Show when=move || !catalog_search_input.get().is_empty()>
-                                        <button
-                                            class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-0.5"
-                                            aria-label="Clear search"
-                                            on:click=move |_| set_catalog_search_input.set(String::new())
-                                        >
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                            </svg>
-                                        </button>
-                                    </Show>
-                                </div>
+                                <SearchInput
+                                    value=Signal::derive(move || catalog_search_input.get())
+                                    on_input=Callback::new(move |val: String| set_catalog_search_input.set(val))
+                                    placeholder="Search tables..."
+                                />
                             </div>
                             // Catalog tree
                             <div class="flex-1 overflow-auto">
@@ -371,28 +336,11 @@ pub fn SqlEditorSidebar(
                         <div class="flex flex-col h-full">
                             // History search input
                             <div class="px-3 py-2 border-b border-border flex-shrink-0">
-                                <div class="relative">
-                                    <input
-                                        type="text"
-                                        placeholder="Search query history..."
-                                        prop:value=move || history_search_input.get()
-                                        on:input=move |ev| {
-                                            set_history_search_input.set(event_target_value(&ev));
-                                        }
-                                        class="w-full px-3 py-2 pr-8 text-sm border border-border rounded-md focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-background text-foreground"
-                                    />
-                                    <Show when=move || !history_search_input.get().is_empty()>
-                                        <button
-                                            class="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors p-0.5"
-                                            aria-label="Clear search"
-                                            on:click=move |_| set_history_search_input.set(String::new())
-                                        >
-                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                                            </svg>
-                                        </button>
-                                    </Show>
-                                </div>
+                                <SearchInput
+                                    value=Signal::derive(move || history_search_input.get())
+                                    on_input=Callback::new(move |val: String| set_history_search_input.set(val))
+                                    placeholder="Search query history..."
+                                />
                             </div>
                             // History list
                             <div class="flex-1 min-h-0">

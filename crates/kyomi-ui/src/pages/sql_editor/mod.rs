@@ -38,10 +38,12 @@ pub use types::{
 // ─── Page-level component ────────────────────────────────────────────────────
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 #[cfg(target_arch = "wasm32")]
 use kode_leptos::EditorHandle;
 
+use crate::components::{ButtonSize, ButtonVariant, ToggleButton};
 use crate::server_fns::sql_editor::get_ws_connection_info;
 
 /// SQL Editor page — full-page component that assembles all sub-components.
@@ -332,12 +334,12 @@ pub fn SqlEditorPage() -> impl IntoView {
     let has_datasource = Memo::new(move |_| ds_selection.slug.get().is_some());
 
     view! {
-        <div class="flex flex-col h-full bg-muted" style:flex-direction="column">
+        <div class="flex flex-col h-full bg-background">
             // ── Header ───────────────────────────────────────────────────
-            <div class="h-14 sm:h-16 border-b border-border bg-card px-4 sm:px-6 flex-shrink-0 flex items-center justify-between">
+            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                 // Left: title + datasource selector
-                <div class="flex items-center gap-2 sm:gap-4 min-w-0">
-                    <h1 class="text-lg sm:text-xl font-display text-foreground shrink-0">
+                <div class="flex items-center gap-4 min-w-0">
+                    <h1 class="text-3xl font-display text-foreground shrink-0">
                         "SQL Editor"
                     </h1>
                     <DatasourceSelector/>
@@ -345,37 +347,22 @@ pub fn SqlEditorPage() -> impl IntoView {
 
                 // Right: sidebar toggle
                 <div class="flex items-center gap-2">
-                    // Sidebar toggle button
-                    <button
+                    <ToggleButton
+                        variant=Signal::derive(move || if sidebar_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                        size=ButtonSize::Sm
+                        aria_label="Toggle catalog sidebar"
                         on:click=toggle_sidebar
-                        class=move || {
-                            if sidebar_open.get() {
-                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-primary/10 text-primary"
-                            } else {
-                                "flex items-center gap-2 px-2 md:px-4 py-2 text-sm font-medium rounded-lg transition-colors bg-accent text-foreground hover:bg-secondary"
-                            }
-                        }
-                        aria-label="Toggle sidebar"
                     >
-                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2"
-                                d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4"
-                            />
-                        </svg>
-                        <span class="hidden sm:inline">"Catalog"</span>
-                    </button>
+                        <Icon icon=icondata_lu::LuDatabase width="16" height="16" />
+                        <span class="hidden sm:inline whitespace-nowrap">"Catalog"</span>
+                    </ToggleButton>
                 </div>
             </div>
 
             // ── "No datasource" banner ────────────────────────────────────
             <Show when=move || !has_datasource.get()>
-                <div class="px-4 sm:px-6 py-2 bg-warning/10 border-b border-warning/30 flex items-center gap-2 text-sm text-warning-foreground flex-shrink-0">
-                    <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
-                    </svg>
+                <div class="px-4 md:px-6 py-2 bg-warning/10 border-b border-warning/30 flex items-center gap-2 text-sm text-warning-foreground flex-shrink-0">
+                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="flex-shrink-0" width="16" height="16" />
                     <span>"No datasource selected. "</span>
                     <a href="/settings" class="text-primary hover:underline font-medium">"Connect a datasource in Settings"</a>
                     <span>" to start querying."</span>
