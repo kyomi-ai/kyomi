@@ -28,25 +28,54 @@ fi
 
 echo "✅ No new lint suppressions."
 
-# --- Check 2: Cargo clippy ---
+# --- Check 2: Cargo clippy (staged crates only) ---
+# Only check crates that have staged .rs files, not the full workspace.
+# This prevents warnings in other crates (e.g. from parallel agents working
+# on the same branch) from blocking unrelated commits.
 echo "🔍 Running cargo clippy..."
 
-warnings=$(cargo clippy --workspace 2>&1 \
-    | grep "^warning:" \
-    | grep -v "cargo:warning\|generated\|Model file\|Downloaded\|Downloading\|too many arguments" \
-    || true)
+staged_rs_files=$(git diff --cached --name-only -- '*.rs' || true)
 
-if [ -n "$warnings" ]; then
-    echo ""
-    echo "❌ Clippy warnings found — commit blocked."
-    echo ""
-    echo "$warnings"
-    echo ""
-    echo "Fix warnings and try again."
-    exit 1
+if [ -z "$staged_rs_files" ]; then
+    echo "✅ Clippy skipped (no Rust files staged)."
+else
+    # Derive -p flags from staged file paths.
+    staged_crates=$(echo "$staged_rs_files" \
+        | sed -n 's|^\(crates/[^/]*\)/.*|\1|p' \
+        | sort -u \
+        | while read -r crate_dir; do
+            if [ -f "$crate_dir/Cargo.toml" ]; then
+                pkg=$(grep '^name' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+                [ -n "$pkg" ] && echo "-p $pkg"
+            fi
+        done)
+
+    # Files outside crates/ (e.g. apps/server) → fall back to workspace.
+    if echo "$staged_rs_files" | grep -qv '^crates/'; then
+        staged_crates="--workspace"
+    fi
+
+    if [ -z "$staged_crates" ]; then
+        echo "✅ Clippy skipped (no crate detected)."
+    else
+        warnings=$(cargo clippy $staged_crates 2>&1 \
+            | grep "^warning:" \
+            | grep -v "cargo:warning\|generated\|Model file\|Downloaded\|Downloading\|too many arguments" \
+            || true)
+
+        if [ -n "$warnings" ]; then
+            echo ""
+            echo "❌ Clippy warnings found — commit blocked."
+            echo ""
+            echo "$warnings"
+            echo ""
+            echo "Fix warnings and try again."
+            exit 1
+        fi
+
+        echo "✅ Clippy clean."
+    fi
 fi
-
-echo "✅ Clippy clean."
 
 # --- Check 3: Verify code review signature ---
 echo "🔍 Verifying code review approval..."
