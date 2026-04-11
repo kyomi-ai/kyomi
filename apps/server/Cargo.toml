@@ -60,10 +60,6 @@ chrono-tz = { workspace = true }
 dashmap = { workspace = true }
 serde_yaml = { workspace = true }
 p256 = { workspace = true }
-arrow-schema = { workspace = true }
-arrow-array = { workspace = true }
-arrow-ipc = { workspace = true }
-arrow-buffer = { workspace = true }
 async-trait = { workspace = true }
 rust-embed = { workspace = true }
 tokio-tungstenite = { version = "0.28", default-features = false }

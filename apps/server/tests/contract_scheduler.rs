@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Contract tests for Phase 7G: Special Indexers, Background Scheduler, Arrow Streaming.
+//! Contract tests for Phase 7G: Special Indexers, Background Scheduler.
 //!
 //! Tests cover:
 //! 1. Scheduler Redis lock acquisition/release
@@ -8,7 +8,6 @@
 //! 3. Sample data indexer configuration detection
 //! 4. BigQuery public indexer constants
 //! 5. User dataset indexer full table ID format
-//! 6. read-arrow endpoint (401 without auth, 501 with auth)
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -360,60 +359,6 @@ fn bigquery_public_indexer_sentinel_workspace_id() {
     let _indexer = kyomi_auth::catalog::indexers::bigquery_public::BigQueryPublicIndexer;
 }
 
-// ===========================================================================
-// Section 5: read-arrow endpoint tests
-// ===========================================================================
-
-#[tokio::test]
-async fn read_arrow_returns_401_without_auth() {
-    let url = base_url().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(format!("{url}/api/v1/bigquery/read-arrow"))
-        .json(&json!({
-            "table_id": "project.dataset.table"
-        }))
-        .send()
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(
-        resp.status(),
-        401,
-        "read-arrow without auth should return 401"
-    );
-}
-
-#[tokio::test]
-async fn read_arrow_requires_job_id() {
-    let ctx = match setup_auth_context("read-arrow").await {
-        Some(c) => c,
-        None => return, // Skip if running against external server
-    };
-
-    let client = reqwest::Client::new();
-
-    // Send a request missing the required `job_id` field — should get 422 (validation error).
-    let resp = client
-        .post(format!("{}/api/v1/bigquery/read-arrow", ctx.base_url))
-        .header("Authorization", format!("Bearer {}", ctx.access_token))
-        .json(&json!({
-            "table_id": "project.dataset.table"
-        }))
-        .send()
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(
-        resp.status(),
-        422,
-        "read-arrow should return 422 when job_id is missing"
-    );
-
-    // Cleanup
-    cleanup_test_user(&ctx.db, "scheduler-test-read-arrow@contract-test.local").await;
-}
 
 // ===========================================================================
 // Section 6: Scheduler start/stop test

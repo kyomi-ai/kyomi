@@ -116,9 +116,9 @@ pub async fn send_copilot_message(
             .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let capabilities = if ctx.config.self_hosted {
-        kyomi_core::capability::compute_capabilities_self_hosted(false)
+        kyomi_core::capability::compute_capabilities_self_hosted()
     } else {
-        kyomi_core::capability::compute_capabilities(&workspace, false)
+        kyomi_core::capability::compute_capabilities(&workspace)
     };
 
     if !capabilities.ai_chat_enabled {

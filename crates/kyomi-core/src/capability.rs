@@ -10,7 +10,6 @@
 //!
 //! - No `BillingService` integration — uses `workspace.ai_credits_used_usd`
 //!   directly with hardcoded credit budgets.
-//! - BigQuery Arrow streaming derived from `bq_arrow_enabled` parameter.
 //! - No async DB queries for `has_capability` — operates on a `&Workspace`.
 
 use serde::Serialize;
@@ -46,7 +45,6 @@ pub struct Capabilities {
 
     // BigQuery
     pub bigquery_access_level: String,
-    pub bigquery_retrieval_mode: String,
 
     // Organization features
     pub multi_user_enabled: bool,
@@ -65,7 +63,6 @@ pub struct Capabilities {
 
     // Premium flags
     pub kyomi_watch_enabled: bool,
-    pub arrow_streaming_enabled: bool,
     pub slack_integration_enabled: bool,
     pub mcp_access_enabled: bool,
     pub pdf_export_enabled: bool,
@@ -202,12 +199,8 @@ fn get_query_history_retention(tier: SubscriptionTier) -> i32 {
 /// This is the main entry point, equivalent to Python's
 /// `CapabilityService.compute_capabilities()`.
 ///
-/// `bq_arrow_enabled` should be `true` when at least one BigQuery datasource
-/// in the workspace has `connection_config.enable_arrow_streaming = true`.
-/// The route handler queries `datasource_configs` for this flag.
-///
 /// Field names and values match the Python JSON output exactly.
-pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Capabilities {
+pub fn compute_capabilities(workspace: &Workspace) -> Capabilities {
     let tier = get_subscription_tier(workspace);
     let credits = get_credits_info(workspace, tier);
 
@@ -228,13 +221,8 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
         ai_autocomplete_enabled: ai_enabled,
         ai_chart_copilot_enabled: ai_enabled,
 
-        // BigQuery — arrow streaming derived from datasource config
+        // BigQuery
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: if bq_arrow_enabled {
-            "arrow_streaming".to_string()
-        } else {
-            "direct_api".to_string()
-        },
 
         // Cloud plan — all organization features enabled
         multi_user_enabled: true,
@@ -253,7 +241,6 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
 
         // Cloud plan — all premium flags enabled
         kyomi_watch_enabled: true,
-        arrow_streaming_enabled: true,
         slack_integration_enabled: true,
         mcp_access_enabled: true,
         pdf_export_enabled: true,
@@ -270,7 +257,6 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
 /// 3. Pass it here
 pub fn compute_capabilities_with_credits(
     workspace: &Workspace,
-    bq_arrow_enabled: bool,
     credits: &CreditsInfo,
 ) -> Capabilities {
     let tier = get_subscription_tier(workspace);
@@ -292,13 +278,8 @@ pub fn compute_capabilities_with_credits(
         ai_autocomplete_enabled: ai_enabled,
         ai_chart_copilot_enabled: ai_enabled,
 
-        // BigQuery — arrow streaming derived from datasource config
+        // BigQuery
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: if bq_arrow_enabled {
-            "arrow_streaming".to_string()
-        } else {
-            "direct_api".to_string()
-        },
 
         // Cloud plan — all organization features enabled
         multi_user_enabled: true,
@@ -317,7 +298,6 @@ pub fn compute_capabilities_with_credits(
 
         // Cloud plan — all premium flags enabled
         kyomi_watch_enabled: true,
-        arrow_streaming_enabled: true,
         slack_integration_enabled: true,
         mcp_access_enabled: true,
         pdf_export_enabled: true,
@@ -329,10 +309,7 @@ pub fn compute_capabilities_with_credits(
 /// Returns enterprise-level capabilities with unlimited credits and all features
 /// enabled. Self-hosted users pay their own LLM provider directly, so there are
 /// no credit budgets or tier restrictions.
-///
-/// `bq_arrow_enabled` should be `true` when at least one BigQuery datasource
-/// in the workspace has `connection_config.enable_arrow_streaming = true`.
-pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities {
+pub fn compute_capabilities_self_hosted() -> Capabilities {
     Capabilities {
         subscription_tier: SubscriptionTier::Enterprise,
         subscription_status: SubscriptionStatus::Active,
@@ -347,13 +324,8 @@ pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities 
         ai_autocomplete_enabled: true,
         ai_chart_copilot_enabled: true,
 
-        // BigQuery — arrow streaming derived from datasource config
+        // BigQuery
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: if bq_arrow_enabled {
-            "arrow_streaming".to_string()
-        } else {
-            "direct_api".to_string()
-        },
 
         // Organization features — all enabled
         multi_user_enabled: true,
@@ -373,7 +345,6 @@ pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities 
 
         // Premium flags — all enabled
         kyomi_watch_enabled: true,
-        arrow_streaming_enabled: bq_arrow_enabled,
         slack_integration_enabled: true,
         mcp_access_enabled: true,
         pdf_export_enabled: true,
@@ -477,7 +448,7 @@ mod tests {
             exhausted: false,
             percentage_used: 33.333333333333336,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
         assert!(!caps.credits_exhausted);
         assert!(caps.ai_chat_enabled);
         assert!((caps.credits_remaining - 6.0).abs() < f64::EPSILON);
@@ -517,7 +488,6 @@ mod tests {
         use SubscriptionTier::*;
         // Cloud plan — all capabilities available to all tiers
         assert!(has_capability(Free, "kyomi_watch"));
-        assert!(has_capability(Free, "arrow_streaming"));
         assert!(has_capability(Free, "slack_integration"));
         assert!(has_capability(Free, "multi_user"));
         assert!(has_capability(Free, "dashboard_sharing"));
@@ -545,7 +515,7 @@ mod tests {
             exhausted: false,
             percentage_used: 0.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Free);
         assert!(caps.ai_chat_enabled); // Not exhausted
@@ -558,7 +528,6 @@ mod tests {
         assert_eq!(caps.catalog_refresh_limit_per_hour, 5);
         assert_eq!(caps.query_history_retention_days, 0); // unlimited
         assert_eq!(caps.user_limit, 999_999); // default unlimited
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
     }
 
     #[test]
@@ -571,12 +540,11 @@ mod tests {
             exhausted: false,
             percentage_used: 0.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Pro);
         assert!(caps.ai_chat_enabled);
         assert!(caps.kyomi_watch_enabled);
-        assert!(caps.arrow_streaming_enabled);
         assert!(caps.api_access_enabled);
         assert!(caps.mcp_access_enabled);
         // Cloud plan — all features enabled
@@ -584,29 +552,13 @@ mod tests {
         assert!(caps.slack_integration_enabled);
         assert_eq!(caps.max_dashboards, 0); // unlimited
         assert_eq!(caps.query_history_retention_days, 0); // unlimited
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
-    }
-
-    #[test]
-    fn test_compute_capabilities_pro_tier_with_arrow() {
-        let ws = test_workspace(SubscriptionTier::Pro, 0.0);
-        let caps = compute_capabilities(&ws, true);
-        assert_eq!(caps.bigquery_retrieval_mode, "arrow_streaming");
-    }
-
-    #[test]
-    fn test_compute_capabilities_free_tier_with_arrow() {
-        // Cloud plan — Free tier gets arrow streaming too
-        let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        let caps = compute_capabilities(&ws, true);
-        assert_eq!(caps.bigquery_retrieval_mode, "arrow_streaming");
     }
 
     #[test]
     fn test_compute_capabilities_team_tier() {
         let mut ws = test_workspace(SubscriptionTier::Team, 0.0);
         ws.user_limit = Some(5);
-        let caps = compute_capabilities(&ws, false);
+        let caps = compute_capabilities(&ws);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Team);
         assert!(caps.multi_user_enabled);
@@ -621,7 +573,7 @@ mod tests {
     #[test]
     fn test_compute_capabilities_credits_exhausted() {
         let ws = test_workspace(SubscriptionTier::Pro, 10.0);
-        let caps = compute_capabilities(&ws, false);
+        let caps = compute_capabilities(&ws);
 
         assert!(caps.credits_exhausted);
         assert!(!caps.ai_chat_enabled);
@@ -633,7 +585,7 @@ mod tests {
     #[test]
     fn test_capabilities_json_field_names_match_python() {
         let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        let caps = compute_capabilities(&ws, false);
+        let caps = compute_capabilities(&ws);
         let json = serde_json::to_value(&caps).unwrap();
 
         // Verify every JSON key matches the Python compute_capabilities() return dict
@@ -649,7 +601,6 @@ mod tests {
             "ai_autocomplete_enabled",
             "ai_chart_copilot_enabled",
             "bigquery_access_level",
-            "bigquery_retrieval_mode",
             "multi_user_enabled",
             "user_management_enabled",
             "dashboard_sharing_enabled",
@@ -660,7 +611,6 @@ mod tests {
             "query_history_retention_days",
             "user_limit",
             "kyomi_watch_enabled",
-            "arrow_streaming_enabled",
             "slack_integration_enabled",
             "mcp_access_enabled",
             "pdf_export_enabled",
@@ -689,7 +639,7 @@ mod tests {
             exhausted: false,
             percentage_used: 50.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Pro);
         assert!(caps.ai_chat_enabled);
@@ -708,7 +658,7 @@ mod tests {
             exhausted: true,
             percentage_used: 100.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert!(caps.credits_exhausted);
         assert!(!caps.ai_chat_enabled);
@@ -717,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_compute_capabilities_self_hosted() {
-        let caps = compute_capabilities_self_hosted(false);
+        let caps = compute_capabilities_self_hosted();
         assert_eq!(caps.subscription_tier, SubscriptionTier::Enterprise);
         assert_eq!(caps.subscription_status, SubscriptionStatus::Active);
         assert!(!caps.billing_enabled);
@@ -729,9 +679,8 @@ mod tests {
         assert!(caps.ai_autocomplete_enabled);
         assert!(caps.ai_chart_copilot_enabled);
 
-        // BigQuery — no arrow when not configured
+        // BigQuery
         assert_eq!(caps.bigquery_access_level, "full");
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
 
         // Organization features
         assert!(caps.multi_user_enabled);
@@ -750,7 +699,6 @@ mod tests {
 
         // Premium flags
         assert!(caps.kyomi_watch_enabled);
-        assert!(!caps.arrow_streaming_enabled); // false when bq_arrow_enabled=false
         assert!(caps.slack_integration_enabled);
         assert!(caps.mcp_access_enabled);
         assert!(caps.pdf_export_enabled);
@@ -758,12 +706,5 @@ mod tests {
         // Credits — effectively unlimited
         assert!((caps.credits_remaining - 999_999.0).abs() < f64::EPSILON);
         assert!((caps.credits_limit - 999_999.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_compute_capabilities_self_hosted_with_arrow() {
-        let caps = compute_capabilities_self_hosted(true);
-        assert_eq!(caps.bigquery_retrieval_mode, "arrow_streaming");
-        assert!(caps.arrow_streaming_enabled);
     }
 }

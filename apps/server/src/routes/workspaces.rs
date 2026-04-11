@@ -17,12 +17,12 @@ use axum::{
 use serde::Deserialize;
 
 use kyomi_auth::{
-    datasource_service, email_service::EmailService, middleware::AuthUser, user_service,
+    email_service::EmailService, middleware::AuthUser, user_service,
     websocket::helpers as ws_helpers, workspace_service,
 };
 use kyomi_core::capability;
 use kyomi_core::enums::{
-    DatasourceType, InvitationStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
+    InvitationStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
 };
 
 use crate::state::AppState;
@@ -165,27 +165,6 @@ async fn get_current_ws(
         .ok_or_else(|| kyomi_core::Error::NotFound("Workspace not found".into()))
 }
 
-/// Check if any BigQuery datasource in the workspace has arrow streaming enabled.
-///
-/// Queries `datasource_configs` for active BigQuery datasources and inspects
-/// `connection_config.enable_arrow_streaming`. Returns `false` on any error
-/// (fail-open — the capability will simply be "direct_api").
-async fn has_bq_arrow_streaming(db: &kyomi_core::DbPool, workspace_id: &str) -> bool {
-    let datasources = match datasource_service::list_datasources(db, workspace_id, false).await {
-        Ok(ds) => ds,
-        Err(_) => return false,
-    };
-
-    datasources.iter().any(|ds| {
-        ds.datasource_type == DatasourceType::Bigquery
-            && ds
-                .connection_config
-                .get("enable_arrow_streaming")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-    })
-}
-
 /// Read a nested key from the workspace settings JSON.
 ///
 /// `workspace.settings` is a JSON object. This helper digs into
@@ -282,7 +261,6 @@ fn merge_custom_settings(
 #[derive(Deserialize)]
 struct UpdateSettingsRequest {
     name: Option<String>,
-    arrow_download_enabled: Option<bool>,
     default_dashboard_id: Option<serde_json::Value>, // can be string or null
 }
 
@@ -438,32 +416,22 @@ async fn get_settings(
 
     // Compute capabilities
     let capabilities = if state.config.self_hosted {
-        capability::compute_capabilities_self_hosted(false)
+        capability::compute_capabilities_self_hosted()
     } else {
-        let bq_arrow_enabled = has_bq_arrow_streaming(&state.db, &workspace.workspace_id).await;
-        capability::compute_capabilities(&workspace, bq_arrow_enabled)
+        capability::compute_capabilities(&workspace)
     };
     let capabilities_json = serde_json::to_value(&capabilities)
         .map_err(|e| kyomi_core::Error::Internal(format!("capability serialization: {e}")))?;
 
-    // Add bigquery_mode alias for frontend compatibility
-    let mut caps_map = capabilities_json
+    let caps_map = capabilities_json
         .as_object()
         .cloned()
         .unwrap_or_default();
-    if let Some(mode) = caps_map.get("bigquery_retrieval_mode").cloned() {
-        caps_map.insert("bigquery_mode".to_string(), mode);
-    }
 
     // Extract default_model from settings.custom_settings
     let default_model = custom_settings_get(&workspace.settings, "default_model")
         .and_then(|v| v.as_str())
         .unwrap_or("claude-sonnet-4-5-20250929");
-
-    // Extract arrow_download_enabled from settings
-    let arrow_download_enabled = settings_get(&workspace.settings, "arrow_download_enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
 
     // Build user BigQuery preferences for database_connections
     let db_user = user_service::get_user_by_id(&state.db, &user.user_id).await?;
@@ -487,7 +455,6 @@ async fn get_settings(
         "workspace_id": workspace.workspace_id,
         "name": workspace.name,
         "subscription_tier": capabilities.subscription_tier,
-        "arrow_download_enabled": arrow_download_enabled,
         "database_connections": database_connections,
         "default_model": default_model,
         "settings": settings_blob,
@@ -524,23 +491,6 @@ async fn update_settings(
             workspace.workspace_id,
             trimmed
         );
-    }
-
-    // Update arrow_download_enabled if provided
-    if let Some(arrow_enabled) = data.arrow_download_enabled {
-        // Ensure workspace has a paid subscription (Cloud or legacy paid tiers)
-        if matches!(workspace.subscription_tier, SubscriptionTier::Free) {
-            return Err(kyomi_core::Error::Forbidden(
-                "Arrow download requires a Cloud subscription".into(),
-            ));
-        }
-
-        if let Some(obj) = current_settings.as_object_mut() {
-            obj.insert(
-                "arrow_download_enabled".to_string(),
-                serde_json::json!(arrow_enabled),
-            );
-        }
     }
 
     // Update default_dashboard_id if provided
@@ -604,10 +554,9 @@ async fn get_billing(
 
     let workspace = get_current_ws(&state.db, &user).await?;
     let capabilities = if state.config.self_hosted {
-        capability::compute_capabilities_self_hosted(false)
+        capability::compute_capabilities_self_hosted()
     } else {
-        let bq_arrow_enabled = has_bq_arrow_streaming(&state.db, &workspace.workspace_id).await;
-        capability::compute_capabilities(&workspace, bq_arrow_enabled)
+        capability::compute_capabilities(&workspace)
     };
     let tier = capabilities.subscription_tier;
     let credits = capability::get_credits_info(&workspace, tier);
@@ -682,7 +631,6 @@ async fn get_billing(
         },
         "features": {
             "ai_enabled": capabilities.ai_chat_enabled,
-            "bigquery_mode": capabilities.bigquery_retrieval_mode,
             "multi_user": capabilities.multi_user_enabled,
         },
     })))

@@ -447,7 +447,6 @@ struct UserSettingsResponse {
     has_username: bool,
     has_access_token: bool,
     auth_mode: Option<String>,
-    enable_arrow_streaming: Option<bool>,
     service_account_email: Option<String>,
 }
 
@@ -1357,7 +1356,7 @@ async fn get_settings(
 
     // Type-specific settings
     let (workspace_defaults, effective, has_oauth, oauth_email, has_bigquery_scopes,
-         needs_bigquery_connect, auth_mode, enable_arrow_streaming, service_account_email) =
+         needs_bigquery_connect, auth_mode, service_account_email) =
         match ds.datasource_type {
             DatasourceType::Bigquery => {
                 let defaults = json!({
@@ -1392,11 +1391,6 @@ async fn get_settings(
                     .and_then(|v| v.as_str())
                     .unwrap_or("kyomi_oauth")
                     .to_string();
-                let enable_arrow = connection_config
-                    .get("enable_arrow_streaming")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
                 let mut sa_email: Option<String> = None;
 
                 let (has_o, o_email, bq_scopes, needs_connect) = match auth_mode_val.as_str() {
@@ -1466,7 +1460,6 @@ async fn get_settings(
                     bq_scopes,
                     needs_connect,
                     Some(auth_mode_val),
-                    Some(enable_arrow),
                     sa_email,
                 )
             }
@@ -1492,7 +1485,6 @@ async fn get_settings(
                     false,
                     None,
                     None,
-                    None,
                 )
             }
             _ => {
@@ -1504,7 +1496,6 @@ async fn get_settings(
                     None,
                     false,
                     false,
-                    None,
                     None,
                     None,
                 )
@@ -1570,7 +1561,6 @@ async fn get_settings(
         has_username,
         has_access_token,
         auth_mode,
-        enable_arrow_streaming,
         service_account_email,
     }))
 }

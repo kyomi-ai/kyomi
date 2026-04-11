@@ -113,13 +113,11 @@ pub fn ResultsTable(
     // When total_rows is unknown but has_more is true, we know there's at
     // least one more page. Use a large sentinel so the "next" button stays
     // enabled — the server returns empty rows when we go past the end.
-    let total_rows = result.total_rows.unwrap_or_else(|| {
-        if result.has_more {
-            // Unknown total — allow forward pagination
-            usize::MAX
-        } else {
-            result.row_count
-        }
+    let total_rows = result.total_rows.unwrap_or(if result.has_more {
+        // Unknown total — allow forward pagination
+        usize::MAX
+    } else {
+        result.row_count
     });
     let page_size = page_size.max(1);
     let total_pages = if has_known_total {

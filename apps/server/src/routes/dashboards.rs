@@ -813,9 +813,9 @@ async fn export_pdf_inner(
         .await?
         .ok_or_else(|| kyomi_core::Error::NotFound("Workspace not found".into()))?;
     let capabilities = if state.config.self_hosted {
-        capability::compute_capabilities_self_hosted(false)
+        capability::compute_capabilities_self_hosted()
     } else {
-        capability::compute_capabilities(&workspace, false)
+        capability::compute_capabilities(&workspace)
     };
     if !capabilities.pdf_export_enabled {
         return Err(kyomi_core::Error::Forbidden(

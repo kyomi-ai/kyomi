@@ -96,11 +96,10 @@ rand = "0.9"
 # Statistics (t-distribution for forecast prediction intervals)
 statrs = "0.18"
 
-# Apache Arrow IPC (BigQuery read-arrow endpoint — REST→Arrow conversion)
+# Apache Arrow IPC (query result → Arrow conversion for chartml-rs)
 arrow-schema = "57"
 arrow-array = "57"
 arrow-ipc = "57"
-arrow-buffer = "57"
 
 # SSH key generation (Ed25519)
 ed25519-dalek = { version = "2", features = ["rand_core"] }

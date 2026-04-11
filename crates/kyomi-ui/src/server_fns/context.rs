@@ -54,17 +54,9 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     let workspace_id = auth.workspace.workspace_id.as_deref();
     let subscription_tier = auth.workspace.subscription_tier;
 
-    // Check BigQuery arrow streaming before branching on self-hosted vs SaaS,
-    // so self-hosted BigQuery users get correct capabilities too.
-    let bq_arrow_enabled = if let Some(ws_id) = workspace_id {
-        check_bq_arrow_streaming(&ctx.db, ws_id).await
-    } else {
-        false
-    };
-
     // Compute capabilities from the workspace (mirrors apps/server/src/routes/workspaces.rs).
     let capabilities = if ctx.config.self_hosted {
-        kyomi_core::capability::compute_capabilities_self_hosted(bq_arrow_enabled)
+        kyomi_core::capability::compute_capabilities_self_hosted()
     } else if let Some(ws_id) = workspace_id {
         let workspace =
             kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
@@ -72,7 +64,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
                 .map_err(|e| ServerFnError::new(e.to_string()))?
                 .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
-        kyomi_core::capability::compute_capabilities(&workspace, bq_arrow_enabled)
+        kyomi_core::capability::compute_capabilities(&workspace)
     } else {
         // No workspace in SaaS mode — return minimal free-tier defaults.
         // Do NOT use compute_capabilities_self_hosted here; that grants
@@ -149,27 +141,6 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     })
 }
 
-/// Check if any BigQuery datasource in the workspace has arrow streaming enabled.
-///
-/// Mirrors `has_bq_arrow_streaming` in `apps/server/src/routes/workspaces.rs`.
-/// Returns `false` on any error (fail-open).
-#[cfg(feature = "ssr")]
-async fn check_bq_arrow_streaming(db: &kyomi_core::DbPool, workspace_id: &str) -> bool {
-    let datasources = match kyomi_auth::datasource_service::list_datasources(db, workspace_id, false).await {
-        Ok(ds) => ds,
-        Err(_) => return false,
-    };
-
-    datasources.iter().any(|ds| {
-        ds.datasource_type == kyomi_core::enums::DatasourceType::Bigquery
-            && ds
-                .connection_config
-                .get("enable_arrow_streaming")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-    })
-}
-
 /// Minimal free-tier capabilities for SaaS users without a workspace.
 ///
 /// Grants only the baseline feature set — no premium flags, no multi-user,
@@ -194,7 +165,6 @@ fn free_tier_capabilities() -> kyomi_core::capability::Capabilities {
 
         // BigQuery — keep in sync with compute_capabilities() in capability.rs
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: "direct_api".to_string(),
 
         // Organization features — disabled for free tier
         multi_user_enabled: false,
@@ -213,7 +183,6 @@ fn free_tier_capabilities() -> kyomi_core::capability::Capabilities {
 
         // Premium flags — all disabled
         kyomi_watch_enabled: false,
-        arrow_streaming_enabled: false,
         slack_integration_enabled: false,
         mcp_access_enabled: true, // MCP is available to all tiers
         pdf_export_enabled: false,
@@ -245,7 +214,6 @@ fn build_capabilities_map(caps: &kyomi_core::capability::Capabilities) -> HashMa
 
     // Premium flags
     map.insert("kyomi_watch_enabled".into(), caps.kyomi_watch_enabled);
-    map.insert("arrow_streaming_enabled".into(), caps.arrow_streaming_enabled);
     map.insert("slack_integration_enabled".into(), caps.slack_integration_enabled);
     map.insert("mcp_access_enabled".into(), caps.mcp_access_enabled);
     map.insert("pdf_export_enabled".into(), caps.pdf_export_enabled);
@@ -264,7 +232,7 @@ mod tests {
     #[test]
     fn build_capabilities_map_includes_all_boolean_flags() {
         // Use self-hosted capabilities as a convenient fully-populated struct.
-        let caps = kyomi_core::capability::compute_capabilities_self_hosted(false);
+        let caps = kyomi_core::capability::compute_capabilities_self_hosted();
         let map = build_capabilities_map(&caps);
 
         // Verify all expected keys are present.
@@ -279,7 +247,6 @@ mod tests {
             "export_enabled",
             "api_access_enabled",
             "kyomi_watch_enabled",
-            "arrow_streaming_enabled",
             "slack_integration_enabled",
             "mcp_access_enabled",
             "pdf_export_enabled",
@@ -300,17 +267,12 @@ mod tests {
 
     #[test]
     fn build_capabilities_map_reflects_disabled_features() {
-        // Use self-hosted with arrow disabled.
-        let caps = kyomi_core::capability::compute_capabilities_self_hosted(false);
+        // Self-hosted should have billing disabled.
+        let caps = kyomi_core::capability::compute_capabilities_self_hosted();
         let map = build_capabilities_map(&caps);
 
-        assert_eq!(map["arrow_streaming_enabled"], false);
-
-        // Now with arrow enabled.
-        let caps_arrow = kyomi_core::capability::compute_capabilities_self_hosted(true);
-        let map_arrow = build_capabilities_map(&caps_arrow);
-
-        assert_eq!(map_arrow["arrow_streaming_enabled"], true);
+        assert_eq!(map["billing_enabled"], false);
+        assert_eq!(map["credits_exhausted"], false);
     }
 
     #[test]
