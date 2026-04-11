@@ -184,6 +184,8 @@ pub fn register_server_functions() {
     register_explicit::<CancelSubscription>();
     register_explicit::<ReactivateSubscription>();
     register_explicit::<CreatePortalSession>();
+    register_explicit::<PurchaseAiBundle>();
+    register_explicit::<PurchaseAnalyticsBundle>();
 
     use server_fns::workspace::*;
     register_explicit::<GetWorkspaceSettings>();
