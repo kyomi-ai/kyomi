@@ -196,6 +196,46 @@ pub fn Layout(children: Children) -> impl IntoView {
         }
     });
 
+    // Subscription gate: redirect to billing when trial expired or subscription cancelled.
+    // Only enforced for non-personal-mode users navigating to non-settings pages.
+    #[cfg(target_arch = "wasm32")]
+    let navigate_billing = use_navigate();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let user_info_for_sub_gate = user_info;
+        let location_for_gate = leptos_router::hooks::use_location();
+        Effect::new(move || {
+            // Don't gate until auth is confirmed
+            if !auth_confirmed.get() {
+                return;
+            }
+            let Some(Ok(user)) = user_info_for_sub_gate.get() else { return };
+            // Personal mode / self-hosted don't have billing
+            if user.is_personal_mode {
+                return;
+            }
+            // Don't gate the settings/billing page itself (or any settings page)
+            let path = location_for_gate.pathname.get();
+            if path.starts_with("/settings") || path.starts_with("/login") || path.starts_with("/signup") {
+                return;
+            }
+            let needs_gate = match user.subscription_status.as_str() {
+                "cancelled" | "past_due" => true,
+                "trialing" => {
+                    // Check if trial has expired
+                    user.trial_ends_at
+                        .as_deref()
+                        .and_then(|te| chrono::DateTime::parse_from_rfc3339(te).ok())
+                        .is_some_and(|dt| dt < chrono::Utc::now())
+                }
+                _ => false,
+            };
+            if needs_gate {
+                navigate_billing("/settings/billing", NavigateOptions::default());
+            }
+        });
+    }
+
     view! {
         // Auth guard loading screen — shown while auth check is in progress.
         // Hidden once auth_confirmed becomes true (user is authenticated).

@@ -421,6 +421,7 @@ async fn signup_start(
                         &user.user_id,
                         Some(name),
                         &email,
+                        Some(&state.config),
                     )
                     .await?;
                 }
@@ -536,6 +537,7 @@ async fn signup_start(
                     &user.user_id,
                     Some(name),
                     &email,
+                    Some(&state.config),
                 )
                 .await?;
 
@@ -699,6 +701,7 @@ async fn signup_complete(
         &user.user_id,
         Some(&name),
         &email,
+        Some(&state.config),
     )
     .await?;
 

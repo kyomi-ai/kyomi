@@ -179,6 +179,7 @@ pub async fn accept_terms(
             &user.user_id,
             Some(name),
             email,
+            Some(&ctx.config),
         )
         .await
         .map_err(|e| {

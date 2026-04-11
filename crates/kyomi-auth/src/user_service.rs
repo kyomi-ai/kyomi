@@ -241,44 +241,55 @@ pub async fn create_user(
 /// Create a personal workspace for a new user.
 ///
 /// Returns the workspace_id. Matches Python's workspace creation flow.
+///
+/// When `config` is provided and contains Stripe keys (SaaS mode):
+/// - Creates workspace with `cloud` tier, `trialing` status, 30-day trial
+/// - Seeds $5 AI credit balance to get started
+/// - Creates a Stripe customer and stores the `stripe_customer_id`
+///
+/// When `config` is `None` or Stripe is not configured:
+/// - Self-hosted gets `team` tier with `active` status (no trial, no billing)
+/// - SaaS without Stripe gets `cloud` tier with `trialing` status
 pub async fn create_workspace_for_user(
     pool: &DbPool,
     user_id: &str,
     _user_name: Option<&str>,
     user_email: &str,
+    config: Option<&kyomi_core::Config>,
 ) -> kyomi_core::Result<String> {
-    let self_hosted = std::env::var("SELF_HOSTED").unwrap_or_default() == "true";
-    create_workspace_for_user_inner(pool, user_id, _user_name, user_email, self_hosted).await
-}
+    let self_hosted = config
+        .map(|c| c.self_hosted)
+        .unwrap_or_else(|| std::env::var("SELF_HOSTED").unwrap_or_default() == "true");
 
-async fn create_workspace_for_user_inner(
-    pool: &DbPool,
-    user_id: &str,
-    _user_name: Option<&str>,
-    user_email: &str,
-    self_hosted: bool,
-) -> kyomi_core::Result<String> {
     let workspace_id = generate_workspace_id();
     let is_pg = pool.is_postgres();
     let bt = sql_compat::bool_true(is_pg);
 
-    // Self-hosted: team tier with active status (no trial, no billing).
-    // SaaS: free tier with 7-day trial window.
-    let (tier, status, trial_ends_at) = if self_hosted {
-        ("team", "active", None)
-    } else {
-        let trial = chrono::Utc::now() + chrono::Duration::days(7);
-        ("free", "trial", Some(trial))
-    };
+    // Determine whether Stripe is available (SaaS mode with billing).
+    let has_stripe = config
+        .and_then(|c| c.stripe_secret_key.as_deref())
+        .is_some_and(|k| !k.is_empty());
 
-    let user_limit: Option<i32> = if self_hosted { Some(999_999) } else { None };
+    // Self-hosted: team tier with active status (no trial, no billing).
+    // SaaS with Stripe: cloud tier with 30-day trial and $5 AI credits.
+    // SaaS without Stripe: cloud tier with 30-day trial, no credits.
+    let (tier, status, subscription_status, trial_ends_at, ai_bundle_balance, user_limit) =
+        if self_hosted {
+            ("team", "active", "active", None, 0.0_f64, Some(999_999_i32))
+        } else {
+            let trial = chrono::Utc::now() + chrono::Duration::days(30);
+            let credits = if has_stripe { 5.0 } else { 0.0 };
+            ("cloud", "trial", "trialing", Some(trial), credits, None)
+        };
 
     kyomi_core::db_execute!(
         pool,
         "INSERT INTO workspaces \
-         (workspace_id, name, admin_email, owner_user_id, status, subscription_tier, subscription_status, trial_ends_at, user_limit) \
-         VALUES ($1, NULL, $2, $3, $4, $5, 'active', $6, $7)",
-        &workspace_id, user_email, user_id, status, tier, &trial_ends_at, &user_limit
+         (workspace_id, name, admin_email, owner_user_id, status, subscription_tier, \
+          subscription_status, trial_ends_at, user_limit, ai_bundle_balance_usd) \
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)",
+        &workspace_id, user_email, user_id, status, tier,
+        subscription_status, &trial_ends_at, &user_limit, ai_bundle_balance
     )?;
 
     // Add user as admin of the workspace
@@ -290,6 +301,37 @@ async fn create_workspace_for_user_inner(
 
     // Set as last workspace
     update_last_workspace(pool, user_id, &workspace_id).await?;
+
+    // Create Stripe customer (SaaS mode only). Non-blocking — if this fails,
+    // the customer can be created later when they visit the billing page.
+    if let Some(config) = config
+        && let Some(ref secret_key) = config.stripe_secret_key
+        && !secret_key.is_empty()
+    {
+        let webhook_secret = config.stripe_webhook_secret.as_deref().unwrap_or_default();
+        let stripe = crate::stripe_service::StripeService::new(secret_key, webhook_secret);
+        match stripe.create_customer(user_email, &workspace_id, "New Workspace").await {
+            Ok(customer_id) => {
+                if let Err(e) = kyomi_core::db_execute!(
+                    pool,
+                    "UPDATE workspaces SET stripe_customer_id = $1 WHERE workspace_id = $2",
+                    &customer_id, &workspace_id
+                ) {
+                    tracing::error!(
+                        workspace_id = %workspace_id, error = %e,
+                        "Failed to store Stripe customer ID"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    workspace_id = %workspace_id, error = %e,
+                    "Failed to create Stripe customer at signup"
+                );
+                // Don't fail signup — customer can be created later
+            }
+        }
+    }
 
     Ok(workspace_id)
 }

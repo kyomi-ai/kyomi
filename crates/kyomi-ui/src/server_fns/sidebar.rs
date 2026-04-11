@@ -21,6 +21,10 @@ pub struct SidebarUser {
     pub email: String,
     pub workspace_name: Option<String>,
     pub is_personal_mode: bool,
+    /// Subscription status for the workspace: "trialing", "active", "past_due", "cancelled".
+    pub subscription_status: String,
+    /// Trial expiration ISO 8601 timestamp. Present when status is "trialing".
+    pub trial_ends_at: Option<String>,
     /// User's theme preference: "light", "dark", or "system".
     pub theme_preference: String,
 }
@@ -78,6 +82,9 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
         .unwrap_or("system")
         .to_string();
 
+    // trial_ends_at is already on the middleware's WorkspaceContext — no extra DB query needed.
+    let trial_ends_at = auth.workspace.trial_ends_at.map(|dt| dt.to_rfc3339());
+
     Ok(SidebarUser {
         user_id: auth.user_id.clone(),
         workspace_id: auth.workspace.workspace_id.clone(),
@@ -85,6 +92,8 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
         email: auth.email.clone(),
         workspace_name: auth.workspace.workspace_name.clone(),
         is_personal_mode: ctx.config.is_personal(),
+        subscription_status: auth.workspace.subscription_status.to_string(),
+        trial_ends_at,
         theme_preference,
     })
 }

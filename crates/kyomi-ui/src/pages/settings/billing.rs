@@ -430,6 +430,7 @@ fn BillingContent(
     let current_tier = info.tier.clone();
     let status = info.status.clone();
     let period_end = info.period_end.clone();
+    let trial_ends_at = info.trial_ends_at.clone();
     let user_limit = info.user_limit;
     let active_members = info.active_members;
 
@@ -447,8 +448,11 @@ fn BillingContent(
     let status_for_actions = status.clone();
     let status_for_seats = status.clone();
 
-    let is_subscribed = current_tier == "cloud";
+    // "trialing" with no Stripe subscription (no period_end) means app-managed trial.
+    // These users haven't subscribed yet — show the subscribe CTA.
+    let is_app_trial = status == "trialing" && period_end.is_none();
     let is_free = current_tier == "free";
+    let is_subscribed = !is_free && !is_app_trial;
 
     view! {
         <div class="space-y-6" style:display="block">
@@ -459,7 +463,7 @@ fn BillingContent(
                         <div>
                             <CardTitle>"Current Plan"</CardTitle>
                             <CardDescription class="mt-1">
-                                {if is_subscribed {
+                                {if is_subscribed || is_app_trial {
                                     format!("Cloud Plan \u{2014} ${:.0}/user/month", PRICE_PER_USER)
                                 } else {
                                     "Free Plan".to_string()
@@ -468,7 +472,7 @@ fn BillingContent(
                         </div>
                         <div class="flex items-center gap-3">
                             // Status Badge
-                            {(is_subscribed && !status_for_badge.is_empty()).then(|| {
+                            {((is_subscribed || is_app_trial) && !status_for_badge.is_empty()).then(|| {
                                 let (variant, label) = match status_for_badge.as_str() {
                                     "active" => (StatusBadgeVariant::Success, "Active"),
                                     "trialing" => (StatusBadgeVariant::Info, "Trial"),
@@ -559,8 +563,22 @@ fn BillingContent(
                         })}
 
                         // Action Buttons
-                        {if is_free {
-                            // Free tier — show subscribe CTA
+                        {if is_free || is_app_trial {
+                            // Free tier or app-managed trial — show subscribe CTA
+                            let trial_msg = if is_app_trial {
+                                trial_ends_at.as_deref().and_then(|te| {
+                                    chrono::DateTime::parse_from_rfc3339(te).ok().map(|dt| {
+                                        let days_left = (dt.signed_duration_since(chrono::Utc::now())).num_days().max(0);
+                                        if days_left == 0 {
+                                            "Your trial has expired. Subscribe to continue using Kyomi.".to_string()
+                                        } else {
+                                            format!("Trial \u{2014} {days_left} day{} remaining", if days_left == 1 { "" } else { "s" })
+                                        }
+                                    })
+                                }).unwrap_or_else(|| "Trial active".to_string())
+                            } else {
+                                "Includes a 30-day free trial. All features included.".to_string()
+                            };
                             view! {
                                 <div class="mt-4">
                                     <Button
@@ -573,7 +591,7 @@ fn BillingContent(
                                         {format!("Subscribe \u{2014} ${:.0}/user/month", PRICE_PER_USER)}
                                     </Button>
                                     <p class="text-xs text-muted-foreground mt-2">
-                                        "Includes a 30-day free trial. All features included."
+                                        {trial_msg}
                                     </p>
                                 </div>
                             }.into_any()
@@ -619,7 +637,7 @@ fn BillingContent(
             </Card>
 
             // User Seats Card (visible for active/trialing Cloud subscriptions)
-            {(tier_for_seats == "cloud" && (status_for_seats == "active" || status_for_seats == "trialing")).then(|| {
+            {(tier_for_seats != "free" && (status_for_seats == "active" || status_for_seats == "trialing")).then(|| {
                 let user_limit_seats = user_limit.unwrap_or(999_999);
 
                 view! {

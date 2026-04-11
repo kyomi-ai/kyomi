@@ -1279,6 +1279,8 @@ mod tests {
                 workspace_roles: vec![],
                 workspace_status: Some(kyomi_core::WorkspaceStatus::Active),
                 subscription_tier,
+                subscription_status: kyomi_core::enums::SubscriptionStatus::Active,
+                trial_ends_at: None,
                 is_owner: true,
             },
             token_exp: None,

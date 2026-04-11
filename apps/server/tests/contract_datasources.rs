@@ -163,7 +163,7 @@ async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
 
     // Create a workspace (user becomes admin + owner)
     let workspace_id =
-        kyomi_auth::user_service::create_workspace_for_user(&db, &user.user_id, Some("DS Test User"), &email)
+        kyomi_auth::user_service::create_workspace_for_user(&db, &user.user_id, Some("DS Test User"), &email, None)
             .await
             .expect("should create test workspace");
 

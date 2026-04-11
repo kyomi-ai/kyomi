@@ -36,6 +36,8 @@ pub struct SubscriptionInfo {
     pub period_start: Option<String>,
     pub period_end: Option<String>,
     pub ai_reset_date: Option<String>,
+    /// Trial expiration timestamp (ISO 8601). Present when status is "trialing".
+    pub trial_ends_at: Option<String>,
     pub user_limit: Option<i32>,
     /// AI token bundle balance in cents (e.g. 1500 = $15.00). Non-expiring.
     pub ai_token_balance_cents: Option<i64>,
@@ -106,6 +108,7 @@ struct WorkspaceRow {
     billing_cycle: Option<String>,
     subscription_period_start: Option<String>,
     subscription_period_end: Option<String>,
+    trial_ends_at: Option<String>,
     user_limit: Option<i32>,
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
@@ -145,6 +148,7 @@ async fn load_workspace(
          billing_cycle, \
          CAST(subscription_period_start AS TEXT) AS subscription_period_start, \
          CAST(subscription_period_end AS TEXT) AS subscription_period_end, \
+         CAST(trial_ends_at AS TEXT) AS trial_ends_at, \
          user_limit, \
          stripe_customer_id, stripe_subscription_id, \
          COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
@@ -257,6 +261,7 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         period_start: workspace.subscription_period_start,
         period_end: workspace.subscription_period_end,
         ai_reset_date,
+        trial_ends_at: workspace.trial_ends_at,
         user_limit: workspace.user_limit,
         ai_token_balance_cents: Some(ai_token_balance_cents),
         analytics_events_used: Some(analytics_events_used),

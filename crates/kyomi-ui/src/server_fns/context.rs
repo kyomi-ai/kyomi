@@ -28,8 +28,10 @@ pub struct UserContext {
     /// Workspace roles as strings, e.g. ["workspace_admin", "user"].
     pub workspace_roles: Vec<String>,
     pub is_owner: bool,
-    /// Subscription tier slug: "free", "team", "enterprise", etc.
+    /// Subscription tier slug: "free", "team", "cloud", "enterprise", etc.
     pub subscription_tier: String,
+    /// Subscription status: "trialing", "active", "past_due", "cancelled".
+    pub subscription_status: String,
     pub is_personal_mode: bool,
     pub is_self_hosted: bool,
     /// Whether billing UI should be shown. Convenience field that mirrors
@@ -133,6 +135,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
             .collect(),
         is_owner: auth.workspace.is_owner,
         subscription_tier: subscription_tier.to_string(),
+        subscription_status: auth.workspace.subscription_status.to_string(),
         is_personal_mode: ctx.config.is_personal(),
         is_self_hosted: ctx.config.self_hosted,
         billing_enabled,

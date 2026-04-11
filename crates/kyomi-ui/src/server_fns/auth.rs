@@ -461,6 +461,7 @@ pub async fn signup_start(
                         &user.user_id,
                         Some(name_str),
                         &email,
+                        Some(&ctx.config),
                     )
                     .await
                     .map_err(|e| {
@@ -617,6 +618,7 @@ pub async fn signup_start(
                     &user.user_id,
                     Some(name_str),
                     &email,
+                    Some(&ctx.config),
                 )
                 .await
                 .map_err(|e| {
@@ -847,6 +849,7 @@ pub async fn signup_complete(
         &user.user_id,
         Some(&name),
         &email,
+        Some(&ctx.config),
     )
     .await
     .map_err(|e| {
@@ -1094,6 +1097,7 @@ pub async fn google_oauth_callback(
                     &user.user_id,
                     user.name.as_deref(),
                     &email,
+                    Some(&ctx.config),
                 )
                 .await
                 .map_err(|e| {
@@ -2335,6 +2339,7 @@ pub async fn passkey_signup_complete(
         &user.user_id,
         Some(&name),
         &email,
+        Some(&ctx.config),
     )
     .await
     .map_err(|e| {

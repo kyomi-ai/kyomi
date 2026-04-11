@@ -12,7 +12,7 @@ use axum::{
 };
 use chrono::Utc;
 
-use kyomi_core::enums::{SubscriptionTier, WorkspaceRole, WorkspaceStatus};
+use kyomi_core::enums::{SubscriptionStatus, SubscriptionTier, WorkspaceRole, WorkspaceStatus};
 
 use crate::jwt;
 
@@ -33,6 +33,8 @@ pub struct WorkspaceContext {
     pub workspace_roles: Vec<WorkspaceRole>,
     pub workspace_status: Option<WorkspaceStatus>,
     pub subscription_tier: SubscriptionTier,
+    pub subscription_status: SubscriptionStatus,
+    pub trial_ends_at: Option<chrono::DateTime<chrono::Utc>>,
     pub is_owner: bool,
 }
 
@@ -44,6 +46,8 @@ impl Default for WorkspaceContext {
             workspace_roles: Vec::new(),
             workspace_status: None,
             subscription_tier: SubscriptionTier::Free,
+            subscription_status: SubscriptionStatus::Active,
+            trial_ends_at: None,
             is_owner: false,
         }
     }
@@ -135,6 +139,8 @@ where
                             workspace_ctx.workspace_roles = vec![wu.role];
                             workspace_ctx.workspace_status = Some(ws.status);
                             workspace_ctx.subscription_tier = ws.subscription_tier;
+                            workspace_ctx.subscription_status = ws.subscription_status;
+                            workspace_ctx.trial_ends_at = ws.trial_ends_at;
                             workspace_ctx.is_owner = ws.owner_user_id == user_id;
                         }
                         Ok(None) => {
@@ -265,6 +271,8 @@ async fn load_personal_user(db: &kyomi_core::DbPool) -> kyomi_core::Result<AuthU
         workspace_roles: vec![WorkspaceRole::WorkspaceAdmin],
         workspace_status: Some(workspace.status),
         subscription_tier: workspace.subscription_tier,
+        subscription_status: workspace.subscription_status,
+        trial_ends_at: workspace.trial_ends_at,
         is_owner: true,
     };
 
