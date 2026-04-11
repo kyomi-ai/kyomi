@@ -444,9 +444,9 @@ impl BillingService {
                     ws.subscription_period_end
                 };
 
-                (reset, ws.trial_ends_at, ws.user_limit.unwrap_or(1))
+                (reset, ws.trial_ends_at, ws.user_limit.unwrap_or(999_999))
             }
-            None => (None, None, 1),
+            None => (None, None, 999_999),
         };
 
         // Per-user fair share (simple: user gets 100% of their share)
@@ -579,6 +579,79 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 /// Check if a year is a leap year.
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+// ─── Seat billing sync ─────────────────────────────────────────────────────
+
+/// Sync the Stripe subscription quantity to match the actual active member count.
+///
+/// Called after invite accept (`increment = 1`) or member removal (`increment = -1`).
+/// Checks that `user_count == stripe_quantity + increment` — if not, logs a
+/// warning indicating drift between Stripe and the DB.
+pub async fn update_billing_users(
+    db: &kyomi_core::DbPool,
+    stripe_service: &crate::stripe_service::StripeService,
+    workspace_id: &str,
+    user_count: i64,
+    increment: i64,
+) -> kyomi_core::Result<()> {
+    let sub_id: Option<String> = kyomi_core::db_fetch_optional!(
+        db,
+        SubIdRow,
+        "SELECT stripe_subscription_id FROM workspaces WHERE workspace_id = $1",
+        workspace_id
+    )?
+    .and_then(|row| row.stripe_subscription_id);
+
+    let Some(sub_id) = sub_id else {
+        // No subscription — ensure user_limit is at least user_count
+        // SQLite doesn't have GREATEST(); MAX(a,b) works on both.
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE workspaces SET user_limit = MAX(user_limit, $1) WHERE workspace_id = $2",
+            user_count as i32,
+            workspace_id
+        )?;
+        return Ok(());
+    };
+
+    let stripe_quantity = stripe_service
+        .get_subscription_quantity(&sub_id)
+        .await
+        .map_err(|e| kyomi_core::Error::Internal(format!("Failed to get Stripe quantity: {e}")))?;
+
+    let expected = stripe_quantity as i64 + increment;
+    if user_count != expected {
+        tracing::warn!(
+            workspace_id = %workspace_id,
+            user_count = user_count,
+            stripe_quantity = stripe_quantity,
+            increment = increment,
+            expected = expected,
+            "Seat count drift detected — DB member count does not match Stripe quantity + increment"
+        );
+    }
+
+    if user_count as u64 != stripe_quantity {
+        stripe_service
+            .update_seat_count(&sub_id, user_count as u64)
+            .await
+            .map_err(|e| kyomi_core::Error::Internal(format!("Failed to update Stripe seats: {e}")))?;
+
+        tracing::info!(
+            workspace_id = %workspace_id,
+            previous = stripe_quantity,
+            new = user_count,
+            "Updated Stripe seat count"
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SubIdRow {
+    stripe_subscription_id: Option<String>,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

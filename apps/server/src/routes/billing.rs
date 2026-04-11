@@ -100,15 +100,6 @@ fn require_stripe(state: &AppState) -> Result<&StripeService, kyomi_core::Error>
     })
 }
 
-/// Determine if the Stripe secret key is in test mode.
-fn is_stripe_test_mode(config: &kyomi_core::Config) -> bool {
-    config
-        .stripe_secret_key
-        .as_deref()
-        .map(stripe_config::is_test_mode)
-        .unwrap_or(true)
-}
-
 /// Load a workspace by its workspace_id.
 async fn load_workspace(
     db: &kyomi_core::DbPool,
@@ -244,12 +235,10 @@ async fn create_checkout(
         }
 
     // New subscription flow: create Stripe customer if needed + checkout session
-    let is_test = is_stripe_test_mode(&state.config);
-
-    let price_id = stripe_config::get_price_id("cloud", "monthly", is_test)
+    let price_id = stripe_config::get_cloud_price_id()
         .ok_or_else(|| {
             kyomi_core::Error::BadRequest(
-                "Cloud price not configured".to_string(),
+                "STRIPE_CLOUD_MONTHLY not configured".to_string(),
             )
         })?;
 
@@ -329,11 +318,9 @@ async fn modify_existing_subscription(
     workspace: &WorkspaceRow,
     subscription_id: &str,
 ) -> Result<Json<Value>, kyomi_core::Error> {
-    let is_test = is_stripe_test_mode(&state.config);
-
     let new_price_id =
-        stripe_config::get_price_id("cloud", "monthly", is_test).ok_or_else(
-            || kyomi_core::Error::BadRequest("Cloud price not configured".to_string()),
+        stripe_config::get_cloud_price_id().ok_or_else(
+            || kyomi_core::Error::BadRequest("STRIPE_CLOUD_MONTHLY not configured".to_string()),
         )?;
 
     // Modify the subscription to the Cloud price
@@ -1057,9 +1044,8 @@ async fn purchase_ai_bundle(
         )
     })?;
 
-    let is_test = is_stripe_test_mode(&state.config);
-    let price_id = stripe_config::get_ai_bundle_price_id(is_test).ok_or_else(|| {
-        kyomi_core::Error::BadRequest("AI bundle price not configured".to_string())
+    let price_id = stripe_config::get_ai_bundle_price_id().ok_or_else(|| {
+        kyomi_core::Error::BadRequest("STRIPE_AI_BUNDLE not configured".to_string())
     })?;
 
     let frontend_url = &state.config.frontend_url;
@@ -1112,9 +1098,8 @@ async fn purchase_analytics_bundle(
         )
     })?;
 
-    let is_test = is_stripe_test_mode(&state.config);
-    let price_id = stripe_config::get_analytics_bundle_price_id(is_test).ok_or_else(|| {
-        kyomi_core::Error::BadRequest("Analytics bundle price not configured".to_string())
+    let price_id = stripe_config::get_analytics_bundle_price_id().ok_or_else(|| {
+        kyomi_core::Error::BadRequest("STRIPE_ANALYTICS_BUNDLE not configured".to_string())
     })?;
 
     let frontend_url = &state.config.frontend_url;

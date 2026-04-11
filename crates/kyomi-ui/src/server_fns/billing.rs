@@ -43,6 +43,8 @@ pub struct SubscriptionInfo {
     pub analytics_events_used: Option<i64>,
     /// Remaining purchased analytics event bundle balance (non-expiring).
     pub analytics_bundle_balance: Option<i64>,
+    /// Number of active members in the workspace (for seat billing display).
+    pub active_members: i32,
 }
 
 /// A single invoice record.
@@ -173,16 +175,6 @@ fn require_stripe(
     ))
 }
 
-/// Determine if the Stripe secret key is in test mode.
-#[cfg(feature = "ssr")]
-fn is_stripe_test_mode(config: &kyomi_core::Config) -> bool {
-    config
-        .stripe_secret_key
-        .as_deref()
-        .map(kyomi_auth::stripe_config::is_test_mode)
-        .unwrap_or(true)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Server functions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,6 +241,15 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
     // Analytics bundle balance from the workspace row (already loaded)
     let analytics_bundle_balance = workspace.analytics_bundle_events.unwrap_or(0);
 
+    // Count active workspace members for seat billing display
+    let bt = kyomi_core::sql_compat::bool_true(ctx.db.is_postgres());
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM workspace_users WHERE workspace_id = $1 AND active = {bt}"
+    );
+    let active_members: i32 = kyomi_core::db_fetch_scalar!(
+        &ctx.db, i64, &count_sql, ws_id
+    ).map_err(|e| ServerFnError::new(format!("Failed to count workspace members: {e}")))? as i32;
+
     Ok(SubscriptionInfo {
         tier: workspace.subscription_tier,
         status: workspace.subscription_status,
@@ -260,6 +261,7 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         ai_token_balance_cents: Some(ai_token_balance_cents),
         analytics_events_used: Some(analytics_events_used),
         analytics_bundle_balance: Some(analytics_bundle_balance),
+        active_members,
     })
 }
 
@@ -341,13 +343,10 @@ pub async fn create_checkout(
         .await;
     }
 
-    // New subscription flow
-    let is_test = is_stripe_test_mode(&ctx.config);
-
-    // Cloud plan — single price, tier/billing_cycle params ignored by get_price_id
-    let price_id = kyomi_auth::stripe_config::get_price_id("cloud", "monthly", is_test)
+    // New subscription flow — single Cloud price from env
+    let price_id = kyomi_auth::stripe_config::get_cloud_price_id()
         .ok_or_else(|| {
-            ServerFnError::new("Cloud price ID not configured")
+            ServerFnError::new("STRIPE_CLOUD_MONTHLY not configured")
         })?;
 
     // Create Stripe customer if workspace doesn't have one
@@ -410,11 +409,9 @@ async fn modify_existing_subscription(
     subscription_id: &str,
     workspace_id: &str,
 ) -> Result<RedirectUrl, ServerFnError> {
-    let is_test = is_stripe_test_mode(config);
-
     let new_price_id =
-        kyomi_auth::stripe_config::get_price_id("cloud", "monthly", is_test).ok_or_else(
-            || ServerFnError::new("Cloud price ID not configured"),
+        kyomi_auth::stripe_config::get_cloud_price_id().ok_or_else(
+            || ServerFnError::new("STRIPE_CLOUD_MONTHLY not configured"),
         )?;
 
     // Modify the subscription to the Cloud price
@@ -645,10 +642,9 @@ pub async fn purchase_ai_bundle() -> Result<RedirectUrl, ServerFnError> {
         ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
     })?;
 
-    let is_test = is_stripe_test_mode(&ctx.config);
     let price_id =
-        kyomi_auth::stripe_config::get_ai_bundle_price_id(is_test).ok_or_else(|| {
-            ServerFnError::new("AI token bundle price not configured")
+        kyomi_auth::stripe_config::get_ai_bundle_price_id().ok_or_else(|| {
+            ServerFnError::new("STRIPE_AI_BUNDLE not configured")
         })?;
 
     let frontend_url = &ctx.config.frontend_url;
@@ -693,10 +689,9 @@ pub async fn purchase_analytics_bundle() -> Result<RedirectUrl, ServerFnError> {
         ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
     })?;
 
-    let is_test = is_stripe_test_mode(&ctx.config);
-    let price_id = kyomi_auth::stripe_config::get_analytics_bundle_price_id(is_test)
+    let price_id = kyomi_auth::stripe_config::get_analytics_bundle_price_id()
         .ok_or_else(|| {
-            ServerFnError::new("Analytics event bundle price not configured")
+            ServerFnError::new("STRIPE_ANALYTICS_BUNDLE not configured")
         })?;
 
     let frontend_url = &ctx.config.frontend_url;

@@ -1214,6 +1214,32 @@ async fn remove_member_handler(
     )
     .await;
 
+    // Sync billing: count active members and update Stripe quantity
+    if let Some(ref stripe_service) = state.stripe {
+        match workspace_service::count_workspace_users(
+            &state.db, &workspace.workspace_id,
+        ).await {
+            Ok(member_count) => {
+                if let Err(e) = kyomi_auth::billing_service::update_billing_users(
+                    &state.db, stripe_service, &workspace.workspace_id, member_count, -1,
+                ).await {
+                    tracing::error!(
+                        workspace_id = %workspace.workspace_id,
+                        error = %e,
+                        "Failed to sync billing after member removal"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    workspace_id = %workspace.workspace_id,
+                    error = %e,
+                    "Failed to count members for billing sync after removal"
+                );
+            }
+        }
+    }
+
     tracing::info!(
         "Removed member {} from workspace {} (transferred {} shared sessions)",
         member_user_id,
@@ -1280,11 +1306,11 @@ async fn create_invitation_handler(
             workspace_service::count_workspace_users(&state.db, &workspace.workspace_id).await?;
         let pending_invitations =
             workspace_service::count_pending_invitations(&state.db, &workspace.workspace_id).await?;
-        let user_limit = workspace.user_limit.unwrap_or(1) as i64;
+        let user_limit = workspace.user_limit.unwrap_or(999_999) as i64;
 
         if current_users + pending_invitations >= user_limit {
             return Err(kyomi_core::Error::BadRequest(
-                "Workspace user limit reached. Upgrade your plan to add more users.".into(),
+                format!("User limit reached ({user_limit}). The workspace owner can increase the limit on the billing page."),
             ));
         }
     }
@@ -1605,6 +1631,32 @@ async fn accept_invitation_handler(
         db_role,
     )
     .await;
+
+    // Sync billing: count active members and update Stripe quantity
+    if let Some(ref stripe_service) = state.stripe {
+        match workspace_service::count_workspace_users(
+            &state.db, &invitation.workspace_id,
+        ).await {
+            Ok(member_count) => {
+                if let Err(e) = kyomi_auth::billing_service::update_billing_users(
+                    &state.db, stripe_service, &invitation.workspace_id, member_count, 1,
+                ).await {
+                    tracing::error!(
+                        workspace_id = %invitation.workspace_id,
+                        error = %e,
+                        "Failed to sync billing after invite accept"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    workspace_id = %invitation.workspace_id,
+                    error = %e,
+                    "Failed to count members for billing sync after invite accept"
+                );
+            }
+        }
+    }
 
     tracing::info!(
         "User {} accepted invitation {} to workspace {}",

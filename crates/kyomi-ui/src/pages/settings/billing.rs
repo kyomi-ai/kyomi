@@ -431,6 +431,7 @@ fn BillingContent(
     let status = info.status.clone();
     let period_end = info.period_end.clone();
     let user_limit = info.user_limit;
+    let active_members = info.active_members;
 
     // Fields for AI and analytics sections
     let ai_token_balance = info.ai_token_balance_cents.unwrap_or(0);
@@ -503,13 +504,13 @@ fn BillingContent(
                         {(tier_for_status == "cloud" && period_end.is_some()).then(|| {
                             let period_end_for_active = period_end.clone();
                             let period_end_for_cancelled = period_end.clone();
-                            let user_count = user_limit.unwrap_or(1);
+                            let user_count = active_members;
 
                             view! {
                                 <div class="bg-muted/50 border border-border rounded-lg p-4 space-y-2">
                                     // User count row
                                     <div class="flex justify-between text-sm">
-                                        <span class="text-muted-foreground">"User seats"</span>
+                                        <span class="text-muted-foreground">"Active users"</span>
                                         <span class="font-medium text-foreground">
                                             {format!("{} {}", user_count, if user_count == 1 { "user" } else { "users" })}
                                         </span>
@@ -619,11 +620,12 @@ fn BillingContent(
 
             // User Seats Card (visible for active/trialing Cloud subscriptions)
             {(tier_for_seats == "cloud" && (status_for_seats == "active" || status_for_seats == "trialing")).then(|| {
-                let user_limit_seats = user_limit.unwrap_or(1);
+                let user_limit_seats = user_limit.unwrap_or(999_999);
 
                 view! {
                     <UserSeatsCard
                         user_limit=user_limit_seats
+                        active_members=active_members
                         desired_team_size=desired_team_size
                         set_desired_team_size=set_desired_team_size
                         team_size_loading=team_size_loading
@@ -666,11 +668,18 @@ fn BillingContent(
 #[component]
 fn UserSeatsCard(
     user_limit: i32,
+    active_members: i32,
     desired_team_size: ReadSignal<i32>,
     set_desired_team_size: WriteSignal<i32>,
     team_size_loading: ReadSignal<bool>,
     handle_team_size_update: Action<i32, ()>,
 ) -> impl IntoView {
+    let user_limit_display = if user_limit >= 999_999 {
+        "Unlimited".to_string()
+    } else {
+        user_limit.to_string()
+    };
+
     view! {
         <Card>
             <CardHeader>
@@ -679,10 +688,7 @@ fn UserSeatsCard(
                     "User Seats"
                 </CardTitle>
                 <CardDescription>
-                    {format!(
-                        "Manage your user seats. Each seat costs ${:.0}/month.",
-                        PRICE_PER_USER
-                    )}
+                    "Users are billed automatically when they accept an invite. Set a limit to control costs."
                 </CardDescription>
             </CardHeader>
             <CardContent>
@@ -690,15 +696,21 @@ fn UserSeatsCard(
                     // Current seat info
                     <div class="bg-muted/50 border border-border rounded-lg p-4">
                         <div class="flex justify-between text-sm">
-                            <span class="text-muted-foreground">"Current seats"</span>
+                            <span class="text-muted-foreground">"Active users"</span>
                             <span class="font-medium text-foreground">
-                                {format!("{} {}", user_limit, if user_limit == 1 { "user" } else { "users" })}
+                                {active_members.to_string()}
+                            </span>
+                        </div>
+                        <div class="flex justify-between text-sm mt-1">
+                            <span class="text-muted-foreground">"User limit"</span>
+                            <span class="font-medium text-foreground">
+                                {user_limit_display}
                             </span>
                         </div>
                         <div class="flex justify-between text-sm mt-1">
                             <span class="text-muted-foreground">"Monthly cost"</span>
                             <span class="font-medium text-foreground">
-                                {format_charge(user_limit)}
+                                {format_charge(active_members)}
                             </span>
                         </div>
                     </div>
@@ -706,7 +718,7 @@ fn UserSeatsCard(
                     // Seat count adjuster
                     <div>
                         <label class="text-sm font-medium text-foreground block mb-2">
-                            "Adjust seats"
+                            "Set user limit"
                         </label>
                         <div class="flex items-center gap-3">
                             <button

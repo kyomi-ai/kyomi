@@ -401,6 +401,22 @@ impl StripeService {
         Ok(())
     }
 
+    /// Get the current seat count (quantity on the first subscription item).
+    pub async fn get_subscription_quantity(
+        &self,
+        subscription_id: &str,
+    ) -> Result<u64, StripeError> {
+        let subscription = RetrieveSubscription::new(subscription_id)
+            .send(&self.client)
+            .await?;
+
+        let first_item = subscription.items.data.first().ok_or_else(|| {
+            StripeError::ClientError("Subscription has no items".into())
+        })?;
+
+        Ok(first_item.quantity.unwrap_or(1))
+    }
+
     /// Update the seat count on a Cloud subscription.
     ///
     /// Retrieves the subscription, finds the first item, and sets its quantity.
