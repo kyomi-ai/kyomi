@@ -129,14 +129,15 @@ pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64
 /// `BillingService::calculate_credits_info()` and pass the result to
 /// `compute_capabilities_with_credits()`.
 pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> CreditsInfo {
-    let limit = get_credits_limit(tier, workspace.user_limit);
+    // Total budget = tier budget (from AI_BUDGET_CLOUD) + purchased bundle balance
+    let limit = get_credits_limit(tier, workspace.user_limit) + workspace.ai_bundle_balance_usd;
     let used = workspace.ai_credits_used_usd;
     let remaining = (limit - used).max(0.0);
-    let exhausted = used >= limit;
+    let exhausted = limit == 0.0 || used >= limit;
     let percentage_used = if limit > 0.0 {
         ((used / limit) * 100.0).min(100.0)
     } else {
-        100.0 // No budget = fully exhausted
+        0.0 // No budget and no bundles — show 0% (not 100%)
     };
 
     CreditsInfo {

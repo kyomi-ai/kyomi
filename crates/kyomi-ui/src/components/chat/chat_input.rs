@@ -182,7 +182,7 @@ pub fn ChatInput(
                 view! {
                     <Alert variant=AlertVariant::Warning class="mb-4">
                         <AlertDescription class="text-center">
-                            "AI budget exhausted for this month. Upgrade for more capacity."
+                            "AI credits exhausted. Add an AI token bundle or connect your own API key."
                         </AlertDescription>
                     </Alert>
                 }.into_any()

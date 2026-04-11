@@ -375,8 +375,11 @@ pub async fn execute_agent_chat(
     };
 
     // 14b. Log usage to api_usage_log for billing (skip trial users).
+    // Apply 10% markup to cover payment processing fees.
+    const AI_COST_MULTIPLIER: f64 = 1.1;
     if !config.user_id.starts_with("trial_") && (input_tokens > 0 || output_tokens > 0) {
         let total_tokens = (input_tokens + output_tokens) as i32;
+        let billed_cost = total_cost * AI_COST_MULTIPLIER;
         let now = chrono::Utc::now();
         let provider_str = provider_kind.to_string();
         if let Err(e) = kyomi_core::db_execute!(
@@ -396,7 +399,7 @@ pub async fn execute_agent_chat(
             input_tokens as i32,
             output_tokens as i32,
             total_tokens,
-            total_cost,
+            billed_cost,
             &config.component
         ) {
             warn!(error = %e, "Failed to log API usage to database");
