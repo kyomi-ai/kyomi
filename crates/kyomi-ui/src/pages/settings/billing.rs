@@ -87,8 +87,6 @@ pub fn BillingPage() -> impl IntoView {
     let (error, set_error) = signal(Option::<String>::None);
     let (success, set_success) = signal(Option::<String>::None);
     let (checkout_loading, set_checkout_loading) = signal(false);
-    let (team_size_loading, set_team_size_loading) = signal(false);
-    let (desired_team_size, set_desired_team_size) = signal(1i32);
 
     // Confirm dialog state
     let dialog_open = RwSignal::new(false);
@@ -98,13 +96,6 @@ pub fn BillingPage() -> impl IntoView {
     let (dialog_destructive, set_dialog_destructive) = signal(false);
     let (pending_confirm_action, set_pending_confirm_action) =
         signal(Option::<ConfirmAction>::None);
-
-    // Sync desired team size when subscription loads
-    Effect::new(move || {
-        if let Some(Ok(info)) = subscription.get() && let Some(limit) = info.user_limit {
-            set_desired_team_size.set(limit);
-        }
-    });
 
     // Check for checkout success param on mount
     #[cfg(target_arch = "wasm32")]
@@ -198,27 +189,6 @@ pub fn BillingPage() -> impl IntoView {
                 Err(e) => {
                     set_error.set(Some(format!("Failed to reactivate subscription: {e}")));
                 }
-            }
-        }
-    });
-
-    let handle_team_size_update = Action::new({
-        move |size: &i32| {
-            let size = *size;
-            async move {
-                set_team_size_loading.set(true);
-                set_error.set(None);
-                set_success.set(None);
-                match update_team_size(size).await {
-                    Ok(result) => {
-                        set_success.set(Some(result.message));
-                        set_sub_version.update(|v| *v += 1);
-                    }
-                    Err(e) => {
-                        set_error.set(Some(format!("Failed to update team size: {e}")));
-                    }
-                }
-                set_team_size_loading.set(false);
             }
         }
     });
@@ -351,12 +321,8 @@ pub fn BillingPage() -> impl IntoView {
                                             info=info
                                             invoices=invoices
                                             checkout_loading=checkout_loading
-                                            team_size_loading=team_size_loading
-                                            desired_team_size=desired_team_size
-                                            set_desired_team_size=set_desired_team_size
                                             handle_subscribe=handle_subscribe
                                             handle_manage_billing=handle_manage_billing
-                                            handle_team_size_update=handle_team_size_update
                                             handle_purchase_ai=handle_purchase_ai
                                             handle_purchase_analytics=handle_purchase_analytics
                                             dialog_open=dialog_open
@@ -412,12 +378,8 @@ fn BillingContent(
     info: SubscriptionInfo,
     invoices: Resource<Result<Vec<InvoiceRecord>, ServerFnError>>,
     checkout_loading: ReadSignal<bool>,
-    team_size_loading: ReadSignal<bool>,
-    desired_team_size: ReadSignal<i32>,
-    set_desired_team_size: WriteSignal<i32>,
     handle_subscribe: Action<u64, ()>,
     handle_manage_billing: Action<(), ()>,
-    handle_team_size_update: Action<i32, ()>,
     handle_purchase_ai: Action<(), ()>,
     handle_purchase_analytics: Action<(), ()>,
     dialog_open: RwSignal<bool>,
@@ -431,7 +393,6 @@ fn BillingContent(
     let status = info.status.clone();
     let period_end = info.period_end.clone();
     let trial_ends_at = info.trial_ends_at.clone();
-    let user_limit = info.user_limit;
     let active_members = info.active_members;
 
     // Fields for AI and analytics sections
@@ -441,17 +402,18 @@ fn BillingContent(
 
     // Clones for closures
     let tier_for_status = current_tier.clone();
-    let tier_for_seats = current_tier.clone();
     let tier_for_invoices = current_tier.clone();
     let status_for_badge = status.clone();
     let status_for_info = status.clone();
     let status_for_actions = status.clone();
-    let status_for_seats = status.clone();
 
-    // "trialing" with no Stripe subscription (no period_end) means app-managed trial.
-    // These users haven't subscribed yet — show the subscribe CTA.
+    // Trialing users with a Stripe subscription (period_end present) have a
+    // Stripe-managed trial. Those without (no period_end) have an app-managed
+    // trial fallback.
+    let is_stripe_trial = status == "trialing" && period_end.is_some();
     let is_app_trial = status == "trialing" && period_end.is_none();
     let is_free = current_tier == "free";
+    // Subscribed = has a Stripe subscription (active, trialing with Stripe, or cancelled)
     let is_subscribed = !is_free && !is_app_trial;
 
     view! {
@@ -562,6 +524,24 @@ fn BillingContent(
                             }
                         })}
 
+                        // Trial nudge banner — shown after day 7 of a Stripe trial
+                        {is_stripe_trial.then(|| {
+                            let trial_end = trial_ends_at.as_deref()
+                                .or(period_end.as_deref())
+                                .and_then(|te| chrono::DateTime::parse_from_rfc3339(te).ok());
+                            let days_left = trial_end.map(|dt| {
+                                dt.signed_duration_since(chrono::Utc::now()).num_days().max(0)
+                            }).unwrap_or(0);
+                            // Show nudge after day 7 (i.e. < 23 days remaining of 30)
+                            (days_left < 23).then(|| view! {
+                                <Alert variant=AlertVariant::Info class="mt-2">
+                                    <AlertDescription>
+                                        "Add a payment method to continue after your trial."
+                                    </AlertDescription>
+                                </Alert>
+                            })
+                        })}
+
                         // Action Buttons
                         {if is_free || is_app_trial {
                             // Free tier or app-managed trial — show subscribe CTA
@@ -595,11 +575,27 @@ fn BillingContent(
                                     </p>
                                 </div>
                             }.into_any()
+                        } else if is_stripe_trial {
+                            // Stripe-managed trial — show "Add Payment Method" (opens portal)
+                            // Do NOT show "Cancel Subscription" for trialing users
+                            view! {
+                                <div class="mt-4">
+                                    <Button
+                                        variant=ButtonVariant::Default
+                                        disabled=checkout_loading.get_untracked()
+                                        on:click=move |_| { handle_manage_billing.dispatch(()); }
+                                    >
+                                        <Icon icon=icondata_lu::LuCreditCard width="16" height="16" attr:class="mr-2"/>
+                                        "Add Payment Method"
+                                    </Button>
+                                </div>
+                            }.into_any()
                         } else {
                             let status_cl = status.clone();
                             view! {
                                 <div class="flex gap-2 mt-4">
-                                    {(status_cl == "active" || status_cl == "trialing").then(|| view! {
+                                    // Only show Cancel for active (not trialing) subscriptions
+                                    {(status_cl == "active").then(|| view! {
                                         <Button
                                             variant=ButtonVariant::Outline
                                             on:click=move |_| {
@@ -629,28 +625,22 @@ fn BillingContent(
                                             "Reactivate Subscription"
                                         </Button>
                                     })}
+                                    // Expired/past_due: show subscribe button
+                                    {(status_cl == "past_due").then(|| view! {
+                                        <Button
+                                            variant=ButtonVariant::Default
+                                            disabled=checkout_loading.get_untracked()
+                                            on:click=move |_| { handle_manage_billing.dispatch(()); }
+                                        >
+                                            "Update Payment Method"
+                                        </Button>
+                                    })}
                                 </div>
                             }.into_any()
                         }}
                     </div>
                 </CardContent>
             </Card>
-
-            // User Seats Card (visible for active/trialing Cloud subscriptions)
-            {(tier_for_seats != "free" && (status_for_seats == "active" || status_for_seats == "trialing")).then(|| {
-                let user_limit_seats = user_limit.unwrap_or(999_999);
-
-                view! {
-                    <UserSeatsCard
-                        user_limit=user_limit_seats
-                        active_members=active_members
-                        desired_team_size=desired_team_size
-                        set_desired_team_size=set_desired_team_size
-                        team_size_loading=team_size_loading
-                        handle_team_size_update=handle_team_size_update
-                    />
-                }
-            })}
 
             // AI Credits Card (visible for subscribed users)
             {is_subscribed.then(|| {
@@ -676,149 +666,6 @@ fn BillingContent(
             // Invoices Section
             <InvoicesSection invoices=invoices current_tier=tier_for_invoices.clone()/>
         </div>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// User Seats Card
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn UserSeatsCard(
-    user_limit: i32,
-    active_members: i32,
-    desired_team_size: ReadSignal<i32>,
-    set_desired_team_size: WriteSignal<i32>,
-    team_size_loading: ReadSignal<bool>,
-    handle_team_size_update: Action<i32, ()>,
-) -> impl IntoView {
-    let user_limit_display = if user_limit >= 999_999 {
-        "Unlimited".to_string()
-    } else {
-        user_limit.to_string()
-    };
-
-    view! {
-        <Card>
-            <CardHeader>
-                <CardTitle class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuUsers width="20" height="20"/>
-                    "User Seats"
-                </CardTitle>
-                <CardDescription>
-                    "Users are billed automatically when they accept an invite. Set a limit to control costs."
-                </CardDescription>
-            </CardHeader>
-            <CardContent>
-                <div class="space-y-4">
-                    // Current seat info
-                    <div class="bg-muted/50 border border-border rounded-lg p-4">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-muted-foreground">"Active users"</span>
-                            <span class="font-medium text-foreground">
-                                {active_members.to_string()}
-                            </span>
-                        </div>
-                        <div class="flex justify-between text-sm mt-1">
-                            <span class="text-muted-foreground">"User limit"</span>
-                            <span class="font-medium text-foreground">
-                                {user_limit_display}
-                            </span>
-                        </div>
-                        <div class="flex justify-between text-sm mt-1">
-                            <span class="text-muted-foreground">"Monthly cost"</span>
-                            <span class="font-medium text-foreground">
-                                {format_charge(active_members)}
-                            </span>
-                        </div>
-                    </div>
-
-                    // Seat count adjuster
-                    <div>
-                        <label class="text-sm font-medium text-foreground block mb-2">
-                            "Set user limit"
-                        </label>
-                        <div class="flex items-center gap-3">
-                            <button
-                                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
-                                disabled=move || desired_team_size.get() <= 1 || team_size_loading.get()
-                                on:click=move |_| {
-                                    set_desired_team_size.update(|v| *v = (*v - 1).max(1));
-                                }
-                            >
-                                <Icon icon=icondata_lu::LuMinus width="16" height="16"/>
-                            </button>
-                            <input
-                                type="number"
-                                prop:value=move || desired_team_size.get().to_string()
-                                on:input=move |ev| {
-                                    let val: i32 = event_target_value(&ev)
-                                        .parse()
-                                        .unwrap_or(1)
-                                        .max(1);
-                                    set_desired_team_size.set(val);
-                                }
-                                min="1"
-                                class="w-20 px-3 py-2 text-center border border-border rounded-md bg-background text-foreground"
-                                disabled=move || team_size_loading.get()
-                            />
-                            <button
-                                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
-                                disabled=move || team_size_loading.get()
-                                on:click=move |_| {
-                                    set_desired_team_size.update(|v| *v += 1);
-                                }
-                            >
-                                <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
-                            </button>
-                            <span class="text-sm text-muted-foreground">"users"</span>
-                        </div>
-                    </div>
-
-                    // Cost preview (when seat count differs from current)
-                    {move || {
-                        let desired = desired_team_size.get();
-                        (desired != user_limit).then(|| {
-                            let total = PRICE_PER_USER * desired as f64;
-                            let is_increase = desired > user_limit;
-
-                            view! {
-                                <div class="bg-primary/10 border border-primary/20 rounded-lg p-4">
-                                    <div class="text-sm space-y-2">
-                                        <div class="flex justify-between">
-                                            <span class="text-foreground">
-                                                {format!("{} {} \u{00d7} ${:.0}/mo", desired, if desired == 1 { "user" } else { "users" }, PRICE_PER_USER)}
-                                            </span>
-                                            <span class="font-medium text-foreground">
-                                                {format!("${:.2}/mo", total)}
-                                            </span>
-                                        </div>
-                                        <p class="text-xs text-muted-foreground pt-2">
-                                            {if is_increase {
-                                                "You will be charged a prorated amount for the remainder of your billing period."
-                                            } else {
-                                                "You will receive a prorated credit on your next invoice."
-                                            }}
-                                        </p>
-                                    </div>
-                                </div>
-                            }
-                        })
-                    }}
-
-                    // Update button
-                    <button
-                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-9 px-4 py-2 w-full"
-                        disabled=move || desired_team_size.get() == user_limit || team_size_loading.get()
-                        on:click=move |_| {
-                            handle_team_size_update.dispatch(desired_team_size.get_untracked());
-                        }
-                    >
-                        {move || if team_size_loading.get() { "Updating..." } else { "Update Seats" }}
-                    </button>
-                </div>
-            </CardContent>
-        </Card>
     }
 }
 

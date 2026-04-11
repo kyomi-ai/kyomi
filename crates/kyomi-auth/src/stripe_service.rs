@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use stripe::{Client, StripeError};
 use stripe_billing::{
     invoice::ListInvoice,
-    subscription::{CancelSubscription, RetrieveSubscription, UpdateSubscription},
+    subscription::{
+        CancelSubscription, CreateSubscription, CreateSubscriptionItems, RetrieveSubscription,
+        UpdateSubscription,
+    },
     subscription_item::{DeleteSubscriptionItem, UpdateSubscriptionItem},
 };
 use stripe_checkout::checkout_session::{
@@ -147,6 +150,51 @@ impl StripeService {
         );
 
         Ok(customer.id.to_string())
+    }
+
+    // ── Subscription (direct creation) ─────────────────────────────────
+
+    /// Create a Stripe subscription for a workspace.
+    ///
+    /// Used at signup to create a Cloud subscription with a 30-day trial.
+    /// No payment method required during trial — Stripe allows this.
+    pub async fn create_subscription(
+        &self,
+        customer_id: &str,
+        price_id: &str,
+        quantity: u64,
+        trial_days: u32,
+        workspace_id: &str,
+    ) -> Result<SubscriptionData, StripeError> {
+        let metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), workspace_id.to_string()),
+            ("brand".to_string(), "kyomi".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let subscription = CreateSubscription::new()
+            .customer(customer_id)
+            .items(vec![CreateSubscriptionItems {
+                price: Some(price_id.to_string()),
+                quantity: Some(quantity),
+                ..Default::default()
+            }])
+            .trial_period_days(trial_days)
+            .metadata(metadata)
+            .description("Kyomi Cloud")
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            subscription_id = %subscription.id,
+            customer_id,
+            workspace_id,
+            trial_days,
+            "Created Stripe subscription"
+        );
+
+        self.parse_subscription_data(&subscription).await
     }
 
     // ── Checkout ─────────────────────────────────────────────────────────

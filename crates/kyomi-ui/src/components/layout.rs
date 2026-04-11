@@ -51,10 +51,20 @@ pub fn Layout(children: Children) -> impl IntoView {
     let _ = set_is_mobile;
     let (mobile_open, set_mobile_open) = signal(false);
 
+    // Trigger signal to refetch sidebar user info after a token refresh.
+    // Bumping this value causes the LocalResource to re-execute without a page reload.
+    let (auth_retry, set_auth_retry) = signal(0u32);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = &set_auth_retry;
+
     // Fetch sidebar user info — used for both the sidebar UI and WebSocket auth signals.
     // Uses LocalResource to avoid "reading resource outside Suspense" warnings —
     // this resource is read in Memo closures which run outside Suspense.
-    let user_info = LocalResource::new(get_sidebar_user);
+    // Depends on `auth_retry` so we can refetch after a silent token refresh.
+    let user_info = LocalResource::new(move || {
+        let _retry = auth_retry.get(); // track the trigger signal
+        get_sidebar_user()
+    });
 
     // Auth guard: tracks whether the user has been authenticated.
     // Starts as `false`; set to `true` once `user_info` resolves successfully.
@@ -66,9 +76,13 @@ pub fn Layout(children: Children) -> impl IntoView {
     #[cfg(not(target_arch = "wasm32"))]
     let (auth_confirmed, _) = signal(false);
 
+    // Tracks whether a token refresh is already in-flight (prevents duplicate refreshes).
+    #[cfg(target_arch = "wasm32")]
+    let (refreshing, set_refreshing) = signal(false);
+
     // Auth guard: when user_info resolves, either confirm auth or redirect to /login.
-    // On WASM: if auth fails, try token refresh first (handles expired access_token
-    // with valid refresh_token). If refresh also fails, redirect to /login.
+    // On WASM: if auth fails, try a silent token refresh and refetch the resource
+    // (no page reload). If refresh also fails, redirect to /login.
     // On SSR/native: just gate rendering — the client will handle the redirect.
     #[cfg(target_arch = "wasm32")]
     {
@@ -87,7 +101,33 @@ pub fn Layout(children: Children) -> impl IntoView {
                 Some(Err(e)) => {
                     let msg = e.to_string();
                     if auth_refresh::is_auth_error(&msg) {
-                        auth_refresh::refresh_and_reload();
+                        // Don't start a second refresh while one is in-flight
+                        if refreshing.get_untracked() {
+                            return;
+                        }
+                        set_refreshing.set(true);
+                        // Silent token refresh: call /api/v1/auth/refresh, then
+                        // bump the trigger signal to refetch get_sidebar_user —
+                        // no visible page reload.
+                        leptos::task::spawn_local(async move {
+                            let ok = auth_refresh::try_refresh().await;
+                            set_refreshing.set(false);
+                            if ok {
+                                // Cookies refreshed — refetch the resource
+                                set_auth_retry.update(|n| *n += 1);
+                            } else {
+                                // Refresh token also invalid — redirect to login
+                                if let Some(window) = web_sys::window() {
+                                    let path = window.location().pathname().unwrap_or_default();
+                                    let url = if path.is_empty() || path == "/" {
+                                        "/login".to_string()
+                                    } else {
+                                        format!("/login?redirect={path}")
+                                    };
+                                    let _ = window.location().set_href(&url);
+                                }
+                            }
+                        });
                     } else {
                         if let Some(window) = web_sys::window() {
                             let _ = window.location().set_href("/login");
@@ -219,17 +259,14 @@ pub fn Layout(children: Children) -> impl IntoView {
             if path.starts_with("/settings") || path.starts_with("/login") || path.starts_with("/signup") {
                 return;
             }
-            let needs_gate = match user.subscription_status.as_str() {
-                "cancelled" | "past_due" => true,
-                "trialing" => {
-                    // Check if trial has expired
-                    user.trial_ends_at
-                        .as_deref()
-                        .and_then(|te| chrono::DateTime::parse_from_rfc3339(te).ok())
-                        .is_some_and(|dt| dt < chrono::Utc::now())
-                }
-                _ => false,
-            };
+            // Stripe manages trial expiry via webhooks. When the trial ends
+            // without a payment method, Stripe fires `invoice.payment_failed`
+            // which sets subscription_status to "past_due". We only need to
+            // gate on the final status — no client-side trial_ends_at check.
+            let needs_gate = matches!(
+                user.subscription_status.as_str(),
+                "cancelled" | "past_due"
+            );
             if needs_gate {
                 navigate_billing("/settings/billing", NavigateOptions::default());
             }

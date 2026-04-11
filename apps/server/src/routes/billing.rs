@@ -53,8 +53,6 @@ pub fn routes() -> Router<AppState> {
         .route("/cancel-subscription", post(cancel_subscription))
         .route("/reactivate-subscription", post(reactivate_subscription))
         .route("/subscription-info", get(get_subscription_info))
-        .route("/update-team-size", post(update_user_count))
-        .route("/update-user-count", post(update_user_count))
         .route("/purchase-ai-bundle", post(purchase_ai_bundle))
         .route("/purchase-analytics-bundle", post(purchase_analytics_bundle))
         .route("/ai-usage-status", get(get_ai_usage_status))
@@ -182,11 +180,6 @@ impl WorkspaceRow {
 struct CreateCheckoutRequest {
     /// Number of users for the subscription (defaults to 1).
     quantity: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct UpdateUserCountRequest {
-    total_users: i32,
 }
 
 #[derive(Deserialize)]
@@ -939,90 +932,6 @@ fn calculate_ai_reset_date(
 // POST /update-team-size, /update-user-count — Update subscription user count (admin)
 // ---------------------------------------------------------------------------
 
-async fn update_user_count(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Json(request): Json<UpdateUserCountRequest>,
-) -> Result<Json<Value>, kyomi_core::Error> {
-    require_workspace_admin(&user)?;
-    let workspace_id = get_workspace_id(&user)?;
-    let stripe_service = require_stripe(&state)?;
-
-    let workspace = load_workspace(&state.db, workspace_id).await?;
-
-    // Must have an active or trialing Cloud subscription
-    if workspace.subscription_tier == "free" {
-        return Err(kyomi_core::Error::BadRequest(
-            "User count can only be updated for Cloud subscriptions".into(),
-        ));
-    }
-
-    if workspace.subscription_status != "active" && workspace.subscription_status != "trialing" {
-        return Err(kyomi_core::Error::BadRequest(format!(
-            "Cannot update user count for subscription in '{}' status",
-            workspace.subscription_status
-        )));
-    }
-
-    let sub_id = workspace
-        .stripe_subscription_id
-        .as_deref()
-        .ok_or_else(|| kyomi_core::Error::BadRequest("No active subscription found".into()))?;
-
-    // Minimum 1 user
-    if request.total_users < 1 {
-        return Err(kyomi_core::Error::BadRequest(
-            "Minimum user count is 1".into(),
-        ));
-    }
-
-    // Check current active member count — cannot reduce below active members
-    let current_member_count: i64 = kyomi_core::db_fetch_scalar!(
-        &state.db, i64,
-        "SELECT COUNT(*) FROM workspace_users \
-         WHERE workspace_id = $1 AND active = true",
-        workspace_id
-    )
-    .unwrap_or(0);
-
-    if (request.total_users as i64) < current_member_count {
-        return Err(kyomi_core::Error::BadRequest(format!(
-            "Cannot reduce user count to {}. You currently have {} active members. \
-             Please remove members first.",
-            request.total_users, current_member_count
-        )));
-    }
-
-    // Update the seat count on the subscription's main item
-    stripe_service
-        .update_seat_count(sub_id, request.total_users as u64)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to update user count: {e}");
-            kyomi_core::Error::Internal(format!("Failed to update user count: {e}"))
-        })?;
-
-    // Update workspace user limit in DB
-    kyomi_core::db_execute!(
-        &state.db,
-        "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
-        request.total_users,
-        workspace_id
-    )?;
-
-    tracing::info!(
-        workspace_id,
-        total_users = request.total_users,
-        "Updated user count"
-    );
-
-    Ok(Json(json!({
-        "status": "success",
-        "message": format!("User count updated to {}", request.total_users),
-        "user_limit": request.total_users,
-    })))
-}
-
 // ---------------------------------------------------------------------------
 // POST /purchase-ai-bundle — One-time AI token bundle purchase
 // ---------------------------------------------------------------------------
@@ -1283,24 +1192,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // UpdateUserCountRequest contract tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn update_user_count_request_deserializes() {
-        let json = json!({"total_users": 8});
-
-        let req: UpdateUserCountRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.total_users, 8);
-    }
-
-    #[test]
-    fn update_user_count_request_missing_total_users_fails() {
-        let json = json!({});
-        assert!(serde_json::from_value::<UpdateUserCountRequest>(json).is_err());
-    }
-
-    // -----------------------------------------------------------------------
     // PurchaseBundleRequest contract tests
     // -----------------------------------------------------------------------
 
@@ -1446,18 +1337,6 @@ mod tests {
 
         assert!(response["checkout_url"].is_string());
         assert_eq!(response["session_id"], "modified");
-    }
-
-    #[test]
-    fn update_user_count_response_shape() {
-        let response = json!({
-            "status": "success",
-            "message": "User count updated to 8",
-            "user_limit": 8
-        });
-
-        assert_eq!(response["status"], "success");
-        assert_eq!(response["user_limit"], 8);
     }
 
     #[test]

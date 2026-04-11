@@ -8,7 +8,6 @@
 //! - `POST /billing/create-checkout` -> `create_checkout()`
 //! - `POST /billing/cancel-subscription` -> `cancel_subscription()`
 //! - `POST /billing/reactivate-subscription` -> `reactivate_subscription()`
-//! - `POST /billing/update-team-size` -> `update_team_size()`
 //! - `POST /billing/create-portal-session` -> `create_portal_session()`
 //!
 //! Calls the same service-layer code as `apps/server/src/routes/billing.rs`.
@@ -115,6 +114,8 @@ struct WorkspaceRow {
     #[sqlx(default)]
     ai_bundle_balance_usd: Option<f64>,
     #[sqlx(default)]
+    ai_credits_used_usd: Option<f64>,
+    #[sqlx(default)]
     analytics_bundle_events: Option<i64>,
 }
 
@@ -152,6 +153,7 @@ async fn load_workspace(
          user_limit, \
          stripe_customer_id, stripe_subscription_id, \
          COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
+         COALESCE(ai_credits_used_usd, 0) AS ai_credits_used_usd, \
          COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
          FROM workspaces WHERE workspace_id = $1",
         ws_id
@@ -222,10 +224,11 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         }
     };
 
-    // AI bundle balance from the workspace row (already loaded)
+    // AI bundle balance remaining = purchased balance - credits used
     let ai_bundle_balance_usd = workspace.ai_bundle_balance_usd.unwrap_or(0.0);
-    // Convert to cents for the frontend
-    let ai_token_balance_cents = (ai_bundle_balance_usd * 100.0) as i64;
+    let ai_credits_used_usd = workspace.ai_credits_used_usd.unwrap_or(0.0);
+    let ai_remaining_usd = (ai_bundle_balance_usd - ai_credits_used_usd).max(0.0);
+    let ai_token_balance_cents = (ai_remaining_usd * 100.0) as i64;
 
     // Analytics events this month from Redis (same pattern as usage.rs).
     // Falls back to 0 if Redis is unavailable.
@@ -526,79 +529,6 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
 
     Ok(BillingResult {
         message: "Subscription has been reactivated".to_string(),
-    })
-}
-
-/// Update the user seat count for a Cloud subscription.
-///
-/// Mirrors `POST /api/v1/billing/update-team-size`.
-///
-/// Cloud plan — per-seat pricing. Uses `update_subscription` to modify the
-/// subscription's primary line item quantity via a price update (same price,
-/// new quantity applied by Stripe). Works for all Cloud users (no tier gate).
-#[server(prefix = "/leptos-api")]
-pub async fn update_team_size(total_users: i32) -> Result<BillingResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
-    let ws_id = workspace_id(&auth)?;
-
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
-
-    if workspace.subscription_status != "active" && workspace.subscription_status != "trialing" {
-        return Err(ServerFnError::new(format!(
-            "Cannot update team size for subscription in '{}' status",
-            workspace.subscription_status
-        )));
-    }
-
-    let sub_id = workspace
-        .stripe_subscription_id
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("No active subscription found"))?;
-
-    if total_users < 1 {
-        return Err(ServerFnError::new(
-            "At least 1 user seat is required",
-        ));
-    }
-
-    // Check current active member count
-    let current_member_count: i64 = kyomi_core::db_fetch_scalar!(
-        &ctx.db,
-        i64,
-        "SELECT COUNT(*) FROM workspace_users \
-         WHERE workspace_id = $1 AND active = true",
-        ws_id
-    )
-    .unwrap_or(0);
-
-    if (total_users as i64) < current_member_count {
-        return Err(ServerFnError::new(format!(
-            "Cannot reduce to {} seats. You currently have {} active members. \
-             Please remove members first before reducing your seat count.",
-            total_users, current_member_count
-        )));
-    }
-
-    // Update the seat count on the subscription's main item.
-    stripe_service
-        .update_seat_count(sub_id, total_users as u64)
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to update user count: {e}")))?;
-
-    // Update workspace user_limit
-    kyomi_core::db_execute!(
-        &ctx.db,
-        "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
-        total_users,
-        ws_id
-    )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    Ok(BillingResult {
-        message: format!("Seat count updated to {} users", total_users),
     })
 }
 

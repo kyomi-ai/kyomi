@@ -183,7 +183,6 @@ pub fn register_server_functions() {
     register_explicit::<CreateCheckout>();
     register_explicit::<CancelSubscription>();
     register_explicit::<ReactivateSubscription>();
-    register_explicit::<UpdateTeamSize>();
     register_explicit::<CreatePortalSession>();
 
     use server_fns::workspace::*;

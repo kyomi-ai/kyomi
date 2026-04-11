@@ -272,7 +272,9 @@ pub async fn create_workspace_for_user(
 
     // Self-hosted: team tier with active status (no trial, no billing).
     // SaaS with Stripe: cloud tier with 30-day trial and $5 AI credits.
-    // SaaS without Stripe: cloud tier with 30-day trial, no credits.
+    //   Stripe is the source of truth for subscription status — it will be
+    //   updated after the Stripe subscription is created below.
+    // SaaS without Stripe: cloud tier with 30-day trial (app-managed fallback), no credits.
     let (tier, status, subscription_status, trial_ends_at, ai_bundle_balance, user_limit) =
         if self_hosted {
             ("team", "active", "active", None, 0.0_f64, Some(999_999_i32))
@@ -302,8 +304,10 @@ pub async fn create_workspace_for_user(
     // Set as last workspace
     update_last_workspace(pool, user_id, &workspace_id).await?;
 
-    // Create Stripe customer (SaaS mode only). Non-blocking — if this fails,
-    // the customer can be created later when they visit the billing page.
+    // Create Stripe customer and subscription (SaaS mode only).
+    // Non-blocking — if this fails, the user still gets an app-managed trial
+    // (using trial_ends_at as fallback). The customer/subscription can be
+    // created later when they visit the billing page.
     if let Some(config) = config
         && let Some(ref secret_key) = config.stripe_secret_key
         && !secret_key.is_empty()
@@ -321,6 +325,48 @@ pub async fn create_workspace_for_user(
                         workspace_id = %workspace_id, error = %e,
                         "Failed to store Stripe customer ID"
                     );
+                }
+
+                // Create Stripe subscription with 30-day trial.
+                // Stripe becomes the source of truth for subscription state.
+                if let Some(price_id) = crate::stripe_config::get_cloud_price_id() {
+                    match stripe
+                        .create_subscription(&customer_id, price_id, 1, 30, &workspace_id)
+                        .await
+                    {
+                        Ok(sub_data) => {
+                            let period_start_str =
+                                sub_data.period_start.map(|dt| dt.to_rfc3339());
+                            let period_end_str =
+                                sub_data.period_end.map(|dt| dt.to_rfc3339());
+                            if let Err(e) = kyomi_core::db_execute!(
+                                pool,
+                                "UPDATE workspaces SET \
+                                 stripe_subscription_id = $1, \
+                                 subscription_status = $2, \
+                                 subscription_period_start = $3, \
+                                 subscription_period_end = $4 \
+                                 WHERE workspace_id = $5",
+                                &sub_data.stripe_subscription_id,
+                                &sub_data.status,
+                                period_start_str.as_deref(),
+                                period_end_str.as_deref(),
+                                &workspace_id
+                            ) {
+                                tracing::error!(
+                                    workspace_id = %workspace_id, error = %e,
+                                    "Failed to store Stripe subscription data"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                workspace_id = %workspace_id, error = %e,
+                                "Failed to create Stripe subscription at signup"
+                            );
+                            // Don't fail signup — app-managed trial via trial_ends_at
+                        }
+                    }
                 }
             }
             Err(e) => {
