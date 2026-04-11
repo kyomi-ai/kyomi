@@ -564,7 +564,11 @@ pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
 /// bundle product. The webhook handler credits the workspace's
 /// `ai_token_balance_cents` upon successful payment.
 #[server(prefix = "/leptos-api")]
-pub async fn purchase_ai_bundle() -> Result<RedirectUrl, ServerFnError> {
+pub async fn purchase_ai_bundle(quantity: u32) -> Result<RedirectUrl, ServerFnError> {
+    if quantity < 1 {
+        return Err(ServerFnError::new("Quantity must be at least 1"));
+    }
+
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     require_workspace_admin(&auth)?;
@@ -593,6 +597,7 @@ pub async fn purchase_ai_bundle() -> Result<RedirectUrl, ServerFnError> {
         cancel_url,
         workspace_id: ws_id.to_string(),
         purchase_type: "ai_bundle".to_string(),
+        quantity: u64::from(quantity),
     };
 
     let checkout_result = stripe_service
@@ -611,7 +616,11 @@ pub async fn purchase_ai_bundle() -> Result<RedirectUrl, ServerFnError> {
 /// event bundle product. The webhook handler credits the workspace's
 /// `analytics_bundle_balance` upon successful payment.
 #[server(prefix = "/leptos-api")]
-pub async fn purchase_analytics_bundle() -> Result<RedirectUrl, ServerFnError> {
+pub async fn purchase_analytics_bundle(quantity: u32) -> Result<RedirectUrl, ServerFnError> {
+    if quantity < 1 {
+        return Err(ServerFnError::new("Quantity must be at least 1"));
+    }
+
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     require_workspace_admin(&auth)?;
@@ -640,6 +649,7 @@ pub async fn purchase_analytics_bundle() -> Result<RedirectUrl, ServerFnError> {
         cancel_url,
         workspace_id: ws_id.to_string(),
         purchase_type: "analytics_bundle".to_string(),
+        quantity: u64::from(quantity),
     };
 
     let checkout_result = stripe_service

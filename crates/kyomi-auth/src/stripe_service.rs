@@ -89,6 +89,8 @@ pub struct PaymentCheckoutParams {
     pub workspace_id: String,
     /// Type of purchase (e.g. "ai_bundle", "analytics_bundle").
     pub purchase_type: String,
+    /// Number of bundles to purchase (minimum 1).
+    pub quantity: u64,
 }
 
 // ─── Service ────────────────────────────────────────────────────────────────
@@ -288,7 +290,7 @@ impl StripeService {
     ) -> Result<CheckoutResult, StripeError> {
         let line_items = vec![CreateCheckoutSessionLineItems {
             price: Some(params.price_id.clone()),
-            quantity: Some(1),
+            quantity: Some(params.quantity),
             ..Default::default()
         }];
 
@@ -296,6 +298,7 @@ impl StripeService {
             ("workspace_id".to_string(), params.workspace_id.clone()),
             ("brand".to_string(), "kyomi".to_string()),
             ("purchase_type".to_string(), params.purchase_type.clone()),
+            ("bundle_quantity".to_string(), params.quantity.to_string()),
         ]
         .into_iter()
         .collect();

@@ -184,8 +184,8 @@ struct CreateCheckoutRequest {
 
 #[derive(Deserialize)]
 struct PurchaseBundleRequest {
-    // No fields — URLs are always derived from frontend_url for security.
-    // Kept as a struct for future extensibility (e.g. bundle size selection).
+    /// Number of bundles to purchase (defaults to 1).
+    quantity: Option<u64>,
 }
 
 // ===========================================================================
@@ -715,25 +715,37 @@ async fn handle_checkout_completed(state: &AppState, session: &CheckoutSession) 
         }
     };
 
+    // Read bundle quantity from metadata (set during checkout creation).
+    // Defaults to 1 for backward compatibility with sessions created before
+    // quantity support was added.
+    let quantity: u64 = metadata
+        .get("bundle_quantity")
+        .and_then(|q| q.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+
     match purchase_type.as_str() {
         "ai_bundle" => {
             // Credit AI bundle balance. Configurable via AI_BUNDLE_CREDIT_USD env var.
-            let credit_amount: f64 = std::env::var("AI_BUNDLE_CREDIT_USD")
+            let credit_per_unit: f64 = std::env::var("AI_BUNDLE_CREDIT_USD")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10.0);
+            let total_credit = credit_per_unit * quantity as f64;
             let result = kyomi_core::db_execute!(
                 &state.db,
                 "UPDATE workspaces SET ai_bundle_balance_usd = ai_bundle_balance_usd + $1 \
                  WHERE workspace_id = $2",
-                credit_amount,
+                total_credit,
                 &workspace_id
             );
             match result {
                 Ok(_) => {
                     tracing::info!(
                         workspace_id = %workspace_id,
-                        credit_amount,
+                        quantity,
+                        credit_per_unit,
+                        total_credit,
                         "AI bundle purchased — credited balance"
                     );
                 }
@@ -747,22 +759,25 @@ async fn handle_checkout_completed(state: &AppState, session: &CheckoutSession) 
         }
         "analytics_bundle" => {
             // Credit analytics event bundle. Configurable via ANALYTICS_BUNDLE_CREDIT_EVENTS env var.
-            let credit_events: i64 = std::env::var("ANALYTICS_BUNDLE_CREDIT_EVENTS")
+            let events_per_unit: i64 = std::env::var("ANALYTICS_BUNDLE_CREDIT_EVENTS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1_000_000);
+            let total_events = events_per_unit * quantity as i64;
             let result = kyomi_core::db_execute!(
                 &state.db,
                 "UPDATE workspaces SET analytics_bundle_events = analytics_bundle_events + $1 \
                  WHERE workspace_id = $2",
-                credit_events,
+                total_events,
                 &workspace_id
             );
             match result {
                 Ok(_) => {
                     tracing::info!(
                         workspace_id = %workspace_id,
-                        credit_events,
+                        quantity,
+                        events_per_unit,
+                        total_events,
                         "Analytics bundle purchased — credited events"
                     );
                 }
@@ -939,11 +954,18 @@ fn calculate_ai_reset_date(
 async fn purchase_ai_bundle(
     State(state): State<AppState>,
     user: AuthUser,
-    Json(_): Json<PurchaseBundleRequest>,
+    Json(request): Json<PurchaseBundleRequest>,
 ) -> Result<Json<Value>, kyomi_core::Error> {
     require_workspace_admin(&user)?;
     let workspace_id = get_workspace_id(&user)?;
     let stripe_service = require_stripe(&state)?;
+
+    let quantity = request.quantity.unwrap_or(1);
+    if quantity == 0 {
+        return Err(kyomi_core::Error::BadRequest(
+            "Quantity must be at least 1".into(),
+        ));
+    }
 
     let workspace = load_workspace(&state.db, workspace_id).await?;
 
@@ -968,6 +990,7 @@ async fn purchase_ai_bundle(
         cancel_url,
         workspace_id: workspace_id.to_string(),
         purchase_type: "ai_bundle".to_string(),
+        quantity,
     };
 
     let result = stripe_service
@@ -978,7 +1001,7 @@ async fn purchase_ai_bundle(
             kyomi_core::Error::Internal(format!("Failed to create AI bundle checkout: {e}"))
         })?;
 
-    tracing::info!(workspace_id, "Created AI bundle checkout session");
+    tracing::info!(workspace_id, quantity, "Created AI bundle checkout session");
 
     Ok(Json(json!({
         "checkout_url": result.checkout_url,
@@ -993,11 +1016,18 @@ async fn purchase_ai_bundle(
 async fn purchase_analytics_bundle(
     State(state): State<AppState>,
     user: AuthUser,
-    Json(_): Json<PurchaseBundleRequest>,
+    Json(request): Json<PurchaseBundleRequest>,
 ) -> Result<Json<Value>, kyomi_core::Error> {
     require_workspace_admin(&user)?;
     let workspace_id = get_workspace_id(&user)?;
     let stripe_service = require_stripe(&state)?;
+
+    let quantity = request.quantity.unwrap_or(1);
+    if quantity == 0 {
+        return Err(kyomi_core::Error::BadRequest(
+            "Quantity must be at least 1".into(),
+        ));
+    }
 
     let workspace = load_workspace(&state.db, workspace_id).await?;
 
@@ -1022,6 +1052,7 @@ async fn purchase_analytics_bundle(
         cancel_url,
         workspace_id: workspace_id.to_string(),
         purchase_type: "analytics_bundle".to_string(),
+        quantity,
     };
 
     let result = stripe_service
@@ -1034,7 +1065,7 @@ async fn purchase_analytics_bundle(
             ))
         })?;
 
-    tracing::info!(workspace_id, "Created analytics bundle checkout session");
+    tracing::info!(workspace_id, quantity, "Created analytics bundle checkout session");
 
     Ok(Json(json!({
         "checkout_url": result.checkout_url,

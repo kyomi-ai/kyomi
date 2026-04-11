@@ -216,40 +216,46 @@ pub fn BillingPage() -> impl IntoView {
     });
 
     let handle_purchase_ai = Action::new({
-        move |(): &()| async move {
-            set_error.set(None);
-            match purchase_ai_bundle().await {
-                Ok(_redirect) => {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        let _ = web_sys::window()
-                            .unwrap()
-                            .location()
-                            .set_href(&_redirect.url);
+        move |quantity: &u32| {
+            let q = *quantity;
+            async move {
+                set_error.set(None);
+                match purchase_ai_bundle(q).await {
+                    Ok(_redirect) => {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let _ = web_sys::window()
+                                .unwrap()
+                                .location()
+                                .set_href(&_redirect.url);
+                        }
                     }
-                }
-                Err(e) => {
-                    set_error.set(Some(format!("Failed to start AI bundle purchase: {e}")));
+                    Err(e) => {
+                        set_error.set(Some(format!("Failed to start AI bundle purchase: {e}")));
+                    }
                 }
             }
         }
     });
 
     let handle_purchase_analytics = Action::new({
-        move |(): &()| async move {
-            set_error.set(None);
-            match purchase_analytics_bundle().await {
-                Ok(_redirect) => {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        let _ = web_sys::window()
-                            .unwrap()
-                            .location()
-                            .set_href(&_redirect.url);
+        move |quantity: &u32| {
+            let q = *quantity;
+            async move {
+                set_error.set(None);
+                match purchase_analytics_bundle(q).await {
+                    Ok(_redirect) => {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            let _ = web_sys::window()
+                                .unwrap()
+                                .location()
+                                .set_href(&_redirect.url);
+                        }
                     }
-                }
-                Err(e) => {
-                    set_error.set(Some(format!("Failed to start analytics bundle purchase: {e}")));
+                    Err(e) => {
+                        set_error.set(Some(format!("Failed to start analytics bundle purchase: {e}")));
+                    }
                 }
             }
         }
@@ -380,8 +386,8 @@ fn BillingContent(
     checkout_loading: ReadSignal<bool>,
     handle_subscribe: Action<u64, ()>,
     handle_manage_billing: Action<(), ()>,
-    handle_purchase_ai: Action<(), ()>,
-    handle_purchase_analytics: Action<(), ()>,
+    handle_purchase_ai: Action<u32, ()>,
+    handle_purchase_analytics: Action<u32, ()>,
     dialog_open: RwSignal<bool>,
     set_dialog_title: WriteSignal<String>,
     set_dialog_message: WriteSignal<String>,
@@ -699,12 +705,22 @@ fn check_byok_key() -> bool {
     false
 }
 
+/// Price per AI token bundle (matches AI_BUNDLE_CREDIT_USD default).
+const AI_BUNDLE_PRICE: f64 = 10.0;
+
+/// Predefined quantity options for bundle purchases.
+/// Quantity options for bundle purchase StyledSelect.
+const BUNDLE_QUANTITY_OPTIONS: [(&str, &str); 5] = [
+    ("1", "1"), ("2", "2"), ("3", "3"), ("5", "5"), ("10", "10"),
+];
+
 #[component]
 fn AiCreditsCard(
     token_balance_cents: i64,
-    handle_purchase_ai: Action<(), ()>,
+    handle_purchase_ai: Action<u32, ()>,
 ) -> impl IntoView {
     let balance_dollars = token_balance_cents as f64 / 100.0;
+    let (ai_quantity, set_ai_quantity) = signal(1u32);
 
     // Detect BYOK key from localStorage (client-side only).
     let has_byok_key = Signal::derive(check_byok_key);
@@ -758,14 +774,40 @@ fn AiCreditsCard(
                         </p>
                     </div>
 
+                    // Quantity selector + price summary
+                    <div class="flex items-center gap-3">
+                        <label class="text-sm text-muted-foreground">"Quantity"</label>
+                        <div class="w-20">
+                            <crate::components::StyledSelect
+                                value="1".to_string()
+                                options=BUNDLE_QUANTITY_OPTIONS.to_vec()
+                                on_change=move |val: String| {
+                                    let q: u32 = val.parse().unwrap_or(1);
+                                    set_ai_quantity.set(q);
+                                }
+                            />
+                        </div>
+                        <span class="text-sm text-foreground">
+                            {move || {
+                                let q = ai_quantity.get();
+                                let total = AI_BUNDLE_PRICE * q as f64;
+                                format!("{q} \u{00d7} ${:.0} = ${:.0} of AI credits", AI_BUNDLE_PRICE, total)
+                            }}
+                        </span>
+                    </div>
+
                     // Purchase button
                     <Button
                         variant=ButtonVariant::Outline
                         class="w-full"
                         disabled=Signal::derive(move || handle_purchase_ai.pending().get())
-                        on:click=move |_| { handle_purchase_ai.dispatch(()); }
+                        on:click=move |_| { handle_purchase_ai.dispatch(ai_quantity.get_untracked()); }
                     >
-                        {move || if handle_purchase_ai.pending().get() { "Redirecting..." } else { "Buy AI Tokens" }}
+                        {move || if handle_purchase_ai.pending().get() { "Redirecting...".to_string() } else {
+                            let q = ai_quantity.get();
+                            let total = AI_BUNDLE_PRICE * q as f64;
+                            format!("Buy AI Tokens \u{2014} ${:.0}", total)
+                        }}
                     </Button>
                 </div>
             </CardContent>
@@ -790,11 +832,14 @@ pub(crate) fn format_number(n: u64) -> String {
     result
 }
 
+/// Events per analytics bundle (matches ANALYTICS_BUNDLE_CREDIT_EVENTS default).
+const ANALYTICS_BUNDLE_EVENTS: u64 = 1_000_000;
+
 #[component]
 fn AnalyticsCard(
     events_used: u64,
     bundle_balance: i64,
-    handle_purchase_analytics: Action<(), ()>,
+    handle_purchase_analytics: Action<u32, ()>,
 ) -> impl IntoView {
     let total_available = ANALYTICS_EVENTS_INCLUDED as i64 + bundle_balance.max(0);
     let usage_pct = if total_available > 0 {
@@ -802,6 +847,8 @@ fn AnalyticsCard(
     } else {
         0.0
     };
+
+    let (analytics_quantity, set_analytics_quantity) = signal(1u32);
 
     view! {
         <Card>
@@ -846,14 +893,40 @@ fn AnalyticsCard(
                         </p>
                     </div>
 
+                    // Quantity selector + summary
+                    <div class="flex items-center gap-3">
+                        <label class="text-sm text-muted-foreground">"Quantity"</label>
+                        <div class="w-20">
+                            <crate::components::StyledSelect
+                                value="1".to_string()
+                                options=BUNDLE_QUANTITY_OPTIONS.to_vec()
+                                on_change=move |val: String| {
+                                    let q: u32 = val.parse().unwrap_or(1);
+                                    set_analytics_quantity.set(q);
+                                }
+                            />
+                        </div>
+                        <span class="text-sm text-foreground">
+                            {move || {
+                                let q = analytics_quantity.get();
+                                let total = ANALYTICS_BUNDLE_EVENTS * q as u64;
+                                format!("{q} \u{00d7} {} = {} events", format_number(ANALYTICS_BUNDLE_EVENTS), format_number(total))
+                            }}
+                        </span>
+                    </div>
+
                     // Purchase button
                     <Button
                         variant=ButtonVariant::Outline
                         class="w-full"
                         disabled=Signal::derive(move || handle_purchase_analytics.pending().get())
-                        on:click=move |_| { handle_purchase_analytics.dispatch(()); }
+                        on:click=move |_| { handle_purchase_analytics.dispatch(analytics_quantity.get_untracked()); }
                     >
-                        {move || if handle_purchase_analytics.pending().get() { "Redirecting..." } else { "Buy Event Bundle" }}
+                        {move || if handle_purchase_analytics.pending().get() { "Redirecting...".to_string() } else {
+                            let q = analytics_quantity.get();
+                            let total = ANALYTICS_BUNDLE_EVENTS * q as u64;
+                            format!("Buy Event Bundle \u{2014} {} events", format_number(total))
+                        }}
                     </Button>
                 </div>
             </CardContent>
