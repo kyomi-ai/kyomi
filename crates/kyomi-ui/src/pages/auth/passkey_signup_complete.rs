@@ -13,6 +13,7 @@
 //! State machine: Form | Creating { status_message } | Success | Error
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
@@ -214,9 +215,7 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
                             <CardHeader>
                                 <div class="text-center">
                                     <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-4">
-                                        <svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                                        </svg>
+                                        <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-primary"/>
                                     </div>
                                     <CardTitle class="text-xl">"Email Verified!"</CardTitle>
                                     <CardDescription>
@@ -326,9 +325,7 @@ fn error_view(message: String) -> impl IntoView {
             <CardHeader>
                 <div class="text-center">
                     <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-4">
-                        <svg class="w-8 h-8 text-error-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                        </svg>
+                        <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
                     </div>
                     <CardTitle class="text-xl">"Signup Link Invalid"</CardTitle>
                     <CardDescription class="text-error-foreground">
@@ -357,9 +354,7 @@ fn success_view() -> impl IntoView {
             <CardHeader>
                 <div class="text-center">
                     <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-4">
-                        <svg class="w-8 h-8 text-success-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                        </svg>
+                        <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
                     </div>
                     <CardTitle class="text-xl">"Account Created!"</CardTitle>
                     <CardDescription>

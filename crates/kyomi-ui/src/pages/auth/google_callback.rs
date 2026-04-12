@@ -8,6 +8,7 @@
 //! Auto-processes the callback on mount. No user interaction needed for the happy path.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant};
 
@@ -246,24 +247,13 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                     <div class="flex justify-center">
                         {move || {
                             if status.get() == CallbackStatus::Error {
-                                // XCircle SVG — Lucide icon
                                 view! {
-                                    <svg
-                                        class="text-error-foreground"
-                                        xmlns="http://www.w3.org/2000/svg"
+                                    <Icon
+                                        icon=icondata_lu::LuCircleX
                                         width="48"
                                         height="48"
-                                        viewBox="0 0 24 24"
-                                        fill="none"
-                                        stroke="currentColor"
-                                        stroke-width="2"
-                                        stroke-linecap="round"
-                                        stroke-linejoin="round"
-                                    >
-                                        <circle cx="12" cy="12" r="10"/>
-                                        <path d="m15 9-6 6"/>
-                                        <path d="m9 9 6 6"/>
-                                    </svg>
+                                        attr:class="text-error-foreground"
+                                    />
                                 }
                                     .into_any()
                             } else {

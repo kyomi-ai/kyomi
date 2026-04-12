@@ -8,6 +8,7 @@
 //! functions (`get_auth_config`, `login_with_password`).
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 #[cfg(target_arch = "wasm32")]
 use leptos_router::hooks::use_query_map;
 
@@ -989,14 +990,7 @@ fn CheckEmailView(
     view! {
         <div class="text-center space-y-4">
             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mb-2">
-                <svg class="w-8 h-8 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                    />
-                </svg>
+                <Icon icon=icondata_lu::LuMail attr:class="w-8 h-8 text-primary"/>
             </div>
             <h3 class="text-xl font-semibold text-foreground">"Check Your Email"</h3>
             <p class="text-muted-foreground">
