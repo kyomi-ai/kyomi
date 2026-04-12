@@ -123,18 +123,19 @@ async fn process_google_callback(
 pub fn GoogleCallbackPage() -> impl IntoView {
     let (status, set_status) = signal(CallbackStatus::Processing);
     let (message, set_message) = signal(String::from("Signing in with Google"));
-    let (show_help_text, set_show_help_text) = signal(false);
 
-    // Show help text after 10 seconds if redirect hasn't happened
+    // Help text appears after 10s if the redirect hasn't fired. The timer
+    // and signal only exist on the wasm target — on SSR there's nothing to
+    // wait for, so we expose a constant `false` Signal of the same shape.
     #[cfg(target_arch = "wasm32")]
-    {
+    let show_help_text = {
+        let (show, set) = signal(false);
         use gloo_timers::callback::Timeout;
-        let timeout = Timeout::new(10_000, move || {
-            set_show_help_text.set(true);
-        });
-        // Prevent the timeout from being cancelled by drop
-        timeout.forget();
-    }
+        Timeout::new(10_000, move || set.set(true)).forget();
+        Signal::derive(move || show.get())
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let show_help_text: Signal<bool> = Signal::derive(|| false);
 
     // Process the OAuth callback on mount (browser-only: read URL params).
     // Uses the browser's native URLSearchParams — same pattern as the other
@@ -179,10 +180,6 @@ pub fn GoogleCallbackPage() -> impl IntoView {
             }
         }
     });
-
-    // Suppress unused warnings for SSR-only signals
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = &set_show_help_text;
 
     // ── Reactive title & subtitle ────────────────────────────────────────
     let title = Signal::derive(move || match status.get() {

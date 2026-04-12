@@ -17,7 +17,8 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
+    ButtonVariant,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::server_fns::auth::{
@@ -341,16 +342,12 @@ fn error_view() -> impl IntoView {
                     <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
                 </div>
             </div>
-            <a href="/auth/recover-passkey">
-                <Button variant=ButtonVariant::Default class="w-full">
-                    "Request New Recovery Link"
-                </Button>
-            </a>
-            <a href="/login">
-                <Button variant=ButtonVariant::Outline class="w-full">
-                    "Back to Login"
-                </Button>
-            </a>
+            <ButtonLink href="/auth/recover-passkey" variant=ButtonVariant::Default class="w-full">
+                "Request New Recovery Link"
+            </ButtonLink>
+            <ButtonLink href="/login" variant=ButtonVariant::Outline class="w-full">
+                "Back to Login"
+            </ButtonLink>
         </div>
     }
 }
