@@ -29,6 +29,11 @@ pub fn register_server_functions() {
     use server_fns::ai_provider::*;
     register_explicit::<TestAiProvider>();
 
+    use server_fns::ai::*;
+    register_explicit::<GetWorkspaceAiConfig>();
+    register_explicit::<UpdateWorkspaceAiConfig>();
+    register_explicit::<TestWorkspaceAiConfig>();
+
     use server_fns::auth::*;
     register_explicit::<GetAuthConfig>();
     register_explicit::<LoginWithPassword>();
