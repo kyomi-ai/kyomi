@@ -186,6 +186,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/settings/security", axum::routing::get(leptos_frontend::serve_protected_page))
         .route("/settings/usage", axum::routing::get(leptos_frontend::serve_protected_page))
         .route("/settings/workspace", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/ai", axum::routing::get(leptos_frontend::serve_protected_page))
         .route("/settings/analytics", axum::routing::get(leptos_frontend::serve_protected_page))
         .route("/settings/team", axum::routing::get(leptos_frontend::serve_protected_page))
         .route("/settings/billing", axum::routing::get(leptos_frontend::serve_protected_page))

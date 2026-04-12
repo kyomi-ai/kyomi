@@ -39,6 +39,7 @@ const TABS: &[SettingsTab] = &[
     SettingsTab { id: "security", name: "Security", icon: icondata_lu::LuShield, path: "security" },
     SettingsTab { id: "workspace", name: "Workspace", icon: icondata_lu::LuSettings, path: "workspace" },
     SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer, path: "datasources" },
+    SettingsTab { id: "ai", name: "AI", icon: icondata_lu::LuSparkles, path: "ai" },
     SettingsTab { id: "analytics", name: "Analytics", icon: icondata_lu::LuActivity, path: "analytics" },
     SettingsTab { id: "usage", name: "Usage", icon: icondata_lu::LuChartBar, path: "usage" },
     SettingsTab { id: "billing", name: "Billing", icon: icondata_lu::LuCreditCard, path: "billing" },
@@ -70,6 +71,9 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
 
     // datasources: always visible
     tabs.push("datasources");
+
+    // ai: always visible. BYOK is per-user; model selector is admin-gated in-page.
+    tabs.push("ai");
 
     // analytics: admin only, not self-hosted, billing enabled
     if is_admin && !ctx.is_self_hosted && ctx.billing_enabled {

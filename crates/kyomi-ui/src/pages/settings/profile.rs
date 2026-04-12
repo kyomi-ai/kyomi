@@ -11,7 +11,6 @@ use crate::components::{
     ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label, StyledSelect,
     INPUT_CLASS,
 };
-use crate::pages::settings::ai_provider::AiProviderCard;
 use crate::pages::settings::push_notifications::PushNotificationsCard;
 use crate::server_fns::profile::*;
 use crate::types::{DashboardSummary, ProfileData};
@@ -112,11 +111,6 @@ pub fn ProfilePage() -> impl IntoView {
                                     </Show>
 
                                     <McpConnectionCard is_personal=is_personal/>
-
-                                    // AI Provider — personal mode only
-                                    <Show when=move || is_personal>
-                                        <AiProviderCard/>
-                                    </Show>
 
                                     <ChartPaletteCard data=data_palette/>
                                     <QueryRetentionCard data=data_retention/>

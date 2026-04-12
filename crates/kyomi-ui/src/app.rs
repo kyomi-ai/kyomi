@@ -26,6 +26,7 @@ use crate::pages::home::HomePage;
 use crate::pages::knowledge::KnowledgePage;
 use crate::pages::not_implemented::NotImplementedPage;
 use crate::pages::onboarding::DatasourceOnboardingPage;
+use crate::pages::settings::ai::AiPage;
 use crate::pages::settings::analytics::AnalyticsPage;
 use crate::pages::settings::billing::BillingPage;
 use crate::pages::settings::datasources::DatasourcesPage;
@@ -149,6 +150,7 @@ pub fn App() -> impl IntoView {
                         <Route path=path!("/security") view=SecurityTab/>
                         <Route path=path!("/workspace") view=WorkspacePage/>
                         <Route path=path!("/datasources") view=DatasourcesPage/>
+                        <Route path=path!("/ai") view=AiPage/>
                         <Route path=path!("/analytics") view=AnalyticsPage/>
                         <Route path=path!("/usage") view=UsagePage/>
                         <Route path=path!("/billing") view=BillingPage/>
