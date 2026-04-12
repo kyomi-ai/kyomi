@@ -93,16 +93,16 @@ impl UserDatasetIndexer {
                 "indexing BigQuery project"
             );
 
-            match index_project_datasets(
-                &client,
+            match index_project_datasets(IndexProjectParams {
+                client: &client,
                 db,
                 embedding,
-                &ctx,
+                ctx: &ctx,
                 access_token,
                 project_id,
                 max_tables_per_dataset,
-                &mut seen_table_ids,
-            )
+                seen_table_ids: &mut seen_table_ids,
+            })
             .await
             {
                 Ok(count) => {
@@ -205,27 +205,55 @@ impl UserDatasetIndexer {
     }
 }
 
+/// Parameters for [`index_project_datasets`].
+struct IndexProjectParams<'a> {
+    client: &'a reqwest::Client,
+    db: &'a DbPool,
+    embedding: &'a EmbeddingService,
+    ctx: &'a IndexerContext,
+    access_token: &'a str,
+    project_id: &'a str,
+    max_tables_per_dataset: Option<usize>,
+    seen_table_ids: &'a mut HashSet<String>,
+}
+
+/// Parameters for [`index_dataset_tables`].
+struct IndexDatasetParams<'a> {
+    client: &'a reqwest::Client,
+    db: &'a DbPool,
+    embedding: &'a EmbeddingService,
+    ctx: &'a IndexerContext,
+    access_token: &'a str,
+    project_id: &'a str,
+    dataset_id: &'a str,
+    max_tables: Option<usize>,
+    seen_table_ids: &'a mut HashSet<String>,
+}
+
 /// Index all datasets in a single BigQuery project.
 ///
 /// Lists datasets via BigQuery REST API, then iterates tables in each.
 /// Returns the total number of tables indexed.
 async fn index_project_datasets(
-    client: &reqwest::Client,
-    db: &DbPool,
-    embedding: &EmbeddingService,
-    ctx: &IndexerContext,
-    access_token: &str,
-    project_id: &str,
-    max_tables_per_dataset: Option<usize>,
-    seen_table_ids: &mut HashSet<String>,
+    params: IndexProjectParams<'_>,
 ) -> Result<usize> {
+    let IndexProjectParams {
+        client,
+        db,
+        embedding,
+        ctx,
+        access_token,
+        project_id,
+        max_tables_per_dataset,
+        seen_table_ids,
+    } = params;
     // List all datasets in the project
     let datasets = list_bigquery_datasets(client, access_token, project_id).await?;
 
     let mut tables_indexed = 0usize;
 
     for dataset_id in &datasets {
-        match index_dataset_tables(
+        match index_dataset_tables(IndexDatasetParams {
             client,
             db,
             embedding,
@@ -233,9 +261,9 @@ async fn index_project_datasets(
             access_token,
             project_id,
             dataset_id,
-            max_tables_per_dataset,
+            max_tables: max_tables_per_dataset,
             seen_table_ids,
-        )
+        })
         .await
         {
             Ok(count) => {
@@ -259,16 +287,19 @@ async fn index_project_datasets(
 ///
 /// Returns the number of tables indexed.
 async fn index_dataset_tables(
-    client: &reqwest::Client,
-    db: &DbPool,
-    embedding: &EmbeddingService,
-    ctx: &IndexerContext,
-    access_token: &str,
-    project_id: &str,
-    dataset_id: &str,
-    max_tables: Option<usize>,
-    seen_table_ids: &mut HashSet<String>,
+    params: IndexDatasetParams<'_>,
 ) -> Result<usize> {
+    let IndexDatasetParams {
+        client,
+        db,
+        embedding,
+        ctx,
+        access_token,
+        project_id,
+        dataset_id,
+        max_tables,
+        seen_table_ids,
+    } = params;
     let mut tables = list_bigquery_tables(client, access_token, project_id, dataset_id).await?;
 
     // Apply limit if specified
@@ -298,17 +329,17 @@ async fn index_dataset_tables(
                 }
             };
 
-        let cached = cache_table(
+        let cached = cache_table(crate::catalog::helpers::CacheTableParams {
             db,
             embedding,
             ctx,
             project_id,
             dataset_id,
-            table_id,
-            "TABLE",
-            &columns,
-            &full_table_id,
-        )
+            table_name: table_id,
+            table_type: "TABLE",
+            columns: &columns,
+            full_table_id: &full_table_id,
+        })
         .await;
 
         if cached {

@@ -340,6 +340,19 @@ pub async fn get_dashboard(
 
 // ─── Update dashboard ────────────────────────────────────────────────────────
 
+/// Parameters for [`update_dashboard`].
+pub struct UpdateDashboardParams<'a> {
+    pub db: &'a DbPool,
+    pub embed: Option<&'a EmbeddingService>,
+    pub dashboard_id: &'a str,
+    pub workspace_id: &'a str,
+    pub user_id: &'a str,
+    pub title: Option<&'a str>,
+    pub content: Option<&'a str>,
+    pub change_summary: Option<&'a str>,
+    pub expected_content_hash: Option<&'a str>,
+}
+
 /// Update a dashboard (title, content, change_summary).
 ///
 /// Ownership check: only the dashboard owner can update.
@@ -351,16 +364,19 @@ pub async fn get_dashboard(
 /// - Updates `content_hash` and `updated_by` when content changes.
 /// - Triggers rechunking if `embed` is `Some`.
 pub async fn update_dashboard(
-    db: &DbPool,
-    embed: Option<&EmbeddingService>,
-    dashboard_id: &str,
-    workspace_id: &str,
-    user_id: &str,
-    title: Option<&str>,
-    content: Option<&str>,
-    change_summary: Option<&str>,
-    expected_content_hash: Option<&str>,
+    params: UpdateDashboardParams<'_>,
 ) -> Result<bool> {
+    let UpdateDashboardParams {
+        db,
+        embed,
+        dashboard_id,
+        workspace_id,
+        user_id,
+        title,
+        content,
+        change_summary,
+        expected_content_hash,
+    } = params;
     // Fetch current dashboard for ownership check and version creation
     let current = get_dashboard(db, dashboard_id, workspace_id).await?;
     let current = current.ok_or_else(|| {

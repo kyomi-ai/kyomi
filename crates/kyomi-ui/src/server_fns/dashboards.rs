@@ -298,15 +298,17 @@ pub async fn update_dashboard(
     }
 
     kyomi_auth::dashboard_service::update_dashboard(
-        &ctx.db,
-        None, // embed: no rechunking from dashboard UI (yet)
-        &dashboard_id,
-        ws_id,
-        &auth.user_id,
-        title.as_deref(),
-        content.as_deref(),
-        change_summary.as_deref(),
-        None, // expected_content_hash: no CAS for dashboard UI
+        kyomi_auth::dashboard_service::UpdateDashboardParams {
+            db: &ctx.db,
+            embed: None, // no rechunking from dashboard UI (yet)
+            dashboard_id: &dashboard_id,
+            workspace_id: ws_id,
+            user_id: &auth.user_id,
+            title: title.as_deref(),
+            content: content.as_deref(),
+            change_summary: change_summary.as_deref(),
+            expected_content_hash: None, // no CAS for dashboard UI
+        },
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;

@@ -1351,16 +1351,16 @@ async fn create_invitation_handler(
             "You have been invited by {} to join \"{}\"",
             inviter_name, workspace_name
         );
-        ws_helpers::send_workspace_invitation(
-            &state.ws_manager,
-            &invited.user_id,
-            &invitation_id,
-            &workspace.workspace_id,
-            &workspace_name,
-            &inviter_name,
-            &data.role,
-            &ws_message,
-        )
+        ws_helpers::send_workspace_invitation(ws_helpers::WorkspaceInvitationParams {
+            manager: &state.ws_manager,
+            user_id: &invited.user_id,
+            invitation_id: &invitation_id,
+            workspace_id: &workspace.workspace_id,
+            workspace_name: &workspace_name,
+            invited_by_name: &inviter_name,
+            role: &data.role,
+            message: &ws_message,
+        })
         .await;
     }
 

@@ -392,15 +392,17 @@ impl AgentTool for SaveLearningTool {
 
         // LLM audit: check for duplicates and validate
         let mut similar = kyomi_auth::learning_service::get_relevant_learnings_hybrid(
-            &ctx.db,
-            ctx.embedding.wait_ready().await?,
-            &ctx.workspace_id,
-            insight,
-            Some(&ctx.user_id),
-            5,
-            0.5,
-            0.7,
-            0.3,
+            kyomi_auth::learning_service::GetRelevantLearningsParams {
+                db: &ctx.db,
+                embedding_svc: ctx.embedding.wait_ready().await?,
+                workspace_id: &ctx.workspace_id,
+                query: insight,
+                user_id: Some(&ctx.user_id),
+                limit: 5,
+                min_similarity: 0.5,
+                semantic_weight: 0.7,
+                keyword_weight: 0.3,
+            },
         )
         .await
         .unwrap_or_default();
@@ -530,18 +532,20 @@ impl AgentTool for SaveLearningTool {
         // Save the learning
         let session_id = ctx.session_id.as_deref().unwrap_or("");
         let learning_id = kyomi_auth::learning_service::save_learning(
-            &ctx.db,
-            ctx.embedding.wait_ready().await?,
-            &ctx.workspace_id,
-            &ctx.user_id,
-            session_id,
-            insight,
-            context,
-            scope,
-            datasource_config_id.as_deref(),
-            learning_type,
-            reference_queries,
-            structured_metadata.as_ref(),
+            kyomi_auth::learning_service::SaveLearningParams {
+                db: &ctx.db,
+                embedding_svc: ctx.embedding.wait_ready().await?,
+                workspace_id: &ctx.workspace_id,
+                user_id: &ctx.user_id,
+                session_id,
+                insight,
+                context,
+                scope,
+                datasource_config_id: datasource_config_id.as_deref(),
+                learning_type,
+                reference_queries,
+                structured_metadata: structured_metadata.as_ref(),
+            },
         )
         .await?;
 

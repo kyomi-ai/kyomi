@@ -447,15 +447,17 @@ async fn update_dashboard(
     }
 
     dashboard_service::update_dashboard(
-        &state.db,
-        None, // embed: no rechunking from REST API (yet)
-        &dashboard_id,
-        workspace_id,
-        &user.user_id,
-        request.title.as_deref(),
-        request.content.as_deref(),
-        request.change_summary.as_deref(),
-        None, // expected_content_hash: no CAS for dashboard REST
+        dashboard_service::UpdateDashboardParams {
+            db: &state.db,
+            embed: None, // no rechunking from REST API (yet)
+            dashboard_id: &dashboard_id,
+            workspace_id,
+            user_id: &user.user_id,
+            title: request.title.as_deref(),
+            content: request.content.as_deref(),
+            change_summary: request.change_summary.as_deref(),
+            expected_content_hash: None, // no CAS for dashboard REST
+        },
     )
     .await?;
 

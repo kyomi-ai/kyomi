@@ -668,30 +668,30 @@ pub async fn deliver_response(
         )
         .await;
     } else {
-        ws_helpers::send_chat_complete(
-            ws_manager,
+        ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
+            manager: ws_manager,
             user_id,
             session_id,
             message_id,
-            response,
+            full_content: response,
             model,
-            usage.clone(),
-            Some(context_type),
-        )
+            usage_stats: usage.clone(),
+            context_type: Some(context_type),
+        })
         .await;
 
         // Broadcast completion to shared conversation members.
         if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
-            ws_helpers::broadcast_chat_complete(
-                ws_manager,
-                wid,
+            ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
+                manager: ws_manager,
+                workspace_id: wid,
                 session_id,
                 message_id,
-                response,
+                full_content: response,
                 model,
-                usage,
-                Some(user_id),
-            )
+                usage_stats: usage,
+                exclude_user_id: Some(user_id),
+            })
             .await;
         }
     }

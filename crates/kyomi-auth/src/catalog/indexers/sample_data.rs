@@ -232,17 +232,17 @@ impl SampleDataIndexer {
 
             let full_table_id = format!("{}.{table_name}", config.database);
 
-            let cached = cache_table(
+            let cached = cache_table(crate::catalog::helpers::CacheTableParams {
                 db,
                 embedding,
-                &ctx,
-                "",                  // project_id is empty for ClickHouse sample
-                &config.database,    // dataset_id = database name
+                ctx: &ctx,
+                project_id: "", // project_id is empty for ClickHouse sample
+                dataset_id: &config.database, // dataset_id = database name
                 table_name,
-                engine,
-                &columns,
-                &full_table_id,
-            )
+                table_type: engine,
+                columns: &columns,
+                full_table_id: &full_table_id,
+            })
             .await;
 
             if cached {

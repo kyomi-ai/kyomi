@@ -709,15 +709,17 @@ pub async fn get_workspace_learnings_for_watch(
 
     // Search for workspace-scoped learnings relevant to this prompt
     let learnings_result = learning_service::get_relevant_learnings_hybrid(
-        db,
-        embedding,
-        workspace_id,
-        watch_prompt,
-        None, // workspace scope (no user_id)
-        5,
-        0.01,
-        0.5,
-        0.5,
+        learning_service::GetRelevantLearningsParams {
+            db,
+            embedding_svc: embedding,
+            workspace_id,
+            query: watch_prompt,
+            user_id: None, // workspace scope
+            limit: 5,
+            min_similarity: 0.01,
+            semantic_weight: 0.5,
+            keyword_weight: 0.5,
+        },
     )
     .await;
 

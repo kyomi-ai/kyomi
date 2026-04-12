@@ -589,15 +589,17 @@ impl AgentTool for WriteDocumentTool {
         if let Some(doc) = existing {
             // Update existing document
             match kyomi_auth::dashboard_service::update_dashboard(
-                &ctx.db,
-                None, // rechunking handled explicitly below
-                &doc.dashboard_id,
-                &ctx.workspace_id,
-                &ctx.user_id,
-                None,
-                Some(content),
-                None,
-                content_hash,
+                kyomi_auth::dashboard_service::UpdateDashboardParams {
+                    db: &ctx.db,
+                    embed: None, // rechunking handled explicitly below
+                    dashboard_id: &doc.dashboard_id,
+                    workspace_id: &ctx.workspace_id,
+                    user_id: &ctx.user_id,
+                    title: None,
+                    content: Some(content),
+                    change_summary: None,
+                    expected_content_hash: content_hash,
+                },
             )
             .await
             {
@@ -909,15 +911,17 @@ impl AgentTool for EditDocumentTool {
 
         // Update via dashboard_service with CAS
         match kyomi_auth::dashboard_service::update_dashboard(
-            &ctx.db,
-            None, // rechunking handled explicitly below
-            &doc.dashboard_id,
-            &ctx.workspace_id,
-            &ctx.user_id,
-            None,
-            Some(&new_content),
-            None,
-            content_hash,
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &ctx.db,
+                embed: None, // rechunking handled explicitly below
+                dashboard_id: &doc.dashboard_id,
+                workspace_id: &ctx.workspace_id,
+                user_id: &ctx.user_id,
+                title: None,
+                content: Some(&new_content),
+                change_summary: None,
+                expected_content_hash: content_hash,
+            },
         )
         .await
         {

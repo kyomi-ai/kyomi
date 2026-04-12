@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use kyomi_auth::catalog::helpers::{
     archive_missing_tables, cache_table, update_datasource_last_refresh, update_workspace_status,
-    IndexerContext,
+    CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::sql_helpers::{get_columns_sql, get_tables_in_container_sql};
 use kyomi_auth::catalog::types::ColumnEntry;
@@ -215,17 +215,17 @@ async fn refresh_connect(
                 kyomi_core::build_full_table_name(project_id, dataset_id, table_name);
             seen_table_ids.insert(archive_id);
 
-            let cached = cache_table(
-                params.db,
-                params.embedding,
-                &ctx,
+            let cached = cache_table(CacheTableParams {
+                db: params.db,
+                embedding: params.embedding,
+                ctx: &ctx,
                 project_id,
                 dataset_id,
                 table_name,
                 table_type,
-                &columns,
-                &full_table_id,
-            )
+                columns: &columns,
+                full_table_id: &full_table_id,
+            })
             .await;
 
             if cached {
@@ -369,17 +369,17 @@ async fn refresh_bigquery_rest(
                     }
                 };
 
-                let cached = cache_table(
-                    params.db,
-                    params.embedding,
-                    &ctx,
-                    project,
+                let cached = cache_table(CacheTableParams {
+                    db: params.db,
+                    embedding: params.embedding,
+                    ctx: &ctx,
+                    project_id: project,
                     dataset_id,
-                    table_id,
-                    "TABLE",
-                    &columns,
-                    &full_table_id,
-                )
+                    table_name: table_id,
+                    table_type: "TABLE",
+                    columns: &columns,
+                    full_table_id: &full_table_id,
+                })
                 .await;
 
                 if cached {
@@ -656,17 +656,17 @@ async fn refresh_sql_based(
             };
 
             let full_table_id = format!("{effective_container}.{table_name}");
-            let cached = cache_table(
-                params.db,
-                params.embedding,
-                &ctx,
+            let cached = cache_table(CacheTableParams {
+                db: params.db,
+                embedding: params.embedding,
+                ctx: &ctx,
                 project_id,
                 dataset_id,
                 table_name,
-                "TABLE",
-                &columns,
-                &full_table_id,
-            )
+                table_type: "TABLE",
+                columns: &columns,
+                full_table_id: &full_table_id,
+            })
             .await;
 
             if cached {
