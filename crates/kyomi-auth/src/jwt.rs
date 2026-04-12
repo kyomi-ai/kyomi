@@ -150,10 +150,9 @@ mod tests {
 
     #[test]
     fn refresh_token_is_opaque() {
-        // Load constants for the prefix
-        if let Ok(path) = kyomi_core::constants::find_constants_file() {
-            let _ = kyomi_core::constants::load(&path);
-        }
+        // Load constants (disk if available, embedded fallback otherwise).
+        // Idempotent — repeat calls are a no-op via OnceLock.
+        let _ = kyomi_core::constants::load_with_fallback();
 
         let token = create_refresh_token();
         assert!(token.starts_with("rt_"), "refresh token must start with rt_ prefix");
@@ -283,9 +282,8 @@ mod tests {
 
     #[test]
     fn refresh_tokens_are_unique() {
-        if let Ok(path) = kyomi_core::constants::find_constants_file() {
-            let _ = kyomi_core::constants::load(&path);
-        }
+        // Load constants (disk if available, embedded fallback otherwise).
+        let _ = kyomi_core::constants::load_with_fallback();
 
         let token1 = create_refresh_token();
         let token2 = create_refresh_token();

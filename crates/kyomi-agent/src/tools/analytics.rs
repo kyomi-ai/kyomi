@@ -450,11 +450,15 @@ mod tests {
     use super::*;
     use crate::tools::AgentTool;
 
-    /// Load shared constants needed by snippet_tag (idempotent — OnceLock ignores repeat calls).
+    /// Load shared constants needed by snippet_tag.
+    ///
+    /// Uses `load_with_fallback` so the call works regardless of the current
+    /// working directory when `cargo test` is invoked: if no `constants.toml`
+    /// is found on disk, the embedded copy compiled into `kyomi-core` is used.
+    /// The underlying `OnceLock` makes subsequent calls a no-op, so this is
+    /// safe to call from every test that needs constants.
     fn load_constants_for_test() {
-        if let Ok(path) = kyomi_core::constants::find_constants_file() {
-            let _ = kyomi_core::constants::load(&path);
-        }
+        let _ = kyomi_core::constants::load_with_fallback();
     }
 
     // -----------------------------------------------------------------------
