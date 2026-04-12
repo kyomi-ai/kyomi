@@ -125,7 +125,7 @@ fn FormView(
                             autocomplete="email"
                             autofocus=true
                             required=true
-                            class=format!("{} h-11", INPUT_CLASS)
+                            class=INPUT_CLASS
                             prop:value=move || email.get()
                             on:input=move |ev| set_email.set(event_target_value(&ev))
                         />

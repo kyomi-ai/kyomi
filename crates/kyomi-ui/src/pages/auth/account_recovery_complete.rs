@@ -307,7 +307,7 @@ fn ready_view(
                             type="password"
                             autocomplete="new-password"
                             autofocus
-                            class=format!("{} h-11", INPUT_CLASS)
+                            class=INPUT_CLASS
                             placeholder="At least 8 characters"
                             minlength="8"
                             required
@@ -323,7 +323,7 @@ fn ready_view(
                             id="confirm-password"
                             type="password"
                             autocomplete="new-password"
-                            class=format!("{} h-11", INPUT_CLASS)
+                            class=INPUT_CLASS
                             placeholder="Re-enter your password"
                             minlength="8"
                             required

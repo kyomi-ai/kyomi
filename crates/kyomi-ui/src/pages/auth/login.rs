@@ -608,7 +608,7 @@ fn CredentialsView(
                         type="email"
                         autocomplete="email"
                         placeholder="name@company.com"
-                        class=format!("{} h-11", INPUT_CLASS)
+                        class=INPUT_CLASS
                         required=true
                         prop:value=move || email.get()
                         on:input=move |ev| set_email.set(event_target_value(&ev))
@@ -622,7 +622,7 @@ fn CredentialsView(
                         type="password"
                         autocomplete="current-password"
                         placeholder="Enter your password"
-                        class=format!("{} h-11", INPUT_CLASS)
+                        class=INPUT_CLASS
                         required=true
                         prop:value=move || password.get()
                         on:input=move |ev| set_password.set(event_target_value(&ev))
@@ -869,7 +869,7 @@ fn SignupView(
                         type="email"
                         autocomplete="email"
                         placeholder="name@company.com"
-                        class=format!("{} h-11", INPUT_CLASS)
+                        class=INPUT_CLASS
                         required=true
                         prop:value=move || signup_email.get()
                         on:input=move |ev| set_signup_email.set(event_target_value(&ev))
@@ -886,7 +886,7 @@ fn SignupView(
                             type="text"
                             autocomplete="name"
                             placeholder="Your name"
-                            class=format!("{} h-11", INPUT_CLASS)
+                            class=INPUT_CLASS
                             required=true
                             prop:value=move || signup_name.get()
                             on:input=move |ev| set_signup_name.set(event_target_value(&ev))
@@ -900,7 +900,7 @@ fn SignupView(
                             type="password"
                             autocomplete="new-password"
                             placeholder="At least 8 characters"
-                            class=format!("{} h-11", INPUT_CLASS)
+                            class=INPUT_CLASS
                             required=true
                             minlength="8"
                             prop:value=move || signup_password.get()
