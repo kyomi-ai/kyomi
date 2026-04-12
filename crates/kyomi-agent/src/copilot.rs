@@ -15,7 +15,6 @@ const CORE_DATA_TOOLS: &[&str] = &[
     "list_datasources",
     "get_table_info",
     "query_datasource",
-    "save_learning",
 ];
 
 /// Returns the tool subset for a given copilot context type.

@@ -25,7 +25,6 @@ pub mod dashboard;
 pub mod datasource;
 pub mod forecast;
 pub mod knowledge;
-pub mod learning;
 pub mod query_utils;
 pub mod resources;
 pub mod watch;
@@ -57,8 +56,8 @@ pub const MCP_ONLY_TOOLS: &[&str] = &[
 ];
 
 /// Tool names that signal the agent should stop iterating and return the
-/// current response content (e.g., after saving a learning).
-pub const FINAL_TOOL_NAMES: &[&str] = &["save_learning", "write_knowledge_file"];
+/// current response content (e.g., after writing a knowledge document).
+pub const FINAL_TOOL_NAMES: &[&str] = &["write_knowledge_file"];
 
 /// Tools available to watch execution agents (data query only, no mutations).
 /// Matches Python `watch_scheduler.py` watch_tools list.
@@ -412,9 +411,6 @@ pub fn create_default_registry() -> ToolRegistry {
     registry.register(Arc::new(catalog::GetTableInfoTool));
     registry.register(Arc::new(catalog::BrowseCatalogTool));
 
-    // Learning tools
-    registry.register(Arc::new(learning::SaveLearningTool));
-
     // Knowledge tools (search + document CRUD)
     registry.register(Arc::new(knowledge::SearchKnowledgeTool));
     registry.register(Arc::new(knowledge::WriteDocumentTool));
@@ -687,7 +683,7 @@ mod tests {
         let registry = create_default_registry();
         let filter = ToolFilter::default();
         let tools = registry.get_tools(&filter);
-        assert_eq!(tools.len(), 35);
+        assert_eq!(tools.len(), 34);
 
         // Verify all expected tools are registered
         let expected = [
@@ -696,7 +692,6 @@ mod tests {
             "validate_sql",
             "get_table_info",
             "browse_catalog",
-            "save_learning",
             "search_knowledge",
             "write_knowledge_file",
             "read_knowledge_file",
@@ -753,7 +748,6 @@ mod tests {
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_chart"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"preview_watch"));
         assert!(MCP_ONLY_TOOLS.contains(&"render_chart"));
-        assert!(FINAL_TOOL_NAMES.contains(&"save_learning"));
         assert!(FINAL_TOOL_NAMES.contains(&"write_knowledge_file"));
         assert!(WATCH_TOOLS.contains(&"browse_catalog"));
         assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
@@ -797,8 +791,8 @@ mod contract_tests {
         let tools = registry.get_tools(&ToolFilter::default());
         assert_eq!(
             tools.len(),
-            35,
-            "Expected 35 tools, got {}. Names: {:?}",
+            34,
+            "Expected 34 tools, got {}. Names: {:?}",
             tools.len(),
             tools.iter().map(|t| t.name()).collect::<Vec<_>>()
         );
@@ -812,7 +806,6 @@ mod contract_tests {
             "validate_sql",
             "get_table_info",
             "browse_catalog",
-            "save_learning",
             "search_knowledge",
             "write_knowledge_file",
             "read_knowledge_file",
@@ -1047,7 +1040,6 @@ mod contract_tests {
     #[test]
     fn mutating_tools_are_not_read_only() {
         let mutating_names: HashSet<&str> = [
-            "save_learning",
             "write_knowledge_file",
             "edit_knowledge_file",
             "create_dashboard",
@@ -1190,7 +1182,7 @@ mod contract_tests {
         }
 
         // Chat context should exclude 3 copilot + 5 MCP = 8 tools
-        assert_eq!(tools.len(), 35 - 8);
+        assert_eq!(tools.len(), 34 - 8);
     }
 
     #[test]
@@ -1217,7 +1209,7 @@ mod contract_tests {
                 "Copilot filter should not include MCP tool '{mcp_name}'"
             );
         }
-        assert_eq!(tools.len(), 35 - 5); // Only MCP excluded
+        assert_eq!(tools.len(), 34 - 5); // Only MCP excluded
     }
 
     #[test]
@@ -1243,7 +1235,7 @@ mod contract_tests {
                 "MCP filter should not include copilot tool '{copilot_name}'"
             );
         }
-        assert_eq!(tools.len(), 35 - 3); // Only copilot excluded
+        assert_eq!(tools.len(), 34 - 3); // Only copilot excluded
     }
 
     #[test]
@@ -1283,7 +1275,6 @@ mod contract_tests {
             );
         }
         // Trial should NOT have mutation tools
-        assert!(!names.contains("save_learning"));
         assert!(!names.contains("create_watch"));
         assert!(!names.contains("create_dashboard"));
     }
@@ -1342,7 +1333,7 @@ mod contract_tests {
         let filter = ToolFilter::default();
         let definitions = registry.get_tool_definitions(&filter);
 
-        assert_eq!(definitions.len(), 35);
+        assert_eq!(definitions.len(), 34);
         for def in &definitions {
             assert!(!def.name.is_empty(), "Tool definition has empty name");
             assert!(

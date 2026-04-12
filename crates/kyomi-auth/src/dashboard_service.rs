@@ -756,6 +756,38 @@ pub async fn get_dashboard_count(
     Ok(count)
 }
 
+/// Count documents in a workspace, optionally filtered by `doc_type`.
+///
+/// Unlike `get_dashboard_count` (which always counts `doc_type='dashboard'`
+/// for tier-limit checks), this counts documents of any type — or only the
+/// specified type when `doc_type_filter` is `Some`. Used by the agent's
+/// search tools to report a total that matches the filter the caller used.
+pub async fn get_document_count(
+    db: &DbPool,
+    workspace_id: &str,
+    doc_type_filter: Option<DocType>,
+) -> Result<i64> {
+    let count: i64 = if let Some(dt) = doc_type_filter {
+        db_fetch_scalar!(
+            db,
+            i64,
+            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1 AND doc_type = $2",
+            workspace_id,
+            dt.as_str()
+        )
+    } else {
+        db_fetch_scalar!(
+            db,
+            i64,
+            "SELECT COUNT(*) FROM dashboards WHERE workspace_id = $1",
+            workspace_id
+        )
+    }
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to count documents: {e}")))?;
+
+    Ok(count)
+}
+
 // ─── Rechunking (knowledge documents) ───────────────────────────────────────
 
 /// Rechunk a knowledge document: delete old chunks, split content into

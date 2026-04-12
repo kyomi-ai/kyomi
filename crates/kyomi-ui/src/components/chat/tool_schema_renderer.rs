@@ -1210,7 +1210,7 @@ fn render_search_dashboards(schema: &Value) -> impl IntoView {
                     }.into_any()
                 } else {
                     let count = dashboards.len();
-                    let total = output.and_then(|o| u64_field(o, "total_workspace_dashboards"));
+                    let total = output.and_then(|o| u64_field(o, "total_workspace_documents"));
 
                     view! {
                         <div class="bg-success p-2 rounded border border-success-border text-xs space-y-2">
@@ -1931,79 +1931,6 @@ fn render_validate_chartml(schema: &Value) -> impl IntoView {
     }
 }
 
-fn render_save_learning(schema: &Value) -> impl IntoView {
-    let input = schema.get("input");
-    let output = schema.get("output");
-
-    let has_error = output.is_some_and(|o| {
-        matches!(o, Value::String(_)) || has_key(o, "error") || bool_field(o, "success") == Some(false)
-    });
-    let is_success = output.is_some_and(|o| bool_field(o, "success") == Some(true));
-
-    view! {
-        <div class="space-y-2">
-            {input.map(|inp| {
-                let insight = str_field(inp, "insight").unwrap_or("").to_string();
-                let context = str_field(inp, "context").map(String::from);
-                let ref_queries = array_field(inp, "reference_queries").cloned().unwrap_or_default();
-
-                view! {
-                    <div>
-                        {section_label("Learning:")}
-                        <div class="mt-1 bg-muted p-3 rounded border border-border">
-                            <div class="text-sm text-foreground mb-2">{insight}</div>
-                            {context.map(|c| view! {
-                                <div class="text-xs text-muted-foreground italic border-l-2 border-input pl-2 mb-2">{c}</div>
-                            })}
-                            {(!ref_queries.is_empty()).then(|| {
-                                let count = ref_queries.len();
-                                view! {
-                                    <div class="mt-2 pt-2 border-t border-border">
-                                        <span class="text-xs font-medium text-muted-foreground">{format!("Reference Queries ({})", count)}</span>
-                                        <div class="space-y-2 mt-1">
-                                            {ref_queries.iter().map(|rq| {
-                                                let comment = str_field(rq, "comment").map(String::from);
-                                                let sql = str_field(rq, "sql").unwrap_or("").to_string();
-                                                let datasource = str_field(rq, "datasource").map(String::from);
-                                                view! {
-                                                    <div class="bg-background rounded border border-border p-2">
-                                                        {comment.map(|c| view! { <div class="text-xs font-medium text-foreground mb-1">{c}</div> })}
-                                                        <pre class="font-mono text-xs text-muted-foreground whitespace-pre-wrap break-all">{sql}</pre>
-                                                        {datasource.map(|ds| view! {
-                                                            <span class="inline-block mt-1 px-1.5 py-0.5 rounded text-[10px] bg-secondary text-secondary-foreground">{ds}</span>
-                                                        })}
-                                                    </div>
-                                                }
-                                            }).collect_view()}
-                                        </div>
-                                    </div>
-                                }
-                            })}
-                        </div>
-                    </div>
-                }
-            })}
-            {is_success.then(|| {
-                let msg = output.and_then(|o| str_field(o, "message")).unwrap_or("Learning saved successfully").to_string();
-                success_block(msg)
-            })}
-            {has_error.then(|| {
-                let rejected = output.and_then(|o| bool_field(o, "rejected")).unwrap_or(false);
-                let title = if rejected { "Rejected" } else { "Error" };
-                let msg = output.map(|o| {
-                    if let Value::String(s) = o { return s.clone(); }
-                    str_field(o, "reason")
-                        .or_else(|| str_field(o, "message"))
-                        .or_else(|| str_field(o, "error"))
-                        .unwrap_or("Failed to save learning")
-                        .to_string()
-                }).unwrap_or_default();
-                error_block(title, msg)
-            })}
-        </div>
-    }
-}
-
 fn render_forecast_data(schema: &Value) -> impl IntoView {
     let input = schema.get("input");
     let output = schema.get("output");
@@ -2281,7 +2208,6 @@ pub fn render_tool_schema(schema: Value) -> impl IntoView {
 
         // Chart & misc renderers
         "validate_chartml" => render_validate_chartml(&schema).into_any(),
-        "save_learning" => render_save_learning(&schema).into_any(),
         "forecast_data" => render_forecast_data(&schema).into_any(),
         "get_workspace_info" => render_workspace_info(&schema).into_any(),
 

@@ -113,9 +113,16 @@ impl AgentTool for SearchDashboardsTool {
         )
         .await?;
 
-        let total_workspace_dashboards =
-            kyomi_auth::dashboard_service::get_dashboard_count(&ctx.db, &ctx.workspace_id, None)
-                .await?;
+        // Count documents matching the same filter the search used, so the
+        // total reported to the agent is consistent with the result set
+        // (e.g. filtering to doc_type=knowledge should count knowledge docs,
+        // not dashboards).
+        let total_workspace_documents = kyomi_auth::dashboard_service::get_document_count(
+            &ctx.db,
+            &ctx.workspace_id,
+            doc_type_filter,
+        )
+        .await?;
 
         let frontend_url = &ctx.config.frontend_url;
 
@@ -141,9 +148,12 @@ impl AgentTool for SearchDashboardsTool {
         let count = dashboards.len();
 
         Ok(serde_json::json!({
+            "documents": dashboards,
+            // Backward-compatible alias — older prompts expect `dashboards`.
+            // Kept pointing at the same array until we deprecate it.
             "dashboards": dashboards,
             "count": count,
-            "total_workspace_dashboards": total_workspace_dashboards,
+            "total_workspace_documents": total_workspace_documents,
             "sorted_by": sort_by_str,
         })
         .to_string())

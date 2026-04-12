@@ -926,7 +926,7 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
         assert!(config.temperature.is_none());
         assert_eq!(config.max_tokens, 4096);
         assert!(!config.log_context);
-        assert!(config.final_tool_names.contains("save_learning"));
+        assert!(config.final_tool_names.contains("write_knowledge_file"));
     }
 
     // -- AgentCallbacks tests ------------------------------------------------
@@ -963,9 +963,9 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
     // -- Contract: AgentConfig default final_tool_names ----------------------
 
     #[test]
-    fn agent_config_final_tool_names_contains_save_learning() {
+    fn agent_config_final_tool_names_contains_write_knowledge_file() {
         let config = AgentConfig::default();
-        assert!(config.final_tool_names.contains("save_learning"));
+        assert!(config.final_tool_names.contains("write_knowledge_file"));
     }
 
     #[test]

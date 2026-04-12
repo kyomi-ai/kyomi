@@ -45,9 +45,11 @@ impl AgentTool for SearchKnowledgeTool {
     }
 
     fn description(&self) -> &str {
-        "Search the workspace's knowledge base for relevant tables, learnings, \
-         and metrics using semantic search. Use this to discover what data is \
-         available before querying."
+        "Search the workspace's knowledge base for relevant tables, dashboards, \
+         knowledge documents, learnings, and metrics using semantic search. \
+         Use this to discover what is available before querying. Pass `doc_type` \
+         to restrict results to only dashboards or only knowledge documents \
+         (omit for everything including tables and metrics)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -61,6 +63,11 @@ impl AgentTool for SearchKnowledgeTool {
                 "datasource": {
                     "type": "string",
                     "description": "Optional datasource slug to filter"
+                },
+                "doc_type": {
+                    "type": "string",
+                    "enum": ["dashboard", "knowledge"],
+                    "description": "Optional document type filter. When set, only returns matching dashboards or knowledge documents (tables, metrics, and legacy learnings are excluded). Omit to search everything."
                 },
                 "limit": {
                     "type": "integer",
@@ -91,6 +98,17 @@ impl AgentTool for SearchKnowledgeTool {
                 kyomi_core::Error::BadRequest("Missing required parameter 'query'".into())
             })?;
         let datasource_slug = args.get("datasource").and_then(|v| v.as_str());
+        let doc_type_filter: Option<DocType> = args
+            .get("doc_type")
+            .and_then(|v| v.as_str())
+            .map(|s| match s {
+                "dashboard" => Ok(DocType::Dashboard),
+                "knowledge" => Ok(DocType::Knowledge),
+                other => Err(kyomi_core::Error::BadRequest(format!(
+                    "Invalid doc_type '{other}' — must be 'dashboard' or 'knowledge'"
+                ))),
+            })
+            .transpose()?;
         let limit = args
             .get("limit")
             .and_then(|v| v.as_i64())
@@ -151,12 +169,19 @@ impl AgentTool for SearchKnowledgeTool {
         // Search knowledge file chunks (new knowledge system)
         let query_embedding = embed.embed_passage(query)?;
         let knowledge_file_results = search_knowledge_chunks(
-            &ctx.db, &ctx.workspace_id, &query_embedding, limit,
+            &ctx.db, &ctx.workspace_id, &query_embedding, limit, doc_type_filter,
         ).await;
 
+        // When doc_type filter is specified, exclude legacy table/metric/learning
+        // entries — the caller is asking specifically for documents of that type.
+        let legacy_entries: Vec<_> = if doc_type_filter.is_some() {
+            Vec::new()
+        } else {
+            result.entries
+        };
+
         // Format entries as structured JSON
-        let mut results: Vec<serde_json::Value> = result
-            .entries
+        let mut results: Vec<serde_json::Value> = legacy_entries
             .into_iter()
             .map(|entry| {
                 let entry_type = match entry.kind {
@@ -318,6 +343,7 @@ async fn search_knowledge_chunks(
     workspace_id: &str,
     query_embedding: &[f32],
     limit: usize,
+    doc_type_filter: Option<DocType>,
 ) -> Vec<serde_json::Value> {
     // For SQLite: load all chunks, compute cosine similarity in memory
     // For Postgres: use pgvector ORDER BY embedding <=> $2::vector
@@ -331,7 +357,12 @@ async fn search_knowledge_chunks(
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            sqlx::query_as::<_, KnowledgeChunkRow>(
+            let doc_type_clause = if doc_type_filter.is_some() {
+                "AND d.doc_type = $4 "
+            } else {
+                ""
+            };
+            let sql = format!(
                 "SELECT kc.dashboard_id, d.title AS file_name, \
                         COALESCE(d.doc_type, 'dashboard') AS doc_type, \
                         kc.content AS chunk_content, \
@@ -340,30 +371,41 @@ async fn search_knowledge_chunks(
                  FROM knowledge_chunks kc \
                  JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
                  WHERE kc.workspace_id = $1 \
+                 {doc_type_clause}\
                  ORDER BY kc.embedding <=> $2::vector \
-                 LIMIT $3",
-            )
-            .bind(workspace_id)
-            .bind(&vec_str)
-            .bind(limit as i64)
-            .fetch_all(pg)
-            .await
-            .unwrap_or_default()
+                 LIMIT $3"
+            );
+            let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql)
+                .bind(workspace_id)
+                .bind(&vec_str)
+                .bind(limit as i64);
+            if let Some(dt) = doc_type_filter {
+                query = query.bind(dt.as_str());
+            }
+            query.fetch_all(pg).await.unwrap_or_default()
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
-            sqlx::query_as::<_, KnowledgeChunkRow>(
+            // SQLite path loads all matching chunks and computes similarity in Rust.
+            let doc_type_clause = if doc_type_filter.is_some() {
+                "AND d.doc_type = $2 "
+            } else {
+                ""
+            };
+            let sql = format!(
                 "SELECT kc.dashboard_id, d.title AS file_name, \
                         COALESCE(d.doc_type, 'dashboard') AS doc_type, \
                         kc.content AS chunk_content, kc.embedding, \
                         NULL AS score \
                  FROM knowledge_chunks kc \
                  JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
-                 WHERE kc.workspace_id = $1",
-            )
-            .bind(workspace_id)
-            .fetch_all(sq)
-            .await
-            .unwrap_or_default()
+                 WHERE kc.workspace_id = $1 \
+                 {doc_type_clause}"
+            );
+            let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql).bind(workspace_id);
+            if let Some(dt) = doc_type_filter {
+                query = query.bind(dt.as_str());
+            }
+            query.fetch_all(sq).await.unwrap_or_default()
         }
     };
     if rows.is_empty() {

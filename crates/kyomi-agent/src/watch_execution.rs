@@ -1022,6 +1022,8 @@ async fn execute_watch_inner(
                subscription_period_start, subscription_period_end, \
                trial_ends_at, \
                ai_credits_used_usd, \
+               ai_bundle_balance_usd, \
+               analytics_bundle_events, \
                user_limit, \
                stripe_customer_id, stripe_subscription_id, \
                settings, \
