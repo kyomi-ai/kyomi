@@ -68,14 +68,23 @@ pub fn LoginPage() -> impl IntoView {
     let (resend_loading, set_resend_loading) = signal(false);
     let (resend_success, set_resend_success) = signal(false);
 
-    // ── Read redirect URL from query params (set by server auth guard) ─
-    // Only compiled on WASM — used after successful login to redirect back
-    // to the original page the user was trying to access.
+    // ── Read post-login destination from query params ─────────────────
+    // `oauth_continue` (set by /api/v1/oauth/authorize when an MCP client
+    // initiates OAuth) takes precedence over `redirect` (set by the server
+    // auth guard). When present, we send the user to the OAuth continue
+    // endpoint after sign-in so the MCP client gets its callback.
+    //
+    // Splicing `oauth_continue` directly into the URL is safe because the
+    // server generates it via `redis_ops::generate_token()` (base64url
+    // alphabet — `A-Z a-z 0-9 - _`), none of which require percent-encoding.
     #[cfg(target_arch = "wasm32")]
     let redirect_url = {
         let query = use_query_map();
         move || -> String {
             query.with(|q| {
+                if let Some(oc) = q.get("oauth_continue").filter(|s| !s.is_empty()) {
+                    return format!("/api/v1/oauth/authorize/continue?state={oc}");
+                }
                 q.get("redirect")
                     .filter(|r| !r.is_empty() && r.starts_with('/'))
                     .unwrap_or_else(|| "/".to_string())
@@ -89,7 +98,7 @@ pub fn LoginPage() -> impl IntoView {
     {
         use crate::server_fns::sidebar::get_sidebar_user;
         let auth_check = Resource::new(|| (), |_| get_sidebar_user());
-        let redirect_for_check = redirect_url.clone();
+        let redirect_for_check = redirect_url;
         Effect::new(move || {
             if let Some(Ok(_)) = auth_check.get() {
                 // Already authenticated — redirect to intended page
@@ -158,8 +167,26 @@ pub fn LoginPage() -> impl IntoView {
 
                 let result: Result<(), String> = async {
                     let window = web_sys::window().ok_or("no window")?;
+                    // Forward `oauth_continue` from the current URL so the
+                    // server can stash it in the Google CSRF state and resume
+                    // the MCP OAuth flow after Google sign-in completes.
+                    // Raw-string extraction (no percent-decode) is safe — the
+                    // token is base64url, see redirect_url() comment above.
+                    let login_url = {
+                        let search = window.location().search().unwrap_or_default();
+                        let oc = search
+                            .strip_prefix('?')
+                            .unwrap_or(&search)
+                            .split('&')
+                            .find_map(|pair| pair.strip_prefix("oauth_continue="))
+                            .filter(|s| !s.is_empty());
+                        match oc {
+                            Some(state) => format!("/api/v1/auth/google/login?oauth_continue={state}"),
+                            None => "/api/v1/auth/google/login".to_string(),
+                        }
+                    };
                     let resp_val = wasm_bindgen_futures::JsFuture::from(
-                        window.fetch_with_str("/api/v1/auth/google/login"),
+                        window.fetch_with_str(&login_url),
                     )
                     .await
                     .map_err(|e| format!("{e:?}"))?;
