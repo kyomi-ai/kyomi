@@ -13,7 +13,6 @@
 //! server crate's `AppState`.
 
 pub mod ai;
-pub mod ai_provider;
 pub mod analytics;
 pub mod auth;
 pub mod billing;

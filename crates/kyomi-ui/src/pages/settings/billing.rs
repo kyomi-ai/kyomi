@@ -1026,32 +1026,6 @@ fn SeatCapCard(
 // AI Credits Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Check localStorage for a BYOK API key.
-fn check_byok_key() -> bool {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use crate::pages::settings::ai_provider::LLM_CONFIG_STORAGE_KEY;
-        let storage = web_sys::window()
-            .and_then(|w| w.local_storage().ok().flatten());
-        if let Some(storage) = storage {
-            if let Ok(Some(val)) = storage.get_item(LLM_CONFIG_STORAGE_KEY) {
-                if let Ok(parsed) = js_sys::JSON::parse(&val) {
-                    let key = js_sys::Reflect::get(
-                        &parsed,
-                        &wasm_bindgen::JsValue::from_str("api_key"),
-                    )
-                    .ok()
-                    .and_then(|v| v.as_string());
-                    return key.map_or(false, |k| !k.is_empty());
-                }
-            }
-        }
-        false
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    false
-}
-
 /// Price per AI token bundle (matches AI_BUNDLE_CREDIT_USD default).
 const AI_BUNDLE_PRICE: f64 = 10.0;
 
@@ -1069,9 +1043,6 @@ fn AiCreditsCard(
     let balance_dollars = token_balance_cents as f64 / 100.0;
     let (ai_quantity, set_ai_quantity) = signal(1u32);
 
-    // Detect BYOK key from localStorage (client-side only).
-    let has_byok_key = Signal::derive(check_byok_key);
-
     view! {
         <Card>
             <CardHeader>
@@ -1080,34 +1051,11 @@ fn AiCreditsCard(
                     "AI Credits"
                 </CardTitle>
                 <CardDescription>
-                    "Use your own API key (BYOK) or purchase token bundles."
+                    "Purchase token bundles to power Kyomi AI. Workspace BYOK (bring your own key) is configured under Settings \u{2192} AI."
                 </CardDescription>
             </CardHeader>
             <CardContent>
                 <div class="space-y-4">
-                    // BYOK Key status
-                    <div class="bg-muted/50 border border-border rounded-lg p-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <div class="flex items-center gap-2">
-                                <Icon icon=icondata_lu::LuKey width="16" height="16"/>
-                                <span class="text-muted-foreground">"BYOK API Key"</span>
-                            </div>
-                            {move || if has_byok_key.get() {
-                                view! {
-                                    <StatusBadge variant=StatusBadgeVariant::Success>
-                                        "Configured"
-                                    </StatusBadge>
-                                }.into_any()
-                            } else {
-                                view! {
-                                    <StatusBadge variant=StatusBadgeVariant::Default>
-                                        "Not configured"
-                                    </StatusBadge>
-                                }.into_any()
-                            }}
-                        </div>
-                    </div>
-
                     // Token bundle balance
                     <div class="bg-muted/50 border border-border rounded-lg p-4">
                         <div class="flex justify-between items-center text-sm">

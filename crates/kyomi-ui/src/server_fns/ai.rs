@@ -46,6 +46,14 @@ pub struct WorkspaceAiConfigView {
     pub has_api_key: bool,
     /// Optional base URL override. Only set in BYOK mode.
     pub base_url: Option<String>,
+    /// Remaining balance in the workspace's AI token bundle, in USD
+    /// (`ai_bundle_balance_usd - ai_credits_used_usd`, clamped to zero).
+    ///
+    /// `None` when the balance could not be read (e.g. self-hosted mode, where
+    /// this server fn is rejected before reaching this view). Any authenticated
+    /// workspace member may see this value — same visibility as the billing
+    /// page's balance display.
+    pub ai_bundle_balance_usd: Option<f64>,
 }
 
 /// Result of a candidate-config connectivity test.
@@ -93,13 +101,50 @@ fn require_saas(ctx: &super::ServerContext) -> Result<(), ServerFnError> {
 #[cfg(feature = "ssr")]
 fn view_from_config(
     cfg: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    ai_bundle_balance_usd: Option<f64>,
 ) -> WorkspaceAiConfigView {
     WorkspaceAiConfigView {
         provider: cfg.provider.as_str().to_string(),
         model: cfg.model.clone(),
         has_api_key: cfg.is_byok() && cfg.api_key.is_some(),
         base_url: cfg.base_url.clone(),
+        ai_bundle_balance_usd,
     }
+}
+
+/// Row shape for reading the AI token bundle balance.
+///
+/// `ai_bundle_balance_usd` is the total purchased balance and
+/// `ai_credits_used_usd` is the amount consumed; the remaining balance shown
+/// in the UI is `(balance - used).max(0.0)`. Matches the computation in
+/// `server_fns::billing::get_subscription_info`.
+#[cfg(feature = "ssr")]
+#[derive(sqlx::FromRow)]
+struct AiBundleRow {
+    ai_bundle_balance_usd: f64,
+    ai_credits_used_usd: f64,
+}
+
+/// Read the remaining AI token bundle balance for a workspace, in USD.
+///
+/// Returns `Ok(None)` if the workspace row is missing — callers fall back to
+/// omitting the balance clause in the UI rather than pretending it's $0.00.
+#[cfg(feature = "ssr")]
+async fn load_ai_bundle_remaining_usd(
+    db: &kyomi_core::DbPool,
+    ws_id: &str,
+) -> Result<Option<f64>, ServerFnError> {
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        AiBundleRow,
+        "SELECT \
+         COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
+         COALESCE(ai_credits_used_usd, 0) AS ai_credits_used_usd \
+         FROM workspaces WHERE workspace_id = $1",
+        ws_id
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(row.map(|r| (r.ai_bundle_balance_usd - r.ai_credits_used_usd).max(0.0)))
 }
 
 // ---------------------------------------------------------------------------
@@ -118,8 +163,9 @@ pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFn
     let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let balance = load_ai_bundle_remaining_usd(&ctx.db, ws_id).await?;
 
-    Ok(view_from_config(&cfg))
+    Ok(view_from_config(&cfg, balance))
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +214,9 @@ pub async fn update_workspace_ai_config(
     let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let balance = load_ai_bundle_remaining_usd(&ctx.db, ws_id).await?;
 
-    Ok(view_from_config(&cfg))
+    Ok(view_from_config(&cfg, balance))
 }
 
 // ---------------------------------------------------------------------------
