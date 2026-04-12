@@ -9,6 +9,7 @@
 
 use leptos::prelude::*;
 
+use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Page state
@@ -284,18 +285,23 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                         if status.get() == CallbackStatus::Error {
                             Some(
                                 view! {
-                                    <h2 class="text-xl font-semibold text-foreground mb-2 mt-4">
+                                    <h2 class="text-3xl font-display text-foreground mb-2 mt-4">
                                         "Google Sign-In"
                                     </h2>
-                                    <p class="text-error-foreground mb-4">{move || message.get()}</p>
+                                    <p class="text-sm text-error-foreground mb-4">{move || message.get()}</p>
                                     <div class="space-y-3">
-                                        <a
+                                        <ButtonLink
                                             href="/login"
-                                            class="block w-full px-4 py-2 bg-muted-foreground text-primary-foreground rounded-lg hover:bg-foreground transition-colors"
+                                            variant=ButtonVariant::Outline
+                                            size=ButtonSize::Lg
+                                            class="w-full"
                                         >
                                             "Return to Login"
-                                        </a>
-                                        <button
+                                        </ButtonLink>
+                                        <Button
+                                            variant=ButtonVariant::Default
+                                            size=ButtonSize::Lg
+                                            class="w-full"
                                             on:click=move |_| {
                                                 #[cfg(target_arch = "wasm32")]
                                                 {
@@ -304,10 +310,9 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                                                     }
                                                 }
                                             }
-                                            class="w-full px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors"
                                         >
                                             "Try Again"
-                                        </button>
+                                        </Button>
                                     </div>
                                 },
                             )

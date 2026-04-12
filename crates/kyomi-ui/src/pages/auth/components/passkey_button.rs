@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::Spinner;
 
@@ -47,7 +48,7 @@ pub fn PasskeySignInButton(
                 } else {
                     view! {
                         <div class="flex items-center justify-center space-x-2">
-                            <span class="text-lg">"🔑"</span>
+                            <Icon icon=icondata_lu::LuKeyRound width="20" height="20"/>
                             <span>"Sign in with Passkey"</span>
                         </div>
                     }.into_any()
