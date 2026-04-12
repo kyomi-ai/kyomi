@@ -115,63 +115,6 @@ async fn process_google_callback(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Query param helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Extract a query parameter value from a `?key=val&key2=val2` search string.
-#[cfg(target_arch = "wasm32")]
-fn get_query_param(search: &str, key: &str) -> Option<String> {
-    let search = search.strip_prefix('?').unwrap_or(search);
-    for pair in search.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                // URL-decode the value (percent-encoded)
-                return Some(
-                    percent_decode(v),
-                );
-            }
-        }
-    }
-    None
-}
-
-/// Minimal percent-decoding for URL query values.
-#[cfg(target_arch = "wasm32")]
-fn percent_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.as_bytes().iter();
-    while let Some(&b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next().copied();
-            let lo = chars.next().copied();
-            if let (Some(h), Some(l)) = (hi, lo) {
-                if let (Some(hv), Some(lv)) = (hex_val(h), hex_val(l)) {
-                    result.push((hv << 4 | lv) as char);
-                    continue;
-                }
-            }
-            // Malformed — emit literal
-            result.push('%');
-        } else if b == b'+' {
-            result.push(' ');
-        } else {
-            result.push(b as char);
-        }
-    }
-    result
-}
-
-#[cfg(target_arch = "wasm32")]
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -192,17 +135,18 @@ pub fn GoogleCallbackPage() -> impl IntoView {
         timeout.forget();
     }
 
-    // Process the OAuth callback on mount (browser-only: read URL params)
+    // Process the OAuth callback on mount (browser-only: read URL params).
+    // Uses the browser's native URLSearchParams — same pattern as the other
+    // auth completion pages. The backend-side SSR path gets None defaults.
     #[cfg(target_arch = "wasm32")]
     let (code, state_param, error) = {
-        let search = web_sys::window()
+        let params = web_sys::window()
             .and_then(|w| w.location().search().ok())
-            .unwrap_or_default();
-        (
-            get_query_param(&search, "code"),
-            get_query_param(&search, "state"),
-            get_query_param(&search, "error"),
-        )
+            .and_then(|s| web_sys::UrlSearchParams::new_with_str(&s).ok());
+        match params {
+            Some(p) => (p.get("code"), p.get("state"), p.get("error")),
+            None => (None, None, None),
+        }
     };
     #[cfg(not(target_arch = "wasm32"))]
     let (code, state_param, error): (Option<String>, Option<String>, Option<String>) =

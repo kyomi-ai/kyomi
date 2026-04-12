@@ -593,6 +593,59 @@ fn CredentialsView(
                 </div>
             </Show>
 
+            // Success / Error / Verification Alerts — placed above the form for a11y
+            // (screen readers encounter them before the email field)
+            <Show when=move || success_msg.get().is_some()>
+                <Alert variant=AlertVariant::Success>
+                    <AlertDescription>
+                        {move || success_msg.get().unwrap_or_default()}
+                    </AlertDescription>
+                </Alert>
+            </Show>
+
+            <Show when=move || error.get().is_some() && !verification_needed.get()>
+                <Alert variant=AlertVariant::Error>
+                    <AlertDescription>
+                        {move || error.get().unwrap_or_default()}
+                    </AlertDescription>
+                </Alert>
+            </Show>
+
+            <Show when=move || verification_needed.get()>
+                <Alert variant=AlertVariant::Warning>
+                    <AlertTitle>"Email Verification Required"</AlertTitle>
+                    <AlertDescription>
+                        <p class="mb-3">
+                            "Please verify your email before signing in. Check your inbox for the verification link."
+                        </p>
+                        <Button
+                            variant=ButtonVariant::Outline
+                            size=ButtonSize::Sm
+                            on:click=on_resend_verification
+                            disabled=Signal::derive(move || resend_loading.get())
+                        >
+                            {move || {
+                                if resend_loading.get() {
+                                    "Sending...".to_string()
+                                } else {
+                                    "Resend Verification Email".to_string()
+                                }
+                            }}
+                        </Button>
+                        <Show when=move || resend_success.get()>
+                            <p class="text-sm text-success-foreground mt-2">
+                                "Verification email sent! Check your inbox."
+                            </p>
+                        </Show>
+                        <Show when=move || error.get().is_some()>
+                            <p class="text-sm text-error-foreground mt-2">
+                                {move || error.get().unwrap_or_default()}
+                            </p>
+                        </Show>
+                    </AlertDescription>
+                </Alert>
+            </Show>
+
             // Divider before email form — show if any auth option above is visible
             <Show when=move || show_passkey_section() || show_google_section()>
                 <AuthDivider text="or sign in with email"/>
@@ -669,60 +722,6 @@ fn CredentialsView(
                     </a>
                 </p>
             </form>
-
-            // Success Messages
-            <Show when=move || success_msg.get().is_some()>
-                <Alert variant=AlertVariant::Success>
-                    <AlertDescription>
-                        {move || success_msg.get().unwrap_or_default()}
-                    </AlertDescription>
-                </Alert>
-            </Show>
-
-            // Error Messages (when not verification needed)
-            <Show when=move || error.get().is_some() && !verification_needed.get()>
-                <Alert variant=AlertVariant::Error>
-                    <AlertDescription>
-                        {move || error.get().unwrap_or_default()}
-                    </AlertDescription>
-                </Alert>
-            </Show>
-
-            // Email Verification Required
-            <Show when=move || verification_needed.get()>
-                <Alert variant=AlertVariant::Warning>
-                    <AlertTitle>"Email Verification Required"</AlertTitle>
-                    <AlertDescription>
-                        <p class="mb-3">
-                            "Please verify your email before signing in. Check your inbox for the verification link."
-                        </p>
-                        <Button
-                            variant=ButtonVariant::Outline
-                            size=ButtonSize::Sm
-                            on:click=on_resend_verification
-                            disabled=Signal::derive(move || resend_loading.get())
-                        >
-                            {move || {
-                                if resend_loading.get() {
-                                    "Sending...".to_string()
-                                } else {
-                                    "Resend Verification Email".to_string()
-                                }
-                            }}
-                        </Button>
-                        <Show when=move || resend_success.get()>
-                            <p class="text-sm text-success-foreground mt-2">
-                                "Verification email sent! Check your inbox."
-                            </p>
-                        </Show>
-                        <Show when=move || error.get().is_some()>
-                            <p class="text-sm text-error-foreground mt-2">
-                                {move || error.get().unwrap_or_default()}
-                            </p>
-                        </Show>
-                    </AlertDescription>
-                </Alert>
-            </Show>
         </>
     }
 }

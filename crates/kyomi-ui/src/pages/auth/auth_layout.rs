@@ -32,29 +32,13 @@ pub fn AuthLayout(
         <div class="min-h-screen bg-background flex">
 
             // ── Left side — Branding (desktop only) ─────────────────────────
-            // React: className="hidden lg:flex lg:w-1/2 relative overflow-hidden"
-            //         style={{backgroundColor: 'var(--color-foreground)'}}
-            <div
-                class="hidden lg:flex lg:w-1/2 relative overflow-hidden"
-                style="background-color: var(--color-foreground)"
-            >
-                // Gradient overlay 1
-                // React: className="absolute inset-0"
-                //         style={{background: 'radial-gradient(ellipse at center, ...) ...'}}
-                <div
-                    class="absolute inset-0"
-                    style="background: radial-gradient(ellipse at center, color-mix(in srgb, var(--color-primary) 10%, transparent) 0%, color-mix(in srgb, var(--color-foreground) 90%, transparent) 50%, var(--color-foreground) 100%), linear-gradient(135deg, color-mix(in srgb, var(--color-foreground) 80%, white) 0%, var(--color-foreground) 100%)"
-                ></div>
-                // Gradient overlay 2
-                // React: className="absolute inset-0 opacity-30"
-                <div
-                    class="absolute inset-0 opacity-30"
-                    style="background-image: radial-gradient(circle at 20% 80%, color-mix(in srgb, var(--color-primary) 15%, transparent) 0%, transparent 50%), radial-gradient(circle at 80% 20%, color-mix(in srgb, var(--color-primary) 10%, transparent) 0%, transparent 50%)"
-                ></div>
-                // Branding content
-                // React: className="relative z-10 flex flex-col justify-center items-center px-12 text-white"
+            // Colors/gradients live in main.css (.auth-brand-panel, .auth-brand-gradient-*)
+            // per DESIGN.md "no inline styles for color".
+            <div class="hidden lg:flex lg:w-1/2 relative overflow-hidden auth-brand-panel">
+                <div class="absolute inset-0 auth-brand-gradient-1"></div>
+                <div class="absolute inset-0 opacity-30 auth-brand-gradient-2"></div>
                 <div class="relative z-10 flex flex-col justify-center items-center px-12 text-white">
-                    <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-32 mb-0"/>
+                    <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-24 mb-0"/>
                     <p class="text-2xl font-semibold text-white text-right w-full max-w-xs -mt-6">
                         "Data Intelligence Platform"
                     </p>

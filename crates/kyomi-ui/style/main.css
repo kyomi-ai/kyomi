@@ -180,6 +180,43 @@ html {
   background-color: var(--color-background);
 }
 
+/* ── Auth brand panel ─────────────────────────────────────────────────
+ * Left-side dark branded panel on auth pages (login, recovery, signup).
+ * Extracted from inline style= attrs per DESIGN.md "no inline styles
+ * for color" rule — keeps theming greppable and theme-switchable. */
+.auth-brand-panel {
+  background-color: var(--color-foreground);
+}
+
+.auth-brand-gradient-1 {
+  background:
+    radial-gradient(
+      ellipse at center,
+      color-mix(in srgb, var(--color-primary) 10%, transparent) 0%,
+      color-mix(in srgb, var(--color-foreground) 90%, transparent) 50%,
+      var(--color-foreground) 100%
+    ),
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--color-foreground) 80%, white) 0%,
+      var(--color-foreground) 100%
+    );
+}
+
+.auth-brand-gradient-2 {
+  background-image:
+    radial-gradient(
+      circle at 20% 80%,
+      color-mix(in srgb, var(--color-primary) 15%, transparent) 0%,
+      transparent 50%
+    ),
+    radial-gradient(
+      circle at 80% 20%,
+      color-mix(in srgb, var(--color-primary) 10%, transparent) 0%,
+      transparent 50%
+    );
+}
+
 /* ── Scrollbars ─────────────────────────────────────────────────────
  * DESIGN.md: thin scrollbars that match their container's background.
  * Light mode: border-color thumb on transparent track.
