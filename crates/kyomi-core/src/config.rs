@@ -223,6 +223,14 @@ pub struct Config {
     /// WebSocket URL embedded in Connect tokens (where the Connect binary connects).
     /// Defaults to `wss://connect.kyomi.ai/v1`.
     pub connect_url: String,
+
+    // ── Workspace Secrets (BYOK) ────────────────────────────────────────
+    /// Base64-encoded 32-byte master key for encrypting workspace-level
+    /// secrets (BYOK API keys), loaded from `WORKSPACE_SECRETS_KEY`.
+    ///
+    /// **Required in SaaS mode** — the server refuses to start without it.
+    /// Optional in self-hosted mode; absence disables BYOK features.
+    pub workspace_secrets_key: Option<String>,
 }
 
 impl Config {
@@ -377,6 +385,9 @@ impl Config {
             connect_jwt_private_key: env::var("CONNECT_JWT_PRIVATE_KEY").ok(),
             connect_url: env::var("CONNECT_URL")
                 .unwrap_or_else(|_| "wss://connect.kyomi.ai/v1".into()),
+            workspace_secrets_key: env::var("WORKSPACE_SECRETS_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }
     }
 
@@ -438,6 +449,7 @@ impl Config {
             analytics_clickhouse_secure: false,
             connect_jwt_private_key: None,
             connect_url: "wss://localhost:8003/connect/v1".into(),
+            workspace_secrets_key: None,
         }
     }
 

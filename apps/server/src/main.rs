@@ -26,6 +26,24 @@ async fn main() {
     let encryption_key = kyomi_auth::encryption::derive_key(&config.encryption_key)
         .expect("ENCRYPTION_KEY must be a valid 32-byte base64url-encoded key");
 
+    // Workspace-level secrets master key (BYOK). Required in SaaS mode — the
+    // server refuses to start without it so BYOK can never be silently broken
+    // in production. In self-hosted mode, absence is allowed and BYOK features
+    // gate themselves off via `workspace_secrets::is_available()`.
+    if !config.self_hosted && config.workspace_secrets_key.is_none() {
+        eprintln!(
+            "FATAL: WORKSPACE_SECRETS_KEY is required in SaaS mode.\n\
+             \n\
+             This key encrypts workspace-level BYOK API keys at rest. Generate\n\
+             a new key with:\n\
+             \n\
+             \topenssl rand -base64 32\n\
+             \n\
+             Then set WORKSPACE_SECRETS_KEY=<value> in your environment."
+        );
+        std::process::exit(1);
+    }
+
     // Lazy-load embedding model on a background thread (~440ms).
     // The server starts listening immediately; endpoints that need embeddings
     // get 503 during the brief warmup window.

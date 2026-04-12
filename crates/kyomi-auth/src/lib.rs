@@ -48,6 +48,7 @@ pub mod totp;
 pub mod token_service;
 pub mod user_service;
 pub mod watch_service;
+pub mod workspace_secrets;
 pub mod webauthn;
 pub mod websocket;
 pub mod workspace_service;
