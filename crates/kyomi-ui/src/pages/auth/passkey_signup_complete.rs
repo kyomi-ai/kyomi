@@ -17,7 +17,7 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, Checkbox, Label, Spinner, INPUT_CLASS,
+    CardDescription, CardHeader, CardTitle, Checkbox, Label, INPUT_CLASS,
 };
 use crate::server_fns::auth::{
     passkey_register_complete, passkey_signup_complete, LoginResult, PasskeyRegisterStartResult,
@@ -363,8 +363,8 @@ fn success_view() -> impl IntoView {
                 </div>
             </CardHeader>
             <CardContent>
-                // Spinner lg: h-8 w-8 (matching React Spinner size="lg")
-                <Spinner size="h-8 w-8" class="text-primary mx-auto"/>
+                // Branded moment (auth page) — DESIGN.md Loading State Pattern
+                <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-8 h-8 mx-auto"/>
             </CardContent>
         </Card>
     }
@@ -379,8 +379,8 @@ fn creating_view(status_message: String) -> impl IntoView {
         <Card class="w-full max-w-md">
             <CardContent class="pt-6">
                 <div class="text-center space-y-4">
-                    // Spinner xl: h-12 w-12 (matching React Spinner size="xl")
-                    <Spinner size="h-12 w-12" class="text-primary mx-auto"/>
+                    // Branded moment (auth page) — DESIGN.md Loading State Pattern
+                    <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
                     <p class="text-muted-foreground">{status_message}</p>
                 </div>
             </CardContent>

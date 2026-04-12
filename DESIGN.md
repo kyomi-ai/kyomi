@@ -395,7 +395,21 @@ When page content is empty (e.g., empty dashboard, no results), show a centered 
 
 ### Loading State Pattern
 
-While content loads, show content-shaped skeleton placeholders that match the expected layout. Never use a bare spinner for page content.
+There are **three** kinds of loading indicator. Choose by context — never swap them.
+
+| Context | Pattern | What to render |
+|---------|---------|----------------|
+| **Data / content loading** — dashboards, lists, tables, charts, any page with structured content coming from an API | Content-shaped skeleton | `<Skeleton>` rectangles that approximate the real layout |
+| **Branded moments** — auth pages (login, recovery, signup, OAuth callbacks), onboarding, AI thinking/streaming, any trust-critical or first-impression wait state | Animated Kyomi starburst logo | `<img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12"/>` (sizes: `w-4 h-4` inline, `w-8 h-8` medium, `w-12 h-12` large) |
+| **Inline actions** — form submit buttons, chart refresh buttons, small async mutations where the indicator sits next to other UI | Generic spinner | `<Spinner>` (Lucide Loader2) |
+
+**Rules:**
+- **Never** use a bare `<Spinner>` for full-page or full-card loading. It feels generic and interchangeable with every other web app.
+- **Never** use `<Skeleton>` for branded moments. A skeleton of a login card makes no sense — the whole card IS the content.
+- The animated Kyomi logo is the product's voice during wait states. Use it on any first-impression or trust-critical surface (auth, onboarding, AI responses, payment processing). Asset lives at `crates/kyomi-ui/public/kyomi_animated_logo.svg`, served at `/kyomi_animated_logo.svg`.
+- `<Spinner>` stays for inline utilities where the Kyomi logo would feel heavy or compete with surrounding text — e.g. a small spinning icon next to "Sending..." inside a submit button.
+
+**Skeleton example (data loading):**
 
 ```rust
 <div class="space-y-6 max-w-[860px]">
@@ -418,7 +432,15 @@ While content loads, show content-shaped skeleton placeholders that match the ex
 - Skeleton shapes must approximate the real content layout
 - Use `max-w-[860px]` for prose-width content
 - When real content appears, wrap in `animate-fade-in` for a smooth entrance
-- Spinners are acceptable only for inline actions (button loading state, chart refresh)
+
+**Branded moment example (auth processing):**
+
+```rust
+<div class="text-center space-y-4">
+    <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
+    <p class="text-muted-foreground">"Verifying recovery link..."</p>
+</div>
+```
 
 ### Responsive Toolbar Pattern
 
