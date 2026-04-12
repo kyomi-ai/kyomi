@@ -762,14 +762,16 @@ async fn trial_chat(
     // provider config (server-side Kyomi keys), bypassing WorkspaceAiConfig.
     let exec_result = kyomi_agent::execute_agent_chat(
         exec_config,
-        &state.db,
-        &state.kv,
-        &state.encryption_key,
-        &state.embedding,
-        &state.ws_manager,
-        &state.config,
-        None, // Trial chat does not use Connect
-        state.platforms.clone(),
+        kyomi_agent::AgentExecutionEnv {
+            db: &state.db,
+            kv: &state.kv,
+            encryption_key: &state.encryption_key,
+            embedding: &state.embedding,
+            ws_manager: &state.ws_manager,
+            app_config: &state.config,
+            connect_registry: None, // Trial chat does not use Connect
+            platforms: state.platforms.clone(),
+        },
     )
     .await;
 

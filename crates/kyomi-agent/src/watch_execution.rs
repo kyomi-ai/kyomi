@@ -1184,14 +1184,16 @@ async fn execute_watch_inner(
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
     let agent_result = execute_agent_chat(
         agent_config,
-        db,
-        kv,
-        encryption_key,
-        &lazy_embedding,
-        ws_manager,
-        app_config,
-        connect_registry.clone(),
-        platforms.clone(),
+        crate::execution::AgentExecutionEnv {
+            db,
+            kv,
+            encryption_key,
+            embedding: &lazy_embedding,
+            ws_manager,
+            app_config,
+            connect_registry: connect_registry.clone(),
+            platforms: platforms.clone(),
+        },
     )
     .await?;
 
@@ -1261,14 +1263,16 @@ async fn execute_watch_inner(
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
                     match execute_agent_chat(
                         retry_config,
-                        db,
-                        kv,
-                        encryption_key,
-                        &lazy_embedding_retry,
-                        ws_manager,
-                        app_config,
-                        connect_registry.clone(),
-                        platforms.clone(),
+                        crate::execution::AgentExecutionEnv {
+                            db,
+                            kv,
+                            encryption_key,
+                            embedding: &lazy_embedding_retry,
+                            ws_manager,
+                            app_config,
+                            connect_registry: connect_registry.clone(),
+                            platforms: platforms.clone(),
+                        },
                     )
                     .await
                     {

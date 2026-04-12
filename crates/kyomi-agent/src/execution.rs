@@ -132,21 +132,41 @@ pub struct AgentExecutionResult {
 // Main execution
 // ---------------------------------------------------------------------------
 
+/// Shared runtime dependencies needed to run an agent chat turn.
+///
+/// Packaged into a borrow-friendly struct so [`execute_agent_chat`] stays
+/// under clippy's `too_many_arguments` threshold. Owned fields
+/// (`connect_registry`, `platforms`) are moved in; the rest are borrowed
+/// from the caller's long-lived state.
+pub struct AgentExecutionEnv<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub encryption_key: &'a Arc<[u8; 32]>,
+    pub embedding: &'a LazyEmbedding,
+    pub ws_manager: &'a WebSocketManager,
+    pub app_config: &'a Arc<kyomi_core::Config>,
+    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+    pub platforms: Arc<kyomi_core::platform::PlatformRegistry>,
+}
+
 /// Execute the agent chat loop for a single user message.
 ///
 /// This is the main entry point that coordinates all the pieces:
 /// system prompt, agent creation, adapter wiring, and execution.
 pub async fn execute_agent_chat(
     config: AgentExecutionConfig,
-    db: &DbPool,
-    kv: &KVPool,
-    encryption_key: &Arc<[u8; 32]>,
-    embedding: &LazyEmbedding,
-    ws_manager: &WebSocketManager,
-    app_config: &Arc<kyomi_core::Config>,
-    connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
-    platforms: Arc<kyomi_core::platform::PlatformRegistry>,
+    env: AgentExecutionEnv<'_>,
 ) -> kyomi_core::Result<AgentExecutionResult> {
+    let AgentExecutionEnv {
+        db,
+        kv,
+        encryption_key,
+        embedding,
+        ws_manager,
+        app_config,
+        connect_registry,
+        platforms,
+    } = env;
     // 1. Build system prompt (or use provided custom one).
     let mut system_prompt = if let Some(ref custom) = config.system_prompt {
         custom.clone()
@@ -389,15 +409,15 @@ pub async fn execute_agent_chat(
 
     // 12. Run the agent loop.
     let result = adapter
-        .chat(
-            &config.message,
-            config.cancel_token.clone(),
-            config.current_time_user_tz.as_deref(),
-            config.message_source.as_deref(),
-            Some(&config.user_id),
-            config.user_message_id.as_deref(),
-            Some(&assistant_message_id),
-        )
+        .chat(crate::adapter::ChatParams {
+            message: &config.message,
+            cancel_token: config.cancel_token.clone(),
+            current_time_user_tz: config.current_time_user_tz.as_deref(),
+            message_source: config.message_source.as_deref(),
+            user_id: Some(&config.user_id),
+            user_message_id: config.user_message_id.as_deref(),
+            assistant_message_id: Some(&assistant_message_id),
+        })
         .await;
 
     // 13. Handle result.

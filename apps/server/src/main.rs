@@ -293,15 +293,17 @@ async fn main() {
 
         // Watch scheduler — polls for due watches every 30s
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
-            db,
-            kv.clone(),
-            encryption_key_arc,
-            embedding,
-            ws_manager,
-            config_arc.clone(),
-            Some(state.connect_registry.clone()),
-            state.platforms.clone(),
-            shutdown_token.child_token(),
+            kyomi_agent::WatchSchedulerDeps {
+                db,
+                kv: kv.clone(),
+                encryption_key: encryption_key_arc,
+                embedding,
+                ws_manager,
+                config: config_arc.clone(),
+                connect_registry: Some(state.connect_registry.clone()),
+                platforms: state.platforms.clone(),
+                cancel: shutdown_token.child_token(),
+            },
         ));
         let _handle = scheduler.clone().start();
         tracing::info!("Watch scheduler started");

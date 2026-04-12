@@ -714,14 +714,16 @@ async fn send_message(
     tokio::spawn(async move {
         let result = kyomi_agent::execute_agent_chat(
             exec_config,
-            &db,
-            &kv,
-            &encryption_key,
-            &embedding,
-            &ws_manager,
-            &app_config,
-            Some(connect_registry),
-            platforms,
+            kyomi_agent::AgentExecutionEnv {
+                db: &db,
+                kv: &kv,
+                encryption_key: &encryption_key,
+                embedding: &embedding,
+                ws_manager: &ws_manager,
+                app_config: &app_config,
+                connect_registry: Some(connect_registry),
+                platforms,
+            },
         )
         .await;
 

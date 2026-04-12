@@ -349,15 +349,17 @@ async fn start_server(
         tracing::info!("Catalog refresh scheduler started");
 
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
-            db,
-            kv,
-            encryption_key_arc,
-            embedding,
-            ws_manager,
-            config_arc.clone(),
-            Some(connect_registry),
-            platforms,
-            shutdown_token.child_token(),
+            kyomi_agent::WatchSchedulerDeps {
+                db,
+                kv,
+                encryption_key: encryption_key_arc,
+                embedding,
+                ws_manager,
+                config: config_arc.clone(),
+                connect_registry: Some(connect_registry),
+                platforms,
+                cancel: shutdown_token.child_token(),
+            },
         ));
         let _scheduler_handle = scheduler.clone().start();
         tracing::info!("Watch scheduler started");
