@@ -143,6 +143,7 @@ pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
     let is_public = matches!(
         path,
         "login" | "try" | "welcome" | "unsubscribe" | "onboarding" | "setup"
+        | "billing/return"
     ) || path.starts_with("signup/")
         || path.starts_with("auth/")
         || path.starts_with("account/")

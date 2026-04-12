@@ -47,7 +47,7 @@ pub fn refresh_and_reload() {
 
 /// Call `/api/v1/auth/refresh` and return whether it succeeded.
 #[cfg(target_arch = "wasm32")]
-async fn try_refresh() -> bool {
+pub async fn try_refresh() -> bool {
     use wasm_bindgen::prelude::*;
 
     let promise = js_sys::Function::new_no_args(

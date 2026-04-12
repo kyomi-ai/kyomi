@@ -11,6 +11,7 @@ use leptos_router::{
 
 use crate::components::{Layout, NavigationProgress, ThemeProvider};
 use crate::pages::accept_ownership::AcceptOwnershipPage;
+use crate::pages::billing_return::BillingReturnPage;
 use crate::pages::auth::account_recovery::AccountRecoveryPage;
 use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
 use crate::pages::auth::google_callback::GoogleCallbackPage;
@@ -99,6 +100,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/try") view=TrialChatPage/>
                     <Route path=path!("/welcome") view=WelcomePage/>
                     <Route path=path!("/unsubscribe") view=UnsubscribePage/>
+                    <Route path=path!("/billing/return") view=BillingReturnPage/>
                     // Flow pages — NO sidebar, requires auth (standalone layout)
                     <Route path=path!("/onboarding") view=DatasourceOnboardingPage/>
                     <Route path=path!("/onboarding/catalog") view=|| view! { <Redirect path="/onboarding"/> }/>

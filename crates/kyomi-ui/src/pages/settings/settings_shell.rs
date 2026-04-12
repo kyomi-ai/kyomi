@@ -102,11 +102,13 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
 ///
 /// Fetches `UserContext` once via server function and provides it to all child
 /// components via Leptos context. Settings tabs read it with
-/// `expect_context::<Resource<Result<UserContext, ServerFnError>>>()`.
+/// `expect_context::<LocalResource<Result<UserContext, ServerFnError>>>()`.
 #[component]
 pub fn SettingsShell() -> impl IntoView {
     // Fetch user context once — all settings tabs share this resource.
-    let user_ctx = Resource::new(|| (), |_| get_user_context());
+    // Uses LocalResource to avoid SSR running without auth cookies
+    // (SameSite=Strict blocks cookies on cross-site redirects from Stripe/Google).
+    let user_ctx = LocalResource::new(get_user_context);
     provide_context(user_ctx);
 
     // Reactive pathname from the Leptos router — updates when the URL changes.

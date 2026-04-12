@@ -4,5 +4,6 @@
 
 pub mod auth_refresh;
 pub mod cron;
+pub mod stripe;
 pub mod webauthn;
 pub mod websocket;

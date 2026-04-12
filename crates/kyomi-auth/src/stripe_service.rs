@@ -23,6 +23,7 @@ use stripe_checkout::checkout_session::{
     CreateCheckoutSessionPaymentMethodTypes, CreateCheckoutSessionSubscriptionData,
     CreateCheckoutSessionTaxIdCollection, CreateCheckoutSessionCustomerUpdateName,
     CreateCheckoutSessionCustomerUpdateAddress, CustomTextPositionParam,
+    RetrieveCheckoutSession,
 };
 use stripe_checkout::CheckoutSessionMode;
 use stripe_core::customer::CreateCustomer;
@@ -77,6 +78,40 @@ pub struct InvoiceData {
     pub hosted_invoice_url: Option<String>,
     pub invoice_pdf: Option<String>,
     pub created: Option<i64>,
+}
+
+/// Parameters for creating an embedded checkout session (subscription).
+#[derive(Debug)]
+pub struct EmbeddedCheckoutParams {
+    pub customer_id: String,
+    pub price_id: String,
+    pub workspace_id: String,
+    pub quantity: u64,
+    pub trial_days: u32,
+}
+
+/// Parameters for creating an embedded payment checkout session (bundle purchases).
+#[derive(Debug)]
+pub struct EmbeddedPaymentCheckoutParams {
+    pub customer_id: String,
+    pub price_id: String,
+    pub workspace_id: String,
+    pub purchase_type: String,
+    pub quantity: u64,
+}
+
+/// Result of creating an embedded checkout session.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EmbeddedCheckoutResult {
+    pub client_secret: String,
+    pub session_id: String,
+}
+
+/// Status of a checkout session (for verifying completion).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CheckoutSessionStatus {
+    pub status: String,
+    pub payment_status: String,
 }
 
 /// Parameters for creating a one-time payment checkout session (e.g. bundle purchases).
@@ -314,6 +349,10 @@ impl StripeService {
             .automatic_tax(CreateCheckoutSessionAutomaticTax {
                 enabled: true,
                 liability: None,
+            })
+            .customer_update(CreateCheckoutSessionCustomerUpdate {
+                address: Some(CreateCheckoutSessionCustomerUpdateAddress::Auto),
+                ..Default::default()
             })
             .send(&self.client)
             .await?;
@@ -649,6 +688,173 @@ impl StripeService {
         Ok(result)
     }
 
+    // ── Embedded Checkout ─────────────────────────────────────────────────
+
+    /// Create an embedded Stripe Checkout session for a new subscription.
+    ///
+    /// Unlike hosted checkout, the user stays on our site. The returned
+    /// `client_secret` is passed to Stripe.js `initEmbeddedCheckout()`.
+    pub async fn create_embedded_checkout_session(
+        &self,
+        params: &EmbeddedCheckoutParams,
+    ) -> Result<EmbeddedCheckoutResult, StripeError> {
+        let line_items = vec![CreateCheckoutSessionLineItems {
+            price: Some(params.price_id.clone()),
+            quantity: Some(params.quantity),
+            ..Default::default()
+        }];
+
+        let sub_metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), params.workspace_id.clone()),
+            ("brand".to_string(), "kyomi".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut sub_data = CreateCheckoutSessionSubscriptionData {
+            description: Some("Kyomi Cloud".to_string()),
+            metadata: Some(sub_metadata),
+            ..Default::default()
+        };
+
+        if params.trial_days > 0 {
+            sub_data.trial_period_days = Some(params.trial_days);
+        }
+
+        let session_metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), params.workspace_id.clone()),
+            ("brand".to_string(), "kyomi".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let session = CreateCheckoutSession::new()
+            .customer(&params.customer_id)
+            .mode(CheckoutSessionMode::Subscription)
+            .ui_mode(stripe_shared::CheckoutSessionUiMode::Embedded)
+            .redirect_on_completion(stripe_shared::CheckoutSessionRedirectOnCompletion::Never)
+            .payment_method_types(vec![CreateCheckoutSessionPaymentMethodTypes::Card])
+            .line_items(line_items)
+            .subscription_data(sub_data)
+            .metadata(session_metadata)
+            .custom_text(CreateCheckoutSessionCustomText {
+                submit: Some(CustomTextPositionParam::new("Subscribe to Kyomi Cloud")),
+                ..Default::default()
+            })
+            .automatic_tax(CreateCheckoutSessionAutomaticTax {
+                enabled: true,
+                liability: None,
+            })
+            .tax_id_collection(CreateCheckoutSessionTaxIdCollection::new(true))
+            .customer_update(CreateCheckoutSessionCustomerUpdate {
+                name: Some(CreateCheckoutSessionCustomerUpdateName::Auto),
+                address: Some(CreateCheckoutSessionCustomerUpdateAddress::Auto),
+                ..Default::default()
+            })
+            .send(&self.client)
+            .await?;
+
+        tracing::info!(
+            session_id = %session.id,
+            workspace_id = %params.workspace_id,
+            "Created embedded checkout session"
+        );
+
+        let client_secret = session.client_secret.ok_or_else(|| {
+            StripeError::ClientError(
+                "Embedded checkout session created but no client_secret returned".into(),
+            )
+        })?;
+
+        Ok(EmbeddedCheckoutResult {
+            session_id: session.id.to_string(),
+            client_secret,
+        })
+    }
+
+    /// Create an embedded payment checkout session (for bundle purchases).
+    pub async fn create_embedded_payment_checkout_session(
+        &self,
+        params: &EmbeddedPaymentCheckoutParams,
+    ) -> Result<EmbeddedCheckoutResult, StripeError> {
+        let line_items = vec![CreateCheckoutSessionLineItems {
+            price: Some(params.price_id.clone()),
+            quantity: Some(params.quantity),
+            ..Default::default()
+        }];
+
+        let session_metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), params.workspace_id.clone()),
+            ("brand".to_string(), "kyomi".to_string()),
+            ("purchase_type".to_string(), params.purchase_type.clone()),
+            ("bundle_quantity".to_string(), params.quantity.to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let session = CreateCheckoutSession::new()
+            .customer(&params.customer_id)
+            .mode(CheckoutSessionMode::Payment)
+            .ui_mode(stripe_shared::CheckoutSessionUiMode::Embedded)
+            .redirect_on_completion(stripe_shared::CheckoutSessionRedirectOnCompletion::Never)
+            .payment_method_types(vec![CreateCheckoutSessionPaymentMethodTypes::Card])
+            .line_items(line_items)
+            .metadata(session_metadata)
+            .automatic_tax(CreateCheckoutSessionAutomaticTax {
+                enabled: true,
+                liability: None,
+            })
+            .customer_update(CreateCheckoutSessionCustomerUpdate {
+                address: Some(CreateCheckoutSessionCustomerUpdateAddress::Auto),
+                ..Default::default()
+            })
+            .send(&self.client)
+            .await
+            .map_err(|e| {
+                tracing::error!("Stripe embedded payment checkout failed: {e}");
+                e
+            })?;
+
+        tracing::info!(
+            session_id = %session.id,
+            workspace_id = %params.workspace_id,
+            purchase_type = %params.purchase_type,
+            "Created embedded payment checkout session"
+        );
+
+        let client_secret = session.client_secret.ok_or_else(|| {
+            StripeError::ClientError(
+                "Embedded checkout session created but no client_secret returned".into(),
+            )
+        })?;
+
+        Ok(EmbeddedCheckoutResult {
+            session_id: session.id.to_string(),
+            client_secret,
+        })
+    }
+
+    /// Retrieve a checkout session's status (for verifying completion).
+    pub async fn retrieve_checkout_session_status(
+        &self,
+        session_id: &str,
+    ) -> Result<CheckoutSessionStatus, StripeError> {
+        let session = RetrieveCheckoutSession::new(session_id.to_string())
+            .send(&self.client)
+            .await?;
+
+        let status = session
+            .status
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let payment_status = session.payment_status.as_str().to_string();
+
+        Ok(CheckoutSessionStatus {
+            status,
+            payment_status,
+        })
+    }
+
     // ── Billing Portal ───────────────────────────────────────────────────
 
     /// Create a Stripe Customer Portal session.
@@ -695,6 +901,28 @@ mod tests {
         };
         let debug_str = format!("{params:?}");
         assert!(debug_str.contains("cus_test"));
+    }
+
+    #[test]
+    fn test_embedded_checkout_result_serialization() {
+        let result = EmbeddedCheckoutResult {
+            client_secret: "cs_test_secret".to_string(),
+            session_id: "cs_test_123".to_string(),
+        };
+        let json = serde_json::to_value(&result).expect("serialize");
+        assert_eq!(json["client_secret"], "cs_test_secret");
+        assert_eq!(json["session_id"], "cs_test_123");
+    }
+
+    #[test]
+    fn test_checkout_session_status_serialization() {
+        let status = CheckoutSessionStatus {
+            status: "complete".to_string(),
+            payment_status: "paid".to_string(),
+        };
+        let json = serde_json::to_value(&status).expect("serialize");
+        assert_eq!(json["status"], "complete");
+        assert_eq!(json["payment_status"], "paid");
     }
 
     #[test]

@@ -38,9 +38,14 @@ pub struct AnalyticsSiteData {
 /// Matches the JSON shape returned by `GET /analytics/usage`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AnalyticsUsageData {
+    /// Events consumed this billing period.
     pub events_used: u64,
+    /// Included monthly event quota (resets each period).
     pub events_limit: u64,
+    /// Usage percentage against the included quota (0..=100+).
     pub usage_percent: f64,
+    /// Non-expiring bundle event balance (from bundle purchases).
+    pub bundle_balance: u64,
     pub status: String,
 }
 
@@ -86,6 +91,7 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
             events_used: 0,
             events_limit: 0,
             usage_percent: 0.0,
+            bundle_balance: 0,
             status: "ok".to_string(),
         });
     }
@@ -120,10 +126,29 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
         0.0
     };
 
-    let status = if events_used >= grace_limit {
+    // Load non-expiring bundle balance from the workspace row.
+    let bundle_balance: u64 = kyomi_core::db_fetch_scalar!(
+        &ctx.db,
+        i64,
+        "SELECT COALESCE(analytics_bundle_events, 0) FROM workspaces WHERE workspace_id = $1",
+        ws_id
+    )
+    .map_err(|e| ServerFnError::new(format!("Failed to load bundle balance: {e}")))?
+    .max(0) as u64;
+
+    // Status considers both the included quota AND the bundle reserve.
+    // If usage is over the included quota but bundles are available, we're
+    // drawing from the reserve — not "exceeded" yet.
+    let over_included = events_used.saturating_sub(events_limit);
+    let bundle_exhausted = over_included >= bundle_balance;
+
+    let status = if events_used >= grace_limit && bundle_exhausted {
         "blocked"
-    } else if events_used >= events_limit {
+    } else if events_used >= events_limit && bundle_exhausted {
         "exceeded"
+    } else if over_included > 0 && bundle_balance > 0 {
+        // Over included and actually drawing from bundle — informational state
+        "reserve"
     } else if events_used >= events_limit * 80 / 100 {
         "warning"
     } else {
@@ -134,6 +159,7 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
         events_used,
         events_limit,
         usage_percent,
+        bundle_balance,
         status: status.to_string(),
     })
 }

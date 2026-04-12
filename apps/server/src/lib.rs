@@ -179,6 +179,9 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/auth/passkey-signup", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/recover-passkey", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/recover-passkey/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        // Billing portal return — public bounce page for SameSite=Strict cookie flow.
+        // Stripe portal redirects here; the page does same-origin navigation to /settings/billing.
+        .route("/billing/return", axum::routing::get(leptos_frontend::serve_leptos_shell))
         // Leptos frontend routes — protected pages (redirect to /login without auth cookie)
         .route("/dashboards", axum::routing::get(leptos_frontend::serve_protected_page))
         .route("/dashboard/{*path}", axum::routing::get(leptos_frontend::serve_protected_page))

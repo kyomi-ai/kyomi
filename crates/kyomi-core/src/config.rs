@@ -150,6 +150,10 @@ pub struct Config {
     /// Optional — server starts without it (no billing features).
     pub stripe_secret_key: Option<String>,
 
+    /// Stripe publishable key (pk_test_ or pk_live_).
+    /// Optional — needed for embedded checkout on the frontend.
+    pub stripe_publishable_key: Option<String>,
+
     /// Stripe webhook signing secret (whsec_...).
     /// Optional — server starts without it (webhooks rejected).
     pub stripe_webhook_secret: Option<String>,
@@ -345,6 +349,7 @@ impl Config {
             llm_model: env::var("LLM_MODEL").ok(),
             llm_base_url: env::var("LLM_BASE_URL").ok(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
+            stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
             slack_client_id: env::var("SLACK_CLIENT_ID").ok(),
             slack_client_secret: env::var("SLACK_CLIENT_SECRET").ok(),
@@ -415,6 +420,7 @@ impl Config {
             llm_model: None,
             llm_base_url: None,
             stripe_secret_key: None,
+            stripe_publishable_key: None,
             stripe_webhook_secret: None,
             slack_client_id: None,
             slack_client_secret: None,

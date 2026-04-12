@@ -12,10 +12,13 @@
 
 use leptos::prelude::*;
 
+use leptos_icons::Icon;
+
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Card, CardContent, CardDescription, CardHeader,
     CardTitle, Skeleton,
 };
+use crate::server_fns::context::UserContext;
 use crate::server_fns::usage::{get_ai_usage_status, UsageData};
 
 use super::billing::format_number;
@@ -71,18 +74,6 @@ fn usage_bar_class(percentage: f64, is_exhausted: bool) -> &'static str {
     }
 }
 
-/// Format an RFC3339 date string to "Mon DD, YYYY" display format.
-///
-/// Matches the React `toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })`.
-fn format_reset_date(iso_str: &str) -> String {
-    // Parse the ISO date and format as "Mar 21, 2026"
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_str) {
-        dt.format("%b %-d, %Y").to_string()
-    } else {
-        iso_str.to_string()
-    }
-}
-
 /// Usage settings page content.
 ///
 /// Fetches AI usage status via server function and displays:
@@ -91,6 +82,7 @@ fn format_reset_date(iso_str: &str) -> String {
 /// - Warning/exhaustion alerts
 #[component]
 pub fn UsagePage() -> impl IntoView {
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
     let usage_resource = Resource::new(|| (), |_| get_ai_usage_status());
 
     view! {
@@ -98,14 +90,13 @@ pub fn UsagePage() -> impl IntoView {
             <h2 class="text-xl font-display text-foreground mb-6">"Usage"</h2>
             <Transition fallback=move || view! { <UsageLoadingSkeleton/> }>
                 {move || Suspend::new(async move {
+                    let is_owner = user_ctx.await.map(|c| c.is_owner).unwrap_or(false);
                     match usage_resource.await {
-                        Ok(data) => view! { <UsageContent data=data/> }.into_any(),
+                        Ok(data) => view! { <UsageContent data=data is_owner=is_owner/> }.into_any(),
                         Err(_) => {
                             // Don't leak raw SQL or internal errors to the UI.
-                            // Match React: show the usage cards with zero data when the
-                            // billing service is unavailable (e.g. SQLite without billing).
                             view! {
-                                <UsageContent data=UsageData {
+                                <UsageContent is_owner=is_owner data=UsageData {
                                     percentage_used: 0.0,
                                     warning_level: None,
                                     allowed: true,
@@ -183,10 +174,9 @@ fn UsageLoadingSkeleton() -> impl IntoView {
 
 /// Main usage content — renders all cards from the fetched data.
 #[component]
-fn UsageContent(data: UsageData) -> impl IntoView {
+fn UsageContent(data: UsageData, is_owner: bool) -> impl IntoView {
     let percentage = data.percentage_used;
     let is_exhausted = data.blocked;
-    let ai_reset_date = data.ai_reset_date.clone();
     let by_feature = data.by_feature.clone();
     let ai_bundle_balance_usd = data.ai_bundle_balance_usd;
     let analytics_events_used = data.analytics_events_used;
@@ -199,8 +189,8 @@ fn UsageContent(data: UsageData) -> impl IntoView {
             <WorkspaceUsageCard
                 percentage=percentage
                 is_exhausted=is_exhausted
-                ai_reset_date=ai_reset_date
                 ai_bundle_balance_usd=ai_bundle_balance_usd
+                is_owner=is_owner
             />
 
             // Analytics Events card
@@ -208,6 +198,7 @@ fn UsageContent(data: UsageData) -> impl IntoView {
                 events_used=analytics_events_used
                 events_included=analytics_events_included
                 bundle_events=analytics_bundle_events
+                is_owner=is_owner
             />
 
             // Feature Breakdown card
@@ -250,14 +241,13 @@ fn UsageContent(data: UsageData) -> impl IntoView {
 /// Workspace AI Usage card with progress bar.
 ///
 /// React: first Card in UsagePanel — "Workspace AI Usage" header,
-/// percentage label, horizontal progress bar, optional exhaustion text,
-/// and reset date.
+/// percentage label, horizontal progress bar, and bundle balance.
 #[component]
 fn WorkspaceUsageCard(
     percentage: f64,
     is_exhausted: bool,
-    ai_reset_date: Option<String>,
     ai_bundle_balance_usd: f64,
+    is_owner: bool,
 ) -> impl IntoView {
     let bar_class = usage_bar_class(percentage, is_exhausted);
     let bar_width = format!("{}%", percentage.min(100.0));
@@ -265,38 +255,59 @@ fn WorkspaceUsageCard(
     view! {
         <Card>
             <CardHeader>
-                <CardTitle>"Workspace AI Usage"</CardTitle>
-                <CardDescription>"Track your AI usage"</CardDescription>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuSparkles width="20" height="20"/>
+                    "Workspace AI Usage"
+                </CardTitle>
+                <CardDescription>"AI credit consumption across the workspace."</CardDescription>
             </CardHeader>
             <CardContent>
-                <div>
-                    <div class="flex justify-between mb-2">
-                        <span class="text-sm font-medium text-foreground">
-                            "AI Usage This Month"
-                        </span>
-                        <span class="text-sm font-medium text-foreground">
-                            {format!("{:.1}% used", percentage)}
+                <div class="space-y-4">
+                    <div>
+                        <div class="flex justify-between items-baseline mb-2">
+                            <span class="text-sm font-medium text-foreground">
+                                "AI Credits Used"
+                            </span>
+                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                                {format!("{:.1}%", percentage)}
+                            </span>
+                        </div>
+                        <div class="w-full bg-muted rounded-full h-2">
+                            <div
+                                class=bar_class
+                                style:width=bar_width
+                            />
+                        </div>
+                    </div>
+
+                    // Bundle balance row
+                    <div class="flex items-center justify-between pt-3 border-t border-border">
+                        <div class="flex items-center gap-2">
+                            <Icon icon=icondata_lu::LuPackage width="16" height="16" attr:class="text-muted-foreground"/>
+                            <div>
+                                <div class="text-sm font-medium text-foreground">
+                                    "Token Bundle Balance"
+                                </div>
+                                <div class="text-xs text-muted-foreground">
+                                    "Non-expiring. Draw down as AI requests are made."
+                                </div>
+                            </div>
+                        </div>
+                        <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                            {format!("${:.2} remaining", ai_bundle_balance_usd)}
                         </span>
                     </div>
-                    <div class="w-full bg-muted rounded-full h-2">
-                        <div
-                            class=bar_class
-                            style:width=bar_width
-                        />
-                    </div>
-                    {(ai_bundle_balance_usd > 0.0).then(|| view! {
-                        <p class="text-sm text-muted-foreground mt-2">
-                            {format!("Token Bundle Balance: ${:.2} remaining", ai_bundle_balance_usd)}
-                        </p>
-                    })}
+
                     {is_exhausted.then(|| view! {
-                        <p class="text-sm text-error-foreground mt-2">
-                            "AI budget exhausted. Add an AI token bundle or connect your own API key to continue."
-                        </p>
+                        <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
+                            <p class="text-xs text-error-foreground">
+                                "AI budget exhausted. Add an AI token bundle or connect your own API key to continue."
+                            </p>
+                        </div>
                     })}
-                    {ai_reset_date.map(|date| view! {
-                        <p class="text-xs text-muted-foreground mt-1">
-                            {format!("Resets {}", format_reset_date(&date))}
+                    {(!is_owner).then(|| view! {
+                        <p class="text-xs text-muted-foreground">
+                            "Contact your workspace owner to purchase additional AI token bundles."
                         </p>
                     })}
                 </div>
@@ -381,51 +392,109 @@ fn AnalyticsEventsCard(
     events_used: u64,
     events_included: u64,
     bundle_events: i64,
+    is_owner: bool,
 ) -> impl IntoView {
-    let total_available = events_included as i64 + bundle_events.max(0);
-    let percentage = if total_available > 0 {
-        ((events_used as f64 / total_available as f64) * 100.0).min(100.0)
+    // Progress bar is against the included monthly quota (what resets).
+    // Bundle reserve is shown separately because it's non-expiring.
+    let usage_pct = if events_included > 0 {
+        ((events_used as f64 / events_included as f64) * 100.0).min(999.0)
     } else {
         0.0
     };
-    let is_exhausted = events_used as i64 >= total_available;
-    let bar_class = usage_bar_class(percentage, is_exhausted);
-    let bar_width = format!("{}%", percentage.min(100.0));
+
+    let over_included = events_used > events_included;
+    let bundle_u = bundle_events.max(0) as u64;
+    let drawing_from_reserve = over_included && bundle_u > 0;
+    let bundle_exhausted = over_included && bundle_u == 0;
+    let over_by = events_used.saturating_sub(events_included);
+
+    let bar_class = if bundle_exhausted {
+        "h-2 rounded-full transition-all bg-error-foreground"
+    } else if drawing_from_reserve {
+        "h-2 rounded-full transition-all bg-primary"
+    } else if usage_pct >= 80.0 {
+        "h-2 rounded-full transition-all bg-warning-foreground"
+    } else {
+        "h-2 rounded-full transition-all bg-success-foreground"
+    };
+    let bar_width = format!("{}%", usage_pct.min(100.0));
 
     view! {
         <Card>
             <CardHeader>
-                <CardTitle>"Analytics Events"</CardTitle>
-                <CardDescription>"Track your analytics event usage"</CardDescription>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuActivity width="20" height="20"/>
+                    "Analytics Events"
+                </CardTitle>
+                <CardDescription>"Event usage against your monthly quota and bundle reserve."</CardDescription>
             </CardHeader>
             <CardContent>
-                <div>
-                    <div class="flex justify-between mb-2">
-                        <span class="text-sm font-medium text-foreground">
-                            "Events This Month"
-                        </span>
-                        <span class="text-sm font-medium text-foreground">
-                            {format!(
-                                "{} / {} used",
-                                format_number(events_used),
-                                format_number(events_included),
-                            )}
-                        </span>
-                    </div>
-                    <div class="w-full bg-muted rounded-full h-2">
-                        <div
-                            class=bar_class
-                            style:width=bar_width
-                        />
-                    </div>
-                    {(bundle_events > 0).then(|| view! {
-                        <p class="text-sm text-muted-foreground mt-2">
-                            {format!("Bundle balance: {} events remaining", format_number(bundle_events as u64))}
+                <div class="space-y-4">
+                    // Primary usage bar — monthly included quota
+                    <div>
+                        <div class="flex justify-between items-baseline mb-2">
+                            <span class="text-sm font-medium text-foreground">
+                                "Events This Month"
+                            </span>
+                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                                {format!(
+                                    "{} / {}",
+                                    format_number(events_used),
+                                    format_number(events_included),
+                                )}
+                                <span class="text-muted-foreground ml-1.5">
+                                    {format!("({:.0}%)", usage_pct)}
+                                </span>
+                            </span>
+                        </div>
+                        <div class="w-full bg-muted rounded-full h-2">
+                            <div
+                                class=bar_class
+                                style:width=bar_width
+                            />
+                        </div>
+                        <p class="text-xs text-muted-foreground mt-1.5">
+                            "Included monthly quota — resets each billing period."
                         </p>
+                    </div>
+
+                    // Bundle reserve row
+                    <div class="flex items-center justify-between pt-3 border-t border-border">
+                        <div class="flex items-center gap-2">
+                            <Icon icon=icondata_lu::LuPackage width="16" height="16" attr:class="text-muted-foreground"/>
+                            <div>
+                                <div class="text-sm font-medium text-foreground">
+                                    "Bundle Reserve"
+                                </div>
+                                <div class="text-xs text-muted-foreground">
+                                    "Non-expiring. Used after monthly quota is consumed."
+                                </div>
+                            </div>
+                        </div>
+                        <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                            {format!("{} events", format_number(bundle_u))}
+                        </span>
+                    </div>
+
+                    // Status messages
+                    {drawing_from_reserve.then(|| view! {
+                        <div class="rounded-md bg-accent-light/30 border border-accent/30 px-3 py-2">
+                            <p class="text-xs text-foreground">
+                                <span class="font-medium">"Drawing from bundle reserve: "</span>
+                                {format!("{} events used beyond this month's included quota.", format_number(over_by))}
+                            </p>
+                        </div>
                     })}
-                    {is_exhausted.then(|| view! {
-                        <p class="text-sm text-error-foreground mt-2">
-                            "Analytics event quota exhausted. Purchase an analytics event bundle to continue."
+                    {bundle_exhausted.then(|| view! {
+                        <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
+                            <p class="text-xs text-error-foreground">
+                                "Monthly quota exceeded and no bundle reserve remaining."
+                            </p>
+                        </div>
+                    })}
+                    {(!is_owner).then(|| view! {
+                        <p class="text-xs text-muted-foreground">
+                            "Contact your workspace owner to purchase additional event bundles."
                         </p>
                     })}
                 </div>

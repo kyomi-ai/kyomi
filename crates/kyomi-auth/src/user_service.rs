@@ -335,10 +335,6 @@ pub async fn create_workspace_for_user(
                         .await
                     {
                         Ok(sub_data) => {
-                            let period_start_str =
-                                sub_data.period_start.map(|dt| dt.to_rfc3339());
-                            let period_end_str =
-                                sub_data.period_end.map(|dt| dt.to_rfc3339());
                             if let Err(e) = kyomi_core::db_execute!(
                                 pool,
                                 "UPDATE workspaces SET \
@@ -349,8 +345,8 @@ pub async fn create_workspace_for_user(
                                  WHERE workspace_id = $5",
                                 &sub_data.stripe_subscription_id,
                                 &sub_data.status,
-                                period_start_str.as_deref(),
-                                period_end_str.as_deref(),
+                                sub_data.period_start,
+                                sub_data.period_end,
                                 &workspace_id
                             ) {
                                 tracing::error!(

@@ -19,8 +19,8 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Skeleton, StatusBadge,
-    StatusBadgeVariant,
+    CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Label, Modal, ModalSize,
+    Skeleton, StatusBadge, StatusBadgeVariant, INPUT_CLASS,
 };
 use crate::server_fns::billing::*;
 use crate::server_fns::context::UserContext;
@@ -65,6 +65,132 @@ fn format_charge(user_count: i32) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Embedded checkout helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Writable signals the embedded checkout helper drives while a session is
+/// open. Bundled into a struct so `open_embedded_checkout` stays below the
+/// clippy argument-count threshold.
+#[derive(Clone, Copy)]
+struct CheckoutContext {
+    set_checkout_open: WriteSignal<bool>,
+    set_checkout_session_id: WriteSignal<Option<String>>,
+    set_checkout_loading: WriteSignal<bool>,
+    set_success: WriteSignal<Option<String>>,
+    set_error: WriteSignal<Option<String>>,
+    set_sub_version: WriteSignal<u32>,
+    checkout_handle: StoredValue<Option<send_wrapper::SendWrapper<crate::utils::stripe::EmbeddedCheckoutHandle>>>,
+}
+
+/// Fetch the Stripe publishable key, mount the embedded checkout form,
+/// and wire up the onComplete callback.
+async fn open_embedded_checkout(
+    client_secret: &str,
+    session_id: &str,
+    ctx: CheckoutContext,
+) {
+    // Fetch the publishable key from the server
+    let pk = match get_stripe_publishable_key().await {
+        Ok(Some(pk)) => pk,
+        Ok(None) => {
+            ctx.set_error.set(Some("Stripe is not configured.".into()));
+            ctx.set_checkout_loading.set(false);
+            return;
+        }
+        Err(e) => {
+            ctx.set_error.set(Some(format!("Failed to load Stripe config: {e}")));
+            ctx.set_checkout_loading.set(false);
+            return;
+        }
+    };
+
+    // Store session ID for the onComplete callback
+    let sid = session_id.to_string();
+    ctx.set_checkout_session_id.set(Some(sid.clone()));
+    ctx.set_checkout_open.set(true);
+    ctx.set_checkout_loading.set(false);
+
+    // Mount the embedded checkout form (WASM only)
+    #[cfg(target_arch = "wasm32")]
+    {
+        let client_secret = client_secret.to_string();
+        leptos::task::spawn_local(async move {
+            // Wait for the mount target to appear in DOM
+            gloo_timers::future::TimeoutFuture::new(50).await;
+
+            let result = crate::utils::stripe::mount_embedded_checkout(
+                &pk,
+                &client_secret,
+                "#stripe-checkout-mount",
+                move || {
+                    let sid = sid.clone();
+                    leptos::task::spawn_local(async move {
+                        let close = || {
+                            ctx.checkout_handle.set_value(None);
+                            ctx.set_checkout_open.set(false);
+                            ctx.set_checkout_session_id.set(None);
+                        };
+                        match get_checkout_session_status(sid).await {
+                            Ok(status) if status.status == "complete" => {
+                                close();
+                                ctx.set_success.set(Some(
+                                    "Payment successful! Your changes are being applied..."
+                                        .to_string(),
+                                ));
+                                ctx.set_sub_version.update(|v| *v += 1);
+                            }
+                            Ok(status) => {
+                                close();
+                                ctx.set_error.set(Some(format!(
+                                    "Checkout session status: {}. Please try again.",
+                                    status.status
+                                )));
+                            }
+                            Err(e) => {
+                                close();
+                                ctx.set_error.set(Some(format!(
+                                    "Failed to verify payment: {e}"
+                                )));
+                            }
+                        }
+                    });
+                },
+            )
+            .await;
+
+            match result {
+                Ok(handle) => {
+                    // Store the handle to keep the checkout form alive
+                    ctx.checkout_handle
+                        .set_value(Some(send_wrapper::SendWrapper::new(handle)));
+                }
+                Err(e) => {
+                    ctx.set_checkout_open.set(false);
+                    ctx.set_checkout_session_id.set(None);
+                    ctx.set_error
+                        .set(Some(format!("Failed to mount checkout form: {e}")));
+                }
+            }
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (
+            client_secret,
+            ctx.set_checkout_open,
+            ctx.set_checkout_session_id,
+            ctx.set_checkout_loading,
+            ctx.set_success,
+            ctx.set_error,
+            ctx.set_sub_version,
+            ctx.checkout_handle,
+            pk,
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main page
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -72,21 +198,46 @@ fn format_charge(user_count: i32) -> String {
 #[component]
 pub fn BillingPage() -> impl IntoView {
     // Read the UserContext provided by SettingsShell to check deployment mode.
-    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // Resources for subscription info (reload via version signal).
+    // Uses LocalResource to avoid SSR running these without auth cookies
+    // (SameSite=Strict blocks cookies on cross-site redirects from Stripe/Google).
     let (sub_version, set_sub_version) = signal(0u32);
-    let subscription = Resource::new(
-        move || sub_version.get(),
-        |_| get_subscription_info(),
-    );
+    let subscription = LocalResource::new(move || {
+        let _ = sub_version.get();
+        get_subscription_info()
+    });
 
-    let invoices = Resource::new(|| (), |_| get_invoices());
+    let invoices = LocalResource::new(get_invoices);
 
     // UI state
     let (error, set_error) = signal(Option::<String>::None);
     let (success, set_success) = signal(Option::<String>::None);
     let (checkout_loading, set_checkout_loading) = signal(false);
+
+    // Embedded checkout state — when Some, the Stripe checkout form is mounted inline.
+    // `set_checkout_session_id` is driven by `open_embedded_checkout` purely to track
+    // which session is in flight; nothing in the view reads it, so the read half is
+    // deliberately discarded.
+    let (checkout_open, set_checkout_open) = signal(false);
+    let (_, set_checkout_session_id) = signal(Option::<String>::None);
+
+    // Store the checkout handle to keep it alive while the form is visible.
+    // Dropping the handle calls destroy() which unmounts the Stripe form.
+    // Uses StoredValue because EmbeddedCheckoutHandle contains JS objects (not Send).
+    let checkout_handle: StoredValue<Option<send_wrapper::SendWrapper<crate::utils::stripe::EmbeddedCheckoutHandle>>> =
+        StoredValue::new(None);
+
+    let checkout_ctx = CheckoutContext {
+        set_checkout_open,
+        set_checkout_session_id,
+        set_checkout_loading,
+        set_success,
+        set_error,
+        set_sub_version,
+        checkout_handle,
+    };
 
     // Confirm dialog state
     let dialog_open = RwSignal::new(false);
@@ -97,47 +248,6 @@ pub fn BillingPage() -> impl IntoView {
     let (pending_confirm_action, set_pending_confirm_action) =
         signal(Option::<ConfirmAction>::None);
 
-    // Check for checkout success param on mount
-    #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move |_| {
-            let window = web_sys::window().unwrap();
-            let search = window.location().search().unwrap_or_default();
-            if search.contains("checkout=success") {
-                set_success.set(Some(
-                    "Payment successful! Your subscription is being activated...".to_string(),
-                ));
-
-                // Clean URL
-                let _ = window
-                    .history()
-                    .unwrap()
-                    .replace_state_with_url(
-                        &wasm_bindgen::JsValue::NULL,
-                        "",
-                        Some("/settings/billing"),
-                    );
-
-                // Poll for updated subscription
-                let poll_count = std::cell::Cell::new(0u32);
-                let interval = gloo_timers::callback::Interval::new(1_000, move || {
-                    poll_count.set(poll_count.get() + 1);
-                    set_sub_version.update(|v| *v += 1);
-                    if poll_count.get() >= 10 {
-                        set_success.set(Some(
-                            "Subscription is processing. Please refresh the page in a moment."
-                                .to_string(),
-                        ));
-                    }
-                });
-
-                // Keep interval alive — wrap in SendWrapper for WASM compatibility
-                let interval = send_wrapper::SendWrapper::new(interval);
-                leptos::prelude::on_cleanup(move || drop(interval));
-            }
-        });
-    }
-
     // ── Actions ──────────────────────────────────────────────────────────
 
     let handle_subscribe = Action::new({
@@ -147,14 +257,18 @@ pub fn BillingPage() -> impl IntoView {
                 set_checkout_loading.set(true);
                 set_error.set(None);
                 match create_checkout(quantity).await {
-                    Ok(_redirect) => {
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let _ = web_sys::window()
-                                .unwrap()
-                                .location()
-                                .set_href(&_redirect.url);
-                        }
+                    Ok(CheckoutOutcome::Embedded(session)) => {
+                        open_embedded_checkout(
+                            &session.client_secret,
+                            &session.session_id,
+                            checkout_ctx,
+                        )
+                        .await;
+                    }
+                    Ok(CheckoutOutcome::Modified(msg)) => {
+                        set_success.set(Some(msg));
+                        set_sub_version.update(|v| *v += 1);
+                        set_checkout_loading.set(false);
                     }
                     Err(e) => {
                         set_error.set(Some(format!("Failed to start checkout: {e}")));
@@ -219,19 +333,20 @@ pub fn BillingPage() -> impl IntoView {
         move |quantity: &u32| {
             let q = *quantity;
             async move {
+                set_checkout_loading.set(true);
                 set_error.set(None);
                 match purchase_ai_bundle(q).await {
-                    Ok(_redirect) => {
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let _ = web_sys::window()
-                                .unwrap()
-                                .location()
-                                .set_href(&_redirect.url);
-                        }
+                    Ok(session) => {
+                        open_embedded_checkout(
+                            &session.client_secret,
+                            &session.session_id,
+                            checkout_ctx,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         set_error.set(Some(format!("Failed to start AI bundle purchase: {e}")));
+                        set_checkout_loading.set(false);
                     }
                 }
             }
@@ -242,19 +357,20 @@ pub fn BillingPage() -> impl IntoView {
         move |quantity: &u32| {
             let q = *quantity;
             async move {
+                set_checkout_loading.set(true);
                 set_error.set(None);
                 match purchase_analytics_bundle(q).await {
-                    Ok(_redirect) => {
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let _ = web_sys::window()
-                                .unwrap()
-                                .location()
-                                .set_href(&_redirect.url);
-                        }
+                    Ok(session) => {
+                        open_embedded_checkout(
+                            &session.client_secret,
+                            &session.session_id,
+                            checkout_ctx,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         set_error.set(Some(format!("Failed to start analytics bundle purchase: {e}")));
+                        set_checkout_loading.set(false);
                     }
                 }
             }
@@ -285,19 +401,48 @@ pub fn BillingPage() -> impl IntoView {
 
     view! {
         <div class="p-6">
-        // If the user context indicates self-hosted mode, show an informational
-        // message instead of loading Stripe-backed billing data.
+        // Check user context for self-hosted mode and owner gate.
+        // Billing is owner-only — non-owners see a helpful message instead.
         {move || {
-            if let Some(Ok(ctx)) = user_ctx.get() && ctx.is_self_hosted {
-                return view! {
-                    <Card>
-                        <CardContent>
-                            <p class="text-muted-foreground py-6">
-                                "Billing is not available in self-hosted mode."
-                            </p>
-                        </CardContent>
-                    </Card>
-                }.into_any();
+            if let Some(Ok(ctx)) = user_ctx.get() {
+                if ctx.is_self_hosted {
+                    return view! {
+                        <Card>
+                            <CardContent>
+                                <p class="text-muted-foreground py-6">
+                                    "Billing is not available in self-hosted mode."
+                                </p>
+                            </CardContent>
+                        </Card>
+                    }.into_any();
+                }
+                if !ctx.is_owner {
+                    let is_expired = matches!(
+                        ctx.subscription_status.as_str(),
+                        "past_due" | "cancelled" | "canceled" | "unpaid" | "incomplete_expired"
+                    );
+                    let (heading, body) = if is_expired {
+                        (
+                            "Workspace subscription expired",
+                            "Your workspace subscription has lapsed. Contact your workspace owner to reactivate it — only the owner can make billing changes.",
+                        )
+                    } else {
+                        (
+                            "Billing is owner-only",
+                            "Only the workspace owner can manage subscriptions and purchases. Contact your workspace owner for billing changes.",
+                        )
+                    };
+                    return view! {
+                        <Card>
+                            <CardContent>
+                                <div class="py-6 text-center space-y-2">
+                                    <p class="text-foreground font-medium">{heading}</p>
+                                    <p class="text-muted-foreground text-sm">{body}</p>
+                                </div>
+                            </CardContent>
+                        </Card>
+                    }.into_any();
+                }
             }
             view! {
                 <div class="space-y-6" style:display="block">
@@ -312,6 +457,21 @@ pub fn BillingPage() -> impl IntoView {
                             <AlertDescription>{msg}</AlertDescription>
                         </Alert>
                     })}
+
+                    // Embedded checkout modal — center-overlay with backdrop
+                    <Modal
+                        show=Signal::derive(move || checkout_open.get())
+                        on_close=Callback::new(move |()| {
+                            // Destroy the Stripe form and close the modal
+                            checkout_handle.set_value(None);
+                            set_checkout_open.set(false);
+                            set_checkout_session_id.set(None);
+                        })
+                        title="Complete Payment".to_string()
+                        size=ModalSize::Lg
+                    >
+                        <div id="stripe-checkout-mount" class="min-h-[400px]"/>
+                    </Modal>
 
                     // Main content
                     <Transition fallback=move || view! {
@@ -337,6 +497,7 @@ pub fn BillingPage() -> impl IntoView {
                                             set_dialog_confirm_text=set_dialog_confirm_text
                                             set_dialog_destructive=set_dialog_destructive
                                             set_pending_confirm_action=set_pending_confirm_action
+                                            set_sub_version=set_sub_version
                                         />
                                     }.into_any()
                                 }
@@ -382,7 +543,7 @@ enum ConfirmAction {
 #[component]
 fn BillingContent(
     info: SubscriptionInfo,
-    invoices: Resource<Result<Vec<InvoiceRecord>, ServerFnError>>,
+    invoices: LocalResource<Result<Vec<InvoiceRecord>, ServerFnError>>,
     checkout_loading: ReadSignal<bool>,
     handle_subscribe: Action<u64, ()>,
     handle_manage_billing: Action<(), ()>,
@@ -394,12 +555,14 @@ fn BillingContent(
     set_dialog_confirm_text: WriteSignal<String>,
     set_dialog_destructive: WriteSignal<bool>,
     set_pending_confirm_action: WriteSignal<Option<ConfirmAction>>,
+    set_sub_version: WriteSignal<u32>,
 ) -> impl IntoView {
     let current_tier = info.tier.clone();
     let status = info.status.clone();
     let period_end = info.period_end.clone();
     let trial_ends_at = info.trial_ends_at.clone();
     let active_members = info.active_members;
+    let user_limit = info.user_limit;
 
     // Fields for AI and analytics sections
     let ai_token_balance = info.ai_token_balance_cents.unwrap_or(0);
@@ -648,6 +811,17 @@ fn BillingContent(
                 </CardContent>
             </Card>
 
+            // Seat Cap Card (visible for subscribed users)
+            {is_subscribed.then(|| {
+                view! {
+                    <SeatCapCard
+                        user_limit=user_limit
+                        active_members=active_members
+                        set_sub_version=set_sub_version
+                    />
+                }
+            })}
+
             // AI Credits Card (visible for subscribed users)
             {is_subscribed.then(|| {
                 view! {
@@ -672,6 +846,179 @@ fn BillingContent(
             // Invoices Section
             <InvoicesSection invoices=invoices current_tier=tier_for_invoices.clone()/>
         </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Seat Cap Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// DB sentinel that represents "unlimited seats" — see `update_user_limit`.
+const UNLIMITED_CAP: i32 = 999_999;
+
+#[component]
+fn SeatCapCard(
+    user_limit: Option<i32>,
+    active_members: i32,
+    set_sub_version: WriteSignal<u32>,
+) -> impl IntoView {
+    let cap = user_limit.unwrap_or(UNLIMITED_CAP);
+    let is_unlimited = cap >= UNLIMITED_CAP;
+
+    let (editing, set_editing) = signal(false);
+    let (new_cap_input, set_new_cap_input) = signal(cap.to_string());
+    let (error_msg, set_error_msg) = signal(Option::<String>::None);
+
+    // Reset input when the displayed value changes (e.g. after save)
+    Effect::new(move |_| {
+        let _ = editing.get();
+        set_new_cap_input.set(cap.to_string());
+        set_error_msg.set(None);
+    });
+
+    let save_action = Action::new(move |new_limit: &i32| {
+        let new_limit = *new_limit;
+        async move {
+            match update_user_limit(new_limit).await {
+                Ok(_) => {
+                    set_editing.set(false);
+                    set_error_msg.set(None);
+                    set_sub_version.update(|v| *v += 1);
+                }
+                Err(e) => {
+                    set_error_msg.set(Some(e.to_string()));
+                }
+            }
+        }
+    });
+
+    let usage_pct = if is_unlimited || cap <= 0 {
+        0.0
+    } else {
+        ((active_members as f64 / cap as f64) * 100.0).min(100.0)
+    };
+    let bar_class = if is_unlimited {
+        "h-2 rounded-full transition-all bg-success-foreground"
+    } else if usage_pct >= 90.0 {
+        "h-2 rounded-full transition-all bg-error-foreground"
+    } else if usage_pct >= 75.0 {
+        "h-2 rounded-full transition-all bg-warning-foreground"
+    } else {
+        "h-2 rounded-full transition-all bg-success-foreground"
+    };
+
+    view! {
+        <Card>
+            <CardHeader>
+                <CardTitle class="flex items-center gap-2">
+                    <Icon icon=icondata_lu::LuUsers width="20" height="20"/>
+                    "Seat Cap"
+                </CardTitle>
+                <CardDescription>
+                    "Your spending ceiling. Workspace admins can invite users up to this cap."
+                </CardDescription>
+            </CardHeader>
+            <CardContent>
+                <div class="space-y-4">
+                    // Usage bar
+                    <div>
+                        <div class="flex justify-between items-baseline mb-2">
+                            <span class="text-sm font-medium text-foreground">
+                                "Active users"
+                            </span>
+                            <span class="font-mono tabular-nums text-sm font-medium text-foreground">
+                                {if is_unlimited {
+                                    format!("{active_members} / Unlimited")
+                                } else {
+                                    format!("{active_members} / {cap}")
+                                }}
+                            </span>
+                        </div>
+                        {(!is_unlimited).then(|| view! {
+                            <div class="w-full bg-muted rounded-full h-2">
+                                <div
+                                    class=bar_class
+                                    style:width=format!("{}%", usage_pct)
+                                />
+                            </div>
+                        })}
+                        <p class="text-xs text-muted-foreground mt-2">
+                            {format!(
+                                "At ${:.0}/user/month, the cap limits your maximum monthly charge to ${:.0}.",
+                                PRICE_PER_USER,
+                                if is_unlimited { 0.0 } else { PRICE_PER_USER * cap as f64 }
+                            )}
+                        </p>
+                    </div>
+
+                    // Edit controls
+                    {move || if editing.get() {
+                        view! {
+                            <div class="space-y-2 pt-3 border-t border-border">
+                                <Label>"New seat cap"</Label>
+                                <div class="flex gap-2">
+                                    <input
+                                        type="number"
+                                        class=INPUT_CLASS
+                                        prop:value=move || new_cap_input.get()
+                                        on:input=move |ev| set_new_cap_input.set(event_target_value(&ev))
+                                        min=active_members.to_string()
+                                    />
+                                    <Button
+                                        variant=ButtonVariant::Default
+                                        on:click=move |_| {
+                                            if let Ok(n) = new_cap_input.get_untracked().parse::<i32>() {
+                                                save_action.dispatch(n);
+                                            } else {
+                                                set_error_msg.set(Some("Please enter a valid number".to_string()));
+                                            }
+                                        }
+                                    >
+                                        "Save"
+                                    </Button>
+                                    <Button
+                                        variant=ButtonVariant::Outline
+                                        on:click=move |_| {
+                                            set_editing.set(false);
+                                            set_error_msg.set(None);
+                                        }
+                                    >
+                                        "Cancel"
+                                    </Button>
+                                </div>
+                                {move || error_msg.get().map(|msg| view! {
+                                    <p class="text-xs text-error-foreground">{msg}</p>
+                                })}
+                                <div class="flex gap-2">
+                                    <Button
+                                        variant=ButtonVariant::Ghost
+                                        size=ButtonSize::Sm
+                                        on:click=move |_| {
+                                            save_action.dispatch(UNLIMITED_CAP);
+                                        }
+                                    >
+                                        "Set unlimited"
+                                    </Button>
+                                </div>
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <div class="pt-3 border-t border-border">
+                                <Button
+                                    variant=ButtonVariant::Outline
+                                    size=ButtonSize::Sm
+                                    on:click=move |_| set_editing.set(true)
+                                >
+                                    <Icon icon=icondata_lu::LuPencil width="14" height="14" attr:class="mr-2"/>
+                                    "Change cap"
+                                </Button>
+                            </div>
+                        }.into_any()
+                    }}
+                </div>
+            </CardContent>
+        </Card>
     }
 }
 
@@ -803,7 +1150,7 @@ fn AiCreditsCard(
                         disabled=Signal::derive(move || handle_purchase_ai.pending().get())
                         on:click=move |_| { handle_purchase_ai.dispatch(ai_quantity.get_untracked()); }
                     >
-                        {move || if handle_purchase_ai.pending().get() { "Redirecting...".to_string() } else {
+                        {move || if handle_purchase_ai.pending().get() { "Loading...".to_string() } else {
                             let q = ai_quantity.get();
                             let total = AI_BUNDLE_PRICE * q as f64;
                             format!("Buy AI Tokens \u{2014} ${:.0}", total)
@@ -922,7 +1269,7 @@ fn AnalyticsCard(
                         disabled=Signal::derive(move || handle_purchase_analytics.pending().get())
                         on:click=move |_| { handle_purchase_analytics.dispatch(analytics_quantity.get_untracked()); }
                     >
-                        {move || if handle_purchase_analytics.pending().get() { "Redirecting...".to_string() } else {
+                        {move || if handle_purchase_analytics.pending().get() { "Loading...".to_string() } else {
                             let q = analytics_quantity.get();
                             let total = ANALYTICS_BUNDLE_EVENTS * q as u64;
                             format!("Buy Event Bundle \u{2014} {} events", format_number(total))
@@ -940,7 +1287,7 @@ fn AnalyticsCard(
 
 #[component]
 fn InvoicesSection(
-    invoices: Resource<Result<Vec<InvoiceRecord>, ServerFnError>>,
+    invoices: LocalResource<Result<Vec<InvoiceRecord>, ServerFnError>>,
     current_tier: String,
 ) -> impl IntoView {
     view! {

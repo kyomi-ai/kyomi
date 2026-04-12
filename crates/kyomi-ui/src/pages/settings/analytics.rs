@@ -53,10 +53,9 @@ fn generate_slug(name: &str) -> String {
 #[component]
 pub fn AnalyticsPage() -> impl IntoView {
     // Read the UserContext provided by SettingsShell to check deployment mode.
-    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     let sites_resource = Resource::new(|| (), |_| list_analytics_sites());
-    let usage_resource = Resource::new(|| (), |_| get_analytics_usage());
 
     view! {
         <div class="p-4 sm:p-6">
@@ -84,11 +83,9 @@ pub fn AnalyticsPage() -> impl IntoView {
                         {move || Suspend::new(async move {
                             match sites_resource.await {
                                 Ok(sites) => {
-                                    let usage = usage_resource.await.ok();
                                     view! {
                                         <AnalyticsContent
                                             initial_sites=sites
-                                            usage=usage
                                             sites_resource=sites_resource
                                         />
                                     }.into_any()
@@ -96,11 +93,9 @@ pub fn AnalyticsPage() -> impl IntoView {
                                 Err(_) => {
                                     // Match React: show the page layout with empty state even
                                     // when the backend errors (e.g. no ClickHouse configured).
-                                    // React shows the error as a toast but keeps the UI visible.
                                     view! {
                                         <AnalyticsContent
                                             initial_sites=vec![]
-                                            usage=None
                                             sites_resource=sites_resource
                                         />
                                     }.into_any()
@@ -154,7 +149,6 @@ fn AnalyticsLoadingSkeleton() -> impl IntoView {
 #[component]
 fn AnalyticsContent(
     initial_sites: Vec<AnalyticsSiteData>,
-    usage: Option<AnalyticsUsageData>,
     sites_resource: Resource<Result<Vec<AnalyticsSiteData>, ServerFnError>>,
 ) -> impl IntoView {
     // Reactive state
@@ -344,15 +338,6 @@ fn AnalyticsContent(
                 </Show>
             </div>
 
-            // Event usage bar
-            {usage.map(|u| {
-                if u.events_limit > 0 {
-                    view! { <UsageBar usage=u/> }.into_any()
-                } else {
-                    view! { <span class="hidden"></span> }.into_any()
-                }
-            })}
-
             // Error messages from actions
             {move || create_action.value().get().and_then(|r| r.err()).map(|e| {
                 view! {
@@ -470,70 +455,6 @@ fn AnalyticsContent(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Usage Bar
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn UsageBar(usage: AnalyticsUsageData) -> impl IntoView {
-    let bar_class = match usage.status.as_str() {
-        "blocked" | "exceeded" => "h-2 rounded-full transition-all bg-error-foreground",
-        "warning" => "h-2 rounded-full transition-all bg-warning-foreground",
-        _ => "h-2 rounded-full transition-all bg-success-foreground",
-    };
-    let bar_width = format!("{}%", usage.usage_percent.min(100.0));
-
-    view! {
-        <Card>
-            <CardContent>
-                <div class="pt-6">
-                    <div class="flex justify-between mb-2">
-                        <span class="text-sm font-medium text-foreground">
-                            "Event Usage This Month"
-                        </span>
-                        <span class="text-sm font-medium text-foreground">
-                            {format!(
-                                "{} / {} ({:.1}%)",
-                                format_number(usage.events_used),
-                                format_number(usage.events_limit),
-                                usage.usage_percent,
-                            )}
-                        </span>
-                    </div>
-                    <div class="w-full bg-muted rounded-full h-2">
-                        <div
-                            class=bar_class
-                            style:width=bar_width
-                        />
-                    </div>
-                    {(usage.status == "blocked").then(|| view! {
-                        <p class="text-sm text-error-foreground mt-2">
-                            "Event quota exceeded. Analytics events are being dropped."
-                        </p>
-                    })}
-                    {(usage.status == "exceeded").then(|| view! {
-                        <p class="text-sm text-error-foreground mt-2">
-                            "Event quota reached. Events are still accepted during the grace period."
-                        </p>
-                    })}
-                </div>
-            </CardContent>
-        </Card>
-    }
-}
-
-/// Format a number with commas (e.g. 1234567 -> "1,234,567").
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Site Form (create / edit)

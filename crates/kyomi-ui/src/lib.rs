@@ -186,6 +186,9 @@ pub fn register_server_functions() {
     register_explicit::<CreatePortalSession>();
     register_explicit::<PurchaseAiBundle>();
     register_explicit::<PurchaseAnalyticsBundle>();
+    register_explicit::<GetStripePublishableKey>();
+    register_explicit::<GetCheckoutSessionStatus>();
+    register_explicit::<UpdateUserLimit>();
 
     use server_fns::workspace::*;
     register_explicit::<GetWorkspaceSettings>();

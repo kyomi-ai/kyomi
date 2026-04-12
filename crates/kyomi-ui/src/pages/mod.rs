@@ -4,6 +4,7 @@
 
 pub mod accept_ownership;
 pub mod auth;
+pub mod billing_return;
 pub mod chat;
 pub mod connect_setup;
 pub mod dashboards;

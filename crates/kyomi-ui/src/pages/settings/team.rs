@@ -26,7 +26,7 @@ use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
 #[component]
 pub fn TeamPage() -> impl IntoView {
     // Use the UserContext resource provided by SettingsShell — already resolved, no extra fetch.
-    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     view! {
         <Transition>
@@ -67,7 +67,7 @@ pub fn TeamPage() -> impl IntoView {
 #[component]
 fn TeamPageInner() -> impl IntoView {
     // Use the UserContext resource provided by SettingsShell — same resource, no extra fetch.
-    let user_ctx = expect_context::<Resource<Result<UserContext, ServerFnError>>>();
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // Resources for members, invitations, transfers
     let (members_version, set_members_version) = signal(0u32);

@@ -69,6 +69,30 @@ pub struct RedirectUrl {
     pub url: String,
 }
 
+/// Result of creating an embedded checkout session.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EmbeddedCheckoutSession {
+    pub client_secret: String,
+    pub session_id: String,
+}
+
+/// Result of creating a subscription checkout — either embedded checkout
+/// (for new subscriptions) or an immediate modification result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CheckoutOutcome {
+    /// New subscription — mount embedded checkout with this client_secret.
+    Embedded(EmbeddedCheckoutSession),
+    /// Existing subscription modified — no checkout needed.
+    Modified(String),
+}
+
+/// Status of a checkout session (for verifying completion from onComplete callback).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckoutStatus {
+    pub status: String,
+    pub payment_status: String,
+}
+
 /// Result of a mutation (cancel, reactivate, update team size).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BillingResult {
@@ -79,22 +103,20 @@ pub struct BillingResult {
 // SSR-only helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Reject non-workspace-admin/non-owner users.
+/// Reject anyone who isn't the workspace owner.
+///
+/// Billing is owner-only because the owner is the single spending authority
+/// for the workspace. Admins can invite users (consuming seats), but only the
+/// owner can change subscription plan, buy bundles, or adjust the seat cap.
 #[cfg(feature = "ssr")]
-fn require_workspace_admin(
+fn require_workspace_owner(
     auth: &kyomi_auth::middleware::AuthUser,
 ) -> Result<(), ServerFnError> {
     if auth.workspace.is_owner {
-        return Ok(());
+        Ok(())
+    } else {
+        Err(ServerFnError::new("Workspace owner access required"))
     }
-    if !auth
-        .workspace
-        .workspace_roles
-        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-    {
-        return Err(ServerFnError::new("Workspace admin access required"));
-    }
-    Ok(())
 }
 
 /// Minimal workspace row for billing operations.
@@ -197,7 +219,7 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let workspace = load_workspace(&ctx.db, ws_id).await?;
@@ -286,7 +308,7 @@ pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
         return Ok(vec![]);
     }
 
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let workspace = load_workspace(&ctx.db, ws_id).await?;
@@ -318,19 +340,19 @@ pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
         .collect())
 }
 
-/// Create a Stripe checkout session and return the redirect URL.
+/// Create a Stripe checkout session for subscription.
 ///
-/// Mirrors `POST /api/v1/billing/create-checkout`.
-///
-/// Cloud plan — single tier, per-seat pricing. `quantity` is the number of
-/// seats (users) to subscribe for.
+/// Returns `CheckoutOutcome::Embedded` with a client_secret for new
+/// subscriptions (mount via Stripe.js embedded checkout), or
+/// `CheckoutOutcome::Modified` when an existing subscription was
+/// reactivated directly (no checkout needed).
 #[server(prefix = "/leptos-api")]
 pub async fn create_checkout(
     quantity: u64,
-) -> Result<RedirectUrl, ServerFnError> {
+) -> Result<CheckoutOutcome, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let stripe_service = require_stripe(&ctx.config)?;
@@ -343,7 +365,6 @@ pub async fn create_checkout(
     {
         return modify_existing_subscription(
             &ctx.db,
-            &ctx.config,
             &stripe_service,
             sub_id,
             ws_id,
@@ -380,49 +401,41 @@ pub async fn create_checkout(
         }
     };
 
-    let frontend_url = &ctx.config.frontend_url;
-    let success_url = format!("{frontend_url}/settings/billing?checkout=success");
-    let cancel_url = format!("{frontend_url}/settings/billing?checkout=cancelled");
-
-    let params = kyomi_auth::stripe_service::CheckoutParams {
+    let params = kyomi_auth::stripe_service::EmbeddedCheckoutParams {
         customer_id,
         price_id: price_id.to_string(),
-        success_url,
-        cancel_url,
         workspace_id: ws_id.to_string(),
         quantity,
         trial_days: 30,
     };
 
-    let checkout_result = stripe_service
-        .create_checkout_session(&params)
+    let result = stripe_service
+        .create_embedded_checkout_session(&params)
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to create checkout session: {e}")))?;
 
-    Ok(RedirectUrl {
-        url: checkout_result.checkout_url,
-    })
+    Ok(CheckoutOutcome::Embedded(EmbeddedCheckoutSession {
+        client_secret: result.client_secret,
+        session_id: result.session_id,
+    }))
 }
 
 /// Modify an existing Stripe subscription (reactivate cancelled plan).
 ///
 /// Cloud plan — single tier, so the only meaningful modification is
-/// reactivating a cancelled subscription on the same price. Tier changes
-/// are not applicable since there is only one Cloud tier.
+/// reactivating a cancelled subscription on the same price.
 #[cfg(feature = "ssr")]
 async fn modify_existing_subscription(
     db: &kyomi_core::DbPool,
-    config: &kyomi_core::Config,
     stripe_service: &kyomi_auth::stripe_service::StripeService,
     subscription_id: &str,
     workspace_id: &str,
-) -> Result<RedirectUrl, ServerFnError> {
+) -> Result<CheckoutOutcome, ServerFnError> {
     let new_price_id =
         kyomi_auth::stripe_config::get_cloud_price_id().ok_or_else(
             || ServerFnError::new("STRIPE_CLOUD_MONTHLY not configured"),
         )?;
 
-    // Modify the subscription to the Cloud price
     let sub_data = stripe_service
         .update_subscription(subscription_id, new_price_id, "cloud", "monthly")
         .await
@@ -451,11 +464,7 @@ async fn modify_existing_subscription(
     )
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Return redirect back to billing page with success param
-    let frontend_url = &config.frontend_url;
-    Ok(RedirectUrl {
-        url: format!("{frontend_url}/settings/billing?checkout=success"),
-    })
+    Ok(CheckoutOutcome::Modified("Subscription reactivated successfully".to_string()))
 }
 
 /// Cancel the current subscription at period end.
@@ -465,7 +474,7 @@ async fn modify_existing_subscription(
 pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let stripe_service = require_stripe(&ctx.config)?;
@@ -500,7 +509,7 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
 pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let stripe_service = require_stripe(&ctx.config)?;
@@ -532,6 +541,54 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
     })
 }
 
+/// The DB sentinel for "no seat cap". Treated as unlimited by the invite flow.
+pub const UNLIMITED_SEAT_CAP: i32 = 999_999;
+
+/// Update the workspace seat cap — the owner's spending ceiling.
+///
+/// Workspace admins can invite users up to this cap. Owner-only because
+/// raising the cap increases monthly Stripe charges.
+///
+/// Validates that the new cap is at least as high as current active members —
+/// lowering below that would require removing users first.
+#[server(prefix = "/leptos-api")]
+pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_owner(&auth)?;
+    let ws_id = workspace_id(&auth)?;
+
+    if limit < 1 {
+        return Err(ServerFnError::new("Seat cap must be at least 1"));
+    }
+
+    // Count active workspace members
+    let bt = kyomi_core::sql_compat::bool_true(ctx.db.is_postgres());
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM workspace_users WHERE workspace_id = $1 AND active = {bt}"
+    );
+    let active: i64 = kyomi_core::db_fetch_scalar!(&ctx.db, i64, &count_sql, ws_id)
+        .map_err(|e| ServerFnError::new(format!("Failed to count members: {e}")))?;
+
+    if (limit as i64) < active {
+        return Err(ServerFnError::new(format!(
+            "Cannot set seat cap below current active members ({active}). Remove users first."
+        )));
+    }
+
+    kyomi_core::db_execute!(
+        &ctx.db,
+        "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
+        limit,
+        ws_id
+    )
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    tracing::info!(workspace_id = %ws_id, limit, "Updated workspace seat cap");
+
+    Ok(limit)
+}
+
 /// Create a Stripe billing portal session and return the redirect URL.
 ///
 /// Mirrors `POST /api/v1/billing/create-portal-session`.
@@ -539,6 +596,7 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
 pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let stripe_service = require_stripe(&ctx.config)?;
@@ -548,7 +606,9 @@ pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
         ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
     })?;
 
-    let return_url = format!("{}/settings/billing", ctx.config.frontend_url);
+    // Portal returns via cross-site redirect from Stripe — use the
+    // intermediate bounce page so SameSite=Strict cookies work.
+    let return_url = format!("{}/billing/return", ctx.config.frontend_url);
 
     let (portal_url, _session_id) = stripe_service
         .create_portal_session(customer_id, &return_url)
@@ -558,20 +618,20 @@ pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
     Ok(RedirectUrl { url: portal_url })
 }
 
-/// Purchase an AI token bundle via Stripe checkout.
+/// Purchase an AI token bundle via embedded Stripe checkout.
 ///
-/// Creates a one-time Stripe checkout session for a predefined AI token
-/// bundle product. The webhook handler credits the workspace's
-/// `ai_token_balance_cents` upon successful payment.
+/// Returns an `EmbeddedCheckoutSession` with the client_secret to mount
+/// the Stripe form inline. The webhook handler credits the workspace's
+/// `ai_bundle_balance_usd` upon successful payment.
 #[server(prefix = "/leptos-api")]
-pub async fn purchase_ai_bundle(quantity: u32) -> Result<RedirectUrl, ServerFnError> {
+pub async fn purchase_ai_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession, ServerFnError> {
     if quantity < 1 {
         return Err(ServerFnError::new("Quantity must be at least 1"));
     }
 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let stripe_service = require_stripe(&ctx.config)?;
@@ -586,44 +646,39 @@ pub async fn purchase_ai_bundle(quantity: u32) -> Result<RedirectUrl, ServerFnEr
             ServerFnError::new("STRIPE_AI_BUNDLE not configured")
         })?;
 
-    let frontend_url = &ctx.config.frontend_url;
-    let success_url = format!("{frontend_url}/settings/billing?checkout=success");
-    let cancel_url = format!("{frontend_url}/settings/billing?checkout=cancelled");
-
-    let params = kyomi_auth::stripe_service::PaymentCheckoutParams {
+    let params = kyomi_auth::stripe_service::EmbeddedPaymentCheckoutParams {
         customer_id: customer_id.to_string(),
         price_id: price_id.to_string(),
-        success_url,
-        cancel_url,
         workspace_id: ws_id.to_string(),
         purchase_type: "ai_bundle".to_string(),
         quantity: u64::from(quantity),
     };
 
-    let checkout_result = stripe_service
-        .create_payment_checkout_session(&params)
+    let result = stripe_service
+        .create_embedded_payment_checkout_session(&params)
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to create AI bundle checkout: {e}")))?;
 
-    Ok(RedirectUrl {
-        url: checkout_result.checkout_url,
+    Ok(EmbeddedCheckoutSession {
+        client_secret: result.client_secret,
+        session_id: result.session_id,
     })
 }
 
-/// Purchase an analytics event bundle via Stripe checkout.
+/// Purchase an analytics event bundle via embedded Stripe checkout.
 ///
-/// Creates a one-time Stripe checkout session for a predefined analytics
-/// event bundle product. The webhook handler credits the workspace's
-/// `analytics_bundle_balance` upon successful payment.
+/// Returns an `EmbeddedCheckoutSession` with the client_secret to mount
+/// the Stripe form inline. The webhook handler credits the workspace's
+/// `analytics_bundle_events` upon successful payment.
 #[server(prefix = "/leptos-api")]
-pub async fn purchase_analytics_bundle(quantity: u32) -> Result<RedirectUrl, ServerFnError> {
+pub async fn purchase_analytics_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession, ServerFnError> {
     if quantity < 1 {
         return Err(ServerFnError::new("Quantity must be at least 1"));
     }
 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    require_workspace_owner(&auth)?;
     let ws_id = workspace_id(&auth)?;
 
     let stripe_service = require_stripe(&ctx.config)?;
@@ -638,22 +693,16 @@ pub async fn purchase_analytics_bundle(quantity: u32) -> Result<RedirectUrl, Ser
             ServerFnError::new("STRIPE_ANALYTICS_BUNDLE not configured")
         })?;
 
-    let frontend_url = &ctx.config.frontend_url;
-    let success_url = format!("{frontend_url}/settings/billing?checkout=success");
-    let cancel_url = format!("{frontend_url}/settings/billing?checkout=cancelled");
-
-    let params = kyomi_auth::stripe_service::PaymentCheckoutParams {
+    let params = kyomi_auth::stripe_service::EmbeddedPaymentCheckoutParams {
         customer_id: customer_id.to_string(),
         price_id: price_id.to_string(),
-        success_url,
-        cancel_url,
         workspace_id: ws_id.to_string(),
         purchase_type: "analytics_bundle".to_string(),
         quantity: u64::from(quantity),
     };
 
-    let checkout_result = stripe_service
-        .create_payment_checkout_session(&params)
+    let result = stripe_service
+        .create_embedded_payment_checkout_session(&params)
         .await
         .map_err(|e| {
             ServerFnError::new(format!(
@@ -661,7 +710,41 @@ pub async fn purchase_analytics_bundle(quantity: u32) -> Result<RedirectUrl, Ser
             ))
         })?;
 
-    Ok(RedirectUrl {
-        url: checkout_result.checkout_url,
+    Ok(EmbeddedCheckoutSession {
+        client_secret: result.client_secret,
+        session_id: result.session_id,
+    })
+}
+
+/// Get the Stripe publishable key (needed for embedded checkout on the frontend).
+///
+/// Publishable keys are designed to be public — this is not a secret.
+#[server(prefix = "/leptos-api")]
+pub async fn get_stripe_publishable_key() -> Result<Option<String>, ServerFnError> {
+    let _auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    Ok(ctx.config.stripe_publishable_key.clone())
+}
+
+/// Check the status of a checkout session (for verifying completion).
+///
+/// Called by the embedded checkout `onComplete` callback to confirm
+/// the session actually completed before showing success UI.
+#[server(prefix = "/leptos-api")]
+pub async fn get_checkout_session_status(
+    session_id: String,
+) -> Result<CheckoutStatus, ServerFnError> {
+    let _auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let stripe_service = require_stripe(&ctx.config)?;
+
+    let status = stripe_service
+        .retrieve_checkout_session_status(&session_id)
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to retrieve session status: {e}")))?;
+
+    Ok(CheckoutStatus {
+        status: status.status,
+        payment_status: status.payment_status,
     })
 }
