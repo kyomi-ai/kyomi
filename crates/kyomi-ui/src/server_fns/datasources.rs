@@ -398,6 +398,84 @@ fn require_workspace_admin(
     Ok(())
 }
 
+/// Spawn a background task that runs the initial catalog index for a
+/// freshly created datasource. Fire-and-forget — failures are logged, and
+/// the hourly catalog scheduler will retry on its next tick.
+///
+/// Called from [`create_datasource_modal`] and from the sample-datasource
+/// creation flow in `server_fns/onboarding.rs`, so a new datasource's tables
+/// appear in the UI seconds after creation instead of up to an hour later.
+#[cfg(feature = "ssr")]
+pub(crate) fn spawn_initial_catalog_index(
+    ctx: &super::ServerContext,
+    workspace_id: String,
+    datasource_config_id: String,
+    user_email: String,
+    credentials: serde_json::Value,
+) {
+    let db = ctx.db.clone();
+    let embedding = ctx.embedding.clone();
+    let encryption_key = match ctx.encryption_key.clone() {
+        Some(k) => k,
+        None => {
+            tracing::warn!(
+                workspace_id,
+                datasource_config_id,
+                "Encryption key not configured — skipping initial catalog index"
+            );
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        tracing::info!(
+            workspace_id,
+            datasource_config_id,
+            "initial catalog index: starting"
+        );
+
+        let embed = match embedding.wait_ready().await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!(
+                    workspace_id,
+                    datasource_config_id,
+                    error = %e,
+                    "initial catalog index: embedding service not ready"
+                );
+                return;
+            }
+        };
+
+        // Pass credentials through to the indexer when present so it doesn't
+        // have to re-fetch them. An empty object is treated as "no creds".
+        let creds_opt = credentials
+            .as_object()
+            .filter(|o| !o.is_empty())
+            .map(|_| credentials.clone());
+
+        let result = kyomi_agent::catalog::indexing_service::CatalogIndexingService::index_datasource(
+            &db,
+            encryption_key,
+            embed,
+            &workspace_id,
+            &datasource_config_id,
+            Some(&user_email),
+            creds_opt.as_ref(),
+            None,
+        )
+        .await;
+
+        tracing::info!(
+            workspace_id,
+            datasource_config_id,
+            status = %result.status,
+            tables_indexed = result.tables_indexed,
+            "initial catalog index: finished"
+        );
+    });
+}
+
 // ─── Modal Server Functions ─────────────────────────────────────────────────
 
 /// Result of creating or saving a datasource.
@@ -510,6 +588,17 @@ pub async fn create_datasource_modal(
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     }
+
+    // Kick off catalog indexing in the background so tables show up
+    // without waiting for the hourly scheduler tick. Fire-and-forget —
+    // failures are logged and picked up on the next scheduled refresh.
+    spawn_initial_catalog_index(
+        &ctx,
+        ws_id.to_string(),
+        ds.id.clone(),
+        auth.email.clone(),
+        credentials,
+    );
 
     Ok(DatasourceResult {
         id: ds.id,

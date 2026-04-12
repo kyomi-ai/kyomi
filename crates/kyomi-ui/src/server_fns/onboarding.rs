@@ -546,35 +546,78 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
         auth.user_id
     );
 
-    // Trigger sample data indexing in background
-    let db = ctx.db.clone();
-    let embedding = ctx.embedding.clone();
-    tokio::spawn(async move {
-        use kyomi_auth::catalog::indexers::SampleDataIndexer;
-
-        tracing::info!("Sample data indexing background task started");
-        let count = SampleDataIndexer::get_sample_table_count(&db).await;
-        if count == 0 {
-            tracing::info!("Sample data index empty — triggering indexing");
-            let emb = match embedding.wait_ready().await {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::error!(error = %e, "Embedding not available for sample data indexing");
-                    return;
-                }
-            };
-            let result = SampleDataIndexer::index_sample_data(&db, emb).await;
-            tracing::info!(
-                status = ?result.status,
-                tables = result.tables_indexed,
-                "sample data indexing finished"
-            );
-        } else {
-            tracing::info!(count, "sample data already indexed — skipping");
-        }
-    });
+    // Trigger the generic catalog indexer in the background so the sample
+    // tables show up in the user's workspace cache immediately. Previously
+    // this used a sample-specific indexer that wrote into a shared sentinel
+    // workspace — the generic per-workspace path is simpler, consistent with
+    // other datasource types, and unblocks the `list_datasources` tool which
+    // reads from the workspace cache.
+    super::datasources::spawn_initial_catalog_index(
+        &ctx,
+        ws_id.to_string(),
+        ds.id.clone(),
+        auth.email.clone(),
+        serde_json::json!({}),
+    );
 
     Ok(())
+}
+
+/// Availability state for the sample datasource in the current workspace.
+///
+/// Mirrors `GET /api/v1/datasources/sample/available` in
+/// `apps/server/src/routes/datasources.rs`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SampleDatasourceAvailability {
+    /// True if the server has a sample ClickHouse configured (via
+    /// `SAMPLE_CLICKHOUSE_HOST` / `SampleClickHouseConfig::from_env`).
+    pub configured: bool,
+    /// True if the current workspace already has a sample datasource.
+    pub already_added: bool,
+    /// True if the current user is a workspace admin (or owner).
+    pub is_admin: bool,
+}
+
+/// Check whether the sample datasource can be added to the current workspace.
+///
+/// Used by the "Add Datasource" modal to show the sample quick-add tile.
+/// Mirrors the React `GET /api/v1/datasources/sample/available` call.
+#[server(prefix = "/leptos-api")]
+pub async fn check_sample_datasource_available()
+-> Result<SampleDatasourceAvailability, ServerFnError> {
+    use super::{extract_auth, extract_context, workspace_id};
+
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    let is_admin = auth
+        .workspace
+        .workspace_roles
+        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
+        || auth.workspace.is_owner;
+
+    let configured =
+        kyomi_auth::catalog::indexers::sample_data::SampleClickHouseConfig::from_env()
+            .is_some();
+
+    let datasources =
+        kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, true)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let already_added = datasources.iter().any(|ds| {
+        ds.connection_config
+            .get("is_sample")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    });
+
+    Ok(SampleDatasourceAvailability {
+        configured,
+        already_added,
+        is_admin,
+    })
 }
 
 /// Return the OAuth connect URL for a given datasource type and auth mode.

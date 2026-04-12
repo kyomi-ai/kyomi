@@ -14,6 +14,9 @@ use crate::components::{
 };
 use crate::components::DynSelect;
 use crate::server_fns::datasources::*;
+use crate::server_fns::onboarding::{
+    check_sample_datasource_available, create_sample_datasource,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -515,6 +518,17 @@ pub fn DatasourceModal(
     let (settings_loading, set_settings_loading) = signal(false);
     let (error_msg, set_error_msg) = signal::<Option<String>>(None);
 
+    // ── Sample datasource state ──────────────────────────────────────────
+    // `is_sample`: true when editing an existing sample datasource (loaded from
+    // connection_config.is_sample). Gates the read-only sample view.
+    // `sample_available`: sample ClickHouse is configured on the server.
+    // `sample_already_added`: current workspace already has a sample datasource.
+    // `creating_sample`: in-flight POST for quick-add.
+    let (is_sample, set_is_sample) = signal(false);
+    let (sample_available, set_sample_available) = signal(false);
+    let (sample_already_added, set_sample_already_added) = signal(false);
+    let (creating_sample, set_creating_sample) = signal(false);
+
     // ── Discovery state ──────────────────────────────────────────────────
     // "idle", "loading", "success", "error"
     let (discovery_status, set_discovery_status) = signal("idle".to_string());
@@ -566,6 +580,10 @@ pub fn DatasourceModal(
         set_discovered_schemas.set(vec![]);
         set_discovered_warehouses.set(vec![]);
         set_discovered_catalogs.set(vec![]);
+        set_is_sample.set(false);
+        // Don't reset sample_available / sample_already_added here — those are
+        // refreshed by an async effect when the modal opens in create mode.
+        set_creating_sample.set(false);
     };
 
     // ── Load settings when switching to edit mode ─────────────────────────
@@ -636,6 +654,7 @@ pub fn DatasourceModal(
                                     .unwrap_or(true),
                             );
                             set_cfg_trust_cert.set(bool_val("trust_server_certificate"));
+                            set_is_sample.set(bool_val("is_sample"));
                             set_cfg_shared_credentials.set(settings.shared_credentials);
                             set_cfg_oauth_client_id.set(str_val("oauth_client_id"));
                             set_cfg_oauth_client_secret.set(str_val("oauth_client_secret"));
@@ -672,6 +691,60 @@ pub fn DatasourceModal(
             }
         }
     });
+
+    // ── Sample availability check (create mode) ─────────────────────────
+    // Matches the React `checkSample` effect in DatasourceModal.jsx — fetches
+    // `/api/v1/datasources/sample/available` when the modal opens in create mode.
+    Effect::new(move |_| {
+        if !open.get() {
+            return;
+        }
+        if datasource_id.get().is_some() {
+            // Edit mode — sample tile is not shown.
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            match check_sample_datasource_available().await {
+                Ok(result) => {
+                    set_sample_available.set(result.configured && result.is_admin);
+                    set_sample_already_added.set(result.already_added);
+                }
+                Err(_) => {
+                    set_sample_available.set(false);
+                    set_sample_already_added.set(false);
+                }
+            }
+        });
+    });
+
+    // ── Sample quick-add handler ─────────────────────────────────────────
+    // Matches React `handleCreateSample` — creates the sample datasource and
+    // closes the modal, then refreshes the datasource list via on_saved.
+    let do_create_sample = move || {
+        set_creating_sample.set(true);
+        set_error_msg.set(None);
+        leptos::task::spawn_local(async move {
+            match create_sample_datasource().await {
+                Ok(()) => {
+                    // Signal success — DatasourcesContent refreshes the list.
+                    on_saved.run(DatasourceResult {
+                        id: String::new(),
+                        slug: "acme-analytics-sample".to_string(),
+                        name: "Acme Analytics (Sample)".to_string(),
+                        datasource_type: "clickhouse".to_string(),
+                    });
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("already") {
+                        set_sample_already_added.set(true);
+                    }
+                    set_error_msg.set(Some(msg));
+                }
+            }
+            set_creating_sample.set(false);
+        });
+    };
 
     // ── Name change handler ──────────────────────────────────────────────
     let handle_name_change = move |new_name: String| {
@@ -1000,20 +1073,33 @@ pub fn DatasourceModal(
                     fallback=move || {
                         let do_save = do_save;
                         let is_saving = saving.get();
+                        let sample = is_sample.get();
                         view! {
-                            // Edit mode footer
+                            // Edit mode footer.
+                            //
+                            // The sample datasource is intentionally read-only:
+                            // its connection settings are managed by the server
+                            // via `SAMPLE_CLICKHOUSE_*` env vars, so there is
+                            // nothing for the user to save. We surface a single
+                            // "Close" button (no "Save") to make the read-only
+                            // nature explicit, matching the React reference
+                            // in `apps/frontend/src/components/settings/
+                            // datasources/DatasourceModal.jsx` around the
+                            // sample tab render path.
                             <Button
                                 variant=ButtonVariant::Outline
                                 on:click=move |_| on_close.run(())
                             >
-                                "Cancel"
+                                {if sample { "Close" } else { "Cancel" }}
                             </Button>
-                            <Button
-                                disabled=is_saving
-                                on:click=move |_| do_save()
-                            >
-                                {move || if saving.get() { "Saving..." } else { "Save" }}
-                            </Button>
+                            <Show when=move || !is_sample.get()>
+                                <Button
+                                    disabled=is_saving
+                                    on:click=move |_| do_save()
+                                >
+                                    {move || if saving.get() { "Saving..." } else { "Save" }}
+                                </Button>
+                            </Show>
                         }.into_any()
                     }
                 >
@@ -1120,6 +1206,84 @@ pub fn DatasourceModal(
                             // ── CONNECTION TAB ──
                             <Show when=move || active_tab.get() == "connection">
                                 <div class="space-y-4">
+
+                                    // ── Sample datasource read-only view (edit mode) ──
+                                    // Matches the React `isSampleDatasource` branch in
+                                    // renderWorkspaceSettingsTab. Shows Name/Slug/Type as
+                                    // non-editable text with an informational alert.
+                                    <Show when=move || !is_create_mode.get() && is_sample.get()>
+                                        <div class="space-y-4">
+                                            <Alert>
+                                                <AlertDescription>
+                                                    "This is a sample datasource with pre-configured connection settings. Connection settings cannot be modified."
+                                                </AlertDescription>
+                                            </Alert>
+                                            <div class="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label class="block text-sm font-medium mb-1 text-muted-foreground">"Name"</label>
+                                                    <p class="text-sm">{move || name.get()}</p>
+                                                </div>
+                                                <div>
+                                                    <label class="block text-sm font-medium mb-1 text-muted-foreground">"Slug"</label>
+                                                    <p class="text-sm font-mono">{move || slug.get()}</p>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label class="block text-sm font-medium mb-1 text-muted-foreground">"Type"</label>
+                                                <div class="flex items-center gap-2">
+                                                    <span class="h-4 w-4 inline-flex items-center justify-center">
+                                                        <Icon icon=icondata_lu::LuDatabase/>
+                                                    </span>
+                                                    <span class="text-sm">
+                                                        {move || {
+                                                            let t = ds_type.get();
+                                                            PROVIDER_TYPES
+                                                                .iter()
+                                                                .find(|(v, _)| *v == t)
+                                                                .map(|(_, l)| (*l).to_string())
+                                                                .unwrap_or(t)
+                                                        }}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </Show>
+
+                                    // ── Sample quick-add tile (create mode only) ──
+                                    // Matches the React sample quick-add block at the top of
+                                    // the connection tab. Only visible for admins when the
+                                    // sample ClickHouse is configured and not already added.
+                                    <Show when=move || {
+                                        is_create_mode.get()
+                                            && sample_available.get()
+                                            && !sample_already_added.get()
+                                    }>
+                                        <div class="flex items-center justify-between p-3 border border-border rounded-lg bg-muted/30">
+                                            <div class="flex items-center gap-3">
+                                                <span class="h-5 w-5 inline-flex items-center justify-center text-muted-foreground">
+                                                    <Icon icon=icondata_lu::LuDatabase/>
+                                                </span>
+                                                <div>
+                                                    <p class="text-sm font-medium">"Acme Analytics (Sample)"</p>
+                                                    <p class="text-xs text-muted-foreground">
+                                                        "Try Kyomi with demo data — no setup required"
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <Button
+                                                variant=ButtonVariant::Outline
+                                                size=ButtonSize::Sm
+                                                disabled=creating_sample
+                                                on:click=move |_| do_create_sample()
+                                            >
+                                                {move || if creating_sample.get() { "Adding..." } else { "Add Sample" }}
+                                            </Button>
+                                        </div>
+                                    </Show>
+
+                                    // Rest of the connection form — hidden when viewing a sample datasource.
+                                    <Show when=move || is_create_mode.get() || !is_sample.get()>
+                                    <div class="space-y-4">
 
                                     // Type selector (create mode only)
                                     <Show when=move || is_create_mode.get()>
@@ -1335,6 +1499,9 @@ pub fn DatasourceModal(
                                             cfg_role=cfg_role
                                             set_cfg_role=set_cfg_role
                                         />
+                                    </Show>
+
+                                    </div>
                                     </Show>
 
                                 </div>

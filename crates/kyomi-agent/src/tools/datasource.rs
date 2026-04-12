@@ -64,29 +64,16 @@ impl AgentTool for ListDatasourcesTool {
 
         let mut results = Vec::new();
         for ds in &datasources {
-            let is_sample = ds
-                .connection_config
-                .get("is_sample")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let table_count: i64 = if is_sample {
-                let sample_ws_id =
-                    kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID;
-                kyomi_core::db_fetch_scalar!(
-                    ctx.db, i64,
-                    "SELECT COUNT(*) FROM datasource_table_cache WHERE workspace_id = $1",
-                    sample_ws_id
-                )
-                .unwrap_or(0)
-            } else {
-                kyomi_core::db_fetch_scalar!(
-                    ctx.db, i64,
-                    "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = $1",
-                    &ds.id
-                )
-                .unwrap_or(0)
-            };
+            // Count tables cached for this specific datasource config. The
+            // sample datasource is treated like any other — it gets its own
+            // per-workspace cache populated on creation by the initial
+            // catalog index, so there's no special-case sentinel lookup.
+            let table_count: i64 = kyomi_core::db_fetch_scalar!(
+                ctx.db, i64,
+                "SELECT COUNT(*) FROM datasource_table_cache WHERE datasource_config_id = $1",
+                &ds.id
+            )
+            .unwrap_or(0);
 
             results.push(serde_json::json!({
                 "slug": ds.slug,

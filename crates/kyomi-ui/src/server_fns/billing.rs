@@ -141,21 +141,42 @@ struct WorkspaceRow {
     analytics_bundle_events: Option<i64>,
 }
 
+/// Parse a timestamp produced by `CAST(timestamptz AS TEXT)` in Postgres
+/// (`YYYY-MM-DD HH:MM:SS[.fff]+00`) or a standard RFC3339 string. Returns
+/// `None` on failure.
+///
+/// Postgres's `timestamptz::text` cast uses a space instead of `T` between
+/// the date and time, and a short `+00` offset rather than `+00:00`, which
+/// `chrono::DateTime::parse_from_rfc3339` rejects. We try RFC3339 first and
+/// fall back to the Postgres text format.
+#[cfg(feature = "ssr")]
+fn parse_pg_or_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    // Postgres text cast: 2026-05-12 07:39:04.698546+00
+    for fmt in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%d %H:%M:%S%#z"] {
+        if let Ok(dt) = chrono::DateTime::parse_from_str(s, fmt) {
+            return Some(dt.with_timezone(&chrono::Utc));
+        }
+    }
+    None
+}
+
 #[cfg(feature = "ssr")]
 impl WorkspaceRow {
     fn period_start_dt(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.subscription_period_start.as_deref().and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-        })
+        self.subscription_period_start
+            .as_deref()
+            .and_then(parse_pg_or_rfc3339)
     }
     fn period_end_dt(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.subscription_period_end.as_deref().and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-        })
+        self.subscription_period_end
+            .as_deref()
+            .and_then(parse_pg_or_rfc3339)
+    }
+    fn trial_ends_at_dt(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.trial_ends_at.as_deref().and_then(parse_pg_or_rfc3339)
     }
 }
 
@@ -279,14 +300,21 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         &ctx.db, i64, &count_sql, ws_id
     ).map_err(|e| ServerFnError::new(format!("Failed to count workspace members: {e}")))? as i32;
 
+    // Normalize all timestamps to RFC3339 so the frontend's date formatter
+    // (which expects RFC3339) renders them correctly. Postgres's
+    // `timestamptz::text` cast uses a space separator that trips the parser.
+    let period_start_rfc = workspace.period_start_dt().map(|dt| dt.to_rfc3339());
+    let period_end_rfc = workspace.period_end_dt().map(|dt| dt.to_rfc3339());
+    let trial_ends_at_rfc = workspace.trial_ends_at_dt().map(|dt| dt.to_rfc3339());
+
     Ok(SubscriptionInfo {
         tier: workspace.subscription_tier,
         status: workspace.subscription_status,
         billing_cycle: workspace.billing_cycle,
-        period_start: workspace.subscription_period_start,
-        period_end: workspace.subscription_period_end,
+        period_start: period_start_rfc,
+        period_end: period_end_rfc,
         ai_reset_date,
-        trial_ends_at: workspace.trial_ends_at,
+        trial_ends_at: trial_ends_at_rfc,
         user_limit: workspace.user_limit,
         ai_token_balance_cents: Some(ai_token_balance_cents),
         analytics_events_used: Some(analytics_events_used),
@@ -747,4 +775,41 @@ pub async fn get_checkout_session_status(
         status: status.status,
         payment_status: status.payment_status,
     })
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pg_or_rfc3339_accepts_postgres_text_cast() {
+        let parsed = parse_pg_or_rfc3339("2026-05-12 07:39:06+00").expect("parse");
+        assert_eq!(parsed.to_rfc3339(), "2026-05-12T07:39:06+00:00");
+    }
+
+    #[test]
+    fn parse_pg_or_rfc3339_accepts_postgres_text_with_fractional_seconds() {
+        let parsed = parse_pg_or_rfc3339("2026-05-12 07:39:04.698546+00").expect("parse");
+        assert_eq!(parsed.to_rfc3339(), "2026-05-12T07:39:04.698546+00:00");
+    }
+
+    #[test]
+    fn parse_pg_or_rfc3339_accepts_rfc3339() {
+        let parsed = parse_pg_or_rfc3339("2026-05-12T07:39:06+00:00").expect("parse");
+        assert_eq!(parsed.to_rfc3339(), "2026-05-12T07:39:06+00:00");
+    }
+
+    #[test]
+    fn parse_pg_or_rfc3339_accepts_postgres_text_with_colon_offset() {
+        // Some Postgres client configurations emit `+00:00` instead of `+00`;
+        // `%#z` accepts both variants.
+        let parsed =
+            parse_pg_or_rfc3339("2026-05-12 07:39:04.698546+00:00").expect("parse");
+        assert_eq!(parsed.to_rfc3339(), "2026-05-12T07:39:04.698546+00:00");
+    }
+
+    #[test]
+    fn parse_pg_or_rfc3339_rejects_garbage() {
+        assert!(parse_pg_or_rfc3339("not a date").is_none());
+    }
 }

@@ -234,6 +234,7 @@ pub fn register_server_functions() {
     register_explicit::<AcceptTerms>();
     register_explicit::<GetOnboardingState>();
     register_explicit::<CreateSampleDatasource>();
+    register_explicit::<CheckSampleDatasourceAvailable>();
     register_explicit::<GetOauthConnectUrl>();
 
     use server_fns::home::*;
