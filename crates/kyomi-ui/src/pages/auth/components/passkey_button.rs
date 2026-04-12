@@ -3,57 +3,44 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
-use crate::components::Spinner;
+use crate::components::{Button, ButtonSize, ButtonVariant, Spinner};
 
-/// Passkey sign-in button matching the React Login.jsx passkey button.
-///
-/// Phase 1: Visual placeholder that calls the on_click handler when clicked.
-/// Actual WebAuthn integration comes in Phase 4.
-///
-/// CSS classes are copied verbatim from the React source.
+/// Passkey sign-in button — wraps the design-system `<Button>` with loading/icon.
 #[component]
 pub fn PasskeySignInButton(
-    /// Whether the button is in loading state
-    #[prop(into)]
-    loading: Signal<bool>,
-    /// Whether the button should be disabled (e.g., other auth in progress)
-    #[prop(into)]
-    disabled: Signal<bool>,
-    /// Click handler
+    #[prop(into)] loading: Signal<bool>,
+    #[prop(into)] disabled: Signal<bool>,
     on_click: Callback<()>,
 ) -> impl IntoView {
-    let is_disabled = move || loading.get() || disabled.get();
+    let is_disabled = Signal::derive(move || loading.get() || disabled.get());
 
     let handle_click = move |_| {
-        if !is_disabled() {
+        if !is_disabled.get() {
             on_click.run(());
         }
     };
 
     view! {
-        <button
-            type="button"
-            on:click=handle_click
+        <Button
+            variant=ButtonVariant::Default
+            size=ButtonSize::Lg
             disabled=is_disabled
-            class="w-full py-3.5 px-4 bg-primary text-primary-foreground font-semibold rounded-lg shadow hover:shadow focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-all duration-200 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            class="w-full"
+            on:click=handle_click
         >
             {move || {
                 if loading.get() {
                     view! {
-                        <div class="flex items-center justify-center space-x-2">
-                            <Spinner class="text-primary-foreground" />
-                            <span>"Authenticating..."</span>
-                        </div>
+                        <Spinner class="text-primary-foreground"/>
+                        <span>"Authenticating..."</span>
                     }.into_any()
                 } else {
                     view! {
-                        <div class="flex items-center justify-center space-x-2">
-                            <Icon icon=icondata_lu::LuKeyRound width="20" height="20"/>
-                            <span>"Sign in with Passkey"</span>
-                        </div>
+                        <Icon icon=icondata_lu::LuKeyRound width="20" height="20"/>
+                        <span>"Sign in with Passkey"</span>
                     }.into_any()
                 }
             }}
-        </button>
+        </Button>
     }
 }

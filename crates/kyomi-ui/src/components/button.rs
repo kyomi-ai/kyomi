@@ -128,6 +128,11 @@ pub fn Button(
     /// Accessibility label — required for icon-only buttons.
     #[prop(optional, into)]
     aria_label: Option<String>,
+    /// Native button `type` attribute. Defaults to `"button"` so buttons inside
+    /// a `<form>` never accidentally submit. Pass `"submit"` for the form's
+    /// actual submit action.
+    #[prop(default = "button")]
+    button_type: &'static str,
     children: Children,
 ) -> impl IntoView {
     let classes = format!(
@@ -139,7 +144,13 @@ pub fn Button(
     );
 
     view! {
-        <button class=classes disabled=move || disabled.try_get().flatten().unwrap_or(false) aria-label=aria_label.clone() title=aria_label>
+        <button
+            r#type=button_type
+            class=classes
+            disabled=move || disabled.try_get().flatten().unwrap_or(false)
+            aria-label=aria_label.clone()
+            title=aria_label
+        >
             {children()}
         </button>
     }

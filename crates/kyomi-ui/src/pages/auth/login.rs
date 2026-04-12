@@ -12,7 +12,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_query_map;
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Label, Spinner, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Label,
+    Spinner, INPUT_CLASS,
 };
 use crate::pages::auth::auth_layout::AuthLayout;
 use crate::pages::auth::components::{AuthDivider, GoogleSignInButton, PasskeySignInButton};
@@ -626,10 +627,12 @@ fn CredentialsView(
                         on:input=move |ev| set_password.set(event_target_value(&ev))
                     />
                 </div>
-                <button
-                    type="submit"
-                    disabled=sign_in_disabled
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-10 rounded-md px-8 w-full"
+                <Button
+                    button_type="submit"
+                    variant=ButtonVariant::Default
+                    size=ButtonSize::Lg
+                    disabled=Signal::derive(sign_in_disabled)
+                    class="w-full"
                 >
                     {move || {
                         if loading.get() {
@@ -643,19 +646,19 @@ fn CredentialsView(
                             view! { <span>"Sign In"</span> }.into_any()
                         }
                     }}
-                </button>
+                </Button>
                 <p class="text-xs text-muted-foreground text-center mt-3">
                     "New to Kyomi? "
-                    <button
-                        type="button"
+                    <Button
+                        variant=ButtonVariant::Link
+                        size=ButtonSize::Sm
                         on:click=move |_| {
                             set_view_state.set(LoginView::Signup);
                             set_error.set(None);
                         }
-                        class="text-primary hover:underline"
                     >
                         "Create an account"
-                    </button>
+                    </Button>
                     " · "
                     <a
                         href="/account/recover"
@@ -692,11 +695,11 @@ fn CredentialsView(
                         <p class="mb-3">
                             "Please verify your email before signing in. Check your inbox for the verification link."
                         </p>
-                        <button
-                            type="button"
+                        <Button
+                            variant=ButtonVariant::Outline
+                            size=ButtonSize::Sm
                             on:click=on_resend_verification
-                            disabled=move || resend_loading.get()
-                            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                            disabled=Signal::derive(move || resend_loading.get())
                         >
                             {move || {
                                 if resend_loading.get() {
@@ -705,7 +708,7 @@ fn CredentialsView(
                                     "Resend Verification Email".to_string()
                                 }
                             }}
-                        </button>
+                        </Button>
                         <Show when=move || resend_success.get()>
                             <p class="text-sm text-success-foreground mt-2">
                                 "Verification email sent! Check your inbox."
@@ -787,10 +790,12 @@ fn TwoFactorView(
                         }
                     />
                 </div>
-                <button
-                    type="submit"
-                    disabled=verify_disabled
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-10 rounded-md px-8 w-full"
+                <Button
+                    button_type="submit"
+                    variant=ButtonVariant::Default
+                    size=ButtonSize::Lg
+                    disabled=Signal::derive(verify_disabled)
+                    class="w-full"
                 >
                     {move || {
                         if loading.get() {
@@ -804,21 +809,20 @@ fn TwoFactorView(
                             view! { <span>"Verify & Sign In"</span> }.into_any()
                         }
                     }}
-                </button>
+                </Button>
             </form>
 
-            <button
-                type="button"
+            <Button
+                variant=ButtonVariant::Link
                 on:click=move |_| {
                     set_view_state.set(LoginView::Credentials);
                     set_error.set(None);
                     set_totp_code.set(String::new());
                     set_loading.set(false);
                 }
-                class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-primary underline-offset-4 hover:underline text-muted-foreground"
             >
                 "Back to login"
-            </button>
+            </Button>
         </div>
     }
 }
@@ -913,10 +917,12 @@ fn SignupView(
                     </Alert>
                 </Show>
 
-                <button
-                    type="submit"
-                    disabled=signup_disabled
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-10 rounded-md px-8 w-full"
+                <Button
+                    button_type="submit"
+                    variant=ButtonVariant::Default
+                    size=ButtonSize::Lg
+                    disabled=Signal::derive(signup_disabled)
+                    class="w-full"
                 >
                     {move || {
                         if signup_loading.get() {
@@ -941,7 +947,7 @@ fn SignupView(
                             view! { <span>{label}</span> }.into_any()
                         }
                     }}
-                </button>
+                </Button>
 
                 <Show when=move || !is_self_hosted_no_smtp()>
                     <p class="text-xs text-muted-foreground text-center">
@@ -951,17 +957,17 @@ fn SignupView(
 
                 <p class="text-xs text-muted-foreground text-center mt-4">
                     "Already have an account? "
-                    <button
-                        type="button"
+                    <Button
+                        variant=ButtonVariant::Link
+                        size=ButtonSize::Sm
                         on:click=move |_| {
                             set_view_state.set(LoginView::Credentials);
                             set_error.set(None);
                             set_signup_email.set(String::new());
                         }
-                        class="text-primary hover:underline"
                     >
                         "Sign in"
-                    </button>
+                    </Button>
                 </p>
             </form>
         </div>
@@ -1004,18 +1010,17 @@ fn CheckEmailView(
                 "The link expires in 1 hour."
             </p>
             <div class="pt-4">
-                <button
-                    type="button"
+                <Button
+                    variant=ButtonVariant::Link
                     on:click=move |_| {
                         set_view_state.set(LoginView::Credentials);
                         set_error.set(None);
                         set_success_msg.set(None);
                         set_signup_email.set(String::new());
                     }
-                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-primary underline-offset-4 hover:underline text-muted-foreground"
                 >
                     "Back to login"
-                </button>
+                </Button>
             </div>
         </div>
     }

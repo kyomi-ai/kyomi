@@ -11,23 +11,11 @@
 use leptos::prelude::*;
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Card, CardContent, CardDescription,
-    CardHeader, CardTitle, Label, Spinner, INPUT_CLASS,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
+    ButtonVariant, Card, CardContent, CardDescription, CardHeader, CardTitle, Label, Spinner,
+    INPUT_CLASS,
 };
 use crate::server_fns::auth::recovery_start;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Button class constants (from button.rs, composed inline like login.rs)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Base + Default variant + Lg size + w-full
-const BTN_PRIMARY_LG_FULL: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 bg-primary text-primary-foreground shadow hover:bg-primary/90 h-10 rounded-md px-8 w-full";
-
-/// Base + Outline variant + Default size + w-full mb-4
-const BTN_OUTLINE_FULL: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-9 px-4 py-2 w-full mb-4";
-
-/// Base + Link variant + Default size + w-full text-muted-foreground
-const BTN_LINK_FULL_MUTED: &str = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-primary underline-offset-4 hover:underline h-9 px-4 py-2 w-full text-muted-foreground";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main component
@@ -154,10 +142,12 @@ fn FormView(
                         />
                     </div>
 
-                    <button
-                        type="submit"
-                        disabled=submit_disabled
-                        class=BTN_PRIMARY_LG_FULL
+                    <Button
+                        button_type="submit"
+                        variant=ButtonVariant::Default
+                        size=ButtonSize::Lg
+                        disabled=Signal::derive(submit_disabled)
+                        class="w-full"
                     >
                         {move || {
                             if loading.get() {
@@ -171,7 +161,7 @@ fn FormView(
                                 view! { <span>"Send Recovery Link"</span> }.into_any()
                             }
                         }}
-                    </button>
+                    </Button>
 
                     <div class="text-center pt-2">
                         <a
@@ -227,22 +217,25 @@ fn SubmittedView(
                 </p>
 
                 <div class="pt-4">
-                    <a href="/login">
-                        <button type="button" class=BTN_OUTLINE_FULL>
-                            "Back to Login"
-                        </button>
-                    </a>
+                    <ButtonLink
+                        href="/login"
+                        variant=ButtonVariant::Outline
+                        size=ButtonSize::Lg
+                        class="w-full mb-4"
+                    >
+                        "Back to Login"
+                    </ButtonLink>
 
-                    <button
-                        type="button"
+                    <Button
+                        variant=ButtonVariant::Link
+                        class="w-full"
                         on:click=move |_| {
                             set_submitted.set(false);
                             set_email.set(String::new());
                         }
-                        class=BTN_LINK_FULL_MUTED
                     >
                         "Try a different email"
-                    </button>
+                    </Button>
                 </div>
             </CardContent>
         </Card>
