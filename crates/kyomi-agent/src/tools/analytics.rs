@@ -182,18 +182,20 @@ impl AgentTool for CreateAnalyticsSiteTool {
             return Ok("Error: Analytics is not configured on this instance.".into());
         }
 
-        let site = analytics_site_service::create_site(
-            &ctx.db,
-            &ctx.workspace_id,
+        let site = analytics_site_service::create_site(analytics_site_service::CreateSiteParams {
+            db: &ctx.db,
+            workspace_id: &ctx.workspace_id,
             name,
-            &allowed_domains,
-            &ctx.config.analytics_signing_secret,
+            domains: &allowed_domains,
+            secret: &ctx.config.analytics_signing_secret,
             datasource_slug,
-            &ctx.config.analytics_clickhouse_host,
-            ctx.config.analytics_clickhouse_port,
-            &ctx.config.analytics_clickhouse_password,
-            ctx.config.analytics_clickhouse_secure,
-        )
+            clickhouse: analytics_site_service::ClickHouseProvisioning {
+                host: &ctx.config.analytics_clickhouse_host,
+                port: ctx.config.analytics_clickhouse_port,
+                admin_password: &ctx.config.analytics_clickhouse_password,
+                secure: ctx.config.analytics_clickhouse_secure,
+            },
+        })
         .await?;
 
         // Spawn background quota sync + catalog indexing

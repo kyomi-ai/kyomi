@@ -499,15 +499,17 @@ impl AgentTool for ModifyDashboardTool {
         }
 
         match kyomi_auth::dashboard_service::update_dashboard(
-            &ctx.db,
-            None, // embed: no rechunking from agent tool (yet)
-            dashboard_id,
-            &ctx.workspace_id,
-            &ctx.user_id,
-            title,
-            content,
-            change_summary,
-            None, // expected_content_hash: no CAS for agent tool
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &ctx.db,
+                embed: None, // no rechunking from agent tool (yet)
+                dashboard_id,
+                workspace_id: &ctx.workspace_id,
+                user_id: &ctx.user_id,
+                title,
+                content,
+                change_summary,
+                expected_content_hash: None, // no CAS for agent tool
+            },
         )
         .await
         {
