@@ -140,15 +140,17 @@ pub async fn get_learnings_for_system_prompt(
     // to scope to user learnings. The hybrid search with an empty query
     // will degrade gracefully.
     let learnings = learning_service::get_relevant_learnings_hybrid(
-        db,
-        embedding,
-        workspace_id,
-        "general data warehouse navigation",
-        Some(user_id),
-        20, // generous limit for system prompt
-        0.0, // low threshold -- we want all user learnings
-        0.7,
-        0.3,
+        learning_service::GetRelevantLearningsParams {
+            db,
+            embedding_svc: embedding,
+            workspace_id,
+            query: "general data warehouse navigation",
+            user_id: Some(user_id),
+            limit: 20, // generous limit for system prompt
+            min_similarity: 0.0, // we want all user learnings
+            semantic_weight: 0.7,
+            keyword_weight: 0.3,
+        },
     )
     .await?;
 

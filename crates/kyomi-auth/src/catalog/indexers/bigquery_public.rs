@@ -144,16 +144,16 @@ impl BigQueryPublicIndexer {
                 "indexing public dataset"
             );
 
-            match index_public_dataset_tables(
-                &client,
+            match index_public_dataset_tables(IndexPublicDatasetParams {
+                client: &client,
                 db,
                 embedding,
-                &ctx,
+                ctx: &ctx,
                 access_token,
-                PUBLIC_PROJECT_ID,
+                project_id: PUBLIC_PROJECT_ID,
                 dataset_id,
-                Some(max_tables),
-            )
+                max_tables: Some(max_tables),
+            })
             .await
             {
                 Ok(count) => {
@@ -201,19 +201,34 @@ impl BigQueryPublicIndexer {
     }
 }
 
+/// Parameters for [`index_public_dataset_tables`].
+struct IndexPublicDatasetParams<'a> {
+    client: &'a reqwest::Client,
+    db: &'a DbPool,
+    embedding: &'a EmbeddingService,
+    ctx: &'a IndexerContext,
+    access_token: &'a str,
+    project_id: &'a str,
+    dataset_id: &'a str,
+    max_tables: Option<usize>,
+}
+
 /// Index all tables in a single public BigQuery dataset.
 ///
 /// Returns the number of tables indexed.
 async fn index_public_dataset_tables(
-    client: &reqwest::Client,
-    db: &DbPool,
-    embedding: &EmbeddingService,
-    ctx: &IndexerContext,
-    access_token: &str,
-    project_id: &str,
-    dataset_id: &str,
-    max_tables: Option<usize>,
+    params: IndexPublicDatasetParams<'_>,
 ) -> Result<usize> {
+    let IndexPublicDatasetParams {
+        client,
+        db,
+        embedding,
+        ctx,
+        access_token,
+        project_id,
+        dataset_id,
+        max_tables,
+    } = params;
     // List tables in the dataset
     let url = format!(
         "https://bigquery.googleapis.com/bigquery/v2/projects/{project_id}/datasets/{dataset_id}/tables"
@@ -288,17 +303,17 @@ async fn index_public_dataset_tables(
             }
         };
 
-        let cached = cache_table(
+        let cached = cache_table(crate::catalog::helpers::CacheTableParams {
             db,
             embedding,
             ctx,
             project_id,
             dataset_id,
-            table_id,
-            "TABLE",
-            &columns,
-            &full_table_id,
-        )
+            table_name: table_id,
+            table_type: "TABLE",
+            columns: &columns,
+            full_table_id: &full_table_id,
+        })
         .await;
 
         if cached {

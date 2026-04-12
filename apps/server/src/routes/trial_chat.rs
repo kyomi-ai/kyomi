@@ -756,16 +756,22 @@ async fn trial_chat(
     // Execute the agent synchronously — the frontend expects the full response
     // in the HTTP body (matching Python's synchronous pattern). Thinking events
     // still stream via WebSocket in real-time during execution.
+    //
+    // Trial chat is anonymous — no workspace. `execute_agent_chat` detects
+    // `context_type == "trial_chat"` and routes through the legacy global
+    // provider config (server-side Kyomi keys), bypassing WorkspaceAiConfig.
     let exec_result = kyomi_agent::execute_agent_chat(
         exec_config,
-        &state.db,
-        &state.kv,
-        &state.encryption_key,
-        &state.embedding,
-        &state.ws_manager,
-        &state.config,
-        None, // Trial chat does not use Connect
-        state.platforms.clone(),
+        kyomi_agent::AgentExecutionEnv {
+            db: &state.db,
+            kv: &state.kv,
+            encryption_key: &state.encryption_key,
+            embedding: &state.embedding,
+            ws_manager: &state.ws_manager,
+            app_config: &state.config,
+            connect_registry: None, // Trial chat does not use Connect
+            platforms: state.platforms.clone(),
+        },
     )
     .await;
 

@@ -455,14 +455,16 @@ pub(crate) fn spawn_initial_catalog_index(
             .map(|_| credentials.clone());
 
         let result = kyomi_agent::catalog::indexing_service::CatalogIndexingService::index_datasource(
-            &db,
-            encryption_key,
-            embed,
-            &workspace_id,
-            &datasource_config_id,
-            Some(&user_email),
-            creds_opt.as_ref(),
-            None,
+            kyomi_agent::catalog::indexing_service::IndexDatasourceParams {
+                db: &db,
+                encryption_key,
+                embedding: embed,
+                workspace_id: &workspace_id,
+                datasource_config_id: &datasource_config_id,
+                user_email: Some(&user_email),
+                credentials: creds_opt.as_ref(),
+                max_tables_per_dataset: None,
+            },
         )
         .await;
 

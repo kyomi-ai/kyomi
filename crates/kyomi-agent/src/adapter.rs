@@ -51,6 +51,21 @@ pub struct ChatAgentAdapter {
     messages_loaded_count: usize,
 }
 
+/// Arguments for [`ChatAgentAdapter::chat`] — one agent turn.
+///
+/// Packaged into a struct to keep the public signature under clippy's
+/// `too_many_arguments` threshold while keeping every field explicit at
+/// the call site.
+pub struct ChatParams<'a> {
+    pub message: &'a str,
+    pub cancel_token: CancellationToken,
+    pub current_time_user_tz: Option<&'a str>,
+    pub message_source: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+    pub user_message_id: Option<&'a str>,
+    pub assistant_message_id: Option<&'a str>,
+}
+
 impl ChatAgentAdapter {
     /// Create a new adapter.
     #[allow(clippy::too_many_arguments)]
@@ -327,16 +342,7 @@ impl ChatAgentAdapter {
     /// If `assistant_message_id` is provided, it will be set on the final
     /// assistant response message before persistence, ensuring the DB record
     /// matches the ID used for WebSocket streaming and UI display.
-    pub async fn chat(
-        &mut self,
-        message: &str,
-        cancel_token: CancellationToken,
-        current_time_user_tz: Option<&str>,
-        message_source: Option<&str>,
-        user_id: Option<&str>,
-        user_message_id: Option<&str>,
-        assistant_message_id: Option<&str>,
-    ) -> kyomi_core::Result<String> {
+    pub async fn chat(&mut self, params: ChatParams<'_>) -> kyomi_core::Result<String> {
         // Lazy context loading on first call.
         if !self.context_loaded {
             self.load_context().await?;
@@ -346,23 +352,23 @@ impl ChatAgentAdapter {
         let result = self
             .agent
             .chat(
-                message,
-                cancel_token,
-                current_time_user_tz,
-                message_source,
-                user_id,
+                params.message,
+                params.cancel_token,
+                params.current_time_user_tz,
+                params.message_source,
+                params.user_id,
             )
             .await;
 
         // Tag the user message with the known ID so the DB record matches
         // the ID returned to the frontend in the HTTP response.
-        if let Some(umid) = user_message_id {
+        if let Some(umid) = params.user_message_id {
             self.tag_first_new_user_message_id(umid);
         }
 
         // Tag the final assistant message with the known ID so that the DB
         // record matches the ID used for WebSocket streaming.
-        if let Some(amid) = assistant_message_id {
+        if let Some(amid) = params.assistant_message_id {
             self.tag_last_assistant_message_id(amid);
         }
 

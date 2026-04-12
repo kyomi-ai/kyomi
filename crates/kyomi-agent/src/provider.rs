@@ -10,6 +10,11 @@
 //!
 //! Use [`create_provider`] to instantiate a provider from [`LLMProviderConfig`],
 //! or [`resolve_provider_config`] to build the config from application settings.
+//!
+//! For workspace-scoped (BYOK) routing, use
+//! [`create_provider_from_workspace`] which takes a
+//! [`kyomi_auth::workspace_ai_config::WorkspaceAiConfig`] and falls back to
+//! server env keys when the workspace is in Kyomi-managed mode.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -193,6 +198,73 @@ pub fn create_provider(
             Ok(Box::new(client))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-scoped factory (BYOK)
+// ---------------------------------------------------------------------------
+
+/// Build an [`LLMProvider`] from a workspace AI config.
+///
+/// * **Kyomi mode** (`ws_config.provider == WorkspaceAiProvider::Kyomi`):
+///   falls back to `fallback_config` — the server's env-configured keys
+///   (`ANTHROPIC_API_KEY` / `LLM_API_KEY`). Matches the legacy behaviour of
+///   [`create_provider`] + [`resolve_provider_config`] exactly so that
+///   existing Kyomi-hosted tenants see no change.
+///   * Model override: `ws_config.model` wins over `fallback_config.llm_model`.
+///   * Base URL: inherited from `fallback_config.llm_base_url` (workspaces
+///     in Kyomi mode never set their own base URL).
+///
+/// * **BYOK mode** (anthropic / openai / gemini): uses the workspace's
+///   decrypted API key, model, and optional base URL. Returns
+///   [`kyomi_core::Error::Internal`] if the workspace is BYOK but has no
+///   stored API key (can only happen if Track 2's [`update`] invariant was
+///   bypassed via direct DB write).
+///
+/// Prefer this over [`create_provider`] anywhere a workspace ID is in scope.
+/// [`create_provider`] remains for anonymous entry points (trial chat) that
+/// have no workspace context.
+pub fn create_provider_from_workspace(
+    ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
+    fallback_config: &kyomi_core::Config,
+) -> kyomi_core::Result<Box<dyn LLMProvider>> {
+    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+
+    let llm_config = match ws_config.provider {
+        WorkspaceAiProvider::Kyomi => {
+            // Server-side keys: reuse the existing resolver so Kyomi-mode
+            // workspaces get identical behaviour to the old global path.
+            let mut resolved = resolve_provider_config(fallback_config)?;
+            if let Some(ref model) = ws_config.model {
+                resolved.model = Some(model.clone());
+            }
+            resolved
+        }
+        WorkspaceAiProvider::Anthropic
+        | WorkspaceAiProvider::OpenAI
+        | WorkspaceAiProvider::Gemini => {
+            let api_key = ws_config.api_key.clone().ok_or_else(|| {
+                kyomi_core::Error::Internal(format!(
+                    "workspace BYOK provider {} has no stored API key",
+                    ws_config.provider.as_str()
+                ))
+            })?;
+            let provider = match ws_config.provider {
+                WorkspaceAiProvider::Anthropic => ProviderKind::Anthropic,
+                WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
+                WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
+                WorkspaceAiProvider::Kyomi => unreachable!("handled above"),
+            };
+            LLMProviderConfig {
+                provider,
+                api_key,
+                model: ws_config.model.clone(),
+                base_url: ws_config.base_url.clone(),
+            }
+        }
+    };
+
+    create_provider(llm_config)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +497,108 @@ mod tests {
         assert!(
             err.to_string().contains("LLM_API_KEY is missing"),
             "expected partial config error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_factory_kyomi_mode_uses_server_env_keys() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+
+        let mut fallback = kyomi_core::Config::test_config();
+        fallback.llm_provider = None;
+        fallback.llm_api_key = None;
+        fallback.anthropic_api_key = Some("sk-ant-server".into());
+        fallback.llm_model = Some("claude-sonnet-4-20250514".into());
+
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::Kyomi,
+            model: None,
+            api_key: None,
+            base_url: None,
+        };
+
+        let provider = create_provider_from_workspace(&ws, &fallback)
+            .expect("Kyomi-mode dispatch should succeed with server env key");
+        // Server default model flows through.
+        assert_eq!(provider.model(), "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn workspace_factory_kyomi_mode_workspace_model_overrides_server() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+
+        let mut fallback = kyomi_core::Config::test_config();
+        fallback.anthropic_api_key = Some("sk-ant-server".into());
+        fallback.llm_model = Some("claude-sonnet-4-20250514".into());
+
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::Kyomi,
+            model: Some("claude-haiku-4-5-20251001".into()),
+            api_key: None,
+            base_url: None,
+        };
+
+        let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
+        assert_eq!(provider.model(), "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn workspace_factory_byok_openai_uses_workspace_key() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+
+        // Deliberately empty fallback — BYOK must not read from it.
+        let mut fallback = kyomi_core::Config::test_config();
+        fallback.llm_provider = None;
+        fallback.llm_api_key = None;
+        fallback.anthropic_api_key = None;
+
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::OpenAI,
+            model: Some("gpt-4o".into()),
+            api_key: Some("sk-ws-byok".into()),
+            base_url: None,
+        };
+
+        let provider = create_provider_from_workspace(&ws, &fallback)
+            .expect("BYOK OpenAI dispatch should not need fallback keys");
+        assert_eq!(provider.model(), "gpt-4o");
+    }
+
+    #[test]
+    fn workspace_factory_byok_gemini_default_model() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+
+        let fallback = kyomi_core::Config::test_config();
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::Gemini,
+            model: None,
+            api_key: Some("AIza-test".into()),
+            base_url: None,
+        };
+
+        let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
+        assert_eq!(provider.model(), crate::gemini::DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn workspace_factory_byok_without_key_errors() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+
+        let fallback = kyomi_core::Config::test_config();
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::Anthropic,
+            model: None,
+            api_key: None,
+            base_url: None,
+        };
+
+        let err = match create_provider_from_workspace(&ws, &fallback) {
+            Ok(_) => panic!("expected BYOK-without-key to error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("no stored API key"),
+            "expected missing-key error, got: {err}"
         );
     }
 

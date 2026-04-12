@@ -97,29 +97,36 @@ pub struct WatchScheduler {
     last_cleanup: Arc<Mutex<Option<Instant>>>,
 }
 
+/// Dependencies required to construct a [`WatchScheduler`].
+///
+/// Packaged into a struct to keep the constructor signature under clippy's
+/// `too_many_arguments` threshold while keeping every field explicit at
+/// the call site.
+pub struct WatchSchedulerDeps {
+    pub db: DbPool,
+    pub kv: KVPool,
+    pub encryption_key: Arc<[u8; 32]>,
+    pub embedding: LazyEmbedding,
+    pub ws_manager: WebSocketManager,
+    pub config: Arc<Config>,
+    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+    pub platforms: Arc<PlatformRegistry>,
+    pub cancel: CancellationToken,
+}
+
 impl WatchScheduler {
     /// Create a new `WatchScheduler`.
-    pub fn new(
-        db: DbPool,
-        kv: KVPool,
-        encryption_key: Arc<[u8; 32]>,
-        embedding: LazyEmbedding,
-        ws_manager: WebSocketManager,
-        config: Arc<Config>,
-        connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
-        platforms: Arc<PlatformRegistry>,
-        cancel: CancellationToken,
-    ) -> Self {
+    pub fn new(deps: WatchSchedulerDeps) -> Self {
         Self {
-            db,
-            kv,
-            encryption_key,
-            embedding,
-            ws_manager,
-            config,
-            connect_registry,
-            platforms,
-            cancel,
+            db: deps.db,
+            kv: deps.kv,
+            encryption_key: deps.encryption_key,
+            embedding: deps.embedding,
+            ws_manager: deps.ws_manager,
+            config: deps.config,
+            connect_registry: deps.connect_registry,
+            platforms: deps.platforms,
+            cancel: deps.cancel,
             active_executions: Arc::new(Mutex::new(HashMap::new())),
             last_cleanup: Arc::new(Mutex::new(None)),
         }

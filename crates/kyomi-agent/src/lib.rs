@@ -56,7 +56,7 @@ pub use agent::{AgentCallbacks, AgentConfig, AgentState, CustomAgent};
 pub use anthropic::{calculate_cost, AnthropicClient, AUDIT_MODEL, DEFAULT_MODEL};
 pub use execution::{
     deliver_response, execute_agent_chat, generate_session_title, AgentExecutionConfig,
-    AgentExecutionResult,
+    AgentExecutionEnv, AgentExecutionResult,
 };
 pub use thinking::{AgentThinkingTracker, ThinkingEvent, ThinkingEventType};
 pub use tools::{
@@ -64,9 +64,10 @@ pub use tools::{
     WATCH_TOOLS,
 };
 pub use provider::{
-    create_provider, resolve_provider_config, LLMProvider, LLMProviderConfig, ProviderKind,
+    create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider,
+    LLMProviderConfig, ProviderKind,
 };
 pub use types::*;
 pub use catalog_scheduler::CatalogRefreshScheduler;
-pub use scheduler::WatchScheduler;
+pub use scheduler::{WatchScheduler, WatchSchedulerDeps};
 pub use watch_execution::execute_watch;

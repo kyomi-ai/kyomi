@@ -708,14 +708,16 @@ pub async fn send_chat_message(
     tokio::spawn(async move {
         let result = kyomi_agent::execute_agent_chat(
             exec_config,
-            &db,
-            &kv,
-            &encryption_key,
-            &embedding,
-            &ws_manager,
-            &app_config,
-            connect_registry,
-            platforms,
+            kyomi_agent::AgentExecutionEnv {
+                db: &db,
+                kv: &kv,
+                encryption_key: &encryption_key,
+                embedding: &embedding,
+                ws_manager: &ws_manager,
+                app_config: &app_config,
+                connect_registry,
+                platforms,
+            },
         )
         .await;
 
@@ -819,16 +821,20 @@ pub async fn send_chat_message(
         cancel_registry.remove(&spawn_user_id, &spawn_session_id);
     });
 
-    // 8. Fire-and-forget title generation for new sessions.
+    // 8. Fire-and-forget title generation for new sessions. The spawned task
+    // loads WorkspaceAiConfig (Kyomi or BYOK) and logs a warning on failure;
+    // no server-side config guard is needed — gating on
+    // `resolve_provider_config` would silently skip titles for BYOK-only
+    // deployments that never set server Kyomi keys.
     if is_new_session
         && let Some(ref ws_mgr) = ctx.ws_manager
-        && kyomi_agent::resolve_provider_config(&ctx.config).is_ok()
     {
         kyomi_agent::generate_session_title(
             ctx.db.clone(),
             ws_mgr.clone(),
             session_id.clone(),
             auth.user_id.clone(),
+            ws_id.to_string(),
             message.clone(),
             ctx.config.clone(),
         );

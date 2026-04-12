@@ -1516,6 +1516,7 @@ async fn handle_app_mention(
                 state.ws_manager.clone(),
                 session_id.clone(),
                 ctx.user_id.clone(),
+                ctx.workspace_id.clone(),
                 text.clone(),
                 state.config.clone(),
             );
@@ -1705,6 +1706,7 @@ async fn handle_direct_message(
                 state.ws_manager.clone(),
                 session_id.clone(),
                 ctx.user_id.clone(),
+                ctx.workspace_id.clone(),
                 text.clone(),
                 state.config.clone(),
             );
@@ -1969,14 +1971,16 @@ async fn run_slack_query(
 
     let result = kyomi_agent::execution::execute_agent_chat(
         agent_config,
-        db,
-        kv,
-        encryption_key,
-        embedding,
-        ws_manager,
-        app_config,
-        Some(connect_registry.clone()),
-        platforms,
+        kyomi_agent::AgentExecutionEnv {
+            db,
+            kv,
+            encryption_key,
+            embedding,
+            ws_manager,
+            app_config,
+            connect_registry: Some(connect_registry.clone()),
+            platforms,
+        },
     )
     .await?;
 

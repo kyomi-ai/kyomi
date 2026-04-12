@@ -157,18 +157,20 @@ async fn create_site(
         ));
     }
 
-    let site = analytics_site_service::create_site(
-        &state.db,
+    let site = analytics_site_service::create_site(analytics_site_service::CreateSiteParams {
+        db: &state.db,
         workspace_id,
         name,
-        &request.allowed_domains,
-        &state.config.analytics_signing_secret,
-        request.datasource_slug.as_deref(),
-        &state.config.analytics_clickhouse_host,
-        state.config.analytics_clickhouse_port,
-        &state.config.analytics_clickhouse_password,
-        state.config.analytics_clickhouse_secure,
-    )
+        domains: &request.allowed_domains,
+        secret: &state.config.analytics_signing_secret,
+        datasource_slug: request.datasource_slug.as_deref(),
+        clickhouse: analytics_site_service::ClickHouseProvisioning {
+            host: &state.config.analytics_clickhouse_host,
+            port: state.config.analytics_clickhouse_port,
+            admin_password: &state.config.analytics_clickhouse_password,
+            secure: state.config.analytics_clickhouse_secure,
+        },
+    })
     .await?;
 
     tracing::info!(

@@ -22,7 +22,7 @@ use tracing::{info, warn};
 
 use kyomi_auth::catalog::helpers::{
     archive_missing_tables, cache_table, update_datasource_last_refresh, update_workspace_status,
-    IndexerContext,
+    CacheTableParams, IndexerContext,
 };
 use kyomi_auth::catalog::types::{CatalogIndexResult, ColumnEntry, TableEntry};
 
@@ -527,17 +527,17 @@ pub async fn index_catalog_sql(
                 .unwrap_or("TABLE");
 
             // Cache table with embeddings
-            let cached = cache_table(
+            let cached = cache_table(CacheTableParams {
                 db,
                 embedding,
                 ctx,
-                &project_id,
-                &cache_dataset,
-                &table.name,
+                project_id: &project_id,
+                dataset_id: &cache_dataset,
+                table_name: &table.name,
                 table_type,
-                &columns,
-                &full_table_id,
-            )
+                columns: &columns,
+                full_table_id: &full_table_id,
+            })
             .await;
 
             if cached {

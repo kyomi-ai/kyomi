@@ -12,7 +12,7 @@
 //! (provided at router setup). This avoids a circular dependency with the
 //! server crate's `AppState`.
 
-pub mod ai_provider;
+pub mod ai;
 pub mod analytics;
 pub mod auth;
 pub mod billing;
