@@ -303,7 +303,14 @@ struct KnowledgeChunkRow {
     file_name: String,
     doc_type: String,
     chunk_content: String,
+    // SQLite path:   raw f32 LE bytes, cosine similarity computed in Rust.
+    // Postgres path: always empty (`''::bytea` placeholder). The field exists
+    // only because `sqlx::FromRow` requires every selected column to map to a
+    // struct field; the actual scoring on Postgres comes from `score` below.
     embedding: Vec<u8>,
+    // Postgres path: `1 - (embedding <=> $2::vector)` — real cosine similarity.
+    // SQLite path:   NULL, since we compute from `embedding` bytes in Rust.
+    score: Option<f64>,
 }
 
 async fn search_knowledge_chunks(
@@ -327,7 +334,9 @@ async fn search_knowledge_chunks(
             sqlx::query_as::<_, KnowledgeChunkRow>(
                 "SELECT kc.dashboard_id, d.title AS file_name, \
                         COALESCE(d.doc_type, 'dashboard') AS doc_type, \
-                        kc.content AS chunk_content, ''::bytea AS embedding \
+                        kc.content AS chunk_content, \
+                        ''::bytea AS embedding, \
+                        (1.0 - (kc.embedding <=> $2::vector))::float8 AS score \
                  FROM knowledge_chunks kc \
                  JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
                  WHERE kc.workspace_id = $1 \
@@ -345,7 +354,8 @@ async fn search_knowledge_chunks(
             sqlx::query_as::<_, KnowledgeChunkRow>(
                 "SELECT kc.dashboard_id, d.title AS file_name, \
                         COALESCE(d.doc_type, 'dashboard') AS doc_type, \
-                        kc.content AS chunk_content, kc.embedding \
+                        kc.content AS chunk_content, kc.embedding, \
+                        NULL AS score \
                  FROM knowledge_chunks kc \
                  JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
                  WHERE kc.workspace_id = $1",
@@ -362,8 +372,8 @@ async fn search_knowledge_chunks(
 
     let mut file_scores: HashMap<String, (f64, String, String, String)> = HashMap::new();
     for row in &rows {
-        let score = if row.embedding.is_empty() {
-            0.6 // Postgres path -- approximate score
+        let score = if let Some(s) = row.score {
+            s
         } else {
             let chunk_emb: Vec<f32> = row
                 .embedding
