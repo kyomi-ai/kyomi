@@ -58,5 +58,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build mcp-chart-app (required by kyomi-server include_str!)
+        working-directory: apps/mcp-chart-app
+        run: npm install && npm run build
+
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace -- -D warnings
