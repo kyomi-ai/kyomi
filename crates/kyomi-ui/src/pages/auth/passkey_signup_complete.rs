@@ -16,9 +16,10 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{
-    Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, Checkbox, Label, INPUT_CLASS,
+    Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Checkbox, Label,
+    INPUT_CLASS,
 };
+use crate::pages::auth::auth_layout::AuthLayout;
 use crate::server_fns::auth::{
     passkey_register_complete, passkey_signup_complete, LoginResult, PasskeyRegisterStartResult,
 };
@@ -201,30 +202,37 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
         });
     };
 
+    // ── Reactive title & subtitle ────────────────────────────────────────
+    let title = Signal::derive(move || match page_state.get() {
+        PageState::Form => "Email Verified".to_string(),
+        PageState::Creating { .. } => "Creating Account".to_string(),
+        PageState::Success => "Account Created".to_string(),
+        PageState::Error { .. } => "Signup Link Invalid".to_string(),
+    });
+    let subtitle = Signal::derive(move || match page_state.get() {
+        PageState::Form => "Complete your account setup below.".to_string(),
+        PageState::Creating { status_message } => status_message,
+        PageState::Success => "Welcome to Kyomi! Setting up your workspace...".to_string(),
+        PageState::Error { message } => message,
+    });
+
     // ── Render ────────────────────────────────────────────────────────────
     view! {
-        <div class="min-h-screen bg-background flex items-center justify-center p-4">
+        <AuthLayout title=title subtitle=subtitle>
             {move || {
                 let state = page_state.get();
                 match state {
-                    PageState::Error { message } => error_view(message).into_any(),
+                    PageState::Error { .. } => error_view().into_any(),
                     PageState::Success => success_view().into_any(),
-                    PageState::Creating { status_message } => creating_view(status_message).into_any(),
+                    PageState::Creating { .. } => creating_view().into_any(),
                     PageState::Form => view! {
-                        <Card class="w-full max-w-md">
-                            <CardHeader>
-                                <div class="text-center">
-                                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-4">
-                                        <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-primary"/>
-                                    </div>
-                                    <CardTitle class="text-xl">"Email Verified!"</CardTitle>
-                                    <CardDescription>
-                                        "Complete your account setup below."
-                                    </CardDescription>
+                        <div>
+                            <div class="text-center">
+                                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+                                    <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-primary"/>
                                 </div>
-                            </CardHeader>
-                            <CardContent>
-                                <form on:submit=on_submit class="space-y-6">
+                            </div>
+                            <form on:submit=on_submit class="space-y-6">
                                     // Name input
                                     <div class="space-y-2">
                                         <Label html_for="name">"Full Name"</Label>
@@ -302,16 +310,15 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
                                         "Create Account"
                                     </Button>
 
-                                    <p class="text-xs text-center text-muted-foreground">
-                                        "You will be prompted to create a passkey using your fingerprint, face, or security key."
-                                    </p>
-                                </form>
-                            </CardContent>
-                        </Card>
+                                <p class="text-xs text-center text-muted-foreground">
+                                    "You will be prompted to create a passkey using your fingerprint, face, or security key."
+                                </p>
+                            </form>
+                        </div>
                     }.into_any(),
                 }
             }}
-        </div>
+        </AuthLayout>
     }
 }
 
@@ -319,28 +326,20 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
 // Error view
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn error_view(message: String) -> impl IntoView {
+fn error_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-4">
-                        <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
-                    </div>
-                    <CardTitle class="text-xl">"Signup Link Invalid"</CardTitle>
-                    <CardDescription class="text-error-foreground">
-                        {message}
-                    </CardDescription>
+        <div class="space-y-4">
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-6">
+                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
                 </div>
-            </CardHeader>
-            <CardContent class="space-y-4">
-                <a href="/login">
-                    <Button variant=ButtonVariant::Outline class="w-full">
-                        "Back to Login"
-                    </Button>
-                </a>
-            </CardContent>
-        </Card>
+            </div>
+            <a href="/login">
+                <Button variant=ButtonVariant::Outline class="w-full">
+                    "Back to Login"
+                </Button>
+            </a>
+        </div>
     }
 }
 
@@ -350,23 +349,15 @@ fn error_view(message: String) -> impl IntoView {
 
 fn success_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-4">
-                        <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
-                    </div>
-                    <CardTitle class="text-xl">"Account Created!"</CardTitle>
-                    <CardDescription>
-                        "Welcome to Kyomi! Setting up your workspace..."
-                    </CardDescription>
+        <div class="space-y-4">
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-6">
+                    <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
                 </div>
-            </CardHeader>
-            <CardContent>
-                // Branded moment (auth page) — DESIGN.md Loading State Pattern
-                <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-8 h-8 mx-auto"/>
-            </CardContent>
-        </Card>
+            </div>
+            // Branded moment (auth page) — DESIGN.md Loading State Pattern
+            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-8 h-8 mx-auto"/>
+        </div>
     }
 }
 
@@ -374,17 +365,12 @@ fn success_view() -> impl IntoView {
 // Creating view
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn creating_view(status_message: String) -> impl IntoView {
+fn creating_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardContent class="pt-6">
-                <div class="text-center space-y-4">
-                    // Branded moment (auth page) — DESIGN.md Loading State Pattern
-                    <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
-                    <p class="text-muted-foreground">{status_message}</p>
-                </div>
-            </CardContent>
-        </Card>
+        <div class="text-center space-y-4">
+            // Branded moment (auth page) — DESIGN.md Loading State Pattern
+            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
+        </div>
     }
 }
 

@@ -17,9 +17,9 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{
-    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Card,
-    CardContent, CardDescription, CardHeader, CardTitle,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant,
 };
+use crate::pages::auth::auth_layout::AuthLayout;
 use crate::server_fns::auth::{
     passkey_recovery_verify, passkey_register_complete, LoginResult, PasskeyRecoveryVerifyResult,
 };
@@ -185,14 +185,32 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
         });
     };
 
+    // ── Reactive title & subtitle ────────────────────────────────────────
+    let title = Signal::derive(move || match page_state.get() {
+        PageState::Verifying => "Verifying Recovery Link".to_string(),
+        PageState::Ready { .. } => "Create New Passkey".to_string(),
+        PageState::Creating => "Creating Passkey".to_string(),
+        PageState::Success => "New Passkey Created".to_string(),
+        PageState::Error { .. } => "Recovery Failed".to_string(),
+    });
+    let subtitle = Signal::derive(move || match page_state.get() {
+        PageState::Verifying => "Checking that your link is still valid.".to_string(),
+        PageState::Ready { .. } => {
+            "Your identity is verified. Create a new passkey to regain access.".to_string()
+        }
+        PageState::Creating => "Setting things up — just a moment.".to_string(),
+        PageState::Success => "Your account is recovered. Redirecting to the app...".to_string(),
+        PageState::Error { message } => message,
+    });
+
     // ── Render ────────────────────────────────────────────────────────────
     view! {
-        <div class="min-h-screen bg-background flex items-center justify-center p-4">
+        <AuthLayout title=title subtitle=subtitle>
             {move || {
                 let state = page_state.get();
                 match state {
                     PageState::Verifying => verifying_view().into_any(),
-                    PageState::Error { message } => error_view(message).into_any(),
+                    PageState::Error { .. } => error_view().into_any(),
                     PageState::Success => success_view().into_any(),
                     PageState::Creating => creating_view().into_any(),
                     PageState::Ready { email, .. } => {
@@ -205,7 +223,7 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
                     }
                 }
             }}
-        </div>
+        </AuthLayout>
     }
 }
 
@@ -215,15 +233,10 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
 
 fn verifying_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardContent class="pt-6">
-                <div class="text-center space-y-4">
-                    // Branded moment (auth page) — DESIGN.md Loading State Pattern
-                    <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
-                    <p class="text-muted-foreground">"Verifying recovery link..."</p>
-                </div>
-            </CardContent>
-        </Card>
+        <div class="text-center space-y-4">
+            // Branded moment (auth page) — DESIGN.md Loading State Pattern
+            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
+        </div>
     }
 }
 
@@ -237,20 +250,13 @@ fn ready_view(
     on_create_passkey: impl Fn(leptos::ev::MouseEvent) + Send + 'static,
 ) -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-4">
-                        <Icon icon=icondata_lu::LuKeyRound attr:class="w-8 h-8 text-primary"/>
-                    </div>
-                    <CardTitle class="text-xl">"Create New Passkey"</CardTitle>
-                    <CardDescription>
-                        "Your identity is verified. Create a new passkey to regain access to your account."
-                    </CardDescription>
+        <div class="space-y-6">
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+                    <Icon icon=icondata_lu::LuKeyRound attr:class="w-8 h-8 text-primary"/>
                 </div>
-            </CardHeader>
-            <CardContent class="space-y-6">
-                // Show email if available
+            </div>
+            // Show email if available
                 {(!email.is_empty()).then(|| {
                     let email_clone = email.clone();
                     view! {
@@ -283,13 +289,12 @@ fn ready_view(
                     "You will be prompted to use your fingerprint, face, or security key."
                 </p>
 
-                <div class="text-center pt-2 border-t border-border">
-                    <p class="text-xs text-muted-foreground mt-4">
-                        "This recovery session is valid for 15 minutes. After creating your passkey, your old passkeys will remain active."
-                    </p>
-                </div>
-            </CardContent>
-        </Card>
+            <div class="text-center pt-2 border-t border-border">
+                <p class="text-xs text-muted-foreground mt-4">
+                    "This recovery session is valid for 15 minutes. After creating your passkey, your old passkeys will remain active."
+                </p>
+            </div>
+        </div>
     }
 }
 
@@ -299,15 +304,10 @@ fn ready_view(
 
 fn creating_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardContent class="pt-6">
-                <div class="text-center space-y-4">
-                    // Branded moment (auth page) — DESIGN.md Loading State Pattern
-                    <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
-                    <p class="text-muted-foreground">"Creating passkey..."</p>
-                </div>
-            </CardContent>
-        </Card>
+        <div class="text-center space-y-4">
+            // Branded moment (auth page) — DESIGN.md Loading State Pattern
+            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12 mx-auto"/>
+        </div>
     }
 }
 
@@ -317,23 +317,15 @@ fn creating_view() -> impl IntoView {
 
 fn success_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-4">
-                        <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
-                    </div>
-                    <CardTitle class="text-xl">"New Passkey Created!"</CardTitle>
-                    <CardDescription>
-                        "Your account is recovered. Redirecting you to the app..."
-                    </CardDescription>
+        <div class="space-y-4">
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-6">
+                    <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
                 </div>
-            </CardHeader>
-            <CardContent>
-                // Branded moment (auth page) — DESIGN.md Loading State Pattern
-                <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-8 h-8 mx-auto"/>
-            </CardContent>
-        </Card>
+            </div>
+            // Branded moment (auth page) — DESIGN.md Loading State Pattern
+            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-8 h-8 mx-auto"/>
+        </div>
     }
 }
 
@@ -341,33 +333,25 @@ fn success_view() -> impl IntoView {
 // Error view
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn error_view(message: String) -> impl IntoView {
+fn error_view() -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-4">
-                        <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
-                    </div>
-                    <CardTitle class="text-xl">"Recovery Link Invalid"</CardTitle>
-                    <CardDescription class="text-error-foreground">
-                        {message}
-                    </CardDescription>
+        <div class="space-y-4">
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-6">
+                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
                 </div>
-            </CardHeader>
-            <CardContent class="space-y-4">
-                <a href="/auth/recover-passkey">
-                    <Button variant=ButtonVariant::Default class="w-full">
-                        "Request New Recovery Link"
-                    </Button>
-                </a>
-                <a href="/login">
-                    <Button variant=ButtonVariant::Outline class="w-full">
-                        "Back to Login"
-                    </Button>
-                </a>
-            </CardContent>
-        </Card>
+            </div>
+            <a href="/auth/recover-passkey">
+                <Button variant=ButtonVariant::Default class="w-full">
+                    "Request New Recovery Link"
+                </Button>
+            </a>
+            <a href="/login">
+                <Button variant=ButtonVariant::Outline class="w-full">
+                    "Back to Login"
+                </Button>
+            </a>
+        </div>
     }
 }
 

@@ -11,6 +11,7 @@ use leptos::prelude::*;
 use leptos_icons::Icon;
 
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant};
+use crate::pages::auth::auth_layout::AuthLayout;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Page state
@@ -183,78 +184,82 @@ pub fn GoogleCallbackPage() -> impl IntoView {
     #[cfg(not(target_arch = "wasm32"))]
     let _ = &set_show_help_text;
 
-    view! {
-        <div class="min-h-screen bg-background flex items-center justify-center px-4">
-            <div class="max-w-md w-full">
-                <div class="bg-background p-8 text-center">
-                    // Status icon
-                    <div class="flex justify-center">
-                        {move || {
-                            if status.get() == CallbackStatus::Error {
-                                view! {
-                                    <Icon
-                                        icon=icondata_lu::LuCircleX
-                                        width="48"
-                                        height="48"
-                                        attr:class="text-error-foreground"
-                                    />
-                                }
-                                    .into_any()
-                            } else {
-                                // Animated Kyomi logo during processing/success
-                                view! {
-                                    <img
-                                        src="/kyomi_animated_logo.svg"
-                                        alt="Processing"
-                                        class="w-12 h-12"
-                                    />
-                                }
-                                    .into_any()
-                            }
-                        }}
-                    </div>
+    // ── Reactive title & subtitle ────────────────────────────────────────
+    let title = Signal::derive(move || match status.get() {
+        CallbackStatus::Error => "Google Sign-In".to_string(),
+        _ => "Signing in with Google".to_string(),
+    });
+    let subtitle = Signal::derive(move || match status.get() {
+        CallbackStatus::Error => message.get(),
+        _ => "Completing your Google sign-in...".to_string(),
+    });
 
-                    // Error state content
+    view! {
+        <AuthLayout title=title subtitle=subtitle>
+            <div class="text-center space-y-4">
+                // Status icon
+                <div class="flex justify-center">
                     {move || {
                         if status.get() == CallbackStatus::Error {
-                            Some(
-                                view! {
-                                    <h2 class="text-3xl font-display text-foreground mb-2 mt-4">
-                                        "Google Sign-In"
-                                    </h2>
-                                    <p class="text-sm text-error-foreground mb-4">{move || message.get()}</p>
-                                    <div class="space-y-3">
-                                        <ButtonLink
-                                            href="/login"
-                                            variant=ButtonVariant::Outline
-                                            size=ButtonSize::Lg
-                                            class="w-full"
-                                        >
-                                            "Return to Login"
-                                        </ButtonLink>
-                                        <Button
-                                            variant=ButtonVariant::Default
-                                            size=ButtonSize::Lg
-                                            class="w-full"
-                                            on:click=move |_| {
-                                                #[cfg(target_arch = "wasm32")]
-                                                {
-                                                    if let Some(window) = web_sys::window() {
-                                                        let _ = window.location().reload();
-                                                    }
-                                                }
-                                            }
-                                        >
-                                            "Try Again"
-                                        </Button>
-                                    </div>
-                                },
-                            )
+                            view! {
+                                <Icon
+                                    icon=icondata_lu::LuCircleX
+                                    width="48"
+                                    height="48"
+                                    attr:class="text-error-foreground"
+                                />
+                            }
+                                .into_any()
                         } else {
-                            None
+                            // Branded moment (auth page) — DESIGN.md Loading State Pattern
+                            view! {
+                                <img
+                                    src="/kyomi_animated_logo.svg"
+                                    alt="Processing"
+                                    class="w-12 h-12"
+                                />
+                            }
+                                .into_any()
                         }
                     }}
                 </div>
+
+                // Error state content
+                {move || {
+                    if status.get() == CallbackStatus::Error {
+                        Some(
+                            view! {
+                                <div class="space-y-3">
+                                    <ButtonLink
+                                        href="/login"
+                                        variant=ButtonVariant::Outline
+                                        size=ButtonSize::Lg
+                                        class="w-full"
+                                    >
+                                        "Return to Login"
+                                    </ButtonLink>
+                                    <Button
+                                        variant=ButtonVariant::Default
+                                        size=ButtonSize::Lg
+                                        class="w-full"
+                                        on:click=move |_| {
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                if let Some(window) = web_sys::window() {
+                                                    let _ = window.location().reload();
+                                                }
+                                            }
+                                        }
+                                    >
+                                        "Try Again"
+                                    </Button>
+                                </div>
+                            },
+                        )
+                    } else {
+                        None
+                    }
+                }}
 
                 // Help text — shown after 10 seconds if not redirected
                 {move || {
@@ -273,6 +278,6 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                     }
                 }}
             </div>
-        </div>
+        </AuthLayout>
     }
 }

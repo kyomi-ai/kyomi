@@ -11,9 +11,9 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
-    ButtonVariant, Card, CardContent, CardDescription, CardHeader, CardTitle, Label, Spinner,
-    INPUT_CLASS,
+    ButtonVariant, Label, Spinner, INPUT_CLASS,
 };
+use crate::pages::auth::auth_layout::AuthLayout;
 use crate::server_fns::auth::recovery_start;
 
 /// Which recovery flow this card represents. Controls the icon and title.
@@ -60,8 +60,24 @@ pub fn RecoveryRequestCard(kind: RecoveryKind) -> impl IntoView {
 
     let submit_disabled = move || loading.get() || email.get().trim().is_empty();
 
+    let title = Signal::derive(move || {
+        if submitted.get() {
+            "Check Your Email".to_string()
+        } else {
+            kind.title().to_string()
+        }
+    });
+    let subtitle = Signal::derive(move || {
+        if submitted.get() {
+            "If a verified account exists with this email, we have sent a recovery link."
+                .to_string()
+        } else {
+            "Enter your email address to receive a recovery link.".to_string()
+        }
+    });
+
     view! {
-        <div class="min-h-screen bg-background flex items-center justify-center p-4">
+        <AuthLayout title=title subtitle=subtitle>
             {move || {
                 if submitted.get() {
                     view! { <SubmittedView set_submitted=set_submitted set_email=set_email/> }
@@ -81,7 +97,7 @@ pub fn RecoveryRequestCard(kind: RecoveryKind) -> impl IntoView {
                         .into_any()
                 }
             }}
-        </div>
+        </AuthLayout>
     }
 }
 
@@ -95,29 +111,21 @@ fn FormView(
     submit_disabled: impl Fn() -> bool + Copy + Send + Sync + 'static,
     on_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
-    let title = kind.title();
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-4">
-                        {match kind {
-                            RecoveryKind::Account => view! {
-                                <Icon icon=icondata_lu::LuLockKeyhole attr:class="w-8 h-8 text-primary"/>
-                            }.into_any(),
-                            RecoveryKind::Passkey => view! {
-                                <Icon icon=icondata_lu::LuKeyRound attr:class="w-8 h-8 text-primary"/>
-                            }.into_any(),
-                        }}
-                    </div>
-                    <CardTitle class="text-xl">{title}</CardTitle>
-                    <CardDescription>
-                        "Enter your email address to receive a recovery link."
-                    </CardDescription>
+        <div>
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+                    {match kind {
+                        RecoveryKind::Account => view! {
+                            <Icon icon=icondata_lu::LuLockKeyhole attr:class="w-8 h-8 text-primary"/>
+                        }.into_any(),
+                        RecoveryKind::Passkey => view! {
+                            <Icon icon=icondata_lu::LuKeyRound attr:class="w-8 h-8 text-primary"/>
+                        }.into_any(),
+                    }}
                 </div>
-            </CardHeader>
-            <CardContent>
-                <form on:submit=on_submit class="space-y-4">
+            </div>
+            <form on:submit=on_submit class="space-y-4">
                     <Show when=move || error.get().is_some()>
                         <Alert variant=AlertVariant::Error>
                             <AlertTitle>"Error"</AlertTitle>
@@ -163,17 +171,16 @@ fn FormView(
                         }}
                     </Button>
 
-                    <div class="text-center pt-2">
-                        <a
-                            href="/login"
-                            class="text-sm text-muted-foreground hover:text-foreground transition-colors"
-                        >
-                            "Back to login"
-                        </a>
-                    </div>
-                </form>
-            </CardContent>
-        </Card>
+                <div class="text-center pt-2">
+                    <a
+                        href="/login"
+                        class="text-sm text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                        "Back to login"
+                    </a>
+                </div>
+            </form>
+        </div>
     }
 }
 
@@ -183,45 +190,37 @@ fn SubmittedView(
     set_email: WriteSignal<String>,
 ) -> impl IntoView {
     view! {
-        <Card class="w-full max-w-md">
-            <CardHeader>
-                <div class="text-center">
-                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-4">
-                        <Icon icon=icondata_lu::LuMail attr:class="w-8 h-8 text-primary"/>
-                    </div>
-                    <CardTitle class="text-xl">"Check Your Email"</CardTitle>
-                    <CardDescription>
-                        "If a verified account exists with this email, we have sent a recovery link."
-                    </CardDescription>
+        <div class="space-y-4">
+            <div class="text-center">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
+                    <Icon icon=icondata_lu::LuMail attr:class="w-8 h-8 text-primary"/>
                 </div>
-            </CardHeader>
-            <CardContent class="space-y-4">
-                <p class="text-sm text-center text-muted-foreground">
-                    "The recovery link expires in 15 minutes and can only be used once."
-                </p>
+            </div>
+            <p class="text-sm text-center text-muted-foreground">
+                "The recovery link expires in 15 minutes and can only be used once."
+            </p>
 
-                <div class="pt-4">
-                    <ButtonLink
-                        href="/login"
-                        variant=ButtonVariant::Outline
-                        size=ButtonSize::Lg
-                        class="w-full mb-4"
-                    >
-                        "Back to Login"
-                    </ButtonLink>
+            <div class="pt-4">
+                <ButtonLink
+                    href="/login"
+                    variant=ButtonVariant::Outline
+                    size=ButtonSize::Lg
+                    class="w-full mb-4"
+                >
+                    "Back to Login"
+                </ButtonLink>
 
-                    <Button
-                        variant=ButtonVariant::Link
-                        class="w-full"
-                        on:click=move |_| {
-                            set_submitted.set(false);
-                            set_email.set(String::new());
-                        }
-                    >
-                        "Try a different email"
-                    </Button>
-                </div>
-            </CardContent>
-        </Card>
+                <Button
+                    variant=ButtonVariant::Link
+                    class="w-full"
+                    on:click=move |_| {
+                        set_submitted.set(false);
+                        set_email.set(String::new());
+                    }
+                >
+                    "Try a different email"
+                </Button>
+            </div>
+        </div>
     }
 }
