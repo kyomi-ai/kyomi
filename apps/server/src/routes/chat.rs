@@ -809,19 +809,21 @@ async fn send_message(
         cancel_registry.remove(&spawn_user_id, &spawn_session_id);
     });
 
-    // Fire-and-forget title generation for new sessions.
+    // Fire-and-forget title generation for new sessions. The spawned task
+    // loads WorkspaceAiConfig (Kyomi or BYOK) and logs a warning on failure,
+    // so no server-side config guard is needed here — gating on
+    // `resolve_provider_config` would silently skip titles for BYOK-only
+    // deployments that never set server Kyomi keys.
     if is_new_session {
-        // Only attempt title generation if an LLM provider is configured.
-        if kyomi_agent::resolve_provider_config(&state.config).is_ok() {
-            kyomi_agent::generate_session_title(
-                state.db.clone(),
-                state.ws_manager.clone(),
-                session_id.clone(),
-                user.user_id.clone(),
-                first_message,
-                state.config.clone(),
-            );
-        }
+        kyomi_agent::generate_session_title(
+            state.db.clone(),
+            state.ws_manager.clone(),
+            session_id.clone(),
+            user.user_id.clone(),
+            workspace_id.to_string(),
+            first_message,
+            state.config.clone(),
+        );
     }
 
     tracing::info!(

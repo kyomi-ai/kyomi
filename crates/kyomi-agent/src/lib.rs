@@ -64,7 +64,8 @@ pub use tools::{
     WATCH_TOOLS,
 };
 pub use provider::{
-    create_provider, resolve_provider_config, LLMProvider, LLMProviderConfig, ProviderKind,
+    create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider,
+    LLMProviderConfig, ProviderKind,
 };
 pub use types::*;
 pub use catalog_scheduler::CatalogRefreshScheduler;

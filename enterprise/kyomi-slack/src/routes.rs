@@ -1516,6 +1516,7 @@ async fn handle_app_mention(
                 state.ws_manager.clone(),
                 session_id.clone(),
                 ctx.user_id.clone(),
+                ctx.workspace_id.clone(),
                 text.clone(),
                 state.config.clone(),
             );
@@ -1705,6 +1706,7 @@ async fn handle_direct_message(
                 state.ws_manager.clone(),
                 session_id.clone(),
                 ctx.user_id.clone(),
+                ctx.workspace_id.clone(),
                 text.clone(),
                 state.config.clone(),
             );

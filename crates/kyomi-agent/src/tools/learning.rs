@@ -472,13 +472,34 @@ impl AgentTool for SaveLearningTool {
              Respond with EXACTLY one line:\nAPPROVED\nor\nREJECTED: <reason>"
         );
 
-        // Call a cheap/fast model for audit
-        let mut audit_config = crate::resolve_provider_config(&ctx.config)?;
-        // For Anthropic, override to the cheap audit model; for others, use default.
-        if audit_config.provider == crate::ProviderKind::Anthropic {
-            audit_config.model = Some(crate::AUDIT_MODEL.to_string());
+        // Call a cheap/fast model for audit, routed through the workspace's
+        // configured AI provider (Kyomi-managed or BYOK).
+        let mut ws_config =
+            kyomi_auth::workspace_ai_config::load(&ctx.db, &ctx.workspace_id)
+                .await
+                .map_err(|e| kyomi_core::Error::Internal(format!(
+                    "failed to load workspace AI config for learning audit ({}): {e}",
+                    ctx.workspace_id
+                )))?;
+        // For Kyomi-mode Anthropic always force the cheap audit model.
+        // For BYOK Anthropic with no explicit model, fall through to the
+        // audit model too. For other BYOK providers we honour the workspace
+        // default (same rationale as title generation).
+        let is_anthropic_route = matches!(
+            ws_config.provider,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+                | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic
+        );
+        if is_anthropic_route
+            && (matches!(
+                ws_config.provider,
+                kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            ) || ws_config.model.is_none())
+        {
+            ws_config.model = Some(crate::AUDIT_MODEL.to_string());
         }
-        let audit_client = crate::create_provider(audit_config)?;
+        let audit_client =
+            crate::create_provider_from_workspace(&ws_config, &ctx.config)?;
 
         let audit_messages = vec![crate::types::Message::user(&audit_prompt)];
         let audit_response = audit_client

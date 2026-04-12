@@ -31,7 +31,9 @@ use crate::adapter::ChatAgentAdapter;
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::anthropic::{AUDIT_MODEL, DEFAULT_MODEL};
 use crate::prompt;
-use crate::provider::{create_provider, resolve_provider_config, ProviderKind};
+use crate::provider::{
+    create_provider, create_provider_from_workspace, resolve_provider_config, ProviderKind,
+};
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::{create_default_registry, ToolContext, ToolFilter, TRIAL_CHAT_TOOLS};
 
@@ -156,18 +158,71 @@ pub async fn execute_agent_chat(
     }
 
     // 3. Create LLM provider via factory.
-    let mut provider_config = resolve_provider_config(app_config)?;
-    // Apply model override from AgentExecutionConfig if specified.
-    if let Some(ref model) = config.model_name {
-        provider_config.model = Some(model.clone());
-    } else if provider_config.model.is_none() && provider_config.provider == ProviderKind::Anthropic
-    {
-        // For Anthropic without an explicit model, default to DEFAULT_MODEL.
-        provider_config.model = Some(DEFAULT_MODEL.to_string());
-    }
-    // Other providers use their own built-in default when model is None.
-    let provider_kind = provider_config.provider;
-    let client = create_provider(provider_config)?;
+    //
+    // Trial chat is unauthenticated and uses a synthetic `"trial-workspace"`
+    // ID that does not exist in the DB — it must stay on the legacy global
+    // path that reads server-side Kyomi keys from env vars. Every real
+    // workspace goes through the BYOK-aware factory.
+    let is_trial_context = config.context_type == "trial_chat";
+    let (client, provider_kind, is_byok) = if is_trial_context {
+        let mut provider_config = resolve_provider_config(app_config)?;
+        if let Some(ref model) = config.model_name {
+            provider_config.model = Some(model.clone());
+        } else if provider_config.model.is_none()
+            && provider_config.provider == ProviderKind::Anthropic
+        {
+            provider_config.model = Some(DEFAULT_MODEL.to_string());
+        }
+        let provider_kind = provider_config.provider;
+        let client = create_provider(provider_config)?;
+        (client, provider_kind, false)
+    } else {
+        let mut ws_config =
+            kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
+                .await
+                .map_err(|e| {
+                    kyomi_core::Error::Internal(format!(
+                        "failed to load workspace AI config for {}: {e}",
+                        config.workspace_id
+                    ))
+                })?;
+            // Per-request model override (from AgentExecutionConfig) always
+            // wins over the workspace default.
+        if let Some(ref model) = config.model_name {
+            ws_config.model = Some(model.clone());
+        } else if ws_config.model.is_none()
+            && ws_config.provider == kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+        {
+            // Preserve legacy behaviour for Anthropic Kyomi workspaces that
+            // had no explicit default model configured.
+            ws_config.model = Some(DEFAULT_MODEL.to_string());
+        }
+        let is_byok = ws_config.is_byok();
+        let client = create_provider_from_workspace(&ws_config, app_config)?;
+        let provider_kind = match ws_config.provider {
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
+                ProviderKind::Anthropic
+            }
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
+        };
+        // For Kyomi-mode workspaces, the effective provider kind reflects
+        // whatever the server env keys resolve to (which may be OpenAI or
+        // Gemini for self-hosted tenants). Re-read it from the resolved
+        // fallback in that case so usage logs attribute to the right vendor.
+        let provider_kind = if matches!(
+            ws_config.provider,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+        ) {
+            resolve_provider_config(app_config)
+                .map(|c| c.provider)
+                .unwrap_or(provider_kind)
+        } else {
+            provider_kind
+        };
+        (client, provider_kind, is_byok)
+    };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
 
@@ -376,10 +431,21 @@ pub async fn execute_agent_chat(
 
     // 14b. Log usage to api_usage_log for billing (skip trial users).
     // Apply 10% markup to cover payment processing fees.
+    //
+    // BYOK (workspace-owned keys): the workspace pays the provider directly,
+    // so we record the row with `cost_estimate = 0.0` — token counts and
+    // model names are preserved for diagnostics, but `check_ai_usage_allowed`
+    // sums `cost_estimate` from this table and must not charge BYOK usage
+    // against `ai_credits_used_usd`. Writing 0 keeps the single source of
+    // truth for billing consistent without a parallel BYOK-only code path.
     const AI_COST_MULTIPLIER: f64 = 1.1;
     if !config.user_id.starts_with("trial_") && (input_tokens > 0 || output_tokens > 0) {
         let total_tokens = (input_tokens + output_tokens) as i32;
-        let billed_cost = total_cost * AI_COST_MULTIPLIER;
+        let billed_cost = if is_byok {
+            0.0
+        } else {
+            total_cost * AI_COST_MULTIPLIER
+        };
         let now = chrono::Utc::now();
         let provider_str = provider_kind.to_string();
         if let Err(e) = kyomi_core::db_execute!(
@@ -623,6 +689,7 @@ pub fn generate_session_title(
     ws_manager: WebSocketManager,
     session_id: String,
     user_id: String,
+    workspace_id: String,
     first_message: String,
     app_config: Arc<kyomi_core::Config>,
 ) {
@@ -632,6 +699,7 @@ pub fn generate_session_title(
             &ws_manager,
             &session_id,
             &user_id,
+            &workspace_id,
             &first_message,
             &app_config,
         )
@@ -653,6 +721,7 @@ async fn generate_title_inner(
     ws_manager: &WebSocketManager,
     session_id: &str,
     user_id: &str,
+    workspace_id: &str,
     first_message: &str,
     app_config: &kyomi_core::Config,
 ) -> kyomi_core::Result<()> {
@@ -667,15 +736,44 @@ async fn generate_title_inner(
                          user's first message. Return ONLY the title text, nothing else. \
                          No quotes, no hashes, no prefixes.";
 
-    // Use a cheap/fast model for title generation.
-    // For Anthropic, override to AUDIT_MODEL (Haiku — cheapest).
+    // Use a cheap/fast model for title generation, routed through the
+    // workspace's configured provider (Kyomi-managed or BYOK).
+    //
+    // Design decision: in Kyomi mode we override Anthropic to AUDIT_MODEL
+    // (Haiku) to minimise server-side cost. In BYOK mode we honour whatever
+    // model the workspace configured — overriding a BYOK customer's chosen
+    // model (which might be a specific GPT variant, a Gemini tier, or an
+    // Anthropic tier they explicitly chose) would be a surprising silent
+    // downgrade. If the workspace has no model set, `create_provider_from_workspace`
+    // falls back to the provider's built-in default, and for Anthropic BYOK
+    // with no model we still prefer AUDIT_MODEL to keep title-gen cheap.
     // TODO: Add per-provider cheapest-model selection for OpenAI/Gemini
     // (currently uses their default model, which may be more expensive than needed).
-    let mut provider_config = resolve_provider_config(app_config)?;
-    if provider_config.provider == ProviderKind::Anthropic {
-        provider_config.model = Some(AUDIT_MODEL.to_string());
+    let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to load workspace AI config for title generation ({workspace_id}): {e}"
+            ))
+        })?;
+    let provider_is_anthropic = matches!(
+        ws_config.provider,
+        kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic
+    );
+    if provider_is_anthropic
+        && matches!(
+            ws_config.provider,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+        )
+    {
+        // Kyomi-managed: always force Haiku for title generation.
+        ws_config.model = Some(AUDIT_MODEL.to_string());
+    } else if provider_is_anthropic && ws_config.model.is_none() {
+        // BYOK Anthropic with no explicit model: use Haiku to keep cost low.
+        ws_config.model = Some(AUDIT_MODEL.to_string());
     }
-    let client = create_provider(provider_config)?;
+    let client = create_provider_from_workspace(&ws_config, app_config)?;
 
     let messages = vec![
         crate::types::Message::system(system_prompt),

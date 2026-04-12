@@ -643,6 +643,10 @@ pub async fn send_trial_message(
 
     // Execute the agent synchronously — the frontend expects the full response
     // in the HTTP body (matching the server route's synchronous pattern).
+    //
+    // Trial chat is anonymous — no workspace. `execute_agent_chat` detects
+    // `context_type == "trial_chat"` and routes through the legacy global
+    // provider config (server-side Kyomi keys), bypassing WorkspaceAiConfig.
     let exec_result = kyomi_agent::execute_agent_chat(
         exec_config,
         &ctx.db,
