@@ -28,6 +28,24 @@ use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
 use crate::adapter::ChatAgentAdapter;
+
+/// SQL used to persist a row to `api_usage_log` after an agent turn.
+///
+/// Semantics of the two cost columns (see [`kyomi_core::models::ApiUsageLog`]):
+/// * `cost_estimate` is what `BillingService::calculate_credits_info` sums —
+///   it is the amount debited from Kyomi bundle credits. For BYOK rows it is
+///   always `0.0` so BYOK traffic does not touch Kyomi billing.
+/// * `provider_cost_usd` is BYOK-only observability — the real upstream
+///   provider cost in USD. `NULL` for Kyomi rows where `cost_estimate` is
+///   already the real cost.
+///
+/// Extracted as a const so it can be unit-tested without a database.
+pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
+     (user_id, workspace_id, session_id, timestamp, provider, model, \
+      input_tokens, output_tokens, total_tokens, \
+      cache_creation_input_tokens, cache_read_input_tokens, \
+      cost_estimate, component, provider_cost_usd) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::anthropic::{AUDIT_MODEL, DEFAULT_MODEL};
 use crate::prompt;
@@ -441,21 +459,24 @@ pub async fn execute_agent_chat(
     const AI_COST_MULTIPLIER: f64 = 1.1;
     if !config.user_id.starts_with("trial_") && (input_tokens > 0 || output_tokens > 0) {
         let total_tokens = (input_tokens + output_tokens) as i32;
-        let billed_cost = if is_byok {
-            0.0
+        // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
+        //       `provider_cost_usd = total_cost` so we keep observability into
+        //       the real upstream provider spend. `total_cost` already comes
+        //       from the tracker, which aggregates per-call costs computed
+        //       from token counts × the provider's pricing table.
+        // Kyomi: `cost_estimate = total_cost * markup` (billed) and
+        //       `provider_cost_usd = NULL` — `cost_estimate` already reflects
+        //       the real cost, so the extra column would be redundant.
+        let (billed_cost, provider_cost_usd): (f64, Option<f64>) = if is_byok {
+            (0.0, Some(total_cost))
         } else {
-            total_cost * AI_COST_MULTIPLIER
+            (total_cost * AI_COST_MULTIPLIER, None)
         };
         let now = chrono::Utc::now();
         let provider_str = provider_kind.to_string();
         if let Err(e) = kyomi_core::db_execute!(
             db,
-            "INSERT INTO api_usage_log \
-             (user_id, workspace_id, session_id, timestamp, provider, model, \
-              input_tokens, output_tokens, total_tokens, \
-              cache_creation_input_tokens, cache_read_input_tokens, \
-              cost_estimate, component) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11)",
+            API_USAGE_LOG_INSERT_SQL,
             &config.user_id,
             &config.workspace_id,
             &config.session_id as &str,
@@ -466,7 +487,8 @@ pub async fn execute_agent_chat(
             output_tokens as i32,
             total_tokens,
             billed_cost,
-            &config.component
+            &config.component,
+            provider_cost_usd
         ) {
             warn!(error = %e, "Failed to log API usage to database");
         }
@@ -849,6 +871,40 @@ async fn record_conversation_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Contract: api_usage_log INSERT includes provider_cost_usd -----------
+    //
+    // Guards the BYOK observability column: `provider_cost_usd` must appear
+    // in both the column list and the VALUES clause, and the parameter count
+    // must match. If someone accidentally drops the column or reorders the
+    // INSERT, this test catches it at `cargo test` time rather than in prod.
+
+    #[test]
+    fn api_usage_log_insert_has_provider_cost_usd_column() {
+        let sql = API_USAGE_LOG_INSERT_SQL;
+        assert!(
+            sql.contains("provider_cost_usd"),
+            "INSERT must reference provider_cost_usd: {sql}"
+        );
+        // Must be the 12th bind parameter (after the 11 existing ones).
+        assert!(
+            sql.contains("$12"),
+            "INSERT must bind $12 for provider_cost_usd: {sql}"
+        );
+        // Sanity: the 12 placeholders line up with 12 named columns (two of
+        // the columns — cache_creation_input_tokens / cache_read_input_tokens
+        // — are hard-coded to 0 in VALUES, so 14 columns total, 12 binds).
+        let placeholder_count = (1..=12).filter(|n| sql.contains(&format!("${n}"))).count();
+        assert_eq!(
+            placeholder_count, 12,
+            "INSERT should have exactly 12 bind placeholders: {sql}"
+        );
+    }
+
+    #[test]
+    fn api_usage_log_insert_targets_correct_table() {
+        assert!(API_USAGE_LOG_INSERT_SQL.contains("INSERT INTO api_usage_log"));
+    }
 
     #[test]
     fn agent_execution_config_defaults() {

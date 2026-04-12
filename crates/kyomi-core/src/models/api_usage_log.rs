@@ -53,7 +53,22 @@ pub struct ApiUsageLog {
     pub cache_read_input_tokens: i32,
 
     /// Estimated cost in USD for this call.
+    ///
+    /// This is the amount billed against Kyomi bundle credits. For BYOK rows
+    /// (where the workspace pays the provider directly) this is always `0.0`
+    /// so `BillingService::calculate_credits_info`'s `SUM(cost_estimate)` does
+    /// not debit Kyomi credits for BYOK traffic.
     pub cost_estimate: Option<f64>,
+
+    /// Real upstream provider cost in USD (observability only).
+    ///
+    /// * `NULL` for Kyomi-mode rows — `cost_estimate` already reflects the
+    ///   real cost (plus markup), so this column would be redundant.
+    /// * Populated for BYOK rows with the raw provider cost computed from
+    ///   token counts × provider pricing. Not used for billing; retained so
+    ///   we can surface upstream provider spend in diagnostics.
+    #[sqlx(default)]
+    pub provider_cost_usd: Option<f64>,
 
     /// Component that made the call (e.g. "chat_agent", "sql_copilot", "kyomi_watch").
     pub component: Option<String>,
