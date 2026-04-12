@@ -45,8 +45,8 @@ pub fn KnowledgePage() -> impl IntoView {
         move |(query, sort)| list_knowledge_docs(query, Some(sort), None),
     );
 
-    // Fetch collections for badge display and filtering
-    let collections_resource = Resource::new(|| (), |_| list_collections(None));
+    // Fetch collections for badge display and filtering (scoped to knowledge)
+    let collections_resource = Resource::new(|| (), |_| list_collections(Some("knowledge".to_string())));
 
     // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
@@ -80,7 +80,7 @@ pub fn KnowledgePage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match create_knowledge_doc("Untitled Document".to_string(), None).await {
                 Ok(doc_id) => {
-                    let url = format!("/dashboard/{doc_id}/edit");
+                    let url = format!("/knowledge/{doc_id}/edit");
                     nav(&url, leptos_router::NavigateOptions::default());
                 }
                 Err(e) => {

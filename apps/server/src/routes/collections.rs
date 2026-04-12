@@ -115,6 +115,12 @@ struct CreateCollectionRequest {
     color: Option<String>,
     #[serde(default)]
     is_public: bool,
+    #[serde(default = "default_doc_type")]
+    doc_type: String,
+}
+
+fn default_doc_type() -> String {
+    "dashboard".to_string()
 }
 
 #[derive(Deserialize)]
@@ -183,6 +189,7 @@ async fn create_collection(
         request.description.as_deref(),
         request.color.as_deref(),
         request.is_public,
+        &request.doc_type,
     )
     .await?;
 

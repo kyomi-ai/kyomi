@@ -126,6 +126,7 @@ pub async fn create_collection(
     description: Option<&str>,
     color: Option<&str>,
     is_public: bool,
+    doc_type: &str,
 ) -> Result<kyomi_core::models::Collection> {
     validate_name(name)?;
     if let Some(c) = color {
@@ -143,12 +144,12 @@ pub async fn create_collection(
 
     let insert_sql = format!(
         r#"
-        INSERT INTO collections (id, workspace_id, name, description, color, is_public, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, {bool_val}, {now_expr}, {now_expr})
+        INSERT INTO collections (id, workspace_id, name, description, color, is_public, doc_type, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, {bool_val}, $6, {now_expr}, {now_expr})
         "#
     );
 
-    db_execute!(db, &insert_sql, &id, workspace_id, name.trim(), &description, &color)
+    db_execute!(db, &insert_sql, &id, workspace_id, name.trim(), &description, &color, doc_type)
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to create collection: {e}")))?;
 
     // Fetch the created row
@@ -168,27 +169,23 @@ pub async fn create_collection(
 
 /// List all collections in a workspace with their dashboards.
 ///
-/// When `doc_type` is `Some`, only collections containing at least one
-/// document of the given type are returned. When `None`, all collections
-/// are returned (backward compatible).
+/// When `doc_type` is `Some`, only collections whose own `doc_type` column
+/// matches are returned. When `None`, all collections are returned.
 pub async fn list_collections(
     db: &DbPool,
     workspace_id: &str,
     doc_type: Option<&str>,
 ) -> Result<Vec<CollectionWithDashboards>> {
-    // Fetch collections — optionally filtered to those containing docs of the given type
+    // Fetch collections — optionally filtered by their own doc_type column
     let collections = if let Some(dt) = doc_type {
         db_fetch_all!(
             db,
             kyomi_core::models::Collection,
             r#"
-            SELECT DISTINCT c.id, c.workspace_id, c.name, c.description, c.color,
-                   c.is_public, c.created_at, c.updated_at
-            FROM collections c
-            JOIN collection_dashboards cd ON cd.collection_id = c.id
-            JOIN dashboards d ON d.dashboard_id = cd.dashboard_id
-            WHERE c.workspace_id = $1 AND d.doc_type = $2
-            ORDER BY c.created_at DESC
+            SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+            FROM collections
+            WHERE workspace_id = $1 AND doc_type = $2
+            ORDER BY created_at DESC
             "#,
             workspace_id,
             dt

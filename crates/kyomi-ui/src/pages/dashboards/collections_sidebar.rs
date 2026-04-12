@@ -230,6 +230,8 @@ fn CollectionList(
     on_all_click: Callback<()>,
     on_edit: Callback<CollectionItem>,
     on_delete: Callback<CollectionItem>,
+    #[prop(default = "Dashboards".to_string())]
+    type_name_plural: String,
 ) -> impl IntoView {
     let public_collections: Vec<_> = collections.iter().filter(|c| c.is_public).cloned().collect();
     let private_collections: Vec<_> = collections.iter().filter(|c| !c.is_public).cloned().collect();
@@ -253,7 +255,7 @@ fn CollectionList(
                 on:click=move |_| on_all_click.run(())
             >
                 <Icon icon=icondata_lu::LuLayoutDashboard width="18" height="18" />
-                <span class="flex-1">"All Dashboards"</span>
+                <span class="flex-1">{format!("All {type_name_plural}")}</span>
                 <span class="text-sm text-muted-foreground">{move || dashboard_count.get()}</span>
             </button>
 
@@ -422,9 +424,16 @@ fn CollectionModal(
     /// None for create, Some for edit.
     editing: Option<CollectionItem>,
     on_saved: Callback<()>,
+    /// doc_type for new collections ("dashboard" or "knowledge").
+    #[prop(default = "dashboard".to_string())]
+    doc_type: String,
+    /// Lowercase plural ("dashboards" or "documents") for placeholder text.
+    #[prop(default = "dashboards".to_string())]
+    type_name_lower: String,
 ) -> impl IntoView {
     let is_edit = editing.is_some();
     let editing_id = StoredValue::new(editing.as_ref().map(|c| c.collection_id.clone()));
+    let doc_type_stored = StoredValue::new(Some(doc_type));
     let title = if is_edit { "Edit Collection" } else { "Create Collection" };
 
     let initial = editing.as_ref().map_or_else(CollectionFormData::default, |c| {
@@ -454,6 +463,7 @@ fn CollectionModal(
         let color_val = color.get_untracked();
         let is_pub_val = is_public.get_untracked();
         let editing_id = editing_id.get_value();
+        let dt = doc_type_stored.get_value();
 
         leptos::task::spawn_local(async move {
             let desc = if desc_val.is_empty() { None } else { Some(desc_val) };
@@ -474,6 +484,7 @@ fn CollectionModal(
                     desc,
                     Some(color_val),
                     Some(is_pub_val),
+                    dt,
                 )
                 .await
                 .map(|_| ())
@@ -552,7 +563,7 @@ fn CollectionModal(
                         id="coll-name"
                         type="text"
                         class=INPUT_CLASS
-                        placeholder="Marketing Dashboards"
+                        placeholder=format!("Marketing {type_name_lower}")
                         required=true
                         prop:value=move || name.get()
                         on:input=move |ev| set_name.set(event_target_value(&ev))
@@ -565,7 +576,7 @@ fn CollectionModal(
                     <textarea
                         id="coll-desc"
                         class="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring resize-none"
-                        placeholder="Dashboards for marketing team analytics"
+                        placeholder=format!("{type_name_lower} for marketing team analytics")
                         rows="3"
                         prop:value=move || description.get()
                         on:input=move |ev| set_description.set(event_target_value(&ev))
@@ -629,6 +640,13 @@ pub fn CollectionsSidebar(
     doc_type: Option<String>,
 ) -> impl IntoView {
     let is_mobile = use_is_mobile();
+
+    // Type-aware labels — one place to change if renaming
+    let (type_name_plural, type_name_lower) = match doc_type.as_deref() {
+        Some("knowledge") => ("Documents", "documents"),
+        _ => ("Dashboards", "dashboards"),
+    };
+    let doc_type_for_modal = StoredValue::new(doc_type.clone());
 
     // Sidebar width for desktop resize — set_sidebar_width used in hydrate feature only
     let (sidebar_width, set_sidebar_width) = signal(DEFAULT_WIDTH);
@@ -703,7 +721,7 @@ pub fn CollectionsSidebar(
     let handle_delete = Callback::new(move |coll: CollectionItem| {
         set_confirm_title.set("Delete Collection?".to_string());
         set_confirm_message.set(format!(
-            "Are you sure you want to delete \"{}\"? Dashboards will not be deleted.",
+            "Are you sure you want to delete \"{}\"? {type_name_plural} will not be deleted.",
             coll.name
         ));
         set_deleting_id.set(Some(coll.collection_id));
@@ -956,6 +974,7 @@ pub fn CollectionsSidebar(
                                     on_all_click=handle_all_click
                                     on_edit=handle_edit
                                     on_delete=handle_delete
+                                    type_name_plural=type_name_plural.to_string()
                                 />
                             </div>
 
@@ -965,6 +984,8 @@ pub fn CollectionsSidebar(
                                 on_close=on_modal_close
                                 editing=modal_editing
                                 on_saved=on_modal_saved
+                                doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
+                                type_name_lower=type_name_lower.to_string()
                             />
                             <ConfirmDialog
                                 open=confirm_open_sig
@@ -1016,6 +1037,7 @@ pub fn CollectionsSidebar(
                                         on_all_click=handle_all_click
                                         on_edit=handle_edit
                                         on_delete=handle_delete
+                                        type_name_plural=type_name_plural.to_string()
                                     />
                                 </div>
                             </div>
@@ -1026,6 +1048,8 @@ pub fn CollectionsSidebar(
                                 on_close=on_modal_close
                                 editing=modal_editing
                                 on_saved=on_modal_saved
+                                doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
+                                type_name_lower=type_name_lower.to_string()
                             />
                             <ConfirmDialog
                                 open=confirm_open_sig

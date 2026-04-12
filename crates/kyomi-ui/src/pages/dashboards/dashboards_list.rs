@@ -45,8 +45,8 @@ pub fn DashboardsListPage() -> impl IntoView {
         move |(query, sort)| list_dashboards(query, Some(sort), None),
     );
 
-    // Fetch collections for badge display and filtering
-    let collections_resource = Resource::new(|| (), |_| list_collections(None));
+    // Fetch collections for badge display and filtering (scoped to dashboards)
+    let collections_resource = Resource::new(|| (), |_| list_collections(Some("dashboard".to_string())));
 
     // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);

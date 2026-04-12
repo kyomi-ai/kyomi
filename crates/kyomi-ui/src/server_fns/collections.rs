@@ -125,10 +125,13 @@ pub async fn create_collection(
     description: Option<String>,
     color: Option<String>,
     is_public: Option<bool>,
+    doc_type: Option<String>,
 ) -> Result<CollectionItem, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
+
+    let dt = doc_type.as_deref().unwrap_or("dashboard");
 
     let collection = kyomi_auth::collection_service::create_collection(
         &ctx.db,
@@ -137,6 +140,7 @@ pub async fn create_collection(
         description.as_deref(),
         color.as_deref(),
         is_public.unwrap_or(false),
+        dt,
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
