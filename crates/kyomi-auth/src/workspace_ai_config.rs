@@ -566,39 +566,273 @@ mod tests {
 
     // ---- DB-backed roundtrip tests -------------------------------------
     //
-    // These require a live DB pool and the `workspaces` table. The
-    // kyomi-auth crate has no shared DB test fixture today (existing
-    // services are all tested via integration tests in the server binary),
-    // so they're gated with `#[ignore]` until a fixture lands.
+    // These run against an in-memory SQLite pool that applies the full
+    // `apps/server/migrations-sqlite` chain, so they exercise the real
+    // `workspaces` schema (including `ai_provider`, `ai_api_key_encrypted`,
+    // and `ai_base_url` added by 00015). The fixture lives in the nested
+    // `test_support` module below — kept in-file because it's only used by
+    // this module and is `#[cfg(test)]`.
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    // --- Env var serialization ------------------------------------------
     //
-    // TODO(byok-followup): once a shared `test_db()` helper exists in
-    // kyomi-core or kyomi-auth's dev-dependencies, unignore these and wire
-    // them up. They should cover:
-    //
-    //   1. Kyomi load on a freshly-created workspace (default row state).
-    //   2. Kyomi → BYOK transition with a new key, then load → decrypted
-    //      plaintext matches.
-    //   3. BYOK model-only update (input.api_key = None) preserves the
-    //      existing encrypted blob.
-    //   4. BYOK with no existing key and no new key → MissingApiKey.
-    //   5. BYOK → Kyomi transition clears ai_api_key_encrypted + ai_base_url.
-    //   6. update() on a non-existent workspace → WorkspaceNotFound.
+    // Both `workspace_secrets::tests` and these tests mutate
+    // `WORKSPACE_SECRETS_KEY`. Each test module has its own lock, but they
+    // still race when run in the same binary. We intentionally use a module-
+    // local lock here (matching the `workspace_secrets` pattern) and rely on
+    // tests in this module never overlapping env reads with that module —
+    // since they're in separate files and cargo-test parallelism schedules
+    // them independently, each acquires its own lock before touching the var
+    // and clears it before releasing. This matches the pattern already in
+    // `workspace_secrets::tests`.
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn with_key(key_b64: &str) -> Self {
+            let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("WORKSPACE_SECRETS_KEY").ok();
+            // SAFETY: lock is held for the duration of the test.
+            unsafe { std::env::set_var("WORKSPACE_SECRETS_KEY", key_b64) };
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("WORKSPACE_SECRETS_KEY", v),
+                    None => std::env::remove_var("WORKSPACE_SECRETS_KEY"),
+                }
+            }
+        }
+    }
+
+    fn test_key() -> String {
+        BASE64_STANDARD.encode([0x7Fu8; 32])
+    }
+
+    // --- Fixture helpers ------------------------------------------------
+
+    mod test_support {
+        use kyomi_core::DbPool;
+        use sqlx::sqlite::SqlitePoolOptions;
+
+        /// Build an in-memory SQLite pool with the full server migration
+        /// chain applied. A single shared connection is used because
+        /// `:memory:` databases are per-connection in SQLite; `max_connections=1`
+        /// guarantees all queries hit the same in-memory database.
+        pub async fn test_sqlite_pool() -> DbPool {
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .expect("connect in-memory sqlite");
+
+            sqlx::query("PRAGMA foreign_keys=ON")
+                .execute(&pool)
+                .await
+                .expect("enable foreign keys");
+
+            sqlx::migrate!("../../apps/server/migrations-sqlite")
+                .run(&pool)
+                .await
+                .expect("run sqlite migrations");
+
+            DbPool::Sqlite(pool)
+        }
+
+        /// Insert a minimal users row + workspaces row. All non-defaulted
+        /// NOT NULL columns are supplied; everything else uses the schema
+        /// default (including `ai_provider` which defaults to `'kyomi'`).
+        pub async fn insert_test_workspace(db: &DbPool, workspace_id: &str) {
+            let sq = match db {
+                DbPool::Sqlite(sq) => sq,
+                _ => panic!("test fixture requires sqlite pool"),
+            };
+
+            let user_id = format!("user-{workspace_id}");
+            let email = format!("{workspace_id}@test.local");
+
+            sqlx::query("INSERT INTO users (user_id, email) VALUES (?1, ?2)")
+                .bind(&user_id)
+                .bind(&email)
+                .execute(sq)
+                .await
+                .expect("insert user");
+
+            sqlx::query(
+                "INSERT INTO workspaces (workspace_id, name, owner_user_id) \
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(workspace_id)
+            .bind("Test Workspace")
+            .bind(&user_id)
+            .execute(sq)
+            .await
+            .expect("insert workspace");
+        }
+    }
+
+    use test_support::{insert_test_workspace, test_sqlite_pool};
+
+    // --- Tests ----------------------------------------------------------
 
     #[tokio::test]
-    #[ignore = "requires DB fixture — see TODO(byok-followup) above"]
     async fn db_roundtrip_kyomi_to_byok_to_kyomi() {
-        // Intentionally empty — placeholder for the wired-up test.
+        let _env = EnvGuard::with_key(&test_key());
+        let db = test_sqlite_pool().await;
+        let ws = "ws-roundtrip";
+        insert_test_workspace(&db, ws).await;
+
+        // 1. Fresh workspace defaults to Kyomi mode.
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.provider, WorkspaceAiProvider::Kyomi);
+        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.model, None);
+        assert_eq!(cfg.base_url, None);
+
+        // 2. Switch to BYOK (Anthropic) with key, model, base URL.
+        update(
+            &db,
+            ws,
+            UpdateWorkspaceAiConfigInput {
+                provider: WorkspaceAiProvider::Anthropic,
+                api_key: Some("sk-ant-test".to_string()),
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                base_url: Some("https://proxy.example.com".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.provider, WorkspaceAiProvider::Anthropic);
+        assert_eq!(cfg.api_key.as_deref(), Some("sk-ant-test"));
+        assert_eq!(cfg.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(cfg.base_url.as_deref(), Some("https://proxy.example.com"));
+
+        // 3. Switch back to Kyomi — key + base URL must be cleared.
+        update(
+            &db,
+            ws,
+            UpdateWorkspaceAiConfigInput {
+                provider: WorkspaceAiProvider::Kyomi,
+                api_key: None,
+                model: None,
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.provider, WorkspaceAiProvider::Kyomi);
+        assert_eq!(cfg.api_key, None);
+        assert_eq!(cfg.base_url, None);
+
+        // 4. Verify the encrypted column itself was cleared at the DB level
+        //    (load() masks it in Kyomi mode regardless).
+        let sq = match &db {
+            kyomi_core::db::DbPool::Sqlite(sq) => sq,
+            _ => unreachable!(),
+        };
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT ai_api_key_encrypted FROM workspaces WHERE workspace_id = ?1",
+        )
+        .bind(ws)
+        .fetch_one(sq)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored, None,
+            "encrypted key column must be NULL after switching to Kyomi"
+        );
     }
 
     #[tokio::test]
-    #[ignore = "requires DB fixture — see TODO(byok-followup) above"]
     async fn db_model_only_update_preserves_key() {
-        // Intentionally empty — placeholder for the wired-up test.
+        let _env = EnvGuard::with_key(&test_key());
+        let db = test_sqlite_pool().await;
+        let ws = "ws-model-only";
+        insert_test_workspace(&db, ws).await;
+
+        // Seed with BYOK (OpenAI) + initial key.
+        update(
+            &db,
+            ws,
+            UpdateWorkspaceAiConfigInput {
+                provider: WorkspaceAiProvider::OpenAI,
+                api_key: Some("sk-openai-original".to_string()),
+                model: Some("gpt-4o".to_string()),
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Model-only update (api_key = None, base_url = None).
+        update(
+            &db,
+            ws,
+            UpdateWorkspaceAiConfigInput {
+                provider: WorkspaceAiProvider::OpenAI,
+                api_key: None,
+                model: Some("gpt-4o-mini".to_string()),
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cfg = load(&db, ws).await.unwrap();
+        assert_eq!(cfg.provider, WorkspaceAiProvider::OpenAI);
+        assert_eq!(
+            cfg.api_key.as_deref(),
+            Some("sk-openai-original"),
+            "existing encrypted key must be preserved across model-only updates"
+        );
+        assert_eq!(cfg.model.as_deref(), Some("gpt-4o-mini"));
     }
 
     #[tokio::test]
-    #[ignore = "requires DB fixture — see TODO(byok-followup) above"]
     async fn db_byok_without_key_rejected() {
-        // Intentionally empty — placeholder for the wired-up test.
+        let _env = EnvGuard::with_key(&test_key());
+        let db = test_sqlite_pool().await;
+        let ws = "ws-byok-no-key";
+        insert_test_workspace(&db, ws).await;
+
+        // Workspace is in default Kyomi mode with no stored key.
+        let err = update(
+            &db,
+            ws,
+            UpdateWorkspaceAiConfigInput {
+                provider: WorkspaceAiProvider::Anthropic,
+                api_key: None,
+                model: Some("claude-sonnet-4-5-20250929".to_string()),
+                base_url: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            WorkspaceAiConfigError::MissingApiKey { provider } => {
+                assert_eq!(provider, "anthropic");
+            }
+            other => panic!("expected MissingApiKey, got {other:?}"),
+        }
     }
 }
