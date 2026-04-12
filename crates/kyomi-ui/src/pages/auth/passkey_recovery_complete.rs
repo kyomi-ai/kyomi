@@ -18,7 +18,7 @@ use leptos_icons::Icon;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Card,
-    CardContent, CardDescription, CardHeader, CardTitle,
+    CardContent, CardDescription, CardHeader, CardTitle, Spinner,
 };
 use crate::server_fns::auth::{
     passkey_recovery_verify, passkey_register_complete, LoginResult, PasskeyRecoveryVerifyResult,
@@ -219,20 +219,7 @@ fn verifying_view() -> impl IntoView {
             <CardContent class="pt-6">
                 <div class="text-center space-y-4">
                     // Spinner xl: h-12 w-12 (matching React Spinner size="xl")
-                    <svg
-                        class="animate-spin h-12 w-12 text-primary mx-auto"
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="24"
-                        height="24"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>
+                    <Spinner size="h-12 w-12" class="text-primary mx-auto"/>
                     <p class="text-muted-foreground">"Verifying recovery link..."</p>
                 </div>
             </CardContent>
@@ -316,20 +303,7 @@ fn creating_view() -> impl IntoView {
             <CardContent class="pt-6">
                 <div class="text-center space-y-4">
                     // Spinner xl: h-12 w-12 (matching React Spinner size="xl")
-                    <svg
-                        class="animate-spin h-12 w-12 text-primary mx-auto"
-                        xmlns="http://www.w3.org/2000/svg"
-                        width="24"
-                        height="24"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                    >
-                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>
+                    <Spinner size="h-12 w-12" class="text-primary mx-auto"/>
                     <p class="text-muted-foreground">"Creating passkey..."</p>
                 </div>
             </CardContent>
@@ -357,20 +331,7 @@ fn success_view() -> impl IntoView {
             </CardHeader>
             <CardContent>
                 // Spinner lg: h-8 w-8 (matching React Spinner size="lg")
-                <svg
-                    class="animate-spin h-8 w-8 text-primary mx-auto"
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="24"
-                    height="24"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                >
-                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                </svg>
+                <Spinner size="h-8 w-8" class="text-primary mx-auto"/>
             </CardContent>
         </Card>
     }
