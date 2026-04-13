@@ -36,6 +36,44 @@ impl std::fmt::Display for ConnectionState {
     }
 }
 
+/// A single close event recorded in the debug history.
+///
+/// Populated by the WASM `on_close` handler and surfaced through
+/// `WsDiagnostics` so the dev debug panel can show a rolling log of
+/// recent disconnects (code, reason, whether clean).
+#[derive(Clone, Debug)]
+pub struct CloseRecord {
+    /// Unix milliseconds when the close fired (from `Date.now()`).
+    pub ts_ms: f64,
+    /// WebSocket close code (e.g. 1000 clean, 1006 abnormal, 4xxx app).
+    pub code: u16,
+    /// Optional human-readable reason from the server.
+    pub reason: String,
+    /// Whether the close was considered clean by the browser.
+    pub was_clean: bool,
+}
+
+/// Snapshot of diagnostics exposed to the dev debug panel.
+///
+/// Deliberately `Clone` so the panel can read a consistent view without
+/// holding a borrow on the internal `RefCell`.
+#[derive(Clone, Debug, Default)]
+pub struct WsDiagnostics {
+    /// Total number of successful `onopen` events since provider mount.
+    pub connect_count: u32,
+    /// Current reconnect attempt counter (resets to 0 on successful open).
+    pub reconnect_attempts: u32,
+    /// Rolling log of the most recent close events, newest last.
+    /// Capped at 10 entries.
+    pub close_history: Vec<CloseRecord>,
+    /// Active subscribers, keyed by message type, value is count.
+    pub subscriber_counts: std::collections::BTreeMap<String, usize>,
+    /// Total subscribers across all message types.
+    pub total_subscribers: usize,
+    /// Number of unique dedup keys tracked (bounded to 1000).
+    pub seen_messages_len: usize,
+}
+
 /// An incoming WebSocket message parsed from JSON.
 ///
 /// Uses `serde_json::Value` for the `data` field to avoid tight coupling
@@ -65,6 +103,11 @@ pub struct WebSocketMessage {
 pub struct WebSocketContext {
     /// Current connection state as a reactive signal.
     pub connection_state: ReadSignal<ConnectionState>,
+
+    /// Diagnostics snapshot — updated by the WASM WS handlers on every
+    /// state transition (connect, close, subscribe, unsubscribe, reconnect).
+    /// Used by the dev debug panel; reading it elsewhere is also fine.
+    pub diagnostics: ReadSignal<WsDiagnostics>,
 
     /// Subscribe to a specific message type. Returns an unsubscribe function.
     ///
@@ -155,7 +198,14 @@ mod wasm {
         reconnect_attempts: u32,
         /// Handle to the pending reconnect timeout (if any).
         reconnect_timeout: Option<SendWrapper<gloo_timers::callback::Timeout>>,
+        /// Running count of successful `onopen` events since mount.
+        connect_count: u32,
+        /// Rolling log of the most recent close events (cap 10, newest last).
+        close_history: std::collections::VecDeque<CloseRecord>,
     }
+
+    /// Maximum close records kept in `WsState::close_history`.
+    const CLOSE_HISTORY_CAP: usize = 10;
 
     impl WsState {
         fn new() -> Self {
@@ -169,8 +219,49 @@ mod wasm {
                 intentional_close: false,
                 reconnect_attempts: 0,
                 reconnect_timeout: None,
+                connect_count: 0,
+                close_history: std::collections::VecDeque::with_capacity(CLOSE_HISTORY_CAP),
             }
         }
+
+        /// Build a diagnostics snapshot from the current state.
+        ///
+        /// Cheap — clones out a small struct so the caller can drop the
+        /// borrow before updating the reactive signal.
+        fn diagnostics(&self) -> WsDiagnostics {
+            let mut subscriber_counts = std::collections::BTreeMap::new();
+            let mut total = 0usize;
+            for (k, v) in &self.subscribers {
+                subscriber_counts.insert(k.clone(), v.len());
+                total += v.len();
+            }
+            WsDiagnostics {
+                connect_count: self.connect_count,
+                reconnect_attempts: self.reconnect_attempts,
+                close_history: self.close_history.iter().cloned().collect(),
+                subscriber_counts,
+                total_subscribers: total,
+                seen_messages_len: self.seen_messages.len(),
+            }
+        }
+    }
+
+    /// Update the reactive diagnostics signal with a fresh snapshot from state.
+    ///
+    /// Takes `&mut` borrow lifetime carefully — builds the snapshot while
+    /// we hold the borrow, drops the borrow, then writes the signal so the
+    /// signal's effects don't reentrantly borrow the state cell.
+    fn push_diagnostics(
+        state: &Rc<RefCell<WsState>>,
+        set_diagnostics: WriteSignal<WsDiagnostics>,
+    ) {
+        let snap = state.borrow().diagnostics();
+        set_diagnostics.set(snap);
+    }
+
+    /// Current Unix milliseconds timestamp from `Date.now()`.
+    fn now_ms() -> f64 {
+        js_sys::Date::now()
     }
 
     /// Provide the WebSocket context to all children. Connects when
@@ -180,9 +271,12 @@ mod wasm {
         workspace_id: Signal<Option<String>>,
     ) -> WebSocketContext {
         let (connection_state, set_connection_state) = signal(ConnectionState::Disconnected);
+        let (diagnostics, set_diagnostics) = signal(WsDiagnostics::default());
         let state = Rc::new(RefCell::new(WsState::new()));
 
         // -- subscribe function -----------------------------------------------
+        // Captures `set_diagnostics` so it can refresh the panel snapshot
+        // whenever the subscriber map mutates (sub or unsub).
         let subscribe_state = state.clone();
         let subscribe_fn: SubscribeBox =
             Box::new(move |message_type: String, callback: Box<dyn Fn(WebSocketMessage)>| {
@@ -196,18 +290,22 @@ mod wasm {
                         .push((id, callback));
                     id
                 };
+                push_diagnostics(&subscribe_state, set_diagnostics);
 
                 // Return unsubscribe closure
                 let unsub_state = subscribe_state.clone();
                 let msg_type = message_type;
                 Box::new(move || {
-                    let mut s = unsub_state.borrow_mut();
-                    if let Some(callbacks) = s.subscribers.get_mut(&msg_type) {
-                        callbacks.retain(|(id, _)| *id != sub_id);
-                        if callbacks.is_empty() {
-                            s.subscribers.remove(&msg_type);
+                    {
+                        let mut s = unsub_state.borrow_mut();
+                        if let Some(callbacks) = s.subscribers.get_mut(&msg_type) {
+                            callbacks.retain(|(id, _)| *id != sub_id);
+                            if callbacks.is_empty() {
+                                s.subscribers.remove(&msg_type);
+                            }
                         }
                     }
+                    push_diagnostics(&unsub_state, set_diagnostics);
                 })
             });
 
@@ -226,29 +324,48 @@ mod wasm {
         });
 
         // -- connect/disconnect effect ----------------------------------------
+        // Only react to *transitions* of (user_id, workspace_id), not to
+        // every refetch of the underlying `user_info` resource. Without this
+        // guard the Effect fires on each LocalResource re-read even when
+        // the identity values are unchanged, churning the socket.
         let connect_state = state.clone();
         let effect_count = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let last_identity: std::rc::Rc<std::cell::RefCell<Option<(String, String)>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
         Effect::new(move |_| {
             let uid = user_id.get();
             let wid = workspace_id.get();
             let count = effect_count.get() + 1;
             effect_count.set(count);
-            tracing::info!("WS Effect fired #{count}, uid={uid:?}, wid={wid:?}");
 
-            match (uid, wid) {
-                (Some(uid), Some(wid)) if !uid.is_empty() && !wid.is_empty() => {
-                    // Reset intentional close flag before connecting
+            let new_identity = match (uid, wid) {
+                (Some(u), Some(w)) if !u.is_empty() && !w.is_empty() => Some((u, w)),
+                _ => None,
+            };
+
+            {
+                let prev = last_identity.borrow();
+                if *prev == new_identity {
+                    tracing::trace!("WS Effect fired #{count} — identity unchanged, skipping");
+                    return;
+                }
+            }
+            *last_identity.borrow_mut() = new_identity.clone();
+
+            tracing::info!("WS Effect fired #{count}, identity={new_identity:?}");
+
+            match new_identity {
+                Some(_) => {
                     connect_state.borrow_mut().intentional_close = false;
-
                     let cs = connect_state.clone();
                     let set_state = set_connection_state;
                     leptos::task::spawn_local(async move {
-                        connect(cs, set_state).await;
+                        connect(cs, set_state, set_diagnostics).await;
                     });
                 }
-                _ => {
+                None => {
                     // Not authenticated — disconnect
-                    disconnect(connect_state.clone(), set_connection_state);
+                    disconnect(connect_state.clone(), set_connection_state, set_diagnostics);
                 }
             }
         });
@@ -258,11 +375,12 @@ mod wasm {
         // requires Send+Sync.
         let cleanup_state = SendWrapper::new(state.clone());
         on_cleanup(move || {
-            disconnect(cleanup_state.take(), set_connection_state);
+            disconnect(cleanup_state.take(), set_connection_state, set_diagnostics);
         });
 
         WebSocketContext {
             connection_state,
+            diagnostics,
             subscribe: StoredValue::new(SendWrapper::new(subscribe_fn)),
             send: StoredValue::new(SendWrapper::new(send_fn)),
         }
@@ -275,6 +393,7 @@ mod wasm {
     async fn connect(
         state: Rc<RefCell<WsState>>,
         set_connection_state: WriteSignal<ConnectionState>,
+        set_diagnostics: WriteSignal<WsDiagnostics>,
     ) {
         // Guard against concurrent connect() calls. The Effect that triggers
         // connect can fire multiple times (e.g., during hydration or auth state
@@ -326,7 +445,7 @@ mod wasm {
                 tracing::error!("Failed to get WebSocket config: {e}");
                 state.borrow_mut().connecting = false;
                 set_connection_state.set(ConnectionState::Disconnected);
-                schedule_reconnect(state, set_connection_state);
+                schedule_reconnect(state, set_connection_state, set_diagnostics);
                 return;
             }
         };
@@ -346,7 +465,7 @@ mod wasm {
                 tracing::error!("Failed to build WebSocket URL: {e}");
                 state.borrow_mut().connecting = false;
                 set_connection_state.set(ConnectionState::Disconnected);
-                schedule_reconnect(state, set_connection_state);
+                schedule_reconnect(state, set_connection_state, set_diagnostics);
                 return;
             }
         };
@@ -357,7 +476,7 @@ mod wasm {
                 tracing::error!("WebSocket::new failed: {:?}", e);
                 state.borrow_mut().connecting = false;
                 set_connection_state.set(ConnectionState::Disconnected);
-                schedule_reconnect(state, set_connection_state);
+                schedule_reconnect(state, set_connection_state, set_diagnostics);
                 return;
             }
         };
@@ -372,7 +491,12 @@ mod wasm {
             // Server sends WebSocket-protocol-level pings every 45s (see
             // websocket.rs lines 146-166). No application-level ping needed
             // from the client — matching React, which has no ping either.
-            onopen_state.borrow_mut().reconnect_attempts = 0;
+            {
+                let mut s = onopen_state.borrow_mut();
+                s.reconnect_attempts = 0;
+                s.connect_count = s.connect_count.saturating_add(1);
+            }
+            push_diagnostics(&onopen_state, set_diagnostics);
         });
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
         closures.push(SendWrapper::new(on_open.into_js_value()));
@@ -439,16 +563,32 @@ mod wasm {
         // -- onclose ----------------------------------------------------------
         let onclose_state = state.clone();
         let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |event: CloseEvent| {
-            tracing::info!("WebSocket closed: code={}, reason={}", event.code(), event.reason());
+            let code = event.code();
+            let reason = event.reason();
+            let was_clean = event.was_clean();
+            tracing::info!("WebSocket closed: code={code}, reason={reason}, clean={was_clean}");
             set_connection_state.set(ConnectionState::Disconnected);
 
-            // Clear the ws reference
-            onclose_state.borrow_mut().ws = None;
+            // Record the close in the rolling history and clear the ws ref.
+            {
+                let mut s = onclose_state.borrow_mut();
+                s.ws = None;
+                if s.close_history.len() >= CLOSE_HISTORY_CAP {
+                    s.close_history.pop_front();
+                }
+                s.close_history.push_back(CloseRecord {
+                    ts_ms: now_ms(),
+                    code,
+                    reason: reason.clone(),
+                    was_clean,
+                });
+            }
+            push_diagnostics(&onclose_state, set_diagnostics);
 
             // Only attempt reconnection if not intentionally closed — matches React
             let intentional = onclose_state.borrow().intentional_close;
             if !intentional {
-                schedule_reconnect(onclose_state.clone(), set_connection_state);
+                schedule_reconnect(onclose_state.clone(), set_connection_state, set_diagnostics);
             }
         });
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
@@ -465,6 +605,7 @@ mod wasm {
     fn disconnect(
         state: Rc<RefCell<WsState>>,
         set_connection_state: WriteSignal<ConnectionState>,
+        set_diagnostics: WriteSignal<WsDiagnostics>,
     ) {
         let mut s = state.borrow_mut();
         s.intentional_close = true;
@@ -487,6 +628,8 @@ mod wasm {
         s._closures.clear();
 
         set_connection_state.set(ConnectionState::Disconnected);
+        drop(s);
+        push_diagnostics(&state, set_diagnostics);
     }
 
     /// Schedule a reconnect with exponential backoff — matches React exactly.
@@ -496,6 +639,7 @@ mod wasm {
     fn schedule_reconnect(
         state: Rc<RefCell<WsState>>,
         set_connection_state: WriteSignal<ConnectionState>,
+        set_diagnostics: WriteSignal<WsDiagnostics>,
     ) {
         let (intentional, attempts) = {
             let s = state.borrow();
@@ -533,11 +677,12 @@ mod wasm {
         let reconnect_state = state.clone();
         let timeout = gloo_timers::callback::Timeout::new(delay_ms, move || {
             leptos::task::spawn_local(async move {
-                connect(reconnect_state, set_connection_state).await;
+                connect(reconnect_state, set_connection_state, set_diagnostics).await;
             });
         });
 
         state.borrow_mut().reconnect_timeout = Some(SendWrapper::new(timeout));
+        push_diagnostics(&state, set_diagnostics);
     }
 }
 
@@ -557,6 +702,7 @@ mod ssr {
         _workspace_id: Signal<Option<String>>,
     ) -> WebSocketContext {
         let (connection_state, _) = signal(ConnectionState::Disconnected);
+        let (diagnostics, _) = signal(WsDiagnostics::default());
 
         let subscribe_fn: SubscribeBox = Box::new(|_msg_type, _callback| Box::new(|| {}));
 
@@ -564,6 +710,7 @@ mod ssr {
 
         WebSocketContext {
             connection_state,
+            diagnostics,
             subscribe: StoredValue::new(SendWrapper::new(subscribe_fn)),
             send: StoredValue::new(SendWrapper::new(send_fn)),
         }
