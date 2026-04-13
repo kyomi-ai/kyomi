@@ -12,7 +12,6 @@ pub mod results_table;
 pub mod sidebar;
 pub mod state;
 pub mod status_bar;
-pub mod streaming;
 pub mod tab_bar;
 pub mod types;
 
