@@ -118,7 +118,7 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
                         .map(String::from)
                 })
         })
-        .unwrap_or_else(|| "balanced".to_string())
+        .unwrap_or_else(|| "kyomi".to_string())
     };
 
     Ok(UserContext {

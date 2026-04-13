@@ -61,7 +61,7 @@ pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
                 .and_then(|s| s.as_str())
                 .map(String::from)
         })
-        .unwrap_or_else(|| "balanced".to_string());
+        .unwrap_or_else(|| "kyomi".to_string());
 
     Ok(ProfileData {
         user_id: user.user_id,

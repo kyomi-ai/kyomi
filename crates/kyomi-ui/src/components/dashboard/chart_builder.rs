@@ -27,7 +27,7 @@ use crate::pages::sql_editor::types::QueryResult;
 use crate::server_fns::datasources::{list_datasources, query_datasource_arrow, DatasourceInfo};
 use crate::server_fns::sql_editor::execute_sql_query;
 
-use super::markdown_renderer::{configured_chartml, kyomi_palette};
+use super::markdown_renderer::{configured_chartml, kyomi_palette, kyomi_theme};
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 
 /// Label classes — matches the design system (uppercase tracking-wide like React).
@@ -707,7 +707,11 @@ pub fn ChartBuilderModal(
                             Ok(ipc_bytes) => {
                                 match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                     Ok(data_table) => {
-                                        let colors = kyomi_palette("balanced");
+                                        let is_dark = crate::components::theme::use_theme()
+                                            .map(|s| s.effective.get_untracked() == "dark")
+                                            .unwrap_or(false);
+                                        let colors = kyomi_palette("kyomi", is_dark);
+                                        let theme = kyomi_theme(is_dark);
                                         let mut chartml_inst = chartml_core::ChartML::new();
                                         chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
                                         chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
@@ -718,6 +722,7 @@ pub fn ChartBuilderModal(
                                         chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
                                         chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
                                         chartml_inst.set_default_palette(colors);
+                                        chartml_inst.set_theme(theme);
                                         chartml_inst.register_source("_remote", data_table);
                                         set_preview_chartml.set(Some(Arc::new(chartml_inst)));
                                     }
@@ -1347,7 +1352,11 @@ pub fn ChartBuilderModal(
                                                             Ok(ipc_bytes) => {
                                                                 match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                                                     Ok(data_table) => {
-                                                                        let colors = kyomi_palette("balanced");
+                                                                        let is_dark = crate::components::theme::use_theme()
+                                                                            .map(|s| s.effective.get_untracked() == "dark")
+                                                                            .unwrap_or(false);
+                                                                        let colors = kyomi_palette("kyomi", is_dark);
+                                                                        let theme = kyomi_theme(is_dark);
                                                                         let mut chartml_inst = chartml_core::ChartML::new();
                                                                         chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
                                                                         chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
@@ -1358,6 +1367,7 @@ pub fn ChartBuilderModal(
                                                                         chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
                                                                         chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
                                                                         chartml_inst.set_default_palette(colors);
+                                                                        chartml_inst.set_theme(theme);
                                                                         chartml_inst.register_source("_remote", data_table);
                                                                         set_preview_chartml.set(Some(Arc::new(chartml_inst)));
                                                                     }
@@ -1422,7 +1432,10 @@ pub fn ChartBuilderModal(
                                         } else if datasource_slug.get().is_empty() {
                                             // Inline data chart — render directly without remote fetch.
                                             // ChartML with DataFusionTransform handles inline data natively.
-                                            let chartml_inst = configured_chartml("balanced");
+                                            let is_dark = crate::components::theme::use_theme()
+                                                .map(|s| s.effective.get_untracked() == "dark")
+                                                .unwrap_or(false);
+                                            let chartml_inst = configured_chartml("kyomi", is_dark);
                                             let preview_yaml = current_yaml.get();
                                             view! {
                                                 <ChartPreview

@@ -2,6 +2,7 @@
 members = [
     "crates/kyomi-core",
     "crates/kyomi-auth",
+    "crates/kyomi-chart-theme",
     "crates/kyomi-embed",
     "crates/kyomi-datasource",
     "crates/kyomi-agent",
@@ -121,6 +122,7 @@ kyomi-auth = { path = "crates/kyomi-auth" }
 kyomi-embed = { path = "crates/kyomi-embed" }
 kyomi-datasource-server = { path = "crates/kyomi-datasource" }
 kyomi-agent = { path = "crates/kyomi-agent" }
+kyomi-chart-theme = { path = "crates/kyomi-chart-theme" }
 kyomi-knowledge = { path = "crates/kyomi-knowledge" }
 kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-connect-protocol = "1"

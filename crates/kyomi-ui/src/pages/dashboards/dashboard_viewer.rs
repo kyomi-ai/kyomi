@@ -280,7 +280,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                 let chart_palette = user_ctx.as_ref()
                     .map(|ctx| ctx.chart_palette.clone())
-                    .unwrap_or_else(|| "balanced".to_string());
+                    .unwrap_or_else(|| "kyomi".to_string());
 
                 Some(match dashboard_result {
                     Err(e) => {

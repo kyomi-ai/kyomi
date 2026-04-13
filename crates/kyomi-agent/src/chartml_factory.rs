@@ -3,6 +3,8 @@
 //! Factory for creating configured ChartML instances with all renderers
 //! and the DataFusion transform middleware registered.
 
+use chartml_core::theme::Theme;
+use kyomi_chart_theme::kyomi_theme;
 use chartml_core::ChartML;
 use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_pie::PieRenderer;
@@ -10,11 +12,24 @@ use chartml_chart_scatter::ScatterRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_datafusion::DataFusionTransform;
 
-/// Create a fully configured ChartML instance with all chart renderers
-/// and the DataFusion transform pipeline registered.
+/// Create a fully configured ChartML instance with all chart renderers,
+/// the DataFusion transform pipeline, and the Kyomi editorial theme
+/// applied. Every server-side chart render path (PDF export, email
+/// snapshots, MCP chart app, watches alerts) should use this factory so
+/// chart chrome matches the dashboard viewer's browser rendering.
 ///
-/// Optionally accepts a color palette to inject into specs before rendering.
+/// PDF and email snapshots are always rendered in light mode — print
+/// media and email clients don't have a meaningful dark-mode preference
+/// we can read at render time, and light-on-light is the safe default.
 pub fn create_chartml() -> ChartML {
+    create_chartml_with_theme(kyomi_theme(false))
+}
+
+/// Create a configured ChartML instance with an explicit theme. Exposed
+/// so callers that need non-default chrome (e.g. a future dark-mode
+/// scheduled report) can supply their own `Theme` without duplicating
+/// the renderer registration boilerplate.
+pub fn create_chartml_with_theme(theme: Theme) -> ChartML {
     let mut chartml = ChartML::new();
 
     // Register all chart type renderers
@@ -28,6 +43,9 @@ pub fn create_chartml() -> ChartML {
 
     // Register DataFusion-based transform middleware (sql, aggregate, forecast)
     chartml.register_transform(DataFusionTransform);
+
+    // Editorial chart chrome — Variant A typography, shape, and colors.
+    chartml.set_theme(theme);
 
     chartml
 }

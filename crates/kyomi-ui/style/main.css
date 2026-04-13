@@ -402,33 +402,61 @@ html {
 }
 
 /* === ChartML Theme Overrides ===
- * chartml is a generic library with cool-gray defaults.
- * Kyomi overrides these to match the warm design system.
- * See DESIGN.md "Chart Design System" section. */
+ * Kyomi chart chrome — the "Editorial Figure" direction (Variant A).
+ * See DESIGN.md "Chart Chrome" section for the visual thesis.
+ *
+ * The Rust `kyomi_theme()` in `crates/kyomi-chart-theme/src/lib.rs` writes
+ * these same values as inline SVG presentation attributes (for SSR parity).
+ * The CSS variables below provide the browser-side override path so light/
+ * dark theme toggles update chart chrome instantly without re-rendering.
+ * chartml-leptos's shipped CSS uses `var(--chartml-*, revert)` so if a
+ * variable is unset the inline SVG attr wins — no values drift. */
 
 :root {
+  /* Chrome colors — Variant A editorial values.
+   * NOTE: every value in this `:root` block has a matching field in
+   * `kyomi_theme()` in `crates/kyomi-chart-theme/src/lib.rs`.
+   * If you edit one, edit the other. The Rust function is the source of truth
+   * for SSR paths (PDF export, email snapshots, MCP chart app) that don't have
+   * a CSS cascade; this block is the source of truth for browser rendering
+   * because chartml-leptos's shipped CSS rules win over SVG presentation attrs. */
   --chartml-text: #1C1917;
   --chartml-text-secondary: #6B6660;
   --chartml-text-strong: #1C1917;
-  --chartml-grid: #E8E5DE;
-  --chartml-axis-line: #6B6660;
-  --chartml-bg: #FFFFFF;
+  --chartml-grid: #EDE9E0;
+  --chartml-axis-line: #1C1917;
+  /* chartml-bg is the color used for element separators (dot outlines,
+   * pie slice gaps, stacked bar segment borders) — it must MATCH the
+   * page background so separators visually disappear into the surface. */
+  --chartml-bg: #FAFAF8;
   --chartml-annotation: #9C9790;
-}
 
-/* Chart typography: override chartml's hardcoded Inter with Kyomi fonts */
-svg text {
-  font-family: 'DM Sans', 'Inter', sans-serif;
-}
+  /* Typography — title */
+  --chartml-title-font: 'Instrument Serif', Georgia, serif;
+  --chartml-title-font-size: 22px;
+  --chartml-title-font-weight: 400;
+  --chartml-title-font-style: normal;
 
-/* Numeric tick labels: monospace for aligned numbers */
-.tick-label {
-  font-family: 'Geist Mono', ui-monospace, monospace;
-}
+  /* Typography — category / axis labels */
+  --chartml-label-font: 'DM Sans', system-ui, sans-serif;
+  --chartml-label-font-size: 10px;
+  --chartml-label-font-weight: 500;
+  --chartml-label-letter-spacing: 1.2px;
+  --chartml-label-text-transform: uppercase;
 
-/* Legend labels: 12px to match design system xs scale (chartml defaults to 11px) */
-.legend-label {
-  font-size: 12px;
+  /* Typography — numeric tick values */
+  --chartml-numeric-font: 'Geist Mono', ui-monospace, monospace;
+  --chartml-numeric-font-size: 11px;
+
+  /* Typography — legend */
+  --chartml-legend-font: 'DM Sans', system-ui, sans-serif;
+  --chartml-legend-font-size: 11px;
+  --chartml-legend-font-weight: 500;
+
+  /* Shape / stroke — mode-independent (same values in light and dark) */
+  --chartml-series-line-weight: 2px;
+  --chartml-bar-corner-radius: 2px;
+  --chartml-dot-radius: 4px;
 }
 
 /* Chart tooltip: warm dark background, Kyomi font */
@@ -475,13 +503,15 @@ svg text {
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
-  /* ChartML dark theme — warm values matching Kyomi dark mode */
+  /* ChartML dark theme — matches kyomi_theme(is_dark=true) in Rust.
+   * `--chartml-bg` is the page background (separator color that disappears
+   * into the surface), not a white chart fill. */
   --chartml-text: #F5F3EF;
   --chartml-text-secondary: #94A3B8;
   --chartml-text-strong: #F5F3EF;
   --chartml-grid: #334155;
   --chartml-axis-line: #94A3B8;
-  --chartml-bg: #1E293B;
+  --chartml-bg: #0F172A;
   --chartml-annotation: #64748B;
 }
 
