@@ -131,6 +131,8 @@ chartml-chart-pie = { workspace = true }
 chartml-chart-scatter = { workspace = true }
 chartml-chart-metric = { workspace = true }
 chartml-datafusion = { workspace = true }
+# Shared chart palettes + editorial theme — wasm-compatible, no server deps.
+kyomi-chart-theme = { workspace = true }
 async-trait = { workspace = true }
 
 # Markdown rendering (shared — works in both SSR and WASM)

@@ -19,6 +19,14 @@ use chartml_chart_scatter::ScatterRenderer;
 use chartml_core::ChartML;
 use chartml_datafusion::DataFusionTransform;
 use chartml_leptos::{use_chartml_configured, ChartMLChart};
+// `kyomi_palette` and `kyomi_theme` live in the tiny `kyomi-chart-theme`
+// crate so they're accessible from both the browser rendering path
+// (kyomi-ui compiled for wasm32) and the SSR rendering path (kyomi-agent
+// via chartml_factory → PDF export, email snapshots, MCP chart app). The
+// crate has zero server-only dependencies, so it compiles cleanly under
+// the `hydrate` feature. Re-exported here so existing callers in this
+// file don't have to touch their import paths.
+pub(crate) use kyomi_chart_theme::{kyomi_palette, kyomi_theme};
 use super::chart_header_bar::ChartHeaderBar;
 use leptos::prelude::*;
 
@@ -370,35 +378,18 @@ pub(crate) fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Kyomi chart palettes — must match apps/frontend/src/config/chartPalettes.js
-// ---------------------------------------------------------------------------
-
-pub(crate) fn kyomi_palette(name: &str) -> Vec<String> {
-    match name {
-        "vibrant" => vec![
-            "#1E88C7", "#D92849", "#28C75A", "#E8B733", "#28C7A8", "#E87333",
-            "#3355D9", "#A8D928", "#C728A8", "#D97328", "#28A8D9", "#73A828",
-        ],
-        "accessible" => vec![
-            "#2D5F7A", "#A83D52", "#3D7A52", "#C9A642", "#3D8A8A", "#E89970",
-            "#5C6D99", "#B8D96B", "#996B8A", "#B87752", "#85B8D9", "#85996B",
-        ],
-        // "balanced" (default)
-        _ => vec![
-            "#1A75C9", "#B8405A", "#3D8A5A", "#D9952D", "#2D7A8A", "#C9734D",
-            "#4D5A8A", "#99C94D", "#8A5A7A", "#D9B370", "#70B8D9", "#6B8A4D",
-        ],
-    }.into_iter().map(String::from).collect()
-}
-
-// ---------------------------------------------------------------------------
 // ChartML instance factory
 // ---------------------------------------------------------------------------
+// `kyomi_palette` and `kyomi_theme` live in the `kyomi-chart-theme` crate
+// (`crates/kyomi-chart-theme/src/lib.rs`). See the re-export at the top
+// of this file.
 
-/// Create a configured ChartML instance with all chart renderers registered
-/// and the user's palette preference applied.
-pub(crate) fn configured_chartml(palette_name: &str) -> Arc<ChartML> {
-    let colors = kyomi_palette(palette_name);
+/// Create a configured ChartML instance with all chart renderers registered,
+/// the user's palette preference applied, and the Kyomi editorial theme wired
+/// in. `is_dark` selects per-mode palette slots and chrome colors.
+pub(crate) fn configured_chartml(palette_name: &str, is_dark: bool) -> Arc<ChartML> {
+    let colors = kyomi_palette(palette_name, is_dark);
+    let theme = kyomi_theme(is_dark);
     use_chartml_configured(|c| {
         c.register_renderer("bar", CartesianRenderer::new());
         c.register_renderer("line", CartesianRenderer::new());
@@ -409,6 +400,7 @@ pub(crate) fn configured_chartml(palette_name: &str) -> Arc<ChartML> {
         c.register_renderer("metric", MetricRenderer::new());
         c.register_transform(DataFusionTransform);
         c.set_default_palette(colors.clone());
+        c.set_theme(theme.clone());
     })
 }
 
@@ -628,15 +620,22 @@ fn WatchPreviewCardView(
     let queries_count = queries.len();
 
     view! {
-        <div class="watch-response not-prose" style="font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif); white-space: normal;">
-            // Render the message as markdown
+        <div class="watch-response">
+            // Render the message as markdown. The outer `MarkdownRenderer`
+            // wraps the whole component in `.prose-kyomi`, so this inner
+            // markdown inherits editorial typography automatically — no
+            // font-family override or prose opt-out needed.
             {(!message_html.is_empty()).then(|| {
                 view! {
                     <div inner_html=message_html.clone()></div>
                 }
             })}
-            // Watch preview card — matches React Card structure
-            <div class="border border-primary/30 bg-primary/5 rounded-lg my-3">
+            // Watch preview card — matches React Card structure.
+            // The `watch-preview-card` class opts out of `.prose-kyomi`
+            // element styling inside the card; main.css scopes a reset
+            // block to `.prose-kyomi .watch-preview-card :is(h1..h6, p, ...)`
+            // so Tailwind utility classes on the card's UI chrome win.
+            <div class="watch-preview-card border border-primary/30 bg-primary/5 rounded-lg my-3">
                 // Card header
                 <div class="px-6 pt-6 pb-2">
                     <div class="flex items-center justify-between">
@@ -939,8 +938,11 @@ fn ChartBlock(
     });
 
     // Create the ChartML instance
-    let palette = chart_palette.unwrap_or_else(|| "balanced".to_string());
-    let chartml = configured_chartml(&palette);
+    let palette = chart_palette.unwrap_or_else(|| "kyomi".to_string());
+    let is_dark = crate::components::theme::use_theme()
+        .map(|s| s.effective.get_untracked() == "dark")
+        .unwrap_or(false);
+    let chartml = configured_chartml(&palette, is_dark);
 
     // -- Remote data path: fetch data, register on ChartML instance, render via ChartMLChart --
     // We store fetched remote data as a signal. When data arrives, we create a new ChartML
@@ -954,6 +956,7 @@ fn ChartBlock(
         let ds_slug = datasource_slug.clone();
         let sql = sql_query.clone();
         let palette_for_remote = palette.clone();
+        let is_dark_for_remote = is_dark;
 
         Effect::new(move || {
             let params = parameters.get();
@@ -961,6 +964,7 @@ fn ChartBlock(
             let ds = ds_slug.clone();
             let q = sql.clone();
             let pal = palette_for_remote.clone();
+            let is_dark = is_dark_for_remote;
 
             set_remote_loading.set(true);
             set_remote_error.set(None);
@@ -999,13 +1003,15 @@ fn ChartBlock(
                             };
 
                         // Create a new ChartML instance with the fetched data registered
-                        let instance = configured_chartml(&pal);
+                        let instance = configured_chartml(&pal, is_dark);
                         // Safety: Arc::get_mut works here because we just created it and
                         // hold the only reference. We need to register the source before
                         // wrapping it.
                         let mut chartml_mut = ChartML::new();
-                        // Re-register all renderers + transform + palette on the mutable instance
-                        let colors = kyomi_palette(&pal);
+                        // Re-register all renderers + transform + palette + theme on the
+                        // mutable instance — must stay in sync with `configured_chartml`.
+                        let colors = kyomi_palette(&pal, is_dark);
+                        let theme = kyomi_theme(is_dark);
                         chartml_mut.register_renderer("bar", CartesianRenderer::new());
                         chartml_mut.register_renderer("line", CartesianRenderer::new());
                         chartml_mut.register_renderer("area", CartesianRenderer::new());
@@ -1015,6 +1021,7 @@ fn ChartBlock(
                         chartml_mut.register_renderer("metric", MetricRenderer::new());
                         chartml_mut.register_transform(DataFusionTransform);
                         chartml_mut.set_default_palette(colors);
+                        chartml_mut.set_theme(theme);
                         chartml_mut.register_source("_remote", data_table);
                         let _ = instance; // drop unused Arc
 
@@ -1311,11 +1318,11 @@ pub fn MarkdownRenderer(
     /// Message ID used to generate stable card IDs for watch preview cards
     #[prop(optional, into)]
     message_id: Option<String>,
-    /// User's chart palette preference (e.g. "balanced", "vibrant", "accessible")
+    /// User's chart palette preference (e.g. "kyomi", "balanced", "vibrant", "accessible")
     #[prop(optional, into)]
     chart_palette: Option<String>,
 ) -> impl IntoView {
-    let palette_name = StoredValue::new(chart_palette.unwrap_or_else(|| "balanced".to_string()));
+    let palette_name = StoredValue::new(chart_palette.unwrap_or_else(|| "kyomi".to_string()));
     let msg_id = StoredValue::new(message_id.unwrap_or_default());
 
     let segments = Memo::new(move |_| {
@@ -1340,7 +1347,7 @@ pub fn MarkdownRenderer(
     let accepted_ids = StoredValue::new(accepted_card_ids);
 
     view! {
-        <div class="prose prose-sm dark:prose-invert max-w-none">
+        <div class="prose-kyomi">
             <For
                 each=move || {
                     segments.get().into_iter().enumerate().collect::<Vec<_>>()
@@ -1421,6 +1428,8 @@ pub fn MarkdownRenderer(
 // Tests
 // ---------------------------------------------------------------------------
 
+// Tests for `kyomi_palette` and `kyomi_theme` live alongside their
+// definitions in `crates/kyomi-chart-theme/src/lib.rs`.
 #[cfg(test)]
 mod tests {
     use super::*;

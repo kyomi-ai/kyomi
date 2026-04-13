@@ -402,33 +402,61 @@ html {
 }
 
 /* === ChartML Theme Overrides ===
- * chartml is a generic library with cool-gray defaults.
- * Kyomi overrides these to match the warm design system.
- * See DESIGN.md "Chart Design System" section. */
+ * Kyomi chart chrome — the "Editorial Figure" direction (Variant A).
+ * See DESIGN.md "Chart Chrome" section for the visual thesis.
+ *
+ * The Rust `kyomi_theme()` in `crates/kyomi-chart-theme/src/lib.rs` writes
+ * these same values as inline SVG presentation attributes (for SSR parity).
+ * The CSS variables below provide the browser-side override path so light/
+ * dark theme toggles update chart chrome instantly without re-rendering.
+ * chartml-leptos's shipped CSS uses `var(--chartml-*, revert)` so if a
+ * variable is unset the inline SVG attr wins — no values drift. */
 
 :root {
+  /* Chrome colors — Variant A editorial values.
+   * NOTE: every value in this `:root` block has a matching field in
+   * `kyomi_theme()` in `crates/kyomi-chart-theme/src/lib.rs`.
+   * If you edit one, edit the other. The Rust function is the source of truth
+   * for SSR paths (PDF export, email snapshots, MCP chart app) that don't have
+   * a CSS cascade; this block is the source of truth for browser rendering
+   * because chartml-leptos's shipped CSS rules win over SVG presentation attrs. */
   --chartml-text: #1C1917;
   --chartml-text-secondary: #6B6660;
   --chartml-text-strong: #1C1917;
-  --chartml-grid: #E8E5DE;
-  --chartml-axis-line: #6B6660;
-  --chartml-bg: #FFFFFF;
+  --chartml-grid: #EDE9E0;
+  --chartml-axis-line: #1C1917;
+  /* chartml-bg is the color used for element separators (dot outlines,
+   * pie slice gaps, stacked bar segment borders) — it must MATCH the
+   * page background so separators visually disappear into the surface. */
+  --chartml-bg: #FAFAF8;
   --chartml-annotation: #9C9790;
-}
 
-/* Chart typography: override chartml's hardcoded Inter with Kyomi fonts */
-svg text {
-  font-family: 'DM Sans', 'Inter', sans-serif;
-}
+  /* Typography — title */
+  --chartml-title-font: 'Instrument Serif', Georgia, serif;
+  --chartml-title-font-size: 22px;
+  --chartml-title-font-weight: 400;
+  --chartml-title-font-style: normal;
 
-/* Numeric tick labels: monospace for aligned numbers */
-.tick-label {
-  font-family: 'Geist Mono', ui-monospace, monospace;
-}
+  /* Typography — category / axis labels */
+  --chartml-label-font: 'DM Sans', system-ui, sans-serif;
+  --chartml-label-font-size: 10px;
+  --chartml-label-font-weight: 500;
+  --chartml-label-letter-spacing: 1.2px;
+  --chartml-label-text-transform: uppercase;
 
-/* Legend labels: 12px to match design system xs scale (chartml defaults to 11px) */
-.legend-label {
-  font-size: 12px;
+  /* Typography — numeric tick values */
+  --chartml-numeric-font: 'Geist Mono', ui-monospace, monospace;
+  --chartml-numeric-font-size: 11px;
+
+  /* Typography — legend */
+  --chartml-legend-font: 'DM Sans', system-ui, sans-serif;
+  --chartml-legend-font-size: 11px;
+  --chartml-legend-font-weight: 500;
+
+  /* Shape / stroke — mode-independent (same values in light and dark) */
+  --chartml-series-line-weight: 2px;
+  --chartml-bar-corner-radius: 2px;
+  --chartml-dot-radius: 4px;
 }
 
 /* Chart tooltip: warm dark background, Kyomi font */
@@ -437,6 +465,411 @@ svg text {
   font-family: 'DM Sans', sans-serif;
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(28, 25, 23, 0.15);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * === Prose Kyomi — "Editorial Figure" markdown treatment ===
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ * Applied by `MarkdownRenderer` to every surface that renders user
+ * markdown: dashboard viewer, dashboard editor preview + WYSIWYG,
+ * chat messages, copilot sidebar, trial chat, watches alerts, and
+ * watches execution log. One class, consistent appearance everywhere.
+ *
+ * Visual reference: `/tmp/kyomi-chartml-variants.html` — the
+ * editorial sample page this treatment is derived from.
+ *
+ * Design principles:
+ * - Instrument Serif for headings and editorial moments (italic em,
+ *   blockquotes, figure captions). Reserved for document content.
+ * - DM Sans for body text at comfortable editorial line-height.
+ * - Geist Mono for code, metadata rows, FIGURE labels, numeric tables.
+ * - Amber accent used sparingly for emphasis (links, blockquote rules,
+ *   list markers, horizontal rules).
+ * - Warm neutrals for surfaces and separators.
+ * - Body text max-width 72ch for readability; charts, tables, code,
+ *   and blockquotes break out to full container width.
+ * - Horizontal rules and ruled spacing for editorial rhythm. No
+ *   gradients, no drop shadows, no rounded corners on content blocks.
+ */
+
+.prose-kyomi {
+  /* Container — body text is capped for readability, nested breakout
+   * blocks (charts, tables, code blocks, blockquotes) override this
+   * with `margin-left/right: auto` + explicit wider width. */
+  color: var(--color-foreground);
+  font-family: 'DM Sans', system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.7;
+  max-width: 72ch;
+  margin: 0 auto;
+}
+
+/* ── Headings ──────────────────────────────────────────────────── */
+
+.prose-kyomi h1,
+.prose-kyomi h2,
+.prose-kyomi h3 {
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-weight: 400;
+  color: var(--color-foreground);
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+}
+
+.prose-kyomi h1 {
+  font-size: 48px;
+  margin: 0 0 32px;
+}
+
+.prose-kyomi h2 {
+  font-size: 36px;
+  margin: 56px 0 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* Italic emphasis inside headings — amber spot color for editorial
+ * "one-word pop" moments. Applies to h1/h2/h3; the smaller heading
+ * levels (h4/h5/h6) aren't display-type so italic-amber there would
+ * feel forced. Matches the kode wysiwyg rule below which uses
+ * `--kode-heading-emphasis-color` on .wysiwyg-italic inside any
+ * .wysiwyg-heading. */
+.prose-kyomi h1 em,
+.prose-kyomi h2 em,
+.prose-kyomi h3 em {
+  color: var(--color-primary);
+  font-style: italic;
+}
+
+.prose-kyomi h3 {
+  font-size: 24px;
+  margin: 40px 0 12px;
+}
+
+.prose-kyomi h4,
+.prose-kyomi h5,
+.prose-kyomi h6 {
+  font-family: 'DM Sans', system-ui, sans-serif;
+  font-weight: 600;
+  color: var(--color-foreground);
+  margin-top: 32px;
+  margin-bottom: 8px;
+}
+
+.prose-kyomi h4 { font-size: 18px; }
+
+.prose-kyomi h5,
+.prose-kyomi h6 {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+}
+
+/* ── Paragraphs ────────────────────────────────────────────────── */
+
+.prose-kyomi p {
+  margin: 0 0 16px;
+}
+
+/* Opt-in lead paragraph (editorial lede). Users add `class="lead"` to
+ * the first <p> after an h1 when they want the larger-lighter treatment. */
+.prose-kyomi p.lead {
+  font-size: 20px;
+  line-height: 1.55;
+  color: var(--color-muted-foreground);
+  max-width: 60ch;
+  margin-bottom: 32px;
+}
+
+.prose-kyomi strong {
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+
+.prose-kyomi em {
+  font-style: italic;
+}
+
+/* ── Links ─────────────────────────────────────────────────────── */
+
+.prose-kyomi a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  transition: color 150ms ease;
+}
+
+.prose-kyomi a:hover {
+  color: #B45309; /* --accent-hover from DESIGN.md */
+}
+
+/* ── Lists ─────────────────────────────────────────────────────── */
+
+.prose-kyomi ul,
+.prose-kyomi ol {
+  margin: 0 0 16px;
+  padding-left: 24px;
+  /* Tailwind v4 preflight resets list-style to `none` on ul/ol by
+   * default. Without these, the markers defined by
+   * `.prose-kyomi ul > li::marker` and `.prose-kyomi ol > li::marker`
+   * have no glyph to color — the list renders flush-left with no
+   * bullets at all. Restoring the default disc/decimal types. */
+}
+
+.prose-kyomi ul {
+  list-style-type: disc;
+}
+
+.prose-kyomi ol {
+  list-style-type: decimal;
+}
+
+.prose-kyomi li {
+  margin-bottom: 6px;
+}
+
+.prose-kyomi ul > li::marker {
+  color: var(--color-primary);
+}
+
+.prose-kyomi ol > li::marker {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-muted-foreground);
+  font-size: 0.9em;
+}
+
+.prose-kyomi li > ul,
+.prose-kyomi li > ol {
+  margin: 6px 0 6px;
+}
+
+/* ── Blockquote — ruled editorial aside ───────────────────────── */
+
+.prose-kyomi blockquote {
+  margin: 24px 0;
+  padding: 4px 0 4px 24px;
+  border-left: 3px solid var(--color-primary);
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-style: italic;
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--color-foreground);
+}
+
+.prose-kyomi blockquote p {
+  margin: 0 0 8px;
+}
+
+.prose-kyomi blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Horizontal rule — editorial section break ────────────────── */
+
+.prose-kyomi hr {
+  border: none;
+  border-top: 1px solid var(--color-border-strong);
+  margin: 48px 0;
+}
+
+/* ── Inline code ───────────────────────────────────────────────── */
+
+.prose-kyomi code {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-size: 0.875em;
+  background: var(--color-secondary);
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: var(--color-foreground);
+}
+
+/* Inside h1/h2/h3, code inherits size from the heading but stays mono */
+.prose-kyomi h1 code,
+.prose-kyomi h2 code,
+.prose-kyomi h3 code {
+  font-size: 0.85em;
+  background: transparent;
+  padding: 0;
+  color: var(--color-primary);
+}
+
+/* ── Code blocks — editorial code sample ──────────────────────── */
+
+.prose-kyomi pre {
+  margin: 24px 0;
+  padding: 16px 20px;
+  background: var(--color-secondary);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: 0;
+  overflow-x: auto;
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.prose-kyomi pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* ── Tables — editorial ruling, no zebra ──────────────────────── */
+
+.prose-kyomi table {
+  width: 100%;
+  margin: 24px 0;
+  border-collapse: collapse;
+  font-family: 'DM Sans', system-ui, sans-serif;
+  font-size: 14px;
+  border-top: 1.5px solid var(--color-foreground);
+  border-bottom: 1.5px solid var(--color-foreground);
+}
+
+.prose-kyomi table thead th {
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground);
+  text-align: left;
+  padding: 12px 16px 10px;
+  border-bottom: 1.5px solid var(--color-foreground);
+}
+
+.prose-kyomi table tbody td {
+  padding: 12px 16px;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-foreground);
+  vertical-align: top;
+}
+
+.prose-kyomi table tbody tr:first-child td {
+  border-top: none;
+}
+
+/* Numeric cells — right-aligned tabular-nums monospace, auto-detected
+ * via user-supplied class. Users can add `.num` to a <td> or <th>
+ * when the content is a numeric value. */
+.prose-kyomi table .num,
+.prose-kyomi table td.num,
+.prose-kyomi table th.num {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* ── Figures — chart/image wrappers with FIGURE rule treatment ── */
+
+.prose-kyomi figure {
+  margin: 48px 0;
+}
+
+.prose-kyomi figure > figcaption {
+  margin-top: 12px;
+  font-family: 'Instrument Serif', Georgia, serif;
+  font-style: italic;
+  font-size: 15px;
+  color: var(--color-muted-foreground);
+  text-align: center;
+  max-width: 60ch;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.4;
+}
+
+/* ── Breakout blocks — charts, tables, code, blockquotes span wider
+ *    than the 72ch body text cap. Uses negative margins so blocks
+ *    remain centered in the container while text stays narrow. */
+
+.prose-kyomi > figure,
+.prose-kyomi > pre,
+.prose-kyomi > table,
+.prose-kyomi > blockquote,
+.prose-kyomi .chart-container {
+  max-width: none;
+  /* The container the .prose-kyomi block lives inside provides its own
+   * padding; breakout blocks fill the full inner width. */
+}
+
+/* ── Scoped opt-out: watch preview card ──────────────────────────
+ *
+ * `WatchPreviewCardView` in `markdown_renderer.rs` renders a Tailwind-
+ * styled UI card that lives INSIDE the `.prose-kyomi` wrapper (because
+ * it's part of the MarkdownRenderer output). But its content is UI
+ * chrome, not editorial prose — it uses Tailwind utilities like
+ * `.text-base`, `.text-xs`, `.font-medium`, `.uppercase`, etc.
+ *
+ * Without this reset, `.prose-kyomi h3` (Instrument Serif 24px with
+ * editorial margins) would win over Tailwind's `.text-base` on the
+ * card's "Watch Preview" heading, and `.prose-kyomi p` would add 16px
+ * bottom margin to every Tailwind-styled label inside the card.
+ *
+ * This block re-establishes the isolation the old Tailwind Typography
+ * `not-prose` escape hatch used to provide, scoped to the card wrapper. */
+
+.prose-kyomi .watch-preview-card :is(h1, h2, h3, h4, h5, h6) {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+  text-transform: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.prose-kyomi .watch-preview-card :is(p, ul, ol, li, blockquote, pre, table, figure, figcaption) {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  max-width: none;
+}
+
+.prose-kyomi .watch-preview-card :is(a, strong, em, code) {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  color: inherit;
+  text-decoration: inherit;
+  background: transparent;
+  padding: 0;
+}
+
+/* ── Dark mode adjustments ─────────────────────────────────────── */
+
+.dark .prose-kyomi h1 code,
+.dark .prose-kyomi h2 code,
+.dark .prose-kyomi h3 code {
+  color: var(--color-primary);
+}
+
+.dark .prose-kyomi table,
+.dark .prose-kyomi table thead th {
+  border-color: var(--color-border-strong);
+}
+
+.dark .prose-kyomi pre,
+.dark .prose-kyomi code {
+  background: var(--color-muted);
 }
 
 /* === Dark Mode Color Overrides === */
@@ -475,13 +908,15 @@ svg text {
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
-  /* ChartML dark theme — warm values matching Kyomi dark mode */
+  /* ChartML dark theme — matches kyomi_theme(is_dark=true) in Rust.
+   * `--chartml-bg` is the page background (separator color that disappears
+   * into the surface), not a white chart fill. */
   --chartml-text: #F5F3EF;
   --chartml-text-secondary: #94A3B8;
   --chartml-text-strong: #F5F3EF;
   --chartml-grid: #334155;
   --chartml-axis-line: #94A3B8;
-  --chartml-bg: #1E293B;
+  --chartml-bg: #0F172A;
   --chartml-annotation: #64748B;
 }
 
@@ -523,17 +958,173 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   --kode-code-fg: var(--color-foreground);
 }
 
-/* ── kode theming ──────────────────────────────────────────────────
- * All kode styling is handled via the Theme API in code_editor.rs.
- * Heading font-sizes are set as CSS variables (no Theme struct field yet).
- * overflow-y: hidden prevents a 1px vertical scrollbar on the toolbar
- * (CSS spec: overflow-x:auto forces overflow-y to auto). */
+/* ── kode WYSIWYG → Editorial Figure typography mapping ───────────
+ *
+ * kode-leptos's TreeWysiwygEditor renders document blocks through its
+ * own class system (.wysiwyg-h1, .wysiwyg-paragraph, .wysiwyg-blockquote,
+ * etc.) rather than through Kyomi's MarkdownRenderer. To keep the editor
+ * visually identical to the viewer, we set the same values as `.prose-kyomi`
+ * (main.css above) but via kode's `--kode-*` CSS variable surface.
+ *
+ * Every field below has a matching rule in `.prose-kyomi`. If you edit
+ * one, edit the other. There's no build-time drift detector — same
+ * hand-maintained mirror pattern as the chartml variables.
+ *
+ * The wysiwyg container is scoped so these overrides don't affect the
+ * source-mode code editor (`.kode-editor` without `.wysiwyg-container`),
+ * which uses monospace for its editing surface. */
 
-.kode-editor, .wysiwyg-container {
-  --kode-h1-font-size: 2rem;          /* 30px — matches .prose h1 */
-  --kode-h2-font-size: 1.6rem;        /* 24px — matches .prose h2 */
-  --kode-h3-font-size: 1.333rem;      /* 20px — matches .prose h3 */
+.wysiwyg-container {
+  /* Content shell — matches `.prose-kyomi` container in this file. */
+  --kode-content-font-family: 'DM Sans', system-ui, sans-serif;
+  --kode-content-font-size: 16px;
+  --kode-content-line-height: 1.7;
+  --kode-content-max-width: 72ch;
+
+  /* Headings — Instrument Serif, Variant A sizes (h1/h2/h3).
+   * h4 is DM Sans semibold 18px, h5/h6 are DM Sans uppercase tracked
+   * muted metadata labels — matching `.prose-kyomi h4/h5/h6`. */
+  --kode-heading-font-family: 'Instrument Serif', Georgia, serif;
+  --kode-heading-font-weight: 400;
+  --kode-heading-line-height: 1.1;
+  --kode-heading-letter-spacing: -0.01em;
+  --kode-heading-color: var(--color-foreground);
+  --kode-heading-emphasis-color: var(--color-primary);
+  /* Shared heading margins — applied to h4/h5/h6 which don't set
+   * per-level overrides. h1/h2/h3 set their own --kode-hN-margin-* and
+   * take precedence. These values match `.prose-kyomi h4/h5/h6` above. */
+  --kode-heading-margin-top: 32px;
+  --kode-heading-margin-bottom: 8px;
+
+  --kode-h1-font-size: 48px;
+  --kode-h1-margin-top: 0;
+  --kode-h1-margin-bottom: 32px;
+  --kode-h1-border-width: 0;     /* drop kode's default h1 bottom border */
+  --kode-h1-padding-bottom: 0;
+
+  --kode-h2-font-size: 36px;
+  --kode-h2-margin-top: 56px;
+  --kode-h2-margin-bottom: 16px;
+  --kode-h2-border-width: 1px;
+  --kode-h2-border-color: var(--color-border);
+  --kode-h2-padding-bottom: 12px;
+
+  --kode-h3-font-size: 24px;
+  --kode-h3-margin-top: 40px;
+  --kode-h3-margin-bottom: 12px;
+
+  /* h4 — DM Sans semibold, regular body-leading */
+  --kode-h4-font-family: 'DM Sans', system-ui, sans-serif;
+  --kode-h4-font-size: 18px;
+  --kode-h4-font-weight: 600;
+  --kode-h4-color: var(--color-foreground);
+  --kode-h4-letter-spacing: normal;
+
+  /* h5/h6 — DM Sans uppercase tracked metadata labels */
+  --kode-h5-font-family: 'DM Sans', system-ui, sans-serif;
+  --kode-h5-font-size: 11px;
+  --kode-h5-font-weight: 500;
+  --kode-h5-color: var(--color-muted-foreground);
+  --kode-h5-text-transform: uppercase;
+  --kode-h5-letter-spacing: 0.08em;
+
+  --kode-h6-font-family: 'DM Sans', system-ui, sans-serif;
+  --kode-h6-font-size: 11px;
+  --kode-h6-font-weight: 500;
+  --kode-h6-color: var(--color-muted-foreground);
+  --kode-h6-text-transform: uppercase;
+  --kode-h6-letter-spacing: 0.08em;
+
+  /* Paragraphs */
+  --kode-paragraph-margin: 0 0 16px;
+  --kode-paragraph-line-height: 1.7;
+
+  /* Inline formatting — strong matches `.prose-kyomi strong` weight 600 */
+  --kode-bold-font-weight: 600;
+
+  /* Links — match `.prose-kyomi a` underline offset + thickness */
+  --kode-link-underline-offset: 3px;
+  --kode-link-decoration-thickness: 1px;
+
+  /* Lists — amber bullets, mono tabular-num ordered markers */
+  --kode-list-marker-color: var(--color-primary);
+  --kode-ul-marker-color: var(--color-primary);
+  --kode-ol-marker-color: var(--color-muted-foreground);
+  --kode-ol-marker-font-family: 'Geist Mono', ui-monospace, monospace;
+  --kode-ol-marker-font-variant-numeric: tabular-nums;
+
+  /* Blockquote — amber rule + italic Instrument Serif */
+  --kode-blockquote-border-width: 3px;
+  --kode-blockquote-border-color: var(--color-primary);
+  --kode-blockquote-background: transparent;
+  --kode-blockquote-color: var(--color-foreground);
+  --kode-blockquote-font-family: 'Instrument Serif', Georgia, serif;
+  --kode-blockquote-font-size: 20px;
+  --kode-blockquote-font-style: italic;
+  --kode-blockquote-line-height: 1.5;
+  --kode-blockquote-margin: 24px 0;
+  --kode-blockquote-padding: 4px 0 4px 24px;
+  --kode-blockquote-border-radius: 0;
+
+  /* Inline code — warm neutral bg, Geist Mono */
+  --kode-code-font-family: 'Geist Mono', ui-monospace, monospace;
+  --kode-inline-code-background: var(--color-secondary);
+  --kode-inline-code-color: var(--color-foreground);
+  --kode-inline-code-padding: 1px 6px;
+  --kode-inline-code-border-radius: 3px;
+
+  /* Inline code INSIDE a heading — transparent bg, amber color, no pill.
+   * Matches `.prose-kyomi h1/h2/h3 code`. */
+  --kode-heading-inline-code-background: transparent;
+  --kode-heading-inline-code-color: var(--color-primary);
+  --kode-heading-inline-code-padding: 0;
+  --kode-heading-inline-code-font-size: 0.85em;
+  --kode-heading-inline-code-border-radius: 0;
+
+  /* Code blocks — editorial code sample aesthetic */
+  --kode-code-block-wrapper-background: transparent;
+  --kode-code-block-wrapper-border-width: 0;
+  --kode-code-block-background: var(--color-secondary);
+  --kode-code-block-inner-border-width: 0;
+  --kode-code-block-border-left: 3px solid var(--color-border-strong);
+  --kode-code-block-padding: 16px 20px;
+  --kode-code-block-border-radius: 0;
+  --kode-code-block-font-size: 13px;
+  --kode-code-block-line-height: 1.55;
+
+  /* Thematic break — editorial section rule */
+  --kode-hr-border-width: 1px;
+  --kode-hr-border-color: var(--color-border-strong);
+  --kode-hr-margin: 48px 0;
+
+  /* Tables — editorial ledger rules, uppercase tracked headers.
+   * Matches `.prose-kyomi table *` above. */
+  --kode-table-border-top-width: 1.5px;
+  --kode-table-border-top-color: var(--color-foreground);
+  --kode-table-border-bottom-width: 1.5px;
+  --kode-table-border-bottom-color: var(--color-foreground);
+  --kode-table-thead-border-bottom-width: 1.5px;
+  --kode-table-thead-border-bottom-color: var(--color-foreground);
+  --kode-table-font-family: 'DM Sans', system-ui, sans-serif;
+  --kode-table-font-size: 14px;
+  --kode-table-th-font-family: 'DM Sans', system-ui, sans-serif;
+  --kode-table-th-font-weight: 500;
+  --kode-table-th-font-size: 11px;
+  --kode-table-th-color: var(--color-muted-foreground);
+  --kode-table-th-text-transform: uppercase;
+  --kode-table-th-letter-spacing: 0.08em;
+  --kode-table-th-padding: 12px 16px 10px;
+  --kode-table-td-padding: 12px 16px;
+  --kode-table-td-color: var(--color-foreground);
+  --kode-table-tbody-row-border-width: 1px;
+  --kode-table-tbody-row-border-color: var(--color-border);
 }
+
+/* Source-mode code editor (`.kode-editor` without `.wysiwyg-container`)
+ * inherits no prose overrides — it's a code surface and uses its own
+ * kode Theme API from `code_editor.rs`. The heading-font-size block
+ * that lived here previously has been moved above into
+ * `.wysiwyg-container` where it belongs. */
 
 .kode-toolbar { overflow-y: hidden; }
 

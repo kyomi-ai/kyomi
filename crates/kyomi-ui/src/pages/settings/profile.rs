@@ -27,6 +27,17 @@ struct PaletteInfo {
 
 const PALETTES: &[PaletteInfo] = &[
     PaletteInfo {
+        id: "kyomi",
+        name: "Kyomi",
+        // Amber-anchored editorial warm — Kyomi signature palette.
+        // Slot 2 is shown here as the light-mode navy; dark mode lifts it
+        // to #5A87C2 automatically at render time.
+        colors: &[
+            "#D97706", "#1E3A5F", "#3D8A5A", "#7C2D12", "#2D7A8A", "#A16207",
+            "#7E22CE", "#6B8A4D", "#0891B2", "#9F1239", "#CA8A04", "#4D5A8A",
+        ],
+    },
+    PaletteInfo {
         id: "balanced",
         name: "Balanced",
         colors: &[

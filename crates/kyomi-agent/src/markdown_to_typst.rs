@@ -27,12 +27,17 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
     let mut table_header_done = false;
     let mut table_rows: Vec<String> = Vec::new();
     let mut table_header_cells: Vec<String> = Vec::new();
+    // Multi-line blockquote collector: consecutive `> ...` lines are grouped
+    // into one `#quote(block: true)[ ... ]` call so the `#show quote:` rule
+    // in pdf_typst::wrap_document() styles them as one editorial pull-quote.
+    let mut blockquote_lines: Vec<String> = Vec::new();
 
     let re_header = regex::Regex::new(r"^(#{1,6})\s+(.*)").expect("valid regex");
     let re_table_sep = regex::Regex::new(r"^\|[\s\-:]+\|$").expect("valid regex");
     let re_ul = regex::Regex::new(r"^[-*+]\s+(.*)").expect("valid regex");
     let re_ol = regex::Regex::new(r"^\d+\.\s+(.*)").expect("valid regex");
     let re_hr = regex::Regex::new(r"^[-*_]{3,}$").expect("valid regex");
+    let re_blockquote = regex::Regex::new(r"^>\s?(.*)").expect("valid regex");
 
     // Track bracket depth for multiline Typst passthrough blocks.
     // When we enter a Typst block (e.g. #block(...)[...]), we pass through
@@ -55,7 +60,7 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
             continue;
         }
 
-        // Empty lines — close open lists/tables, emit blank line
+        // Empty lines — close open lists/tables/blockquotes, emit blank line
         if stripped.is_empty() {
             close_list(&mut output, &mut in_ul, &mut in_ol);
             if in_table {
@@ -65,14 +70,34 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
                 table_header_cells.clear();
                 table_header_done = false;
             }
+            if !blockquote_lines.is_empty() {
+                emit_blockquote(&mut output, &blockquote_lines);
+                blockquote_lines.clear();
+            }
             output.push(String::new());
             continue;
         }
 
-        // Typst passthrough (pre-rendered Typst blocks from metric/table/chart/grid renderers)
+        // Blockquote lines (`> text`) — collect contiguously, emit on next non-blockquote.
+        if let Some(caps) = re_blockquote.captures(stripped) {
+            close_list(&mut output, &mut in_ul, &mut in_ol);
+            blockquote_lines.push(caps[1].to_string());
+            continue;
+        }
+        if !blockquote_lines.is_empty() {
+            emit_blockquote(&mut output, &blockquote_lines);
+            blockquote_lines.clear();
+        }
+
+        // Typst passthrough (pre-rendered Typst blocks from metric/table/chart/grid renderers).
+        // `#figure(...)` is the editorial chart-emission shape used by
+        // `pdf_export.rs` — it must pass through so the `#show figure` rule in
+        // `pdf_typst::wrap_document()` can apply the editorial top/bottom rule
+        // treatment with the "FIGURE N" eyebrow label.
         if stripped.starts_with("#image(")
             || stripped.starts_with("#block(")
             || stripped.starts_with("#table(")
+            || stripped.starts_with("#figure(")
             || stripped.starts_with("#align(")
             || stripped.starts_with("#grid(")
             || stripped.starts_with("#v(")
@@ -179,8 +204,27 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
     if in_table {
         emit_table(&mut output, &table_header_cells, &table_rows, table_columns);
     }
+    if !blockquote_lines.is_empty() {
+        emit_blockquote(&mut output, &blockquote_lines);
+    }
 
     output.join("\n")
+}
+
+/// Emit a collected run of blockquote lines as a single `#quote(block: true)[...]`
+/// call. The `#show quote:` rule in `pdf_typst::wrap_document()` styles this with
+/// a 2pt amber left border and italic Instrument Serif, matching the viewer's
+/// `.prose-kyomi blockquote`.
+fn emit_blockquote(output: &mut Vec<String>, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let body = lines
+        .iter()
+        .map(|l| inline_formatting(l))
+        .collect::<Vec<_>>()
+        .join(" \\\n");
+    output.push(format!("#quote(block: true)[{body}]"));
 }
 
 /// Close any open list context.
@@ -214,29 +258,36 @@ fn emit_table(
         .collect::<Vec<_>>()
         .join(", ");
 
+    // Editorial ledger styling: 1.5pt dark #1C1917 top+bottom, thin 0.5pt
+    // #E8E5DE between rows, uppercase tracked muted header. No zebra fill.
+    // Matches `.prose-kyomi table` rules in main.css.
     let mut table = format!(
         r##"#table(
   columns: (1fr,) * {columns},
   stroke: none,
-  inset: (x: 12pt, y: 9pt),
-  fill: (_, y) => if y == 0 {{ rgb("#F5F3EF") }} else {{ white }},
-  table.hline(stroke: 0.5pt + rgb("#E8E5DE")),
+  inset: (x: 12pt, y: 10pt),
+  table.hline(stroke: 1.5pt + rgb("#1C1917")),
   table.header({header_row}),
-  table.hline(stroke: 0.5pt + rgb("#E8E5DE")),
+  table.hline(stroke: 1.5pt + rgb("#1C1917")),
 "##
     );
 
     for (i, row) in body_rows.iter().enumerate() {
         table.push_str(&format!("  {row},\n"));
-        // Bottom border after each body row
-        let y = i + 1; // row 0 is header
-        table.push_str(&format!(
-            r##"  table.hline(y: {}, stroke: 0.5pt + rgb("#E8E5DE")),
+        // Thin divider between body rows, omitted after the final row
+        // (the bottom edge of the table gets a 1.5pt rule below instead).
+        if i + 1 < body_rows.len() {
+            let y = i + 2; // +1 for header, +1 because we want the line below this row
+            table.push_str(&format!(
+                r##"  table.hline(y: {y}, stroke: 0.5pt + rgb("#E8E5DE")),
 "##,
-            y + 1
-        ));
+            ));
+        }
     }
-    table.push(')');
+    table.push_str(
+        r##"  table.hline(stroke: 1.5pt + rgb("#1C1917")),
+)"##,
+    );
 
     output.push(table);
 }

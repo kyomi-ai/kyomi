@@ -13,6 +13,7 @@ use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
+use chartml_core::theme::Theme;
 use chartml_core::ChartML;
 use chartml_leptos::ChartMLChart;
 use kode_leptos::extension::Extension;
@@ -24,8 +25,9 @@ use crate::components::dashboard::markdown_renderer::{
     apply_spec_overrides, extract_chart_mode, extract_chart_orientation, extract_chart_type,
 };
 
-/// Create a configured ChartML instance, optionally with a color palette.
-fn create_chartml(colors: Option<Vec<String>>) -> Arc<ChartML> {
+/// Create a configured ChartML instance, optionally with a color palette
+/// and a Kyomi chart theme (chrome + typography + shape).
+fn create_chartml(colors: Option<Vec<String>>, theme: Option<Theme>) -> Arc<ChartML> {
     let mut chartml = ChartML::new();
     chartml.register_renderer("bar", CartesianRenderer::new());
     chartml.register_renderer("line", CartesianRenderer::new());
@@ -36,6 +38,9 @@ fn create_chartml(colors: Option<Vec<String>>) -> Arc<ChartML> {
     chartml.register_renderer("metric", MetricRenderer::new());
     if let Some(colors) = colors {
         chartml.set_default_palette(colors);
+    }
+    if let Some(theme) = theme {
+        chartml.set_theme(theme);
     }
     Arc::new(chartml)
 }
@@ -54,13 +59,22 @@ impl Default for ChartMLExtension {
 impl ChartMLExtension {
     pub fn new() -> Self {
         Self {
-            chartml: create_chartml(None),
+            chartml: create_chartml(None, None),
         }
     }
 
     pub fn with_colors(colors: Vec<String>) -> Self {
         Self {
-            chartml: create_chartml(Some(colors)),
+            chartml: create_chartml(Some(colors), None),
+        }
+    }
+
+    /// Create the extension with both a palette and a Kyomi chart theme.
+    /// Used by the dashboard editor so the kode WYSIWYG preview renders
+    /// charts with the same chrome as the dashboard viewer.
+    pub fn with_colors_and_theme(colors: Vec<String>, theme: Theme) -> Self {
+        Self {
+            chartml: create_chartml(Some(colors), Some(theme)),
         }
     }
 }

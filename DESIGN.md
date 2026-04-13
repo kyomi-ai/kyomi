@@ -111,12 +111,36 @@ Each semantic color has background and border variants for alerts:
 
 ### Chart Colors
 
-For data visualizations, use the predefined palettes from `apps/frontend/src/config/chartPalettes.js`:
-- **autumnForest** - Default palette, warm and professional
-- **spectrumPro** - Vibrant, high contrast
-- **horizonSuite** - Cool, modern palette
+Chart palettes live in `kyomi_palette()` in `crates/kyomi-ui/src/components/dashboard/markdown_renderer.rs`. Four options are available; new users and new workspaces default to **kyomi**.
 
-Each palette contains 12 colors optimized for data visualization and colorblind accessibility. The design system accent (#D97706) and navy (#1E3A5F) are valid chart colors for 2-3 series visualizations.
+| Palette | Persona | Notes |
+|---|---|---|
+| **kyomi** (default) | Editorial warm — amber-led, Kyomi signature | Slot 1 is always `#D97706` amber; slot 2 is per-mode (`#1E3A5F` light / `#5A87C2` dark) so the navy lifts above `#0F172A` in dark mode instead of disappearing |
+| **balanced** | Cool-toned professional | Existing default retained for users who picked it explicitly |
+| **vibrant** | High-saturation modern | Unchanged |
+| **accessible** | Maximum luminosity spread, colorblind-validated | Unchanged |
+
+Each palette is 12 colors tuned for perceptual distance in OKLCH space and validated for the three common colorblind deficiencies. The design system accent (`#D97706`) and navy (`#1E3A5F`) are also valid for direct use in 2–3 series visualizations.
+
+### Chart Chrome — "Editorial Figure" (Variant A)
+
+Charts are typeset like figures in a research paper, not drawn like dashboard widgets. The chrome is driven by `kyomi_theme(is_dark)` in `markdown_renderer.rs`, which constructs a `chartml_core::Theme` passed to every chartml instance via `ChartML::set_theme()`. Browser-side, the same values are mirrored as CSS custom properties in `main.css` so light/dark theme toggles update chart chrome instantly without re-rendering.
+
+**Typography**
+- **Chart title:** Instrument Serif, 22px, weight 400 — editorial display, no other BI tool does this
+- **Axis / category labels:** DM Sans, 10px, weight 500, letter-spacing 1.2px, UPPERCASE tracked — Bloomberg Terminal signal, restrained
+- **Numeric tick values:** Geist Mono, 11px, `font-variant-numeric: tabular-nums` — numbers line up like a ledger
+- **Legend:** DM Sans, 11px, weight 500
+
+**Chrome & shape**
+- **Gridlines:** Horizontal only, warm `#EDE9E0` (light) / `#334155` (dark), 1px. No vertical gridlines.
+- **Axis lines:** Editorial baseline — `#1C1917` light / `#94A3B8` dark, 1px
+- **Zero line:** Emphasized — same as axis line color at 1.5px, drawn when data crosses zero
+- **Line weight:** 2px default for all series marks (line paths, area outlines). Inked, not drafted.
+- **Bar corners:** 2px rounded at the **top only** (or the max-value end for horizontal bars / negative bars — sign-aware). Uses `BarCornerRadius::Top(2.0)` from chartml 3.1.0.
+- **Dot markers:** radius 4px, with a 1.5px halo stroke in the page background color so markers read as annotated on top of lines and each other
+- **Chart background:** Transparent — charts sit on the warm `#FAFAF8` page (or `#0F172A` in dark mode). No floating white rectangles.
+- **`theme.bg`:** Matches the page background — this is the color used for element separators (dot outlines, pie slice gaps, stacked bar segment borders). It is NOT a chart-fill color; chartml never emits a background rect.
 
 ## Icons
 

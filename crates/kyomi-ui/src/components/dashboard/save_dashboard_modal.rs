@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::alert::{Alert, AlertVariant};
 use crate::components::empty_state::EmptyState;
@@ -28,15 +29,18 @@ use super::shared::{
     check_circle_icon, BTN_BASE, BTN_DEFAULT, BTN_OUTLINE, BTN_SIZE, DashboardListEntry,
 };
 
-// ─── SVG Icons (local to this module) ───────────────────────────────────────
+// ─── Icon helpers ───────────────────────────────────────────────────────────
 
-/// Plus icon — React: `<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />`
+/// Plus icon wrapper — Lucide `LuPlus` routed through a span that carries
+/// the sizing class. This lets callers keep passing Tailwind size classes
+/// (`w-5 h-5 text-primary-foreground`) while using the design-system icon
+/// library per DESIGN.md (no inline SVG).
 fn plus_icon(class: &str) -> impl IntoView {
     let class = class.to_string();
     view! {
-        <svg class=class fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
-        </svg>
+        <span class=class>
+            <Icon icon=icondata_lu::LuPlus width="100%" height="100%" />
+        </span>
     }
 }
 

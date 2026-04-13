@@ -46,6 +46,7 @@ chartml-chart-pie = { workspace = true }
 chartml-chart-scatter = { workspace = true }
 chartml-chart-metric = { workspace = true }
 chartml-datafusion = { workspace = true }
+kyomi-chart-theme = { workspace = true }
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }

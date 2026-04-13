@@ -105,7 +105,7 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
         .and_then(|v| v.get("config"))
         .and_then(|c| c.get("style"))
         .and_then(|s| s.as_str())
-        .unwrap_or("balanced")
+        .unwrap_or("kyomi")
         .to_string();
 
     Ok(WorkspaceSettingsData {

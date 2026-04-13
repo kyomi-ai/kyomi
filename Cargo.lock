@@ -5794,6 +5794,7 @@ dependencies = [
  "chrono",
  "http",
  "kyomi-auth",
+ "kyomi-chart-theme",
  "kyomi-core",
  "kyomi-datasource",
  "kyomi-datasource-server",
@@ -5869,6 +5870,13 @@ dependencies = [
  "uuid",
  "webauthn-rs",
  "webauthn-rs-proto",
+]
+
+[[package]]
+name = "kyomi-chart-theme"
+version = "0.1.0"
+dependencies = [
+ "chartml-core",
 ]
 
 [[package]]
@@ -6138,6 +6146,7 @@ dependencies = [
  "kode-leptos",
  "kyomi-agent",
  "kyomi-auth",
+ "kyomi-chart-theme",
  "kyomi-connect-protocol",
  "kyomi-core",
  "kyomi-datasource-server",

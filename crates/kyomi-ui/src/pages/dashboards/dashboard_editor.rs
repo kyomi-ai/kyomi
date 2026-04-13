@@ -795,7 +795,7 @@ fn DashboardEditorInner(
                                         <div class="dashboard-content p-6 flex-1">
                                             <MarkdownRenderer
                                                 content=effective_preview
-                                                chart_palette=chart_palette.get().unwrap_or_else(|| "balanced".to_string())
+                                                chart_palette=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
                                                 on_chart_info=Callback::new(move |yaml: String| {
                                                     set_chart_info_yaml.set(yaml);
                                                     set_chart_info_open.set(true);
@@ -901,7 +901,12 @@ fn DashboardEditorInner(
                                     <DashboardWysiwygEditor
                                         content=effective_editor_content
                                         on_change=on_editor_change.clone()
-                                        chart_colors=kyomi_palette(&chart_palette.get().unwrap_or_else(|| "balanced".to_string()))
+                                        chart_colors={
+                                            let is_dark = crate::components::theme::use_theme()
+                                                .map(|s| s.effective.get() == "dark")
+                                                .unwrap_or(false);
+                                            kyomi_palette(&chart_palette.get().unwrap_or_else(|| "kyomi".to_string()), is_dark)
+                                        }
                                         toolbar_items=items
                                         inject=inject
                                     />
@@ -1091,8 +1096,15 @@ fn DashboardWysiwygEditor(
 
         let editor_theme = crate::pages::sql_editor::code_editor::use_editor_theme();
 
+        let is_dark = crate::components::theme::use_theme()
+            .map(|s| s.effective.get_untracked() == "dark")
+            .unwrap_or(false);
+        let kyomi_chart_theme =
+            crate::components::dashboard::markdown_renderer::kyomi_theme(is_dark);
         let extension = match chart_colors {
-            Some(colors) => ChartMLExtension::with_colors(colors),
+            Some(colors) => {
+                ChartMLExtension::with_colors_and_theme(colors, kyomi_chart_theme)
+            }
             None => ChartMLExtension::new(),
         };
         let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![

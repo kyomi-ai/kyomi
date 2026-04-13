@@ -4,6 +4,7 @@
 //! ChartML YAML source, matching React's ChartInfoModal component exactly.
 
 use leptos::prelude::*;
+use leptos_icons::Icon;
 
 use crate::components::modal::{Modal, ModalSize};
 
@@ -119,28 +120,25 @@ pub fn ChartInfoModal(
                             <div class="relative group">
                                 <button
                                     on:click=on_sql_copy
-                                    class="absolute top-2 right-2 p-2 rounded-md bg-accent hover:bg-secondary/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                                    class="absolute top-2 right-2 p-2 rounded-md bg-secondary hover:bg-accent opacity-0 group-hover:opacity-100 transition-opacity z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                     title=move || if sql_copied.get() { "Copied!" } else { "Copy code" }
                                 >
                                     {move || if sql_copied.get() {
                                         view! {
-                                            <svg class="h-4 w-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                                            </svg>
+                                            <span class="block h-4 w-4 text-success-foreground">
+                                                <Icon icon=icondata_lu::LuCheck width="16" height="16" />
+                                            </span>
                                         }.into_any()
                                     } else {
                                         view! {
-                                            <svg class="h-4 w-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                                            </svg>
+                                            <span class="block h-4 w-4 text-muted-foreground">
+                                                <Icon icon=icondata_lu::LuCopy width="16" height="16" />
+                                            </span>
                                         }.into_any()
                                     }}
                                 </button>
-                                <pre
-                                    class="bg-muted rounded-md p-4 overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto"
-                                    style="margin: 0; border: none; font-size: 0.929rem; padding: 16px;"
-                                >
-                                    <code style="font-family: var(--font-mono); background-color: transparent;">
+                                <pre class="bg-muted rounded-md p-4 overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto">
+                                    <code class="font-mono bg-transparent">
                                         {sql_text}
                                     </code>
                                 </pre>
@@ -156,28 +154,25 @@ pub fn ChartInfoModal(
                     <div class="relative group">
                         <button
                             on:click=on_copy
-                            class="absolute top-2 right-2 p-2 rounded-md bg-accent hover:bg-secondary/80 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                            class="absolute top-2 right-2 p-2 rounded-md bg-secondary hover:bg-accent opacity-0 group-hover:opacity-100 transition-opacity z-10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                             title=move || if copied.get() { "Copied!" } else { "Copy code" }
                         >
                             {move || if copied.get() {
                                 view! {
-                                    <svg class="h-4 w-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                                    </svg>
+                                    <span class="block h-4 w-4 text-success-foreground">
+                                        <Icon icon=icondata_lu::LuCheck width="16" height="16" />
+                                    </span>
                                 }.into_any()
                             } else {
                                 view! {
-                                    <svg class="h-4 w-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
-                                    </svg>
+                                    <span class="block h-4 w-4 text-muted-foreground">
+                                        <Icon icon=icondata_lu::LuCopy width="16" height="16" />
+                                    </span>
                                 }.into_any()
                             }}
                         </button>
-                        <pre
-                            class="bg-muted rounded-md overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto"
-                            style="margin: 0; border: none; font-size: 0.929rem; background-color: var(--color-muted); padding: 16px;"
-                        >
-                            <code style="font-family: var(--font-mono); background-color: transparent;">
+                        <pre class="bg-muted rounded-md p-4 overflow-x-auto text-sm font-mono max-h-[300px] overflow-y-auto">
+                            <code class="font-mono bg-transparent">
                                 {move || yaml.get()}
                             </code>
                         </pre>
