@@ -620,15 +620,22 @@ fn WatchPreviewCardView(
     let queries_count = queries.len();
 
     view! {
-        <div class="watch-response not-prose" style="font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif); white-space: normal;">
-            // Render the message as markdown
+        <div class="watch-response">
+            // Render the message as markdown. The outer `MarkdownRenderer`
+            // wraps the whole component in `.prose-kyomi`, so this inner
+            // markdown inherits editorial typography automatically — no
+            // font-family override or prose opt-out needed.
             {(!message_html.is_empty()).then(|| {
                 view! {
                     <div inner_html=message_html.clone()></div>
                 }
             })}
-            // Watch preview card — matches React Card structure
-            <div class="border border-primary/30 bg-primary/5 rounded-lg my-3">
+            // Watch preview card — matches React Card structure.
+            // The `watch-preview-card` class opts out of `.prose-kyomi`
+            // element styling inside the card; main.css scopes a reset
+            // block to `.prose-kyomi .watch-preview-card :is(h1..h6, p, ...)`
+            // so Tailwind utility classes on the card's UI chrome win.
+            <div class="watch-preview-card border border-primary/30 bg-primary/5 rounded-lg my-3">
                 // Card header
                 <div class="px-6 pt-6 pb-2">
                     <div class="flex items-center justify-between">
@@ -1340,7 +1347,7 @@ pub fn MarkdownRenderer(
     let accepted_ids = StoredValue::new(accepted_card_ids);
 
     view! {
-        <div class="prose prose-sm dark:prose-invert max-w-none">
+        <div class="prose-kyomi">
             <For
                 each=move || {
                     segments.get().into_iter().enumerate().collect::<Vec<_>>()
