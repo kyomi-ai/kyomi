@@ -11,6 +11,34 @@ use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_datafusion::DataFusionTransform;
+use std::sync::Once;
+
+use crate::pdf_typst::bundled_fonts_owned;
+
+/// Ensures chartml-render's shared font database is seeded with the
+/// compile-time embedded Kyomi fonts (Instrument Serif, DM Sans, Geist
+/// Mono) exactly once per process. Called at the top of every public
+/// render entry point below — the first invocation wins, subsequent
+/// invocations short-circuit via `Once::call_once`.
+///
+/// Without this, resvg's rasterizer can't resolve the `'DM Sans'` /
+/// `'Instrument Serif'` / `'Geist Mono'` family names that the Kyomi
+/// chart theme sets in SVG `font-family` attributes, and silently drops
+/// every text element in the chart (tick labels, axis labels, titles,
+/// legends). The PNG comes out with bars and gridlines but no text.
+fn ensure_fonts_registered() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // `init_font_database` returns `false` if the fontdb has already
+        // been lazily initialized by a prior render in this process. That
+        // case is only possible if some other code path triggered rendering
+        // before kyomi-agent's first call reaches here, which shouldn't
+        // happen in the normal process lifecycle but we don't error on it —
+        // the render proceeds with system-only fonts, which is strictly
+        // better than panicking.
+        let _ = chartml_render::init_font_database(bundled_fonts_owned());
+    });
+}
 
 /// Create a fully configured ChartML instance with all chart renderers,
 /// the DataFusion transform pipeline, and the Kyomi editorial theme
@@ -69,6 +97,7 @@ pub async fn render_chart_to_png(
     density: u32,
     palette: Option<&[String]>,
 ) -> Result<Vec<u8>, String> {
+    ensure_fonts_registered();
     let chartml = create_chartml();
 
     // If a palette is provided, inject it into the spec's style.colors
@@ -91,6 +120,7 @@ pub fn render_chart_to_png_sync(
     density: u32,
     palette: Option<&[String]>,
 ) -> Result<Vec<u8>, String> {
+    ensure_fonts_registered();
     let chartml = create_chartml();
 
     let final_yaml = if let Some(colors) = palette {

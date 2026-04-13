@@ -28,7 +28,7 @@ static FONT_INSTRUMENT_SERIF_ITALIC: &[u8] = include_bytes!("../fonts/Instrument
 static FONT_GEIST_MONO_REGULAR: &[u8] = include_bytes!("../fonts/GeistMono-Regular.ttf");
 static FONT_GEIST_MONO_MEDIUM: &[u8] = include_bytes!("../fonts/GeistMono-Medium.ttf");
 
-/// All bundled font bytes for the Typst engine.
+/// All bundled font bytes for the Typst engine (static slice references).
 fn bundled_fonts() -> Vec<&'static [u8]> {
     vec![
         FONT_DM_SANS_REGULAR, FONT_DM_SANS_MEDIUM, FONT_DM_SANS_SEMIBOLD,
@@ -36,6 +36,17 @@ fn bundled_fonts() -> Vec<&'static [u8]> {
         FONT_INSTRUMENT_SERIF_REGULAR, FONT_INSTRUMENT_SERIF_ITALIC,
         FONT_GEIST_MONO_REGULAR, FONT_GEIST_MONO_MEDIUM,
     ]
+}
+
+/// All bundled font bytes as owned `Vec<u8>` — the form
+/// `chartml_render::init_font_database` requires. The kyomi-agent
+/// module uses this to seed chartml-render's font database with the
+/// same fonts Typst uses, so chart PNGs embedded in PDFs render
+/// `Instrument Serif`, `DM Sans`, and `Geist Mono` correctly. Without
+/// this, resvg would silently drop text elements whose `font-family`
+/// names aren't in the system font database.
+pub fn bundled_fonts_owned() -> Vec<Vec<u8>> {
+    bundled_fonts().into_iter().map(|b| b.to_vec()).collect()
 }
 
 /// Generate a PDF from a Typst document string and a set of named images.
@@ -186,9 +197,14 @@ fn wrap_document_inner(title: &str, body: &str, cover_date: Option<&str>) -> Str
   footer-descent: 20%,
 )
 
-// Body defaults — editorial density with DM Sans 10.5pt.
+// Body defaults — editorial density with DM Sans 10.5pt. Leading
+// 0.62em / spacing 0.9em — a touch more breathing room inside
+// paragraphs than the pre-editorial 0.55em leading, while keeping
+// the same inter-block spacing so titles still sit tight to their
+// following paragraphs. Still denser than web prose (~0.7em leading
+// at 1.7 line-height).
 #set text(10.5pt, font: "DM Sans", fill: rgb("#1C1917"))
-#set par(leading: 0.55em, spacing: 0.9em)
+#set par(leading: 0.62em, spacing: 0.9em)
 
 // Strong/bold uses weight 600 per .prose-kyomi (Tailwind default is 700).
 #show strong: set text(weight: "semibold")
