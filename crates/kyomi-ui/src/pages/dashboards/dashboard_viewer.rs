@@ -151,6 +151,24 @@ pub fn DashboardViewerPage() -> impl IntoView {
         params.get().get("id").unwrap_or_default()
     });
 
+    // This page is mounted at both /dashboard/:id and /knowledge/:id.
+    // Derive URL base + "list" target from the current pathname so the
+    // back button and edit link keep the user inside the right section.
+    let location = leptos_router::hooks::use_location();
+    let is_knowledge = Memo::new(move |_| location.pathname.get().starts_with("/knowledge"));
+    let list_href = move || if is_knowledge.get() { "/knowledge" } else { "/dashboards" };
+    let back_aria = move || if is_knowledge.get() { "Back to knowledge" } else { "Back to dashboards" };
+    let not_found_label = move || if is_knowledge.get() { "Knowledge Document Not Found" } else { "Dashboard Not Found" };
+    let back_label = move || if is_knowledge.get() { "Back to Knowledge" } else { "Back to Dashboards" };
+    let base_path = move || if is_knowledge.get() { "/knowledge" } else { "/dashboard" };
+    // Singular nouns for button labels, empty states, and PDF fallback filename.
+    let edit_label = move || if is_knowledge.get() { "Edit Document" } else { "Edit Dashboard" };
+    let empty_title = move || if is_knowledge.get() { "This document is empty" } else { "This dashboard is empty" };
+    let empty_hint = move || if is_knowledge.get() { "Click \"Edit Document\" to add content and charts" } else { "Click \"Edit Dashboard\" to add content and charts" };
+    // Used only inside the WASM-gated PDF download block below.
+    #[cfg(target_arch = "wasm32")]
+    let pdf_fallback_name = move || if is_knowledge.get() { "Document.pdf" } else { "Dashboard.pdf" };
+
     // ── User context (roles, capabilities) ──────────────────────────────
     let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
 
@@ -237,7 +255,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         dashboard_resource.refetch();
                     }
                     "deleted" => {
-                        navigate("/dashboards", leptos_router::NavigateOptions::default());
+                        navigate(list_href(), leptos_router::NavigateOptions::default());
                     }
                     _ => {}
                 }
@@ -288,13 +306,13 @@ pub fn DashboardViewerPage() -> impl IntoView {
                             <div class="flex h-full items-center justify-center bg-background">
                                 <div class="text-center">
                                     <h2 class="text-lg font-semibold text-foreground mb-4">
-                                        "Dashboard Not Found"
+                                        {not_found_label()}
                                     </h2>
                                     <p class="text-muted-foreground mb-6">
                                         {e.to_string()}
                                     </p>
-                                    <ButtonLink href="/dashboards">
-                                        "Back to Dashboards"
+                                    <ButtonLink href=list_href().to_string()>
+                                        {back_label()}
                                     </ButtonLink>
                                 </div>
                             </div>
@@ -311,7 +329,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         let did_for_title = did.clone();
 
                         let content = dashboard.content.clone();
-                        let edit_href = format!("/dashboard/{}/edit", did);
+                        let edit_href = format!("{}/{}/edit", base_path(), did);
                         let edit_href_empty = edit_href.clone();
                         let created_at = dashboard.created_at.clone();
                         let updated_at = dashboard.updated_at.clone();
@@ -445,7 +463,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                 })
                                                                 .unwrap_or_else(|| {
                                                                     if title.is_empty() {
-                                                                        "Dashboard.pdf".to_string()
+                                                                        pdf_fallback_name().to_string()
                                                                     } else {
                                                                         // Sanitize title: keep alphanumeric, spaces, hyphens
                                                                         let safe: String = title.chars()
@@ -690,7 +708,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 <div class="page-header h-16 bg-background px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                                     // Left: back button + editable title
                                     <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
-                                        <ButtonLink href="/dashboards" variant=ButtonVariant::Ghost size=ButtonSize::Icon class="flex-shrink-0 text-muted-foreground hover:text-foreground" aria_label="Back to dashboards">
+                                        <ButtonLink href=list_href().to_string() variant=ButtonVariant::Ghost size=ButtonSize::Icon class="flex-shrink-0 text-muted-foreground hover:text-foreground" aria_label=back_aria().to_string()>
                                             <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
                                         </ButtonLink>
 
@@ -842,7 +860,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         // Edit Dashboard — always visible (primary action)
                                         <ButtonLink href=edit_href size=ButtonSize::Sm>
                                             <Icon icon=icondata_lu::LuPencil width="14" height="14" />
-                                            <span class="hidden @6xl:inline whitespace-nowrap">"Edit Dashboard"</span>
+                                            <span class="hidden @6xl:inline whitespace-nowrap">{edit_label()}</span>
                                         </ButtonLink>
                                     </div>
                                 </div>
@@ -889,14 +907,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                     <Icon icon=icondata_lu::LuFileText width="64" height="64" />
                                                                 </div>
                                                                 <h3 class="text-xl font-semibold text-foreground mb-2">
-                                                                    "This dashboard is empty"
+                                                                    {empty_title()}
                                                                 </h3>
                                                                 <p class="text-muted-foreground mb-6">
-                                                                    "Click \"Edit Dashboard\" to add content and charts"
+                                                                    {empty_hint()}
                                                                 </p>
                                                                 <ButtonLink href=edit_href_empty.clone()>
                                                                     <Icon icon=icondata_lu::LuPencil width="14" height="14" />
-                                                                    "Edit Dashboard"
+                                                                    {edit_label()}
                                                                 </ButtonLink>
                                                             </div>
                                                         }.into_any()

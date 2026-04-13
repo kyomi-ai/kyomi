@@ -250,6 +250,7 @@ pub fn KnowledgePage() -> impl IntoView {
                                                         set_deleting_doc.set(Some((id, title)));
                                                         set_confirm_open.set(true);
                                                     })
+                                                    base_path="/knowledge"
                                                 />
                                             }.into_any()
                                         }

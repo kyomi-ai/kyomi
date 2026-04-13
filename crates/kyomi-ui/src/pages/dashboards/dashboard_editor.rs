@@ -58,6 +58,9 @@ pub fn DashboardEditorPage() -> impl IntoView {
 
     let is_new = Memo::new(move |_| dashboard_id.get() == "new");
 
+    let location = leptos_router::hooks::use_location();
+    let is_knowledge = Memo::new(move |_| location.pathname.get().starts_with("/knowledge"));
+
     // Resource created at component level, keyed on dashboard_id
     let dashboard_resource = Resource::new(
         move || dashboard_id.get(),
@@ -67,11 +70,13 @@ pub fn DashboardEditorPage() -> impl IntoView {
     view! {
         {move || {
             if is_new.get() {
-                // New dashboard: skip fetch, go straight to the editor
+                // New dashboard / document: skip fetch, go straight to the editor.
+                // Title placeholder is noun-specific so the user sees the right word.
+                let initial_title = if is_knowledge.get() { "Untitled Document" } else { "Untitled Dashboard" };
                 view! {
                     <DashboardEditorInner
                         dashboard_id=None
-                        initial_title="Untitled Dashboard".to_string()
+                        initial_title=initial_title.to_string()
                         initial_content=String::new()
                     />
                 }
@@ -95,11 +100,11 @@ pub fn DashboardEditorPage() -> impl IntoView {
                                             <div class="flex h-full items-center justify-center bg-background">
                                                 <div class="text-center">
                                                     <h2 class="text-lg font-semibold text-foreground mb-4">
-                                                        "Dashboard Not Found"
+                                                        {if is_knowledge.get() { "Knowledge Document Not Found" } else { "Dashboard Not Found" }}
                                                     </h2>
                                                     <p class="text-muted-foreground mb-6">{e.to_string()}</p>
-                                                    <ButtonLink href="/dashboards">
-                                                        "Back to Dashboards"
+                                                    <ButtonLink href=(if is_knowledge.get() { "/knowledge" } else { "/dashboards" }).to_string()>
+                                                        {if is_knowledge.get() { "Back to Knowledge" } else { "Back to Dashboards" }}
                                                     </ButtonLink>
                                                 </div>
                                             </div>
@@ -178,6 +183,14 @@ fn DashboardEditorInner(
     initial_title: String,
     initial_content: String,
 ) -> impl IntoView {
+    // This page is mounted at both /dashboard/:id/edit and /knowledge/:id/edit.
+    // Derive section-specific labels and URL bases from the current pathname
+    // so back/save navigation stays inside the right section.
+    let location = leptos_router::hooks::use_location();
+    let is_knowledge = Memo::new(move |_| location.pathname.get().starts_with("/knowledge"));
+    let list_href = move || if is_knowledge.get() { "/knowledge" } else { "/dashboards" };
+    let base_path = move || if is_knowledge.get() { "/knowledge" } else { "/dashboard" };
+
     // ── Core signals ─────────────────────────────────────────────────────
     let (title, set_title) = signal(initial_title.clone());
     let (editor_content, set_editor_content) = signal(initial_content.clone());
@@ -336,7 +349,7 @@ fn DashboardEditorInner(
                         // Update URL without full navigation
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let url = format!("/dashboard/{new_id}/edit");
+                            let url = format!("{}/{new_id}/edit", base_path());
                             if let Some(window) = web_sys::window() {
                                 let _ = window
                                     .history()
@@ -568,8 +581,8 @@ fn DashboardEditorInner(
     // ── Back href ────────────────────────────────────────────────────────
     let back_href = Memo::new(move |_| {
         match current_dashboard_id.get() {
-            Some(id) => format!("/dashboard/{id}"),
-            None => "/dashboards".to_string(),
+            Some(id) => format!("{}/{id}", base_path()),
+            None => list_href().to_string(),
         }
     });
 
@@ -600,9 +613,9 @@ fn DashboardEditorInner(
             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
                 // Left: back button + title input
                 <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
-                    <ButtonLink href="/dashboards" variant=ButtonVariant::Ghost size=ButtonSize::Icon
+                    <ButtonLink href=list_href().to_string() variant=ButtonVariant::Ghost size=ButtonSize::Icon
                         class="flex-shrink-0 text-muted-foreground hover:text-foreground"
-                        aria_label="Back to dashboards">
+                        aria_label=(if is_knowledge.get() { "Back to knowledge" } else { "Back to dashboards" }).to_string()>
                         <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
                     </ButtonLink>
 
@@ -610,7 +623,7 @@ fn DashboardEditorInner(
                         <input
                             type="text"
                             class="text-3xl font-display text-foreground bg-transparent border-none outline-none w-full placeholder:text-muted-foreground truncate"
-                            placeholder="Untitled Dashboard"
+                            placeholder=if is_knowledge.get() { "Untitled Document" } else { "Untitled Dashboard" }
                             prop:value=move || title.get()
                             on:input=on_title_input
                         />
@@ -872,7 +885,7 @@ fn DashboardEditorInner(
                                     <Icon icon=icondata_lu::LuLink width="16" height="16" />
                                     <span class="hidden sm:inline">"Link"</span>
                                 }.into_any(),
-                                title: "Link to Dashboard".to_string(),
+                                title: if is_knowledge.get_untracked() { "Link to Document".to_string() } else { "Link to Dashboard".to_string() },
                                 on_click: Arc::new(move || set_link_open.set(true)),
                                 class: Some("kode-toolbar-button flex items-center gap-1".to_string()),
                             }),

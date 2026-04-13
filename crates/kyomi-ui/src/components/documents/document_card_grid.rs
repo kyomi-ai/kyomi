@@ -122,6 +122,11 @@ pub fn DocumentCardGrid(
     /// Callback when a collection badge is clicked.
     #[prop(optional)]
     on_collection_click: Option<Callback<String>>,
+    /// Base URL path for view/edit links. Defaults to `/dashboard` so existing
+    /// callers are unaffected; the knowledge page passes `/knowledge` so its
+    /// cards link to `/knowledge/:id` instead.
+    #[prop(default = "/dashboard")]
+    base_path: &'static str,
 ) -> impl IntoView {
     let total_collection_count = collections.len();
     let collections = std::sync::Arc::new(collections);
@@ -152,6 +157,7 @@ pub fn DocumentCardGrid(
                     on_add_to_collection=on_add_to_collection
                     on_remove_from_collection=on_remove_from_collection
                     on_collection_click=on_collection_click
+                    base_path=base_path
                 />
             }
         })
@@ -180,10 +186,12 @@ fn DocumentCard(
     on_add_to_collection: Option<Callback<DashboardListItem>>,
     on_remove_from_collection: Option<Callback<(String, String, String)>>,
     on_collection_click: Option<Callback<String>>,
+    #[prop(default = "/dashboard")]
+    base_path: &'static str,
 ) -> impl IntoView {
-    let view_href = format!("/dashboard/{}", dashboard.dashboard_id);
+    let view_href = format!("{}/{}", base_path, dashboard.dashboard_id);
     let view_href_footer = view_href.clone();
-    let edit_href = format!("/dashboard/{}/edit", dashboard.dashboard_id);
+    let edit_href = format!("{}/{}/edit", base_path, dashboard.dashboard_id);
     let title = dashboard.title.clone();
     let delete_id = dashboard.dashboard_id.clone();
     let delete_title = dashboard.title.clone();

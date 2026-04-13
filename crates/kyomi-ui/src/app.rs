@@ -123,6 +123,11 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/chats") view=|| view! { <Layout><ChatsListPage/></Layout> }/>
                     <Route path=path!("/sql-editor") view=|| view! { <Layout><crate::pages::sql_editor::SqlEditorPage/></Layout> }/>
                     <Route path=path!("/knowledge") view=|| view! { <Layout><KnowledgePage/></Layout> }/>
+                    // Knowledge docs are dashboards with doc_type="knowledge".
+                    // They reuse the dashboard viewer/editor under /knowledge/:id
+                    // so the URL reflects the user-facing noun.
+                    <Route path=path!("/knowledge/:id") view=|| view! { <Layout><DashboardViewerPage/></Layout> }/>
+                    <Route path=path!("/knowledge/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
                     <Route path=path!("/watches") view=|| view! { <Layout><WatchesPage/></Layout> }/>
                     <Route path=path!("/watches/:view") view=|| view! { <Layout><WatchesPage/></Layout> }/>
                     // Settings pages — wrapped in Layout (sidebar) + SettingsShell

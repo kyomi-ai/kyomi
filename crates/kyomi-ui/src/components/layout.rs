@@ -189,9 +189,6 @@ pub fn Layout(children: Children) -> impl IntoView {
                 .unwrap_or(1024.0);
             let mobile = width < 768.0;
             set_is_mobile.set(mobile);
-            if mobile {
-                set_collapsed.set(true);
-            }
         });
 
         // Listen for resize — attached once, cleaned up on unmount
@@ -207,7 +204,6 @@ pub fn Layout(children: Children) -> impl IntoView {
                 let mobile = width < 768.0;
                 set_is_mobile.set(mobile);
                 if mobile {
-                    set_collapsed.set(true);
                     set_mobile_open.set(false);
                 }
             });
@@ -368,6 +364,11 @@ fn Sidebar(
     let pathname = leptos_router::hooks::use_location().pathname;
     let new_chat_active = Memo::new(move |_| pathname.get() == "/chat");
 
+    // Effective collapsed state: the persisted desktop preference is ignored
+    // when the mobile overlay is showing — the overlay is full-width and must
+    // render labels and expanded spacing.
+    let effective_collapsed = Signal::derive(move || collapsed.get() && !is_mobile.get());
+
     // Logout action — calls POST /leptos-api/logout to revoke the current session
     // and clear HTTPOnly cookies, then navigates to /login.
     // Matches React: AuthContext.jsx `logout()` + Sidebar.jsx `handleLogout()`.
@@ -466,7 +467,7 @@ fn Sidebar(
                     <a
                         href="/chat"
                         class=move || {
-                            let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
+                            let spacing = if effective_collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
                             if new_chat_active.get() {
                                 format!("w-full min-h-[44px] flex items-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-[rgba(217,119,6,0.12)] text-amber-500 {spacing}")
                             } else {
@@ -479,19 +480,19 @@ fn Sidebar(
                         </div>
                         <span
                             class="text-sm font-medium text-[var(--color-sidebar-foreground)] whitespace-nowrap overflow-hidden transition-opacity duration-300"
-                            style=move || if collapsed.get() { "opacity: 0" } else { "opacity: 1" }
+                            style=move || if effective_collapsed.get() { "opacity: 0" } else { "opacity: 1" }
                         >
                             "New chat"
                         </span>
                     </a>
 
-                    <NavItem href="/chats" icon=icondata_lu::LuMessagesSquare label="Chats" collapsed=collapsed/>
-                    <NavItem href="/dashboards" icon=icondata_lu::LuChartBar label="Dashboards" collapsed=collapsed/>
+                    <NavItem href="/chats" icon=icondata_lu::LuMessagesSquare label="Chats" collapsed=effective_collapsed/>
+                    <NavItem href="/dashboards" icon=icondata_lu::LuChartBar label="Dashboards" collapsed=effective_collapsed/>
                     <NavItem
                         href="/watches"
                         icon=icondata_lu::LuEye
                         label="Watches"
-                        collapsed=collapsed
+                        collapsed=effective_collapsed
                         badge_count=Signal::derive(move || {
                             match unread_alerts.get() {
                                 Some(Ok(count)) => count,
@@ -500,15 +501,15 @@ fn Sidebar(
                             }
                         })
                     />
-                    <NavItem href="/knowledge" icon=icondata_lu::LuBookOpen label="Knowledge" collapsed=collapsed/>
-                    <NavItem href="/sql-editor" icon=icondata_lu::LuDatabase label="SQL Editor" collapsed=collapsed/>
+                    <NavItem href="/knowledge" icon=icondata_lu::LuBookOpen label="Knowledge" collapsed=effective_collapsed/>
+                    <NavItem href="/sql-editor" icon=icondata_lu::LuDatabase label="SQL Editor" collapsed=effective_collapsed/>
                 </div>
 
                 // ── Recent Chats ───────────────────────────────────────────
                 // React: "border-t border-border pt-4 flex-1 flex flex-col min-h-0"
                 <div
                     class="border-t border-[var(--color-sidebar-border)] pt-4 flex-1 flex flex-col min-h-0 transition-opacity duration-300"
-                    style=move || if collapsed.get() { "opacity: 0; pointer-events: none" } else { "opacity: 1" }
+                    style=move || if effective_collapsed.get() { "opacity: 0; pointer-events: none" } else { "opacity: 1" }
                 >
                     <div class="flex items-center justify-between px-3 mb-2">
                         <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] font-medium">"Recent Chats"</div>
@@ -608,7 +609,7 @@ fn Sidebar(
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
                                         "flex items-center w-full min-h-[44px] hover:bg-[var(--color-sidebar-hover)] rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring {}",
-                                        if collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-1" }
+                                        if effective_collapsed.get() { "gap-3 px-2" } else { "gap-3 pl-2 pr-3 py-1" }
                                     )
                                 >
                                     <div class="w-6 h-6 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
@@ -620,7 +621,7 @@ fn Sidebar(
                                     </div>
                                     <div
                                         class="flex-1 min-w-0 text-left overflow-hidden transition-[width,opacity] duration-300"
-                                        style=move || if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
+                                        style=move || if effective_collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" }
                                     >
                                         <div class="text-sm font-medium text-[var(--color-sidebar-foreground)] truncate">{display_name.clone()}</div>
                                         {if !is_personal {
@@ -632,7 +633,7 @@ fn Sidebar(
                                     <span
                                         class="text-[var(--color-sidebar-foreground-secondary)] flex-shrink-0 transition-[opacity,width,transform] duration-300"
                                         style=move || {
-                                            let visibility = if collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" };
+                                            let visibility = if effective_collapsed.get() { "opacity: 0; width: 0" } else { "opacity: 1" };
                                             let rotation = if user_menu_open.get() { "; transform: rotate(180deg)" } else { "; transform: rotate(0deg)" };
                                             format!("{visibility}{rotation}")
                                         }
@@ -712,7 +713,7 @@ fn NavItem(
     href: &'static str,
     icon: &'static icondata_core::IconData,
     label: &'static str,
-    collapsed: ReadSignal<bool>,
+    collapsed: Signal<bool>,
     /// Optional badge count (e.g. unread alerts). When > 0, shows a count badge
     /// (expanded) or a dot indicator (collapsed). Mirrors React Sidebar.jsx badge.
     #[prop(optional, into)]

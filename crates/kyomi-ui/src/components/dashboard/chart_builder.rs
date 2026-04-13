@@ -1526,12 +1526,14 @@ fn SqlEditorSection(
     #[cfg(target_arch = "wasm32")]
     {
         use kode_leptos::{CodeEditor, Language};
+        let theme = crate::pages::sql_editor::code_editor::use_editor_theme();
 
         view! {
             <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 420px);">
                 <CodeEditor
                     language=Signal::stored(Language::Sql)
                     content=content
+                    theme=theme
                     on_change=on_change
                 />
             </div>
@@ -1564,12 +1566,14 @@ fn YamlEditorSection(
     #[cfg(target_arch = "wasm32")]
     {
         use kode_leptos::{CodeEditor, Language};
+        let theme = crate::pages::sql_editor::code_editor::use_editor_theme();
 
         view! {
             <div class="h-full min-h-[400px] border-t border-border overflow-hidden">
                 <CodeEditor
                     language=Signal::stored(Language::Yaml)
                     content=content
+                    theme=theme
                     on_change=on_change
                 />
             </div>
