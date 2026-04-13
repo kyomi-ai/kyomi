@@ -613,6 +613,19 @@ html {
 .prose-kyomi ol {
   margin: 0 0 16px;
   padding-left: 24px;
+  /* Tailwind v4 preflight resets list-style to `none` on ul/ol by
+   * default. Without these, the markers defined by
+   * `.prose-kyomi ul > li::marker` and `.prose-kyomi ol > li::marker`
+   * have no glyph to color — the list renders flush-left with no
+   * bullets at all. Restoring the default disc/decimal types. */
+}
+
+.prose-kyomi ul {
+  list-style-type: disc;
+}
+
+.prose-kyomi ol {
+  list-style-type: decimal;
 }
 
 .prose-kyomi li {

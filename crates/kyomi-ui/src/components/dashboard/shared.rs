@@ -140,13 +140,15 @@ pub(crate) fn dashboard_icon(class: &str) -> impl IntoView {
     }
 }
 
-/// Checkmark circle icon — filled circle with checkmark, viewBox="0 0 20 20".
+/// Checkmark circle icon — Lucide `LuCircleCheck`, sized via the caller's
+/// span class. Per DESIGN.md §Icons, all icons come from the Lucide set
+/// via `icondata_lu::*`; no inline SVG in components.
 pub(crate) fn check_circle_icon(class: &str) -> impl IntoView {
     let class = class.to_string();
     view! {
-        <svg class=class fill="currentColor" viewBox="0 0 20 20">
-            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-        </svg>
+        <span class=class>
+            <leptos_icons::Icon icon=icondata_lu::LuCircleCheck width="100%" height="100%" />
+        </span>
     }
 }
 

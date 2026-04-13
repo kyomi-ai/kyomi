@@ -759,16 +759,20 @@ pub fn ChartBuilderModal(
     let (config_tab, set_config_tab) = signal("visual".to_string());
 
     /// CSS classes for underlined tab buttons — matches React's border-b-2 style.
+    /// Active border routes through `border-primary` (design token) rather than
+    /// the hardcoded Tailwind palette `border-amber-600` so it tracks DESIGN.md
+    /// primary color changes automatically.
     const TAB_ACTIVE: &str =
-        "px-1 py-3 text-sm font-medium border-b-2 border-amber-600 text-primary transition-colors";
+        "px-1 py-3 text-sm font-medium border-b-2 border-primary text-primary transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 rounded-sm";
     const TAB_INACTIVE: &str =
-        "px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground hover:border-border transition-colors";
+        "px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground hover:border-border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 rounded-sm";
 
-    /// CSS for config sub-tab pills (matches React's pill-style bg-background toggle).
+    /// CSS for config sub-tab pills (segmented-control pattern — the active
+    /// face reads as a card raised above the muted container).
     const SUB_TAB_ACTIVE: &str =
-        "px-3 py-1 text-xs font-medium rounded bg-background text-foreground shadow-sm transition-colors";
+        "px-3 py-1 text-xs font-medium rounded bg-background text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
     const SUB_TAB_INACTIVE: &str =
-        "px-3 py-1 text-xs font-medium rounded text-muted-foreground hover:text-foreground transition-colors";
+        "px-3 py-1 text-xs font-medium rounded text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
     /// CSS for modifier chip — active state.
     const CHIP_ACTIVE: &str =
