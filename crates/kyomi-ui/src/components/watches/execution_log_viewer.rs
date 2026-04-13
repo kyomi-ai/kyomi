@@ -12,6 +12,7 @@
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{Badge, BadgeVariant, Spinner};
 use crate::types::WatchExecutionItem;
 
@@ -299,12 +300,10 @@ pub fn ExecutionLogViewer(
                             <div class="flex flex-col items-start">
                                 <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
                                     {if let Some(response) = agent_response {
-                                        // For now, render markdown as raw text.
-                                        // Full chartml rendering integration will come later.
                                         view! {
-                                            <div class="text-sm prose prose-sm max-w-none">
-                                                {response}
-                                            </div>
+                                            <MarkdownRenderer
+                                                content=Signal::derive(move || response.clone())
+                                            />
                                         }.into_any()
                                     } else if status == "running" {
                                         view! {

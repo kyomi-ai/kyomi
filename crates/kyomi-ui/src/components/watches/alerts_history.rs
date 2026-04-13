@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos_icons::Icon;
 
+use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
     Switch,
@@ -906,10 +907,9 @@ pub fn AlertsHistory(
                                                     expanded_alerts.get().contains(&alert_id).then(|| {
                                                         view! {
                                                             <div class="px-3 sm:px-4 py-3 border-t border-border bg-muted/30 overflow-x-auto">
-                                                                // Simple prose rendering — full MarkdownRenderer integration comes later
-                                                                <div class="prose prose-sm text-sm">
-                                                                    {agent_response}
-                                                                </div>
+                                                                <MarkdownRenderer
+                                                                    content=Signal::derive(move || agent_response.clone())
+                                                                />
                                                             </div>
                                                         }
                                                     })
