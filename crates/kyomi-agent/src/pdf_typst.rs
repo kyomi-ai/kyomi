@@ -94,12 +94,67 @@ pub fn generate_pdf(
 /// Uses the Kyomi design system: Instrument Serif for headings, DM Sans for
 /// body text, Geist Mono for data, warm grays, and amber (#D97706) accent.
 /// Includes a branded header with logo and amber rule, and a branded footer.
+///
+/// Editorial prose treatment mirrors `.prose-kyomi` in
+/// `crates/kyomi-ui/style/main.css` and the `.wysiwyg-container` CSS variable
+/// block driving the WYSIWYG editor — viewer and PDF render the same content
+/// with the same typography, so the three surfaces (viewer, editor, PDF)
+/// stay consistent. If you change an h2 rule here, also change it in main.css.
+///
+/// No cover page variant. The branded page header with the dashboard title
+/// appears on every page including the first.
 pub fn wrap_document(title: &str, body: &str) -> String {
+    wrap_document_inner(title, body, None)
+}
+
+/// Build a complete Typst document with an optional cover page preceding
+/// the content. Use this for long editorial exports where a title page
+/// gives the document a "finished publication" feel. Pass `None` as the
+/// date to suppress the date line in the cover eyebrow.
+pub fn wrap_document_with_cover(title: &str, body: &str, cover_date: Option<&str>) -> String {
+    wrap_document_inner(title, body, Some(cover_date.unwrap_or("")))
+}
+
+fn wrap_document_inner(title: &str, body: &str, cover_date: Option<&str>) -> String {
     let escaped_title = typst_escape(title);
+
+    // Cover page block — emitted inline before the content when present.
+    // Renders the dashboard title in display-size Instrument Serif with a
+    // small uppercase tracked eyebrow above, then a pagebreak. The branded
+    // header still appears on the cover page because we don't touch per-
+    // page chrome (simpler and keeps the document consistent).
+    let cover_block = match cover_date {
+        Some(date) => {
+            let escaped_date = typst_escape(date);
+            let eyebrow = if escaped_date.is_empty() {
+                "Kyomi \\u{00B7} Dashboard".to_string()
+            } else {
+                format!("Kyomi \\u{{00B7}} Dashboard \\u{{00B7}} {escaped_date}")
+            };
+            format!(
+                r##"#v(4cm)
+#align(left)[
+  #text(8pt, weight: "medium", tracking: 0.12em, fill: rgb("#6B6660"), font: "DM Sans")[
+    #upper[{eyebrow}]
+  ]
+  #v(1.2cm)
+  #text(48pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")[
+    {escaped_title}
+  ]
+]
+#pagebreak()
+
+"##
+            )
+        }
+        None => String::new(),
+    };
+
     format!(
         r##"// -- Kyomi Design System PDF Template --
 // Fonts: Instrument Serif (display), DM Sans (body), Geist Mono (data/code)
 // Colors: warm grays, amber accent (#D97706)
+// Editorial parity with `.prose-kyomi` in crates/kyomi-ui/style/main.css.
 
 #set page(
   paper: "a4",
@@ -131,40 +186,138 @@ pub fn wrap_document(title: &str, body: &str) -> String {
   footer-descent: 20%,
 )
 
-// Body defaults — tighter leading for editorial density
-#set text(10.5pt, font: "DM Sans", fill: rgb("#374151"))
-#set par(leading: 0.55em, spacing: 0.8em)
+// Body defaults — editorial density with DM Sans 10.5pt.
+#set text(10.5pt, font: "DM Sans", fill: rgb("#1C1917"))
+#set par(leading: 0.55em, spacing: 0.9em)
 
-// Heading styles — Instrument Serif for H1/H2, DM Sans for H3
-#set heading(numbering: none)
-#show heading.where(level: 1): it => {{
-  v(2pt)
-  set text(22pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
-  it.body
-  v(2pt)
-  line(length: 100%, stroke: 0.5pt + rgb("#E8E5DE"))
-  v(6pt)
-}}
-#show heading.where(level: 2): it => {{
-  v(6pt)
-  set text(15pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
-  it.body
-  v(3pt)
-}}
-#show heading.where(level: 3): it => {{
-  v(4pt)
-  set text(12pt, weight: "semibold", fill: rgb("#374151"), font: "DM Sans")
-  it.body
-  v(2pt)
-}}
+// Strong/bold uses weight 600 per .prose-kyomi (Tailwind default is 700).
+#show strong: set text(weight: "semibold")
 
-// Links in amber accent
+// Links in amber accent.
 #show link: set text(fill: rgb("#D97706"))
 
-// Raw/code blocks in Geist Mono
-#show raw: set text(font: "Geist Mono", size: 9.5pt)
+// ── Headings ──────────────────────────────────────────────────────
+// h1-h3 use Instrument Serif regular, h4-h6 use DM Sans.
+// Italic emphasis inside h1/h2/h3 is amber (editorial "one-word pop"
+// pattern). h2 has a ruled bottom separator. h5/h6 are uppercase
+// tracked metadata labels.
+#set heading(numbering: none)
 
-{body}
+#show heading.where(level: 1): it => block(below: 16pt)[
+  #set text(32pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
+  #set par(leading: 0.35em)
+  #show emph: set text(fill: rgb("#D97706"), style: "italic")
+  #it.body
+]
+
+#show heading.where(level: 2): it => block(above: 28pt, below: 10pt)[
+  #set text(22pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
+  #set par(leading: 0.35em)
+  #show emph: set text(fill: rgb("#D97706"), style: "italic")
+  #it.body
+  #v(6pt)
+  #line(length: 100%, stroke: 0.5pt + rgb("#E8E5DE"))
+]
+
+#show heading.where(level: 3): it => block(above: 20pt, below: 8pt)[
+  #set text(16pt, weight: "regular", fill: rgb("#1C1917"), font: "Instrument Serif")
+  #set par(leading: 0.35em)
+  #show emph: set text(fill: rgb("#D97706"), style: "italic")
+  #it.body
+]
+
+#show heading.where(level: 4): it => block(above: 16pt, below: 6pt)[
+  #set text(13pt, weight: "semibold", fill: rgb("#1C1917"), font: "DM Sans")
+  #it.body
+]
+
+#show heading.where(level: 5): it => block(above: 14pt, below: 4pt)[
+  #set text(8pt, weight: "medium", fill: rgb("#6B6660"), font: "DM Sans", tracking: 0.08em)
+  #upper[#it.body]
+]
+
+#show heading.where(level: 6): it => block(above: 14pt, below: 4pt)[
+  #set text(8pt, weight: "medium", fill: rgb("#6B6660"), font: "DM Sans", tracking: 0.08em)
+  #upper[#it.body]
+]
+
+// ── Lists ────────────────────────────────────────────────────────
+// Amber bullet markers; ordered-list numerals in Geist Mono so
+// numbers in nested lists align like a ledger.
+#set list(marker: ([#text(fill: rgb("#D97706"))[•]], [#text(fill: rgb("#D97706"))[◦]]))
+#show enum.item: it => {{
+  set text(font: "DM Sans")
+  it
+}}
+
+// ── Blockquote ──────────────────────────────────────────────────
+// Typst renders markdown `> quoted` as the `quote` function, which
+// we style with a 2pt amber left border + italic Instrument Serif
+// 14pt, matching the viewer's blockquote treatment.
+#show quote: it => block(
+  stroke: (left: 2pt + rgb("#D97706")),
+  inset: (left: 14pt, top: 4pt, bottom: 4pt),
+  spacing: 1em,
+)[
+  #set text(14pt, style: "italic", fill: rgb("#1C1917"), font: "Instrument Serif")
+  #it.body
+]
+
+// ── Code — inline and block ─────────────────────────────────────
+// Inline code: Geist Mono on warm #F5F3EF background, pill padding.
+// Block code: Geist Mono 9.5pt on warm #F5F3EF with a 2pt left rule
+// in #D4D0C8, matching the viewer's editorial code sample aesthetic.
+#show raw.where(block: false): it => box(
+  fill: rgb("#F5F3EF"),
+  inset: (x: 4pt, y: 1pt),
+  outset: (y: 3pt),
+  radius: 2pt,
+)[
+  #set text(font: "Geist Mono", size: 0.9em, fill: rgb("#1C1917"))
+  #it
+]
+
+#show raw.where(block: true): it => block(
+  fill: rgb("#F5F3EF"),
+  stroke: (left: 2pt + rgb("#D4D0C8")),
+  inset: (x: 14pt, y: 12pt),
+  spacing: 1em,
+  width: 100%,
+)[
+  #set text(font: "Geist Mono", size: 9.5pt, fill: rgb("#1C1917"))
+  #it
+]
+
+// ── Figures ──────────────────────────────────────────────────────
+// Chart images wrapped in `#figure(...)` render with the signature
+// editorial top+bottom rule treatment and a "FIGURE N" eyebrow above.
+// The caption, if present, is italic Instrument Serif centered below.
+// This is the distinctive move from the variants reference site.
+#set figure(numbering: "1")
+#show figure: it => block(above: 18pt, below: 18pt)[
+  #line(length: 100%, stroke: 1pt + rgb("#1C1917"))
+  #v(4pt)
+  #text(7pt, weight: "medium", fill: rgb("#6B6660"), font: "DM Sans", tracking: 0.12em)[
+    #upper[Figure #context counter(figure).display()]
+  ]
+  #v(6pt)
+  #it.body
+  #v(6pt)
+  #line(length: 100%, stroke: 1pt + rgb("#1C1917"))
+  #if it.caption != none [
+    #v(6pt)
+    #align(center)[
+      #text(9pt, style: "italic", fill: rgb("#6B6660"), font: "Instrument Serif")[
+        // `.body` extracts the raw caption text without Typst's
+        // auto-generated "Figure N." supplement prefix — we already
+        // emit the "FIGURE N" eyebrow manually above the figure body.
+        #it.caption.body
+      ]
+    ]
+  ]
+]
+
+{cover_block}{body}
 "##
     )
 }
@@ -308,6 +461,111 @@ This is a test document with some content.
         assert!(text.contains("Enterprise deals closed"), "list item missing: {text}");
         // Numbered list
         assert!(text.contains("Expand APAC"), "numbered list missing: {text}");
+        // Footer
+        assert!(text.contains("kyomi.ai"), "footer missing: {text}");
+    }
+
+    #[test]
+    fn wrap_document_with_cover_compiles_and_renders() {
+        // Exercises the Phase 6 editorial cover page plus the new `#show
+        // figure` rule. Uses the same production emission shape as
+        // `pdf_export.rs`: charts wrapped in `#figure(image(...))` so the
+        // editorial top+bottom rule treatment fires.
+        use crate::chartml_factory::render_chart_to_png_sync;
+        use crate::markdown_to_typst::markdown_to_typst;
+
+        let chart_yaml = r##"
+type: chart
+version: 1
+title: "Quarterly Revenue"
+data:
+  provider: inline
+  rows:
+    - quarter: "Q1"
+      revenue: 142
+    - quarter: "Q2"
+      revenue: 168
+    - quarter: "Q3"
+      revenue: 195
+    - quarter: "Q4"
+      revenue: 231
+visualize:
+  type: bar
+  columns: quarter
+  rows: revenue
+"##;
+
+        let chart_png = render_chart_to_png_sync(chart_yaml, 700, 380, 144, None)
+            .expect("chart render");
+        let mut images = HashMap::new();
+        images.insert("chart_0.png".to_string(), chart_png);
+
+        // Markdown that mixes all the Phase 4 editorial elements plus a
+        // figure-wrapped chart.
+        let markdown = "\
+## *Quarterly* Highlights\n\n\
+Revenue grew consistently through the year, with Q4 showing the largest \
+jump driven by **enterprise** expansion in the APAC region.\n\n\
+#figure(image(\"chart_0.png\", width: 100%), caption: [Quarterly revenue by region])\n\n\
+### Key drivers\n\n\
+- Enterprise deals closed: **12**\n\
+- New customers: **47**\n\
+- Churn rate: `1.2%`\n\n\
+> The APAC expansion was the single biggest driver of Q4 growth.\n\n\
+---\n\n\
+#### Supporting Data\n\n\
+##### METRICS TRACKED\n\n\
+Metrics pulled from `finance.transactions` and cross-checked against the \
+`reporting.monthly_rollup` materialized view.\n";
+
+        let typst_body = markdown_to_typst(markdown);
+        let typst_doc = wrap_document_with_cover(
+            "Q4 Revenue Report",
+            &typst_body,
+            Some("April 2026"),
+        );
+        std::fs::write("/tmp/kyomi_test_editorial.typ", &typst_doc).unwrap();
+
+        let pdf = generate_pdf(&typst_doc, &images)
+            .expect("editorial PDF with cover + figure should compile");
+        let text = pdf_to_text(&pdf, "editorial");
+
+        // Cover page content. pdftotext inserts spaces between letters when
+        // CSS tracking is applied (the eyebrow uses 0.12em), so "KYOMI"
+        // extracts as "K YO M I". Strip spaces and compare uppercase to
+        // match the actual eyebrow regardless of the visual spacing.
+        assert!(text.contains("Q4 Revenue Report"), "cover title missing: {text}");
+        let text_nospace = text.to_uppercase().replace(' ', "");
+        assert!(
+            text_nospace.contains("KYOMI") && text_nospace.contains("DASHBOARD"),
+            "cover eyebrow missing: {text}"
+        );
+        // Headings
+        assert!(text.contains("Quarterly Highlights"), "h2 missing: {text}");
+        assert!(text.contains("Key drivers"), "h3 missing: {text}");
+        // Body
+        assert!(text.contains("Enterprise deals closed"), "list item missing: {text}");
+        // Blockquote
+        assert!(text.contains("APAC expansion"), "blockquote missing: {text}");
+        // Figure caption — raw caption text without Typst's auto
+        // "Figure N." supplement prefix. We emit "FIGURE N" ourselves
+        // as an eyebrow above the chart, so a second prefix inside the
+        // caption would be a double label.
+        let text_lower = text.to_lowercase();
+        assert!(
+            text_lower.contains("quarterly revenue"),
+            "figure caption missing: {text}"
+        );
+        assert!(
+            !text_lower.contains("figure 1. quarterly"),
+            "figure caption has redundant auto-supplement prefix: {text}"
+        );
+        // The custom show rule should still emit the manual "FIGURE N" eyebrow
+        // above the chart body.
+        assert!(
+            text_lower.contains("figure 1") || text_lower.contains("figure  1"),
+            "figure eyebrow missing: {text}"
+        );
         // Footer
         assert!(text.contains("kyomi.ai"), "footer missing: {text}");
     }

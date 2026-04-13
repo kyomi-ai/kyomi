@@ -165,8 +165,12 @@ pub async fn generate_dashboard_pdf(
     // 6. Convert processed markdown to Typst markup
     let typst_body = markdown_to_typst::markdown_to_typst(&processed_content);
 
-    // 7. Wrap in full Typst document with page setup
-    let typst_doc = pdf_typst::wrap_document(title, &typst_body);
+    // 7. Wrap in full Typst document with page setup. Every export gets
+    //    an editorial cover page showing the dashboard title and the
+    //    export date — gives the document a "finished publication" feel
+    //    rather than dropping straight into content on page 1.
+    let today = chrono::Utc::now().format("%B %Y").to_string();
+    let typst_doc = pdf_typst::wrap_document_with_cover(title, &typst_body, Some(&today));
 
     // 8. Compile Typst → PDF (pure Rust, no external deps)
     let pdf_bytes = pdf_typst::generate_pdf(&typst_doc, &chart_png_bytes)?;
@@ -279,10 +283,27 @@ fn replace_chartml_with_typst(
             if let Some(typst) = typst_rendered.get(&spec_idx) {
                 others.push(typst.clone());
             } else if let Some(filename) = chart_image_refs.get(&spec_idx) {
+                // Emit a `#figure(...)` rather than a plain block. The
+                // `#show figure` rule in `wrap_document()` adds the
+                // editorial top+bottom rule treatment plus a
+                // "FIGURE N" eyebrow above the chart — the distinctive
+                // markup-as-published-paper move from the variants
+                // reference site.
+                let chart_title = if spec_idx < extraction.specs.len() {
+                    chartml_utils::get_chart_title(&extraction.specs[spec_idx])
+                } else {
+                    String::new()
+                };
+                let caption_arg = if chart_title.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", caption: [{}]",
+                        pdf_typst::typst_escape(&chart_title)
+                    )
+                };
                 others.push(format!(
-                    r##"#block(stroke: 0.5pt + rgb("#E8E5DE"), radius: 4pt, clip: true, width: 100%)[
-  #image("{filename}", width: 100%)
-]"##,
+                    r##"#figure(image("{filename}", width: 100%){caption_arg})"##,
                 ));
             } else {
                 let chart_title = if spec_idx < extraction.specs.len() {
