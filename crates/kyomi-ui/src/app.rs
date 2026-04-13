@@ -107,32 +107,37 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/setup") view=PersonalSetupPage/>
                     <Route path=path!("/connect/setup") view=ConnectSetupPage/>
                     <Route path=path!("/accept-ownership/:transfer_id") view=AcceptOwnershipPage/>
-                    // Dashboard pages — wrapped in Layout (sidebar)
-                    <Route path=path!("/dashboards") view=|| view! { <Layout><DashboardsListPage/></Layout> }/>
-                    <Route path=path!("/dashboard/:id") view=|| view! { <Layout><DashboardViewerPage/></Layout> }/>
-                    <Route path=path!("/dashboard/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
-                    // Main app pages — wrapped in Layout
-                    <Route path=path!("/") view=|| view! { <Layout><HomePage/></Layout> }/>
-                    // Chat pages — ParentRoute keeps ChatPage mounted when navigating
-                    // from /chat (new chat) to /chat/:session_id (after session creation),
-                    // so streaming state is not lost on the URL transition.
-                    <ParentRoute path=path!("/chat") view=|| view! { <Layout><ChatPage/></Layout> }>
-                        <Route path=path!("") view=|| view! { <Outlet/> }/>
-                        <Route path=path!("/:session_id") view=|| view! { <Outlet/> }/>
-                    </ParentRoute>
-                    <Route path=path!("/chats") view=|| view! { <Layout><ChatsListPage/></Layout> }/>
-                    <Route path=path!("/sql-editor") view=|| view! { <Layout><crate::pages::sql_editor::SqlEditorPage/></Layout> }/>
-                    <Route path=path!("/knowledge") view=|| view! { <Layout><KnowledgePage/></Layout> }/>
-                    // Knowledge docs are dashboards with doc_type="knowledge".
-                    // They reuse the dashboard viewer/editor under /knowledge/:id
-                    // so the URL reflects the user-facing noun.
-                    <Route path=path!("/knowledge/:id") view=|| view! { <Layout><DashboardViewerPage/></Layout> }/>
-                    <Route path=path!("/knowledge/:id/edit") view=|| view! { <Layout><DashboardEditorPage/></Layout> }/>
-                    <Route path=path!("/watches") view=|| view! { <Layout><WatchesPage/></Layout> }/>
-                    <Route path=path!("/watches/:view") view=|| view! { <Layout><WatchesPage/></Layout> }/>
-                    // Settings pages — wrapped in Layout (sidebar) + SettingsShell
-                    <ParentRoute path=path!("/settings") view=|| view! {
-                        <Layout>
+                    // ── Authenticated app shell ──────────────────────────
+                    // ALL routes below mount under a single Layout instance
+                    // via this ParentRoute. The Layout — and the WebSocket
+                    // connection it owns — persists across navigation instead
+                    // of being torn down and rebuilt on every page change.
+                    // Previously each route wrapped its own <Layout>, so each
+                    // navigation created a fresh WebSocket; after 10 navs the
+                    // server's MAX_CONNECTIONS_PER_USER (10) was hit and every
+                    // subsequent connection was rejected with close code 4029.
+                    <ParentRoute path=path!("") view=|| view! { <Layout><Outlet/></Layout> }>
+                        <Route path=path!("/") view=HomePage/>
+                        <Route path=path!("/dashboards") view=DashboardsListPage/>
+                        <Route path=path!("/dashboard/:id") view=DashboardViewerPage/>
+                        <Route path=path!("/dashboard/:id/edit") view=DashboardEditorPage/>
+                        // Chat — nested ParentRoute so ChatPage stays mounted
+                        // across /chat ↔ /chat/:session_id transitions.
+                        <ParentRoute path=path!("/chat") view=ChatPage>
+                            <Route path=path!("") view=|| view! { <Outlet/> }/>
+                            <Route path=path!("/:session_id") view=|| view! { <Outlet/> }/>
+                        </ParentRoute>
+                        <Route path=path!("/chats") view=ChatsListPage/>
+                        <Route path=path!("/sql-editor") view=crate::pages::sql_editor::SqlEditorPage/>
+                        <Route path=path!("/knowledge") view=KnowledgePage/>
+                        // Knowledge docs reuse the dashboard viewer/editor.
+                        <Route path=path!("/knowledge/:id") view=DashboardViewerPage/>
+                        <Route path=path!("/knowledge/:id/edit") view=DashboardEditorPage/>
+                        <Route path=path!("/watches") view=WatchesPage/>
+                        <Route path=path!("/watches/:view") view=WatchesPage/>
+                        // Settings — nested ParentRoute provides the SettingsShell
+                        // chrome around the settings tab routes.
+                        <ParentRoute path=path!("/settings") view=|| view! {
                             <div class="flex flex-col h-full bg-muted overflow-x-hidden" style:flex-direction="column">
                                 <div class="flex-1 overflow-y-auto p-4 md:p-6 relative">
                                     // Close button — matches React SettingsPage.jsx positioning
@@ -150,18 +155,18 @@ pub fn App() -> impl IntoView {
                                     </div>
                                 </div>
                             </div>
-                        </Layout>
-                    }>
-                        <Route path=path!("") view=|| view! { <Redirect path="/settings/profile"/> }/>
-                        <Route path=path!("/profile") view=ProfilePage/>
-                        <Route path=path!("/security") view=SecurityTab/>
-                        <Route path=path!("/workspace") view=WorkspacePage/>
-                        <Route path=path!("/datasources") view=DatasourcesPage/>
-                        <Route path=path!("/ai") view=AiPage/>
-                        <Route path=path!("/analytics") view=AnalyticsPage/>
-                        <Route path=path!("/usage") view=UsagePage/>
-                        <Route path=path!("/billing") view=BillingPage/>
-                        <Route path=path!("/team") view=TeamPage/>
+                        }>
+                            <Route path=path!("") view=|| view! { <Redirect path="/settings/profile"/> }/>
+                            <Route path=path!("/profile") view=ProfilePage/>
+                            <Route path=path!("/security") view=SecurityTab/>
+                            <Route path=path!("/workspace") view=WorkspacePage/>
+                            <Route path=path!("/datasources") view=DatasourcesPage/>
+                            <Route path=path!("/ai") view=AiPage/>
+                            <Route path=path!("/analytics") view=AnalyticsPage/>
+                            <Route path=path!("/usage") view=UsagePage/>
+                            <Route path=path!("/billing") view=BillingPage/>
+                            <Route path=path!("/team") view=TeamPage/>
+                        </ParentRoute>
                     </ParentRoute>
                 </Routes>
             </Router>
