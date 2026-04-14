@@ -24,11 +24,11 @@ use crate::components::{
 use crate::components::select::{CHEVRON_STYLE, SELECT_CLASS};
 use crate::components::toast::{toast_error, toast_success};
 use crate::pages::settings::ai_models::{
-    label_for_model, models_for_provider, provider_label, KYOMI_CREDITS_MODELS, ModelOption,
+    label_for_model, provider_label, KYOMI_CREDITS_MODELS,
 };
 use crate::server_fns::ai::{
-    get_workspace_ai_config, test_workspace_ai_config, update_workspace_ai_config,
-    WorkspaceAiConfigView,
+    get_workspace_ai_config, list_workspace_ai_models, test_workspace_ai_config,
+    update_workspace_ai_config, AiModelInfo, WorkspaceAiConfigView,
 };
 use crate::server_fns::context::UserContext;
 
@@ -482,28 +482,51 @@ fn ByokPanel(
     let initial_base_url = cfg.base_url.clone().unwrap_or_default();
     let had_api_key = cfg.has_api_key;
 
-    // Pre-select "custom model" if the server has a model that isn't in the
-    // catalog for its provider.
-    let initial_model_choice = {
-        let in_catalog = models_for_provider(&initial_provider)
-            .iter()
-            .any(|m| m.id == initial_model);
-        if initial_model.is_empty() || in_catalog {
-            initial_model.clone()
-        } else {
-            CUSTOM_MODEL_SENTINEL.to_string()
-        }
-    };
-
     let (provider, set_provider) = signal(initial_provider);
     let (api_key, set_api_key) = signal(String::new());
-    let (model_choice, set_model_choice) = signal(initial_model_choice);
+    let (model_choice, set_model_choice) = signal(initial_model.clone());
     let (custom_model, set_custom_model) = signal(initial_model);
     let (base_url, set_base_url) = signal(initial_base_url);
     let (show_advanced, set_show_advanced) = signal(false);
     let (test_result, set_test_result) = signal::<Option<Result<String, String>>>(None);
 
-    // Reset model_choice + custom_model when the provider changes.
+    // Bumped after a successful test or save to trigger a model-list refetch.
+    let (refetch_models_version, set_refetch_models_version) = signal(0u32);
+    // The most recently *tested* (validated) candidate key. Passed to the
+    // model-list resource so we can fetch the live list before the user
+    // commits via Save.
+    let (last_tested_key, set_last_tested_key) = signal::<Option<String>>(None);
+    // Tracks whether we've already reconciled `model_choice` against the
+    // initial fetched-models list (to convert unknown ids → custom mode).
+    let (initial_apply_done, set_initial_apply_done) = signal(false);
+
+    // Live model list for the current BYOK provider. Also tracks the
+    // advanced-panel base_url override so users with custom proxy endpoints
+    // list models from their configured URL, not the provider default.
+    let models_resource = Resource::new(
+        move || {
+            (
+                provider.get(),
+                refetch_models_version.get(),
+                last_tested_key.get(),
+                base_url.get(),
+            )
+        },
+        |(prov, _, candidate_key, url)| async move {
+            let url_opt = {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            };
+            list_workspace_ai_models(prov, candidate_key, url_opt).await
+        },
+    );
+
+    // Reset model_choice + custom_model + last_tested_key when the provider
+    // changes.
     Effect::new(move |prev_provider: Option<String>| {
         let current = provider.get();
         if let Some(prev) = prev_provider.as_ref()
@@ -512,8 +535,31 @@ fn ByokPanel(
             set_model_choice.set(String::new());
             set_custom_model.set(String::new());
             set_test_result.set(None);
+            set_last_tested_key.set(None);
+            set_initial_apply_done.set(false);
         }
         current
+    });
+
+    // After the first successful fetch, if the currently-selected model isn't
+    // in the returned list, flip to custom-model mode preserving the value.
+    // Runs at most once per provider switch.
+    Effect::new(move |_| {
+        if initial_apply_done.get() {
+            return;
+        }
+        let Some(Ok(list)) = models_resource.get() else {
+            return;
+        };
+        let current = model_choice.get_untracked();
+        if !current.is_empty()
+            && current != CUSTOM_MODEL_SENTINEL
+            && !list.iter().any(|m| m.id == current)
+        {
+            set_custom_model.set(current);
+            set_model_choice.set(CUSTOM_MODEL_SENTINEL.to_string());
+        }
+        set_initial_apply_done.set(true);
     });
 
     // Resolve the actual model ID to send to the server.
@@ -544,10 +590,16 @@ fn ByokPanel(
             if m.is_empty() { None } else { Some(m) }
         };
 
+        let key_for_refetch = key.clone();
         match test_workspace_ai_config(prov, key, url_opt, model_opt).await {
             Ok(result) => {
                 if result.ok {
                     set_test_result.set(Some(Ok(result.message)));
+                    // Promote the just-tested key so the model list resource
+                    // can fetch with it (no need to Save first).
+                    set_last_tested_key.set(Some(key_for_refetch));
+                    set_initial_apply_done.set(false);
+                    set_refetch_models_version.update(|v| *v += 1);
                 } else {
                     set_test_result.set(Some(Err(result.message)));
                 }
@@ -582,6 +634,10 @@ fn ByokPanel(
             Ok(_) => {
                 toast_success("AI configuration saved.");
                 set_api_key.set(String::new());
+                // The stored key is now valid — drop the last-tested fallback
+                // and refetch models against the persisted credentials.
+                set_last_tested_key.set(None);
+                set_refetch_models_version.update(|v| *v += 1);
                 refresh.run(());
             }
             Err(e) => toast_error(format!("Failed to save: {e}")),
@@ -672,22 +728,59 @@ fn ByokPanel(
                     // ── Model ────────────────────────────────────────────
                     <div class="space-y-2">
                         <Label>"Model"</Label>
-                        <select
-                            class=SELECT_CLASS
-                            style=CHEVRON_STYLE
-                            disabled=!is_admin
-                            prop:value=move || model_choice.get()
-                            on:change=move |ev| set_model_choice.set(event_target_value(&ev))
-                        >
-                            <option value="">"Select a model..."</option>
+                        <Suspense fallback=move || view! {
+                            <select
+                                class=SELECT_CLASS
+                                style=CHEVRON_STYLE
+                                disabled=true
+                            >
+                                <option>"Loading models\u{2026}"</option>
+                            </select>
+                        }>
                             {move || {
-                                let prov = provider.get();
-                                models_for_provider(&prov).iter().map(|m: &ModelOption| view! {
-                                    <option value=m.id>{m.label}</option>
-                                }).collect_view()
+                                let resource_value = models_resource.get();
+                                let (models, fetch_error): (Vec<AiModelInfo>, Option<String>) =
+                                    match resource_value {
+                                        Some(Ok(list)) => (list, None),
+                                        Some(Err(e)) => (Vec::new(), Some(e.to_string())),
+                                        None => (Vec::new(), None),
+                                    };
+
+                                let current = model_choice.get();
+                                // If the current selection isn't in the fetched
+                                // list (and isn't custom/empty), inject a synthetic
+                                // option so the dropdown isn't blank during the
+                                // pre-reconciliation flicker window.
+                                let needs_synthetic = !current.is_empty()
+                                    && current != CUSTOM_MODEL_SENTINEL
+                                    && !models.iter().any(|m| m.id == current);
+                                let synthetic_id = current.clone();
+
+                                view! {
+                                    <select
+                                        class=SELECT_CLASS
+                                        style=CHEVRON_STYLE
+                                        disabled=!is_admin
+                                        prop:value=move || model_choice.get()
+                                        on:change=move |ev| set_model_choice.set(event_target_value(&ev))
+                                    >
+                                        <option value="">"Select a model..."</option>
+                                        {needs_synthetic.then(|| view! {
+                                            <option value=synthetic_id.clone()>{synthetic_id.clone()}</option>
+                                        })}
+                                        {models.into_iter().map(|m| view! {
+                                            <option value=m.id.clone()>{m.label}</option>
+                                        }).collect_view()}
+                                        <option value=CUSTOM_MODEL_SENTINEL>"Custom model ID\u{2026}"</option>
+                                    </select>
+                                    {fetch_error.map(|msg| view! {
+                                        <p class="text-xs text-error-foreground">
+                                            "Couldn\u{2019}t load models: " {msg}
+                                        </p>
+                                    })}
+                                }
                             }}
-                            <option value=CUSTOM_MODEL_SENTINEL>"Custom model ID\u{2026}"</option>
-                        </select>
+                        </Suspense>
                         <Show when=move || model_choice.get() == CUSTOM_MODEL_SENTINEL>
                             <input
                                 type="text"

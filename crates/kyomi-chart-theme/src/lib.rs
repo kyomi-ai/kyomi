@@ -116,55 +116,82 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
         )
     };
 
-    Theme {
-        // ----- chrome colors -----
-        text: text_primary.into(),
-        text_secondary: text_secondary.into(),
-        text_strong: text_primary.into(),
-        axis_line: axis.into(),
-        tick: axis.into(),
-        grid: grid.into(),
-        bg: page_bg.into(),
+    // `Theme` is `#[non_exhaustive]` upstream, so consumers can't build it
+    // with struct literals. Start from the chartml default and override
+    // only the fields that carry editorial intent. Any future field
+    // additions in chartml-core get sensible defaults automatically —
+    // this is a compile-time-enforced contract, not a convention.
+    let mut t = Theme::default();
 
-        // ----- typography: title -----
-        title_font_family: "'Instrument Serif', Georgia, serif".into(),
-        title_font_size: 22.0,
-        title_font_weight: 400,
-        title_font_style: "normal".into(),
+    // ----- chrome colors -----
+    t.text = text_primary.into();
+    t.text_secondary = text_secondary.into();
+    t.text_strong = text_primary.into();
+    t.axis_line = axis.into();
+    t.tick = axis.into();
+    t.grid = grid.into();
+    t.bg = page_bg.into();
 
-        // ----- typography: labels -----
-        label_font_family: "'DM Sans', system-ui, sans-serif".into(),
-        label_font_size: 10.0,
-        label_font_weight: 500,
-        label_letter_spacing: 1.2,
-        label_text_transform: TextTransform::Uppercase,
+    // ----- typography: title -----
+    t.title_font_family = "'Instrument Serif', Georgia, serif".into();
+    t.title_font_size = 22.0;
+    t.title_font_weight = 400;
+    t.title_font_style = "normal".into();
 
-        // ----- typography: numeric tick values -----
-        numeric_font_family: "'Geist Mono', ui-monospace, monospace".into(),
-        numeric_font_size: 11.0,
+    // ----- typography: labels -----
+    t.label_font_family = "'DM Sans', system-ui, sans-serif".into();
+    t.label_font_size = 10.0;
+    t.label_font_weight = 500;
+    t.label_letter_spacing = 1.2;
+    t.label_text_transform = TextTransform::Uppercase;
 
-        // ----- typography: legend -----
-        legend_font_family: "'DM Sans', system-ui, sans-serif".into(),
-        legend_font_size: 11.0,
-        legend_font_weight: 500,
+    // ----- typography: numeric tick values -----
+    t.numeric_font_family = "'Geist Mono', ui-monospace, monospace".into();
+    t.numeric_font_size = 11.0;
 
-        // ----- shape / stroke -----
-        axis_line_weight: 1.0,
-        grid_line_weight: 1.0,
-        series_line_weight: 2.0,
-        annotation_line_weight: 1.0,
-        bar_corner_radius: BarCornerRadius::Top(2.0),
-        dot_radius: 4.0,
-        dot_halo_color: Some(halo.into()),
-        dot_halo_width: 1.5,
+    // ----- typography: legend -----
+    t.legend_font_family = "'DM Sans', system-ui, sans-serif".into();
+    t.legend_font_size = 11.0;
+    t.legend_font_weight = 500;
 
-        // ----- grid + baseline -----
-        grid_style: GridStyle::HorizontalOnly,
-        zero_line: Some(ZeroLineSpec {
-            color: zero.into(),
-            width: 1.5,
-        }),
-    }
+    // ----- shape / stroke -----
+    t.axis_line_weight = 1.0;
+    t.grid_line_weight = 1.0;
+    t.series_line_weight = 2.0;
+    t.annotation_line_weight = 1.0;
+    t.bar_corner_radius = BarCornerRadius::Top(2.0);
+    t.dot_radius = 4.0;
+    t.dot_halo_color = Some(halo.into());
+    t.dot_halo_width = 1.5;
+
+    // ----- grid + baseline -----
+    t.grid_style = GridStyle::HorizontalOnly;
+    t.zero_line = Some(ZeroLineSpec {
+        color: zero.into(),
+        width: 1.5,
+    });
+
+    // ----- table chrome -----
+    //
+    // Derived from the same editorial palette used for the rest of the
+    // theme so rendered `<table>`s in chart exports match the chart chrome
+    // they sit alongside. The row background uses the page-matched
+    // `page_bg` for a transparent-feeling surface, the alternating stripe
+    // and the cell borders both use `grid` (the warm neutral in light mode,
+    // muted slate in dark mode), and cell text uses the primary text color
+    // so headers and body read at the same weight as axis labels. Cell
+    // padding and font size are CSS string values — kept modest so tables
+    // don't dominate a chart figure.
+    t.table_header_bg = grid.into();
+    t.table_header_text = text_primary.into();
+    t.table_row_bg = page_bg.into();
+    t.table_row_bg_alt = grid.into();
+    t.table_border = grid.into();
+    t.table_text = text_primary.into();
+    t.table_cell_padding = "8px 12px".into();
+    t.table_font_size = "13px".into();
+
+    t
 }
 
 #[cfg(test)]

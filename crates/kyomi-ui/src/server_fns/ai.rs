@@ -56,6 +56,17 @@ pub struct WorkspaceAiConfigView {
     pub ai_bundle_balance_usd: Option<f64>,
 }
 
+/// One model entry returned by [`list_workspace_ai_models`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AiModelInfo {
+    /// Provider-specific model identifier (e.g. `gpt-4o`, `claude-sonnet-4-5-20250929`,
+    /// `gemini-2.5-pro`). Sent verbatim back to the provider when issuing requests.
+    pub id: String,
+    /// Human-readable display label. Falls back to `id` when the provider does
+    /// not supply a friendly name.
+    pub label: String,
+}
+
 /// Result of a candidate-config connectivity test.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TestAiConfigResult {
@@ -420,6 +431,343 @@ fn extract_error_message(body: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// list_workspace_ai_models
+// ---------------------------------------------------------------------------
+
+/// List models available from a BYOK provider, filtered to chat-completion
+/// capable entries. Admin/owner only. SaaS only.
+///
+/// API key resolution:
+/// * If `api_key` is `Some(non-empty)` after trimming, that candidate key is
+///   used (lets the UI refresh the list right after a successful test, before
+///   the user has hit Save).
+/// * Otherwise the stored config is loaded; if it matches the requested
+///   provider AND has a stored key, that key is used.
+/// * Otherwise returns `Ok(vec![])` — the UI degrades to the custom-model
+///   input. This is a normal pre-save state, not an error.
+///
+/// `kyomi` is rejected: the curated `KYOMI_CREDITS_MODELS` list is the source
+/// of truth for that mode and is not fetched live.
+#[server(prefix = "/leptos-api")]
+pub async fn list_workspace_ai_models(
+    provider: String,
+    api_key: Option<String>,
+    base_url: Option<String>,
+) -> Result<Vec<AiModelInfo>, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_saas(&ctx)?;
+    require_workspace_admin(&auth)?;
+
+    if provider == "kyomi" {
+        return Err(ServerFnError::new(
+            "Kyomi mode uses a curated model list; live model listing is not supported.",
+        ));
+    }
+    if !matches!(provider.as_str(), "anthropic" | "openai" | "gemini") {
+        return Err(ServerFnError::new(format!("Unknown provider: {provider}")));
+    }
+
+    // Resolve the candidate key.
+    let candidate_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // Resolve the candidate key AND stored base_url together: when we fall
+    // back to the stored key, we must also honour the workspace's stored
+    // base_url override so users with custom proxies (corporate Anthropic
+    // proxy, Azure OpenAI, etc.) list models from their configured endpoint
+    // rather than silently hitting the default one.
+    let (resolved_key, stored_base_url): (String, Option<String>) = match candidate_key {
+        Some(k) => (k, None),
+        None => {
+            let ws_id = workspace_id(&auth)?;
+            let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
+                .await
+                .map_err(|e| ServerFnError::new(e.to_string()))?;
+            // Cross-provider guard: never use a stored key intended for
+            // provider X to list models from provider Y.
+            if cfg.provider.as_str() != provider {
+                return Ok(Vec::new());
+            }
+            let stored_base = cfg.base_url.clone();
+            match cfg.api_key {
+                Some(k) if !k.trim().is_empty() => (k, stored_base),
+                _ => return Ok(Vec::new()),
+            }
+        }
+    };
+
+    // Resolve base URL: caller-supplied override → stored workspace config → default.
+    let base = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .or_else(|| {
+            stored_base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_end_matches('/').to_string())
+        })
+        .or_else(|| default_base_url(&provider).map(str::to_string))
+        .ok_or_else(|| ServerFnError::new(format!("No base URL for provider: {provider}")))?;
+
+    fetch_provider_models(&provider, &resolved_key, &base).await
+}
+
+/// HTTP fetch + parse dispatch for the three live-listing providers.
+#[cfg(feature = "ssr")]
+async fn fetch_provider_models(
+    provider: &str,
+    api_key: &str,
+    base: &str,
+) -> Result<Vec<AiModelInfo>, ServerFnError> {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| ServerFnError::new(format!("Failed to create HTTP client: {e}")))?;
+
+    let url = match provider {
+        "anthropic" => format!("{base}/v1/models"),
+        "openai" => format!("{base}/models"),
+        "gemini" => format!("{base}/models"),
+        _ => return Err(ServerFnError::new(format!("Unknown provider: {provider}"))),
+    };
+
+    let req = match provider {
+        "anthropic" => client
+            .get(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01"),
+        "openai" => client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}")),
+        "gemini" => client
+            .get(&url)
+            .query(&[("key", api_key), ("pageSize", "1000")]),
+        _ => unreachable!(),
+    };
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(ServerFnError::new(sanitise_error(&e.to_string(), api_key)));
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let detail = extract_error_message(&body).unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(ServerFnError::new(sanitise_error(&detail, api_key)));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))?;
+
+    let parsed = match provider {
+        "anthropic" => parse_anthropic_models(&body),
+        "openai" => parse_openai_models(&body),
+        "gemini" => parse_gemini_models(&body),
+        _ => unreachable!(),
+    };
+
+    parsed.map_err(|e| {
+        ServerFnError::new(sanitise_error(
+            &format!("Failed to parse provider response: {e}"),
+            api_key,
+        ))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Provider parsers (pure CPU — unit-testable without network)
+// ---------------------------------------------------------------------------
+
+/// Parse Anthropic `GET /v1/models` response.
+///
+/// Shape: `{"data":[{"id":"claude-...","display_name":"Claude ...","type":"model","created_at":"2024-..."}]}`.
+/// All entries with `type == "model"` are kept; label prefers `display_name`,
+/// sorted by `created_at` descending (newest first).
+#[cfg(feature = "ssr")]
+fn parse_anthropic_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Resp {
+        data: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default, rename = "type")]
+        kind: Option<String>,
+        #[serde(default)]
+        created_at: Option<String>,
+    }
+
+    let parsed: Resp = serde_json::from_str(body)?;
+    let mut entries: Vec<(Option<String>, AiModelInfo)> = parsed
+        .data
+        .into_iter()
+        .filter(|e| e.kind.as_deref().unwrap_or("model") == "model")
+        .map(|e| {
+            let label = e.display_name.clone().unwrap_or_else(|| e.id.clone());
+            (
+                e.created_at,
+                AiModelInfo {
+                    id: e.id,
+                    label,
+                },
+            )
+        })
+        .collect();
+
+    // Sort by created_at desc; entries missing created_at fall to the end and
+    // sort reverse-alphabetically among themselves.
+    entries.sort_by(|a, b| match (&a.0, &b.0) {
+        (Some(x), Some(y)) => y.cmp(x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.1.id.cmp(&a.1.id),
+    });
+
+    Ok(entries.into_iter().map(|(_, m)| m).collect())
+}
+
+/// Parse OpenAI `GET /v1/models` response.
+///
+/// Shape: `{"data":[{"id":"gpt-4o","created":1234567890,"object":"model"}]}`.
+/// Filters to chat-completion-capable models (allowlist of id prefixes minus
+/// a denylist of substrings for non-chat variants like embeddings, audio,
+/// vision-only, image, moderation, etc.). Sorted by `created` desc.
+#[cfg(feature = "ssr")]
+fn parse_openai_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Resp {
+        data: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        #[serde(default)]
+        created: Option<i64>,
+    }
+
+    let parsed: Resp = serde_json::from_str(body)?;
+
+    const ALLOWED_PREFIXES: &[&str] = &["gpt-", "chatgpt-", "o1", "o3", "o4"];
+    const DENY_SUBSTRINGS: &[&str] = &[
+        "-instruct",
+        "-audio",
+        "-realtime",
+        "-tts",
+        "-transcribe",
+        "-search",
+        "-image",
+        "embedding",
+        "whisper",
+        "dall-e",
+        "tts-",
+        "moderation",
+        "babbage",
+        "davinci",
+        "-vision-preview",
+    ];
+
+    let mut entries: Vec<(Option<i64>, AiModelInfo)> = parsed
+        .data
+        .into_iter()
+        .filter(|e| {
+            let id = &e.id;
+            ALLOWED_PREFIXES.iter().any(|p| id.starts_with(p))
+                && !DENY_SUBSTRINGS.iter().any(|s| id.contains(s))
+        })
+        .map(|e| {
+            (
+                e.created,
+                AiModelInfo {
+                    label: e.id.clone(),
+                    id: e.id,
+                },
+            )
+        })
+        .collect();
+
+    entries.sort_by(|a, b| match (a.0, b.0) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.1.id.cmp(&a.1.id),
+    });
+
+    Ok(entries.into_iter().map(|(_, m)| m).collect())
+}
+
+/// Parse Gemini `GET /v1beta/models` response.
+///
+/// Shape: `{"models":[{"name":"models/gemini-1.5-pro","displayName":"Gemini 1.5 Pro","supportedGenerationMethods":["generateContent"]}]}`.
+/// Requires `supportedGenerationMethods` to contain `generateContent`. Strips
+/// the `models/` prefix from the id. Sorted reverse-alphabetically by id so
+/// newer model families surface first (`gemini-2.5-pro` > `gemini-1.5-pro`).
+#[cfg(feature = "ssr")]
+fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        models: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        name: String,
+        #[serde(default, rename = "displayName")]
+        display_name: Option<String>,
+        #[serde(default, rename = "supportedGenerationMethods")]
+        supported_generation_methods: Vec<String>,
+    }
+
+    let parsed: Resp = serde_json::from_str(body)?;
+
+    const DENY_SUBSTRINGS: &[&str] = &[
+        "embedding",
+        "aqa",
+        "imagen",
+        "text-bison",
+        "chat-bison",
+        "-tuning",
+    ];
+
+    let mut entries: Vec<AiModelInfo> = parsed
+        .models
+        .into_iter()
+        .filter(|e| {
+            e.supported_generation_methods
+                .iter()
+                .any(|m| m == "generateContent")
+        })
+        .filter_map(|e| {
+            let id = e.name.strip_prefix("models/").unwrap_or(&e.name).to_string();
+            if DENY_SUBSTRINGS.iter().any(|s| id.contains(s)) {
+                return None;
+            }
+            let label = e.display_name.unwrap_or_else(|| id.clone());
+            Some(AiModelInfo { id, label })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
 // Extractor re-exports
 // ---------------------------------------------------------------------------
 
@@ -525,5 +873,162 @@ mod tests {
     #[test]
     fn extract_error_message_none_for_non_json() {
         assert_eq!(extract_error_message("<html>500</html>"), None);
+    }
+
+    // ---- parse_anthropic_models -----------------------------------------
+
+    #[test]
+    fn parse_anthropic_models_keeps_all_and_uses_display_name() {
+        let body = r#"{
+            "data": [
+                {"id":"claude-sonnet-4-5-20250929","display_name":"Claude Sonnet 4.5","type":"model","created_at":"2025-09-29T00:00:00Z"},
+                {"id":"claude-haiku-4-5-20251001","display_name":"Claude Haiku 4.5","type":"model","created_at":"2025-10-01T00:00:00Z"}
+            ]
+        }"#;
+        let parsed = parse_anthropic_models(body).unwrap();
+        assert_eq!(parsed.len(), 2);
+        // Newest first (haiku 2025-10-01 > sonnet 2025-09-29)
+        assert_eq!(parsed[0].id, "claude-haiku-4-5-20251001");
+        assert_eq!(parsed[0].label, "Claude Haiku 4.5");
+        assert_eq!(parsed[1].id, "claude-sonnet-4-5-20250929");
+        assert_eq!(parsed[1].label, "Claude Sonnet 4.5");
+    }
+
+    #[test]
+    fn parse_anthropic_models_sorts_by_created_at_desc() {
+        let body = r#"{
+            "data": [
+                {"id":"claude-old","display_name":"Old","type":"model","created_at":"2023-01-01T00:00:00Z"},
+                {"id":"claude-new","display_name":"New","type":"model","created_at":"2025-01-01T00:00:00Z"},
+                {"id":"claude-mid","display_name":"Mid","type":"model","created_at":"2024-06-01T00:00:00Z"}
+            ]
+        }"#;
+        let parsed = parse_anthropic_models(body).unwrap();
+        assert_eq!(
+            parsed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["claude-new", "claude-mid", "claude-old"],
+        );
+    }
+
+    #[test]
+    fn parse_anthropic_models_falls_back_to_id_when_display_name_missing() {
+        let body = r#"{
+            "data": [
+                {"id":"claude-bare","type":"model"}
+            ]
+        }"#;
+        let parsed = parse_anthropic_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].label, "claude-bare");
+    }
+
+    // ---- parse_openai_models --------------------------------------------
+
+    #[test]
+    fn parse_openai_models_excludes_embeddings_and_whisper() {
+        let body = r#"{
+            "data": [
+                {"id":"gpt-4o","created":1715000000,"object":"model"},
+                {"id":"text-embedding-3-large","created":1700000000,"object":"model"},
+                {"id":"whisper-1","created":1690000000,"object":"model"},
+                {"id":"dall-e-3","created":1695000000,"object":"model"},
+                {"id":"tts-1","created":1690000000,"object":"model"},
+                {"id":"omni-moderation-latest","created":1690000000,"object":"model"},
+                {"id":"babbage-002","created":1690000000,"object":"model"},
+                {"id":"davinci-002","created":1690000000,"object":"model"},
+                {"id":"gpt-3.5-turbo-instruct","created":1690000000,"object":"model"}
+            ]
+        }"#;
+        let parsed = parse_openai_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "gpt-4o");
+    }
+
+    #[test]
+    fn parse_openai_models_keeps_gpt4o_and_o1() {
+        let body = r#"{
+            "data": [
+                {"id":"gpt-4o","created":1715000000,"object":"model"},
+                {"id":"gpt-4o-mini","created":1716000000,"object":"model"},
+                {"id":"o1-preview","created":1720000000,"object":"model"},
+                {"id":"o3-mini","created":1735000000,"object":"model"},
+                {"id":"chatgpt-4o-latest","created":1730000000,"object":"model"}
+            ]
+        }"#;
+        let parsed = parse_openai_models(body).unwrap();
+        let ids: Vec<&str> = parsed.iter().map(|m| m.id.as_str()).collect();
+        // Sorted by created desc.
+        assert_eq!(
+            ids,
+            vec![
+                "o3-mini",
+                "chatgpt-4o-latest",
+                "o1-preview",
+                "gpt-4o-mini",
+                "gpt-4o",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_openai_models_excludes_audio_and_realtime_variants() {
+        let body = r#"{
+            "data": [
+                {"id":"gpt-4o-audio-preview","created":1720000000,"object":"model"},
+                {"id":"gpt-4o-realtime-preview","created":1720000000,"object":"model"},
+                {"id":"gpt-4o-search-preview","created":1720000000,"object":"model"},
+                {"id":"gpt-4o","created":1715000000,"object":"model"}
+            ]
+        }"#;
+        let parsed = parse_openai_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "gpt-4o");
+    }
+
+    // ---- parse_gemini_models --------------------------------------------
+
+    #[test]
+    fn parse_gemini_models_requires_generate_content() {
+        let body = r#"{
+            "models": [
+                {"name":"models/gemini-2.5-pro","displayName":"Gemini 2.5 Pro","supportedGenerationMethods":["generateContent","countTokens"]},
+                {"name":"models/text-embedding-004","displayName":"Text Embedding 004","supportedGenerationMethods":["embedContent"]}
+            ]
+        }"#;
+        let parsed = parse_gemini_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "gemini-2.5-pro");
+        assert_eq!(parsed[0].label, "Gemini 2.5 Pro");
+    }
+
+    #[test]
+    fn parse_gemini_models_excludes_embeddings() {
+        let body = r#"{
+            "models": [
+                {"name":"models/gemini-2.5-pro","displayName":"Gemini 2.5 Pro","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/gemini-embedding-001","displayName":"Gemini Embedding","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/aqa","displayName":"Attributed QA","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/imagen-3.0","displayName":"Imagen","supportedGenerationMethods":["generateContent"]}
+            ]
+        }"#;
+        let parsed = parse_gemini_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "gemini-2.5-pro");
+    }
+
+    #[test]
+    fn parse_gemini_models_sorts_reverse_alpha() {
+        let body = r#"{
+            "models": [
+                {"name":"models/gemini-1.5-pro","displayName":"Gemini 1.5 Pro","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/gemini-2.5-pro","displayName":"Gemini 2.5 Pro","supportedGenerationMethods":["generateContent"]},
+                {"name":"models/gemini-2.0-flash","displayName":"Gemini 2.0 Flash","supportedGenerationMethods":["generateContent"]}
+            ]
+        }"#;
+        let parsed = parse_gemini_models(body).unwrap();
+        assert_eq!(
+            parsed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"],
+        );
     }
 }

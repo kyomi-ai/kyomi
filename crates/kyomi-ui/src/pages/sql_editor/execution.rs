@@ -105,8 +105,11 @@ fn run_paginated_query(
 
                 query_running.set(false);
 
-                // Fire-and-forget: save success to history.
+                // Fire-and-forget: save success to history, then bump the
+                // shared history refresh tick so the sidebar's QueryHistory
+                // panel refetches and shows this run without a page reload.
                 save_to_history(
+                    state,
                     sql,
                     execution_time.map(|t| t as i32),
                     history_result.bytes_processed.map(|b| b as i64),
@@ -130,8 +133,11 @@ fn run_paginated_query(
 
                 query_running.set(false);
 
-                // Fire-and-forget: save error to history.
+                // Fire-and-forget: save error to history, then bump the
+                // sidebar refresh tick (same reason as the success path —
+                // failed queries still appear in the history list).
                 save_to_history(
+                    state,
                     sql,
                     None,
                     None,
@@ -147,8 +153,14 @@ fn run_paginated_query(
 
 /// Fire-and-forget helper to save a query execution to history.
 ///
-/// Matches the React `finally` block in `SQLEditorPage.handleRunQuery`.
+/// After the server acknowledges the write, bumps `state.history_refresh_tick`
+/// so the sidebar's QueryHistory panel refetches and shows the new entry
+/// without a page reload. The tick is bumped even on save failure — the row
+/// in the tab's result area is the source of truth for the user, and the
+/// tick bump is cheap; if the save itself failed the history list just won't
+/// contain a new row, which is the desired behaviour.
 pub(super) fn save_to_history(
+    state: SqlEditorState,
     query_text: String,
     execution_time_ms: Option<i32>,
     bytes_processed: Option<i64>,
@@ -169,6 +181,7 @@ pub(super) fn save_to_history(
             datasource,
         )
         .await;
+        state.history_refresh_tick.update(|n| *n += 1);
     });
 }
 

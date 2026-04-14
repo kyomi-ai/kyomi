@@ -85,6 +85,11 @@ pub struct SqlEditorState {
     pub active_right_tab: RwSignal<Option<SidebarTab>>,
     /// Right sidebar width percentage (0-50).
     pub right_sidebar_percentage: RwSignal<u32>,
+    /// Monotonic counter the sidebar's query-history Resource keys on. Bumped
+    /// after each successful `save_query_history` call in
+    /// `execution::save_to_history` so the history list reflects the query
+    /// the user just ran without waiting for a page reload. Not persisted.
+    pub history_refresh_tick: RwSignal<u32>,
 }
 
 impl SqlEditorState {
@@ -103,6 +108,7 @@ impl SqlEditorState {
             default_page_size: RwSignal::new(DEFAULT_PAGE_SIZE),
             active_right_tab: RwSignal::new(None),
             right_sidebar_percentage: RwSignal::new(DEFAULT_SIDEBAR_PERCENTAGE),
+            history_refresh_tick: RwSignal::new(0),
         };
 
         // Restore from localStorage on the client.

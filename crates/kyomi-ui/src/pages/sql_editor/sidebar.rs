@@ -192,7 +192,11 @@ pub fn SqlEditorSidebar(
     // ── History search state (with 300ms debounce) ──────────────────────
     let (history_search_input, set_history_search_input) = signal(String::new());
     let (history_search, _set_history_search) = signal(String::new());
-    let (history_refresh_trigger, _set_history_refresh_trigger) = signal(0u32);
+    // History refresh tick lives on the shared SqlEditorState so
+    // `execution::save_to_history` can bump it after a query runs and the
+    // QueryHistory panel will refetch automatically.
+    let history_refresh_trigger =
+        Signal::derive(move || state.history_refresh_tick.get());
 
     // Debounce history search input → actual search query.
     #[cfg(feature = "hydrate")]
