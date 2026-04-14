@@ -123,39 +123,21 @@ fn view_from_config(
     }
 }
 
-/// Row shape for reading the AI token bundle balance.
+/// Read the live remaining AI token bundle balance for a workspace, in USD.
 ///
-/// `ai_bundle_balance_usd` is the total purchased balance and
-/// `ai_credits_used_usd` is the amount consumed; the remaining balance shown
-/// in the UI is `(balance - used).max(0.0)`. Matches the computation in
-/// `server_fns::billing::get_subscription_info`.
-#[cfg(feature = "ssr")]
-#[derive(sqlx::FromRow)]
-struct AiBundleRow {
-    ai_bundle_balance_usd: f64,
-    ai_credits_used_usd: f64,
-}
-
-/// Read the remaining AI token bundle balance for a workspace, in USD.
-///
-/// Returns `Ok(None)` if the workspace row is missing — callers fall back to
-/// omitting the balance clause in the UI rather than pretending it's $0.00.
+/// Delegates to
+/// [`kyomi_auth::billing_service::BillingService::get_bundle_remaining_usd`]
+/// which computes the value from authoritative live usage records rather than
+/// the stale `ai_credits_used_usd` cache column. Returns `Ok(None)` when the
+/// billing service errors (e.g. workspace missing) so the UI omits the balance
+/// clause rather than surfacing "$0.00".
 #[cfg(feature = "ssr")]
 async fn load_ai_bundle_remaining_usd(
     db: &kyomi_core::DbPool,
     ws_id: &str,
 ) -> Result<Option<f64>, ServerFnError> {
-    let row = kyomi_core::db_fetch_optional!(
-        db,
-        AiBundleRow,
-        "SELECT \
-         COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
-         COALESCE(ai_credits_used_usd, 0) AS ai_credits_used_usd \
-         FROM workspaces WHERE workspace_id = $1",
-        ws_id
-    )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(row.map(|r| (r.ai_bundle_balance_usd - r.ai_credits_used_usd).max(0.0)))
+    let service = kyomi_auth::billing_service::BillingService::new();
+    Ok(service.get_bundle_remaining_usd(db, ws_id).await.ok())
 }
 
 // ---------------------------------------------------------------------------

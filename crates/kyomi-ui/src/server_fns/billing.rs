@@ -134,10 +134,6 @@ struct WorkspaceRow {
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
     #[sqlx(default)]
-    ai_bundle_balance_usd: Option<f64>,
-    #[sqlx(default)]
-    ai_credits_used_usd: Option<f64>,
-    #[sqlx(default)]
     analytics_bundle_events: Option<i64>,
 }
 
@@ -195,8 +191,6 @@ async fn load_workspace(
          CAST(trial_ends_at AS TEXT) AS trial_ends_at, \
          user_limit, \
          stripe_customer_id, stripe_subscription_id, \
-         COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
-         COALESCE(ai_credits_used_usd, 0) AS ai_credits_used_usd, \
          COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
          FROM workspaces WHERE workspace_id = $1",
         ws_id
@@ -267,10 +261,15 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         }
     };
 
-    // AI bundle balance remaining = purchased balance - credits used
-    let ai_bundle_balance_usd = workspace.ai_bundle_balance_usd.unwrap_or(0.0);
-    let ai_credits_used_usd = workspace.ai_credits_used_usd.unwrap_or(0.0);
-    let ai_remaining_usd = (ai_bundle_balance_usd - ai_credits_used_usd).max(0.0);
+    // AI bundle balance remaining comes from the billing service, which
+    // computes it from authoritative live usage records. Using the stale
+    // `ai_credits_used_usd` cache column here produced a stuck "$X.XX
+    // remaining" display that never decreased as users actually consumed
+    // credits — see the Billing Service comment for the full story.
+    let ai_remaining_usd = kyomi_auth::billing_service::BillingService::new()
+        .get_bundle_remaining_usd(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
     let ai_token_balance_cents = (ai_remaining_usd * 100.0) as i64;
 
     // Analytics events this month from Redis (same pattern as usage.rs).

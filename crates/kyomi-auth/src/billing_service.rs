@@ -46,6 +46,13 @@ pub struct CreditsInfo {
     pub total_calls: i64,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
+    /// Authoritative bundle remaining. Computed as
+    /// `bundle_purchased - max(0, used_usd - tier_budget)` so it reflects
+    /// actual live draw-down of the purchased AI token bundle after the
+    /// monthly tier allowance has been consumed. Use this instead of reading
+    /// the `ai_credits_used_usd` column directly — that column is a stale
+    /// fallback/cache and is not incremented in real time.
+    pub bundle_remaining_usd: f64,
 }
 
 /// Whether AI usage is allowed and any warning level.
@@ -77,6 +84,9 @@ pub struct AiUsageStatus {
     pub trial_ends_at: Option<DateTime<Utc>>,
     pub per_user: PerUserUsage,
     pub by_feature: std::collections::HashMap<String, f64>,
+    /// Authoritative purchased-bundle remaining, in USD. See
+    /// [`CreditsInfo::bundle_remaining_usd`] for the definition.
+    pub bundle_remaining_usd: f64,
 }
 
 // ─── Internal row types ─────────────────────────────────────────────────────
@@ -283,8 +293,9 @@ impl BillingService {
         })?;
 
         // Get budget for this tier, plus any purchased bundle balance
-        let budget_usd = Self::get_ai_budget_for_tier(ws.subscription_tier, ws.user_limit)
-            + ws.ai_bundle_balance_usd;
+        let tier_budget_usd = Self::get_ai_budget_for_tier(ws.subscription_tier, ws.user_limit);
+        let bundle_purchased_usd = ws.ai_bundle_balance_usd;
+        let budget_usd = tier_budget_usd + bundle_purchased_usd;
 
         // Get actual usage for current billing period
         let usage = self
@@ -294,6 +305,14 @@ impl BillingService {
 
         // Calculate remaining and percentage
         let remaining_usd = (budget_usd - used_usd).max(0.0);
+
+        // Pure bundle remaining = purchased bundle minus whatever portion of
+        // live usage exceeds the monthly tier allowance. Usage first consumes
+        // the tier allowance; only the overflow draws from the bundle. When
+        // the tier allowance is zero (free plan + purchased bundle), the
+        // bundle draws down dollar-for-dollar with usage.
+        let bundle_draw_usd = (used_usd - tier_budget_usd).max(0.0);
+        let bundle_remaining_usd = (bundle_purchased_usd - bundle_draw_usd).max(0.0);
         let percentage_used = if budget_usd > 0.0 {
             ((used_usd / budget_usd) * 100.0).min(100.0)
         } else {
@@ -329,7 +348,24 @@ impl BillingService {
             total_calls: usage.total_calls,
             period_start: usage.period_start,
             period_end: usage.period_end,
+            bundle_remaining_usd,
         })
+    }
+
+    /// Return the authoritative remaining balance of the workspace's
+    /// purchased AI token bundle, in USD. Wraps [`calculate_credits_info`] for
+    /// callers that don't need the full credits breakdown. Always prefer this
+    /// over reading the `ai_credits_used_usd` column directly — that column
+    /// is a stale fallback that isn't updated in real time.
+    pub async fn get_bundle_remaining_usd(
+        &self,
+        db: &DbPool,
+        workspace_id: &str,
+    ) -> kyomi_core::Result<f64> {
+        Ok(self
+            .calculate_credits_info(db, workspace_id)
+            .await?
+            .bundle_remaining_usd)
     }
 
     /// Check if AI usage is allowed for a workspace.
@@ -521,6 +557,7 @@ impl BillingService {
                 fair_share_percentage: fair_share_pct,
             },
             by_feature,
+            bundle_remaining_usd: credits_info.bundle_remaining_usd,
         })
     }
 }

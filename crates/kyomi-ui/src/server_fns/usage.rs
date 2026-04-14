@@ -14,12 +14,16 @@ use std::collections::HashMap;
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};
 
-/// Workspace bundle balances row (SSR only).
+/// Workspace row — analytics-bundle-only.
+///
+/// The AI bundle balance displayed on the usage page used to be computed here
+/// as `ai_bundle_balance_usd - ai_credits_used_usd`, but `ai_credits_used_usd`
+/// is a stale cache column that isn't updated in real time. The authoritative
+/// live value now comes from
+/// [`kyomi_auth::billing_service::AiUsageStatus::bundle_remaining_usd`].
 #[cfg(feature = "ssr")]
 #[derive(Debug, sqlx::FromRow)]
 struct BundleRow {
-    ai_bundle_balance_usd: f64,
-    ai_credits_used_usd: f64,
     analytics_bundle_events: i64,
 }
 
@@ -99,21 +103,20 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Fetch bundle balances from the workspace row.
+    // Analytics bundle balance comes from the workspace row. The AI bundle
+    // remaining comes from `status.bundle_remaining_usd` below — it's the
+    // authoritative live value (see BundleRow doc comment).
     let bundles = kyomi_core::db_fetch_optional!(
         &ctx.db,
         BundleRow,
-        "SELECT COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd, \
-         COALESCE(ai_credits_used_usd, 0) AS ai_credits_used_usd, \
-         COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
+        "SELECT COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
          FROM workspaces WHERE workspace_id = $1",
         ws_id
     )
     .map_err(|e| ServerFnError::new(format!("failed to fetch bundle balances: {e}")))?;
 
-    let (ai_bundle_remaining_usd, analytics_bundle_events) = bundles
-        .map(|b| ((b.ai_bundle_balance_usd - b.ai_credits_used_usd).max(0.0), b.analytics_bundle_events))
-        .unwrap_or((0.0, 0));
+    let analytics_bundle_events = bundles.map(|b| b.analytics_bundle_events).unwrap_or(0);
+    let ai_bundle_remaining_usd = status.bundle_remaining_usd;
 
     // Get analytics events used this month from Redis.
     let analytics_events_used: u64 = if let Some(ref redis_url) = ctx.config.redis_url {
