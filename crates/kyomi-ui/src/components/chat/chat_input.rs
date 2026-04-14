@@ -231,7 +231,13 @@ pub fn ChatInput(
                     class="w-full pr-12 resize-none overflow-hidden border border-input focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring bg-card rounded-xl px-4 py-3 shadow-sm text-foreground"
                     style=format!("max-height: {}px", max_height)
                     rows="1"
-                    disabled=move || credits_exhausted || !can_send.get()
+                    // Stay enabled while the agent is replying so the user can
+                    // draft their next message AND so the post-send refocus in
+                    // `do_send` actually lands (focus() on a disabled element
+                    // is a silent no-op — that's what caused the focus-loss
+                    // bug). `do_send` and `send_enabled` both still gate on
+                    // `can_send`, so hitting Enter mid-stream correctly no-ops.
+                    disabled=move || credits_exhausted
                 />
                 // Send/Stop buttons — use CSS display instead of <Show> to avoid
                 // DOM unmount/remount issues during URL transitions. Both buttons
