@@ -101,6 +101,23 @@ pub async fn execute_catalog_refresh(
         }
     }
 
+    // Stamp the start so concurrent callers going through
+    // `CatalogIndexingService::index_datasource` (the scheduler, the
+    // post-create spawn) observe that an indexing run is in flight and
+    // skip cleanly. Manual refresh itself does NOT check the stamp —
+    // an explicit user click always proceeds (stamp-but-don't-check =
+    // force semantics). If the stamp fails, we log and proceed — better
+    // to do the manual refresh than fail on a bookkeeping column.
+    if let Err(e) =
+        kyomi_auth::catalog::helpers::stamp_last_index_started_at(params.db, &datasource.id).await
+    {
+        tracing::warn!(
+            datasource_id = %datasource.id,
+            error = %e,
+            "failed to stamp last_index_started_at before manual refresh — concurrent-run guard may not engage for a racing scheduler tick"
+        );
+    }
+
     // Dispatch based on connection type.
     if datasource.connection_type == "connect" {
         refresh_connect(params).await
