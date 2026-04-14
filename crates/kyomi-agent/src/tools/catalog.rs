@@ -84,7 +84,19 @@ impl AgentTool for GetTableInfoTool {
         let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
         let full_name_expr = kyomi_core::sql_compat::full_table_name_expr_prefixed(is_pg, "dtc");
 
-        // In trial mode, query the sample data workspace directly.
+        // In trial mode, query the sample-data sentinel workspace directly.
+        //
+        // NOTE (dormant): Trial mode is currently unused. The sentinel
+        // (SAMPLE_DATA_WORKSPACE_ID) is populated only when the legacy
+        // `POST /api/v1/datasources/sample` REST route is invoked — nothing
+        // in the UI calls it anymore (the UI onboarding flow writes samples
+        // into the user's own workspace instead). On a fresh install the
+        // sentinel is empty and this path returns "not found" for every
+        // table. When resurrecting trial mode, revisit the whole pattern:
+        //   a) add a startup bootstrap hook that runs
+        //      SampleDataIndexer::index_sample_data on first boot, OR
+        //   b) migrate trial to a designated per-workspace example like the
+        //      UI onboarding path so there's only one write/read pattern.
         if ctx.is_trial {
             let sample_ws_id =
                 kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID;

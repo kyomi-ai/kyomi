@@ -552,13 +552,21 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     // workspace — the generic per-workspace path is simpler, consistent with
     // other datasource types, and unblocks the `list_datasources` tool which
     // reads from the workspace cache.
-    super::datasources::spawn_initial_catalog_index(
-        &ctx,
-        ws_id.to_string(),
-        ds.id.clone(),
-        auth.email.clone(),
-        serde_json::json!({}),
-    );
+    if let Some(encryption_key) = ctx.encryption_key.clone() {
+        kyomi_agent::catalog::indexing_service::CatalogIndexingService::spawn_post_create(
+            ctx.db.clone(),
+            encryption_key,
+            ctx.embedding.clone(),
+            ws_id.to_string(),
+            ds.id.clone(),
+        );
+    } else {
+        tracing::warn!(
+            workspace_id = %ws_id,
+            datasource_id = %ds.id,
+            "Encryption key not configured — skipping initial catalog index for sample datasource"
+        );
+    }
 
     Ok(())
 }
