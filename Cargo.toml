@@ -135,6 +135,7 @@ chartml-chart-cartesian = { path = "../chartml/crates/chartml-chart-cartesian" }
 chartml-chart-pie = { path = "../chartml/crates/chartml-chart-pie" }
 chartml-chart-scatter = { path = "../chartml/crates/chartml-chart-scatter" }
 chartml-chart-metric = { path = "../chartml/crates/chartml-chart-metric" }
+chartml-chart-table = { path = "../chartml/crates/chartml-chart-table" }
 chartml-datafusion = { path = "../chartml/crates/chartml-datafusion" }
 chartml-leptos = { path = "../chartml/crates/chartml-leptos" }
 

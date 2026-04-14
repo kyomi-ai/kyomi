@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
+use chartml_chart_table::TableRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
 use chartml_core::ChartML;
@@ -398,6 +399,7 @@ pub(crate) fn configured_chartml(palette_name: &str, is_dark: bool) -> Arc<Chart
         c.register_renderer("doughnut", PieRenderer::new());
         c.register_renderer("scatter", ScatterRenderer::new());
         c.register_renderer("metric", MetricRenderer::new());
+        c.register_renderer("table", TableRenderer::new());
         c.register_transform(DataFusionTransform);
         c.set_default_palette(colors.clone());
         c.set_theme(theme.clone());
@@ -1019,6 +1021,7 @@ fn ChartBlock(
                         chartml_mut.register_renderer("doughnut", PieRenderer::new());
                         chartml_mut.register_renderer("scatter", ScatterRenderer::new());
                         chartml_mut.register_renderer("metric", MetricRenderer::new());
+                        chartml_mut.register_renderer("table", TableRenderer::new());
                         chartml_mut.register_transform(DataFusionTransform);
                         chartml_mut.set_default_palette(colors);
                         chartml_mut.set_theme(theme);

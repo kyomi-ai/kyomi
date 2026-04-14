@@ -13,6 +13,7 @@ use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
+use chartml_chart_table::TableRenderer;
 use chartml_core::theme::Theme;
 use chartml_core::ChartML;
 use chartml_leptos::ChartMLChart;
@@ -36,6 +37,7 @@ fn create_chartml(colors: Option<Vec<String>>, theme: Option<Theme>) -> Arc<Char
     chartml.register_renderer("donut", PieRenderer::new());
     chartml.register_renderer("scatter", ScatterRenderer::new());
     chartml.register_renderer("metric", MetricRenderer::new());
+    chartml.register_renderer("table", TableRenderer::new());
     if let Some(colors) = colors {
         chartml.set_default_palette(colors);
     }

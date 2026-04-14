@@ -10,6 +10,7 @@ use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
 use chartml_chart_metric::MetricRenderer;
+use chartml_chart_table::TableRenderer;
 use chartml_datafusion::DataFusionTransform;
 use std::sync::Once;
 
@@ -68,6 +69,7 @@ pub fn create_chartml_with_theme(theme: Theme) -> ChartML {
     chartml.register_renderer("doughnut", PieRenderer::new());
     chartml.register_renderer("scatter", ScatterRenderer::new());
     chartml.register_renderer("metric", MetricRenderer::new());
+    chartml.register_renderer("table", TableRenderer::new());
 
     // Register DataFusion-based transform middleware (sql, aggregate, forecast)
     chartml.register_transform(DataFusionTransform);

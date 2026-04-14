@@ -1627,6 +1627,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chartml-chart-table"
+version = "3.1.0"
+dependencies = [
+ "chartml-core",
+]
+
+[[package]]
 name = "chartml-core"
 version = "3.1.0"
 dependencies = [
@@ -5788,6 +5795,7 @@ dependencies = [
  "chartml-chart-metric",
  "chartml-chart-pie",
  "chartml-chart-scatter",
+ "chartml-chart-table",
  "chartml-core",
  "chartml-datafusion",
  "chartml-render",
@@ -6131,6 +6139,7 @@ dependencies = [
  "chartml-chart-metric",
  "chartml-chart-pie",
  "chartml-chart-scatter",
+ "chartml-chart-table",
  "chartml-core",
  "chartml-datafusion",
  "chartml-leptos",
