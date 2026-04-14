@@ -130,52 +130,30 @@ impl AgentTool for GetTableInfoTool {
         )
         .await?;
 
-        let is_sample = ds
-            .connection_config
-            .get("is_sample")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        // Look up cached table info.
+        // Look up cached table info for this datasource.
         //
         // The table_name parameter is a fully qualified name like
         // "acme_analytics.orders" or "project.dataset.table".
         // We reconstruct the full name from stored project_id/dataset_id/table_id.
-        let table_metadata = if is_sample {
-            // Sample data: query by sentinel workspace
-            let sample_ws_id =
-                kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID;
-            let sample_sql = format!(
-                "SELECT dtc.table_metadata \
-                 FROM datasource_table_cache dtc \
-                 WHERE dtc.workspace_id = $1 \
-                   AND dtc.is_archived = {bool_false} \
-                   AND {full_name_expr} = $2"
-            );
-            let cached: Option<TableMetadataRow> = kyomi_core::db_fetch_optional!(
-                ctx.db, TableMetadataRow,
-                &sample_sql,
-                sample_ws_id,
-                table_name
-            )?;
-            cached.map(|row| row.table_metadata)
-        } else {
-            // Regular datasource: query by datasource_config_id
-            let ds_sql = format!(
-                "SELECT dtc.table_metadata \
-                 FROM datasource_table_cache dtc \
-                 WHERE dtc.datasource_config_id = $1 \
-                   AND dtc.is_archived = {bool_false} \
-                   AND {full_name_expr} = $2"
-            );
-            let cached: Option<TableMetadataRow> = kyomi_core::db_fetch_optional!(
-                ctx.db, TableMetadataRow,
-                &ds_sql,
-                &ds.id,
-                table_name
-            )?;
-            cached.map(|row| row.table_metadata)
-        };
+        //
+        // Sample datasources used to require a sentinel-workspace branch
+        // here; they now index into the user's workspace via the generic
+        // per-workspace indexer, so `datasource_config_id` works for every
+        // datasource type.
+        let ds_sql = format!(
+            "SELECT dtc.table_metadata \
+             FROM datasource_table_cache dtc \
+             WHERE dtc.datasource_config_id = $1 \
+               AND dtc.is_archived = {bool_false} \
+               AND {full_name_expr} = $2"
+        );
+        let cached: Option<TableMetadataRow> = kyomi_core::db_fetch_optional!(
+            ctx.db, TableMetadataRow,
+            &ds_sql,
+            &ds.id,
+            table_name
+        )?;
+        let table_metadata = cached.map(|row| row.table_metadata);
 
         let table_metadata = if let Some(metadata) = table_metadata {
             metadata
@@ -282,33 +260,18 @@ impl AgentTool for BrowseCatalogTool {
             false,
         )
         .await?;
-        let is_sample = ds
-            .connection_config
-            .get("is_sample")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
 
-        let rows: Vec<CatalogBrowseRow> = if is_sample {
-            let sample_ws_id =
-                kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID;
-            let sql = format!(
-                "SELECT project_id, dataset_id, table_id, table_metadata \
-                 FROM datasource_table_cache \
-                 WHERE workspace_id = $1 AND is_archived = {bool_false} \
-                 ORDER BY dataset_id, table_id"
-            );
-            kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &sql, sample_ws_id)
-                .unwrap_or_default()
-        } else {
-            let sql = format!(
-                "SELECT project_id, dataset_id, table_id, table_metadata \
-                 FROM datasource_table_cache \
-                 WHERE datasource_config_id = $1 AND is_archived = {bool_false} \
-                 ORDER BY dataset_id, table_id"
-            );
+        // Query by `datasource_config_id` uniformly — sample datasources now
+        // index into the user's workspace like any other datasource.
+        let sql = format!(
+            "SELECT project_id, dataset_id, table_id, table_metadata \
+             FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bool_false} \
+             ORDER BY dataset_id, table_id"
+        );
+        let rows: Vec<CatalogBrowseRow> =
             kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &sql, &ds.id)
-                .unwrap_or_default()
-        };
+                .unwrap_or_default();
 
         let mut schemas: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();

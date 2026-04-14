@@ -205,14 +205,36 @@ async fn fetch_catalog_statuses(
 ) -> std::collections::HashMap<String, (i64, Option<chrono::DateTime<chrono::Utc>>)> {
     let mut result = std::collections::HashMap::new();
 
+    let is_pg = db.is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+
     for ds in datasources {
-        let table_count: i64 = kyomi_core::db_fetch_scalar!(
+        // Count non-archived cache rows. A prior version of this query
+        // referenced `datasource_tables` (which does not exist) and was
+        // wrapped in `.unwrap_or(0)` — the error was silently swallowed,
+        // so every datasource reported 0 tables and always showed the
+        // "catalog needs attention" warning icon. Log on error now so a
+        // future typo or schema change doesn't regress silently.
+        let sql = format!(
+            "SELECT COUNT(*) FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bf}"
+        );
+        let table_count: i64 = match kyomi_core::db_fetch_scalar!(
             db,
             i64,
-            "SELECT COUNT(*) FROM datasource_tables WHERE datasource_config_id = $1",
+            &sql,
             &ds.id
-        )
-        .unwrap_or(0);
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    datasource_id = %ds.id,
+                    error = %e,
+                    "failed to count cached tables for datasource; defaulting to 0"
+                );
+                0
+            }
+        };
 
         result.insert(ds.id.clone(), (table_count, ds.last_catalog_refresh));
     }

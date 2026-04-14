@@ -662,6 +662,7 @@ fn Sidebar(
                                         }}
                                         <a
                                             href="/settings"
+                                            on:click=move |_| set_user_menu_open.set(false)
                                             class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
                                         >
                                             <Icon icon=icondata_lu::LuSettings width="16" height="16"/>

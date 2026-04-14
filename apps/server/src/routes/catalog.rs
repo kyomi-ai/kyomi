@@ -755,47 +755,31 @@ async fn get_catalog_tree(
     let workspace_id = get_workspace_id(&user)?;
     let datasource = resolve_or_404(&state.db, &identifier, workspace_id, false).await?;
 
-    // Sample datasources use a shared sentinel workspace index.
-    let is_sample = datasource
-        .connection_config
-        .get("is_sample")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Get all cached tables (exclude archived)
+    // Get all cached tables for this datasource (exclude archived).
+    //
+    // Note: sample datasources used to live in a shared sentinel workspace
+    // (`SAMPLE_DATA_WORKSPACE_ID`) and required a special branch here, but
+    // they now index into the user's workspace via the generic per-workspace
+    // indexer (see `kyomi_ui::server_fns::onboarding::add_sample_datasource`).
+    // Query by `datasource_config_id` uniformly.
     let is_pg = state.db.is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
-    let cached_tables: Vec<DatasourceTableCache> = if is_sample {
-        kyomi_core::db_fetch_all!(
-            &state.db, DatasourceTableCache,
-            &format!(
-                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                 table_metadata, column_descriptions, created_at, updated_at, \
-                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                 FROM datasource_table_cache \
-                 WHERE workspace_id = $1 AND is_archived = {bf}"
-            ),
-            kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID
-        )?
-    } else {
-        kyomi_core::db_fetch_all!(
-            &state.db, DatasourceTableCache,
-            &format!(
-                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                 table_metadata, column_descriptions, created_at, updated_at, \
-                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                 FROM datasource_table_cache \
-                 WHERE datasource_config_id = $1 AND is_archived = {bf}"
-            ),
-            &datasource.id
-        )?
-    };
+    let mut cached_tables: Vec<DatasourceTableCache> = kyomi_core::db_fetch_all!(
+        &state.db, DatasourceTableCache,
+        &format!(
+            "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+             table_metadata, column_descriptions, created_at, updated_at, \
+             structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+             FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bf}"
+        ),
+        &datasource.id
+    )?;
 
     // SPECIAL CASE: BigQuery public datasets.
     // Public datasets are stored in a sentinel workspace and shared across all workspaces.
     // Include them when the datasource has include_public_datasets enabled (defaults to true).
-    let mut cached_tables = cached_tables;
-    if !is_sample && datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
+    if datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
         let include_public = datasource
             .connection_config
             .get("include_public_datasets")
@@ -999,41 +983,22 @@ async fn get_catalog_status(
     let datasource =
         resolve_or_404(&state.db, &identifier, workspace_id, is_admin(&user)).await?;
 
-    // Sample datasources use a shared sentinel workspace index.
-    let is_sample = datasource
-        .connection_config
-        .get("is_sample")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Get cached table stats (exclude archived)
+    // Get cached table stats for this datasource (exclude archived).
+    // Sample datasources now index into the user's workspace like any other
+    // datasource — the old sentinel branch has been removed.
     let is_pg = state.db.is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
-    let cached_tables: Vec<DatasourceTableCache> = if is_sample {
-        kyomi_core::db_fetch_all!(
-            &state.db, DatasourceTableCache,
-            &format!(
-                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                 table_metadata, column_descriptions, created_at, updated_at, \
-                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                 FROM datasource_table_cache \
-                 WHERE workspace_id = $1 AND is_archived = {bf}"
-            ),
-            kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID
-        )?
-    } else {
-        kyomi_core::db_fetch_all!(
-            &state.db, DatasourceTableCache,
-            &format!(
-                "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
-                 table_metadata, column_descriptions, created_at, updated_at, \
-                 structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
-                 FROM datasource_table_cache \
-                 WHERE datasource_config_id = $1 AND is_archived = {bf}"
-            ),
-            &datasource.id
-        )?
-    };
+    let cached_tables: Vec<DatasourceTableCache> = kyomi_core::db_fetch_all!(
+        &state.db, DatasourceTableCache,
+        &format!(
+            "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
+             table_metadata, column_descriptions, created_at, updated_at, \
+             structure_refreshed_at, descriptions_refreshed_at, is_archived, last_verified \
+             FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bf}"
+        ),
+        &datasource.id
+    )?;
 
     let table_count = cached_tables.len();
 
@@ -1341,18 +1306,10 @@ async fn refresh_catalog(
 
     let datasource = resolve_or_404(&state.db, &identifier, workspace_id, false).await?;
 
-    // Sample datasources cannot be refreshed manually
-    let is_sample = datasource
-        .connection_config
-        .get("is_sample")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if is_sample {
-        return Err(kyomi_core::Error::BadRequest(
-            "Sample datasource catalog is managed automatically and cannot be refreshed manually"
-                .into(),
-        ));
-    }
+    // (The old "sample datasources cannot be refreshed manually" gate was
+    // valid when samples lived in a shared sentinel workspace. Samples are
+    // now indexed into the user's workspace by the generic per-workspace
+    // indexer, so the normal refresh path works for them too.)
 
     let force = body.map(|b| b.force).unwrap_or(false);
 
