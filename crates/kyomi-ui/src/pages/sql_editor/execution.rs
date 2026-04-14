@@ -110,13 +110,15 @@ fn run_paginated_query(
                 // panel refetches and shows this run without a page reload.
                 save_to_history(
                     state,
-                    sql,
-                    execution_time.map(|t| t as i32),
-                    history_result.bytes_processed.map(|b| b as i64),
-                    Some(total_rows.unwrap_or(row_count) as i32),
-                    "success",
-                    None,
-                    Some(ds_slug),
+                    HistoryRecord {
+                        query_text: sql,
+                        execution_time_ms: execution_time.map(|t| t as i32),
+                        bytes_processed: history_result.bytes_processed.map(|b| b as i64),
+                        row_count: Some(total_rows.unwrap_or(row_count) as i32),
+                        status: "success".to_string(),
+                        error_message: None,
+                        datasource: Some(ds_slug),
+                    },
                 );
             }
             Err(e) => {
@@ -138,17 +140,33 @@ fn run_paginated_query(
                 // failed queries still appear in the history list).
                 save_to_history(
                     state,
-                    sql,
-                    None,
-                    None,
-                    None,
-                    "error",
-                    Some(e.to_string()),
-                    Some(ds_slug),
+                    HistoryRecord {
+                        query_text: sql,
+                        execution_time_ms: None,
+                        bytes_processed: None,
+                        row_count: None,
+                        status: "error".to_string(),
+                        error_message: Some(e.to_string()),
+                        datasource: Some(ds_slug),
+                    },
                 );
             }
         }
     });
+}
+
+/// A single query-history entry to be written asynchronously.
+///
+/// Bundled as a struct so [`save_to_history`] stays under clippy's
+/// `too_many_arguments` threshold.
+pub(super) struct HistoryRecord {
+    pub query_text: String,
+    pub execution_time_ms: Option<i32>,
+    pub bytes_processed: Option<i64>,
+    pub row_count: Option<i32>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub datasource: Option<String>,
 }
 
 /// Fire-and-forget helper to save a query execution to history.
@@ -159,26 +177,16 @@ fn run_paginated_query(
 /// in the tab's result area is the source of truth for the user, and the
 /// tick bump is cheap; if the save itself failed the history list just won't
 /// contain a new row, which is the desired behaviour.
-pub(super) fn save_to_history(
-    state: SqlEditorState,
-    query_text: String,
-    execution_time_ms: Option<i32>,
-    bytes_processed: Option<i64>,
-    row_count: Option<i32>,
-    status: &str,
-    error_message: Option<String>,
-    datasource: Option<String>,
-) {
-    let status = status.to_string();
+pub(super) fn save_to_history(state: SqlEditorState, record: HistoryRecord) {
     leptos::task::spawn_local(async move {
         let _ = save_query_history(
-            query_text,
-            execution_time_ms,
-            bytes_processed,
-            row_count,
-            status,
-            error_message,
-            datasource,
+            record.query_text,
+            record.execution_time_ms,
+            record.bytes_processed,
+            record.row_count,
+            record.status,
+            record.error_message,
+            record.datasource,
         )
         .await;
         state.history_refresh_tick.update(|n| *n += 1);

@@ -431,6 +431,7 @@ impl CatalogRefreshScheduler {
                 user_email: Some(effective_email),
                 credentials: indexing_creds.as_ref(),
                 max_tables_per_dataset: None,
+                force: false,
             },
         )
         .await;

@@ -77,7 +77,22 @@ pub struct IndexDatasourceParams<'a> {
     pub user_email: Option<&'a str>,
     pub credentials: Option<&'a Value>,
     pub max_tables_per_dataset: Option<usize>,
+    /// When `true`, bypass the concurrent-run guard (the check that skips
+    /// if an indexing run started within the last hour). Set by the
+    /// manual refresh path so an explicit user click always proceeds even
+    /// if a background run is in flight. Scheduler and post-create spawn
+    /// leave this `false` so they defer to an in-flight run.
+    pub force: bool,
 }
+
+/// How long a just-started indexing run blocks subsequent runs before
+/// the stamp ages out. Chosen to cover all realistic indexing durations
+/// plus slack — a ClickHouse sample schema indexes in 1s, a 50-table
+/// Postgres in ~60s, so 60 minutes is 60× headroom. Longer than any
+/// single run should take, shorter than the 24h `can_refresh_now` rate
+/// limit so the two gates stay orthogonal. Panicked runs self-heal
+/// after the stamp ages out.
+const CONCURRENT_RUN_GUARD_MINUTES: i64 = 60;
 
 /// Provider-agnostic catalog indexing service.
 ///
@@ -101,6 +116,7 @@ impl CatalogIndexingService {
             user_email,
             credentials,
             max_tables_per_dataset,
+            force,
         } = params;
         // Load datasource config
         let ds_config = kyomi_core::db_fetch_optional!(
@@ -150,6 +166,56 @@ impl CatalogIndexingService {
             }
         };
 
+        // Concurrent-run guard: skip if an indexing run started within the
+        // last hour. This is the serialization point that prevents the
+        // scheduler and spawn_post_create from doubling up. `force: true`
+        // (set by manual refresh) bypasses the guard so an explicit user
+        // click always proceeds.
+        //
+        // The stamp is written below BEFORE dispatching to the indexer, so
+        // the first caller wins and any later caller (scheduler tick firing
+        // 1 second after a fresh datasource create) observes the recent
+        // stamp and skips cleanly.
+        //
+        // Self-healing: if the winning run panics and never updates
+        // `last_catalog_refresh`, the start stamp ages out after 60 minutes
+        // and the next scheduler tick picks the datasource back up. No
+        // "running" status to get stuck in.
+        if !force
+            && kyomi_auth::catalog::helpers::index_started_within(
+                db,
+                datasource_config_id,
+                CONCURRENT_RUN_GUARD_MINUTES,
+            )
+            .await
+        {
+            info!(
+                workspace_id,
+                datasource_config_id,
+                datasource_name = ds_name,
+                "skipping catalog indexing — another run started recently"
+            );
+            return CatalogIndexResult::skipped(
+                "another indexing run started within the concurrent-run guard window",
+            );
+        }
+
+        // Stamp the start so any concurrent caller skips. Failure to stamp
+        // is logged but doesn't abort — better to proceed with the index
+        // than to fail the whole run because the guard column couldn't be
+        // updated.
+        if let Err(e) =
+            kyomi_auth::catalog::helpers::stamp_last_index_started_at(db, datasource_config_id)
+                .await
+        {
+            warn!(
+                workspace_id,
+                datasource_config_id,
+                error = %e,
+                "failed to stamp last_index_started_at — concurrent-run guard may not engage for the next caller"
+            );
+        }
+
         let ctx = IndexerContext {
             workspace_id: workspace_id.to_string(),
             datasource_config_id: datasource_config_id.to_string(),
@@ -162,6 +228,7 @@ impl CatalogIndexingService {
             datasource_config_id,
             datasource_name = ds_name,
             datasource_type = ds_type_str,
+            force,
             "starting catalog indexing"
         );
 
@@ -224,6 +291,7 @@ impl CatalogIndexingService {
                 user_email,
                 credentials,
                 max_tables_per_dataset,
+                force: false,
             })
             .await;
 
@@ -305,6 +373,7 @@ impl CatalogIndexingService {
                 user_email: owner_email.as_deref(),
                 credentials: None,
                 max_tables_per_dataset: None,
+                force: false,
             })
             .await;
 
@@ -371,6 +440,7 @@ impl CatalogIndexingService {
                 user_email: None,         // shared credentials
                 credentials: None,        // uses connection_config
                 max_tables_per_dataset: None, // default max tables
+                force: false,
             })
             .await;
 

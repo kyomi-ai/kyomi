@@ -106,7 +106,7 @@ pub async fn list_datasources(
                       datasource_type, connection_config,
                       active, connection_type, connect_token_jti,
                       created_at, updated_at,
-                      last_catalog_refresh, auto_refresh_allowed
+                      last_catalog_refresh, last_index_started_at, auto_refresh_allowed
              FROM datasource_configs
              WHERE workspace_id = $1
              ORDER BY name",
@@ -118,7 +118,7 @@ pub async fn list_datasources(
                       datasource_type, connection_config,
                       active, connection_type, connect_token_jti,
                       created_at, updated_at,
-                      last_catalog_refresh, auto_refresh_allowed
+                      last_catalog_refresh, last_index_started_at, auto_refresh_allowed
              FROM datasource_configs
              WHERE workspace_id = $1 AND active = {}
              ORDER BY name",
@@ -143,7 +143,7 @@ pub async fn get_datasource(
                   datasource_type, connection_config,
                   active, connection_type, connect_token_jti,
                   created_at, updated_at,
-                  last_catalog_refresh, auto_refresh_allowed
+                  last_catalog_refresh, last_index_started_at, auto_refresh_allowed
          FROM datasource_configs
          WHERE id = $1 AND workspace_id = $2",
         id,
@@ -166,7 +166,7 @@ pub async fn get_datasource_by_slug(
                   datasource_type, connection_config,
                   active, connection_type, connect_token_jti,
                   created_at, updated_at,
-                  last_catalog_refresh, auto_refresh_allowed
+                  last_catalog_refresh, last_index_started_at, auto_refresh_allowed
          FROM datasource_configs
          WHERE slug = $1 AND workspace_id = $2",
         slug,
@@ -201,7 +201,7 @@ pub async fn resolve_datasource(
                       datasource_type, connection_config,
                       active, connection_type, connect_token_jti,
                       created_at, updated_at,
-                      last_catalog_refresh, auto_refresh_allowed
+                      last_catalog_refresh, last_index_started_at, auto_refresh_allowed
              FROM datasource_configs
              WHERE slug = $1 AND workspace_id = $2",
             identifier,
@@ -213,7 +213,7 @@ pub async fn resolve_datasource(
                       datasource_type, connection_config,
                       active, connection_type, connect_token_jti,
                       created_at, updated_at,
-                      last_catalog_refresh, auto_refresh_allowed
+                      last_catalog_refresh, last_index_started_at, auto_refresh_allowed
              FROM datasource_configs
              WHERE slug = $1 AND workspace_id = $2 AND active = {}",
             sql_compat::bool_true(is_pg)
@@ -235,7 +235,7 @@ pub async fn resolve_datasource(
                           datasource_type, connection_config,
                           active, connection_type, connect_token_jti,
                           created_at, updated_at,
-                          last_catalog_refresh, auto_refresh_allowed
+                          last_catalog_refresh, last_index_started_at, auto_refresh_allowed
                  FROM datasource_configs
                  WHERE id = $1 AND workspace_id = $2",
                 identifier,
@@ -247,7 +247,7 @@ pub async fn resolve_datasource(
                           datasource_type, connection_config,
                           active, connection_type, connect_token_jti,
                           created_at, updated_at,
-                          last_catalog_refresh, auto_refresh_allowed
+                          last_catalog_refresh, last_index_started_at, auto_refresh_allowed
                  FROM datasource_configs
                  WHERE id = $1 AND workspace_id = $2 AND active = {}",
                 sql_compat::bool_true(is_pg)
@@ -294,7 +294,7 @@ pub async fn resolve_by_provider(
                   datasource_type, connection_config,
                   active, connection_type, connect_token_jti,
                   created_at, updated_at,
-                  last_catalog_refresh, auto_refresh_allowed
+                  last_catalog_refresh, last_index_started_at, auto_refresh_allowed
          FROM datasource_configs
          WHERE workspace_id = $1 AND datasource_type = $2 AND active = {}",
         sql_compat::bool_true(is_pg)

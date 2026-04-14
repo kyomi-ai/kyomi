@@ -227,6 +227,73 @@ pub async fn update_datasource_last_refresh(
     Ok(())
 }
 
+/// Stamp the datasource's `last_index_started_at` column with `now()`.
+///
+/// Called at the top of [`CatalogIndexingService::index_datasource`] so that
+/// any concurrent caller (scheduler, post-create spawn, manual refresh)
+/// can observe that an indexing run is in flight and skip.
+///
+/// [`CatalogIndexingService::index_datasource`]: (see crate `kyomi-agent`)
+pub async fn stamp_last_index_started_at(
+    db: &DbPool,
+    datasource_config_id: &str,
+) -> Result<()> {
+    let is_pg = db.is_postgres();
+    let now_expr = kyomi_core::sql_compat::now(is_pg);
+    let sql = format!(
+        "UPDATE datasource_configs SET last_index_started_at = {now_expr} WHERE id = $1"
+    );
+
+    kyomi_core::db_execute!(db, &sql, datasource_config_id).map_err(|e| {
+        kyomi_core::Error::Internal(format!(
+            "failed to stamp datasource last_index_started_at: {e}"
+        ))
+    })?;
+
+    Ok(())
+}
+
+/// Returns `true` if an indexing run for this datasource started within
+/// the last `minutes_threshold` minutes.
+///
+/// Reads `datasource_configs.last_index_started_at`. Returns `false` if:
+/// - the column is NULL (never indexed), OR
+/// - the stamp is older than the threshold (self-healing — a panicked run's
+///   stamp ages out and the next attempt proceeds), OR
+/// - the row can't be found or the query errors (fail open; the downstream
+///   indexer will produce a clearer error if the datasource is genuinely
+///   missing).
+///
+/// Use in combination with `can_refresh_now` (which guards against
+/// "just finished, don't re-index" via `last_catalog_refresh`). This guard
+/// protects against "just started, don't double up".
+pub async fn index_started_within(
+    db: &DbPool,
+    datasource_config_id: &str,
+    minutes_threshold: i64,
+) -> bool {
+    #[derive(sqlx::FromRow)]
+    struct StartedRow {
+        last_index_started_at: Option<chrono::DateTime<Utc>>,
+    }
+
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        StartedRow,
+        "SELECT last_index_started_at FROM datasource_configs WHERE id = $1",
+        datasource_config_id
+    );
+
+    let Ok(Some(row)) = row else {
+        return false; // not found or error → allow caller to proceed
+    };
+
+    match row.last_index_started_at {
+        None => false,
+        Some(ts) => (Utc::now() - ts).num_minutes() < minutes_threshold,
+    }
+}
+
 /// Cache a table and generate embeddings for its search entries.
 ///
 /// This is the core caching + embedding function used by all indexers.
