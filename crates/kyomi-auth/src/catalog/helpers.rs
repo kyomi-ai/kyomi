@@ -41,6 +41,34 @@ pub struct IndexerContext {
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
 
+/// Look up the workspace owner's email address.
+///
+/// Used by catalog indexing paths that need a "default user" to resolve stored
+/// credentials against. The workspace owner is the creator/admin who is most
+/// likely to have valid datasource credentials stored.
+///
+/// Returns `None` if the workspace doesn't exist or the owner can't be resolved.
+pub async fn get_workspace_owner_email(db: &DbPool, workspace_id: &str) -> Option<String> {
+    #[derive(sqlx::FromRow)]
+    struct EmailRow {
+        email: String,
+    }
+
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        EmailRow,
+        "SELECT u.email \
+         FROM workspaces w \
+         JOIN users u ON u.user_id = w.owner_user_id \
+         WHERE w.workspace_id = $1",
+        workspace_id
+    )
+    .ok()
+    .flatten();
+
+    row.map(|r| r.email)
+}
+
 /// Check if a datasource can be refreshed now (respects rate limit).
 ///
 /// Returns `true` if the datasource has never been refreshed, or if more

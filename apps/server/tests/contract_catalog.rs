@@ -1401,3 +1401,152 @@ async fn catalog_refresh_returns_404_for_nonexistent_datasource() {
     // Clean up
     cleanup_test_user(&ctx.db, "cat-test-refresh-404@contract-test.local").await;
 }
+
+// ===========================================================================
+// 15. Auto-index catalog on datasource create
+// ===========================================================================
+//
+// Regression test: creating a new datasource via POST /api/v1/datasources/
+// must automatically kick off catalog indexing in the background so the
+// onboarding flow populates tables/schemas without the user hitting
+// "Refresh" manually. Previously this was an explicit TODO comment
+// ("Skip catalog indexing (Phase 7)") and never worked — this test locks
+// the behavior in.
+//
+// Strategy: point the new datasource at the test Postgres itself (same DB
+// the test harness uses) so indexing has a live target. Assert that
+// `datasource_configs.last_catalog_refresh` transitions from NULL to
+// non-NULL within a reasonable timeout, which only happens when
+// `index_catalog_sql` completes successfully.
+
+#[tokio::test]
+async fn create_datasource_triggers_background_catalog_index() {
+    let ctx = setup_auth_context("autoindex-create").await;
+    if ctx.is_none() {
+        eprintln!(
+            "SKIP: create_datasource_triggers_background_catalog_index — requires Rust-backend mode"
+        );
+        return;
+    }
+    let ctx = ctx.unwrap();
+
+    // Parse the test database URL so we index a real, reachable Postgres.
+    // test_config() defaults to postgres://kyomi_test:test@localhost:5434/kyomi_test
+    // so we point the new datasource at the same instance.
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://kyomi_test:test@localhost:5434/kyomi_test".into());
+    let parsed = url::Url::parse(&db_url).expect("DATABASE_URL should be a valid URL");
+    let host = parsed.host_str().unwrap_or("localhost").to_string();
+    let port = parsed.port().unwrap_or(5432);
+    let username = parsed.username().to_string();
+    let password = parsed.password().unwrap_or("").to_string();
+    let database = parsed.path().trim_start_matches('/').to_string();
+
+    let slug = "autoindex-create-ds";
+
+    // Clean up any leftover from a previous run
+    cleanup_datasource(&ctx.db, &ctx.workspace_id, slug).await;
+
+    // Create datasource via the HTTP route — the code path we're testing.
+    let create_body = json!({
+        "name": "AutoIndex Create Test",
+        "slug": slug,
+        "datasource_type": "postgres",
+        "connection_type": "direct",
+        "connection_config": {
+            "host": host,
+            "port": port,
+            "database": database,
+            "shared_credentials": true,
+            "shared_username": username,
+            "shared_password": password,
+        }
+    });
+
+    let resp = auth_post(
+        &ctx.base_url,
+        "/api/v1/datasources/",
+        &ctx.access_token,
+    )
+    .body(create_body.to_string())
+    .send()
+    .await
+    .expect("create datasource request should succeed");
+
+    assert_eq!(
+        resp.status(),
+        201,
+        "create datasource should return 201, body: {}",
+        resp.text().await.unwrap_or_default()
+    );
+
+    // Look up the created datasource id by slug.
+    let ds_id: Option<String> = match &ctx.db {
+        kyomi_core::db::DbPool::Postgres(pg) => sqlx::query_scalar::<_, String>(
+            "SELECT id FROM datasource_configs WHERE workspace_id = $1 AND slug = $2",
+        )
+        .bind(&ctx.workspace_id)
+        .bind(slug)
+        .fetch_optional(pg)
+        .await
+        .unwrap_or(None),
+        kyomi_core::db::DbPool::Sqlite(sq) => sqlx::query_scalar::<_, String>(
+            "SELECT id FROM datasource_configs WHERE workspace_id = $1 AND slug = $2",
+        )
+        .bind(&ctx.workspace_id)
+        .bind(slug)
+        .fetch_optional(sq)
+        .await
+        .unwrap_or(None),
+    };
+    let ds_id = ds_id.expect("datasource should exist in DB after create");
+
+    // Poll last_catalog_refresh until it flips from NULL to non-NULL,
+    // indicating the background indexer ran to completion.
+    //
+    // Timeout: 180s. End-to-end verification against dev.kyomi.ai's
+    // ~50-table Postgres schema took 52 seconds (dominated by BGE-small
+    // embedding generation via Candle). 180s gives headroom for slower
+    // targets and cold-cache runs while still catching real hangs.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let mut refreshed_at: Option<chrono::DateTime<chrono::Utc>> = None;
+    while std::time::Instant::now() < deadline {
+        let row: Option<Option<chrono::DateTime<chrono::Utc>>> = match &ctx.db {
+            kyomi_core::db::DbPool::Postgres(pg) => sqlx::query_scalar::<
+                _,
+                Option<chrono::DateTime<chrono::Utc>>,
+            >(
+                "SELECT last_catalog_refresh FROM datasource_configs WHERE id = $1",
+            )
+            .bind(&ds_id)
+            .fetch_optional(pg)
+            .await
+            .unwrap_or(None),
+            kyomi_core::db::DbPool::Sqlite(sq) => sqlx::query_scalar::<
+                _,
+                Option<chrono::DateTime<chrono::Utc>>,
+            >(
+                "SELECT last_catalog_refresh FROM datasource_configs WHERE id = $1",
+            )
+            .bind(&ds_id)
+            .fetch_optional(sq)
+            .await
+            .unwrap_or(None),
+        };
+        if let Some(Some(ts)) = row {
+            refreshed_at = Some(ts);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    // Clean up before asserting so a failure doesn't leak state.
+    cleanup_datasource(&ctx.db, &ctx.workspace_id, slug).await;
+    cleanup_test_user(&ctx.db, "cat-test-autoindex-create@contract-test.local").await;
+
+    assert!(
+        refreshed_at.is_some(),
+        "datasource_configs.last_catalog_refresh was never populated — \
+         auto-index on datasource create did not run"
+    );
+}

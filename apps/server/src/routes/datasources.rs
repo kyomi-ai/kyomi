@@ -25,6 +25,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use kyomi_agent::catalog::indexing_service::CatalogIndexingService;
 use kyomi_auth::{
     credential_service,
     datasource_auth_service::{self, CredentialStatusResult},
@@ -954,7 +955,21 @@ async fn create_datasource(
         user.user_id
     );
 
-    // Skip catalog indexing (Phase 7) and MCP notification (Phase 11)
+    // Kick off initial catalog indexing in the background so the SQL editor
+    // tree and the AI agent both see tables/schemas without the user hitting
+    // "Refresh" manually. Connect datasources are indexed via the Connect
+    // agent path and have no server-side credentials, so we skip them here.
+    if !is_connect {
+        CatalogIndexingService::spawn_post_create(
+            state.db.clone(),
+            state.encryption_key.clone(),
+            state.embedding.clone(),
+            workspace_id.to_string(),
+            ds.id.clone(),
+        );
+    }
+
+    // MCP notification (Phase 11) still pending.
 
     let masked_config =
         credential_service::mask_connection_config(&ds.connection_config, ds.datasource_type.as_ref());
