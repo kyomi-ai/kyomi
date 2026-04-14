@@ -1504,9 +1504,11 @@ async fn create_datasource_triggers_background_catalog_index() {
     // Poll last_catalog_refresh until it flips from NULL to non-NULL,
     // indicating the background indexer ran to completion.
     //
-    // Timeout: 30s. Indexing the kyomi_test DB (small, mostly empty)
-    // should complete in <5s locally; 30s leaves slack for cold builds.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // Timeout: 180s. End-to-end verification against dev.kyomi.ai's
+    // ~50-table Postgres schema took 52 seconds (dominated by BGE-small
+    // embedding generation via Candle). 180s gives headroom for slower
+    // targets and cold-cache runs while still catching real hangs.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let mut refreshed_at: Option<chrono::DateTime<chrono::Utc>> = None;
     while std::time::Instant::now() < deadline {
         let row: Option<Option<chrono::DateTime<chrono::Utc>>> = match &ctx.db {
