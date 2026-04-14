@@ -10,12 +10,15 @@ path = "src/main.rs"
 
 [features]
 default = ["slack"]
-slack = ["dep:kyomi-slack"]
+slack = ["dep:kyomi-slack", "kyomi-ui/slack"]
 
 [dependencies]
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
 kyomi-core = { workspace = true }
 kyomi-auth = { workspace = true }
+kyomi-ui = { workspace = true, features = ["ssr"] }
+leptos = "0.8"
+leptos_axum = "0.8"
 kyomi-embed = { workspace = true }
 kyomi-datasource-server = { workspace = true }
 kyomi-datasource-drivers = { workspace = true }
@@ -51,15 +54,12 @@ async-stripe-billing = { workspace = true }
 async-stripe-shared = { workspace = true }
 async-stripe-types = { workspace = true }
 regex = { workspace = true }
+similar = { workspace = true }
 serde_urlencoded = { workspace = true }
 chrono-tz = { workspace = true }
 dashmap = { workspace = true }
 serde_yaml = { workspace = true }
 p256 = { workspace = true }
-arrow-schema = { workspace = true }
-arrow-array = { workspace = true }
-arrow-ipc = { workspace = true }
-arrow-buffer = { workspace = true }
 async-trait = { workspace = true }
 rust-embed = { workspace = true }
 tokio-tungstenite = { version = "0.28", default-features = false }

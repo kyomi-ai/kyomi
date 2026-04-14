@@ -6,9 +6,9 @@
 
 pub mod cancel_registry;
 pub mod connect;
-pub mod frontend;
 pub mod health;
 pub mod helpers;
+pub mod leptos_frontend;
 pub mod mcp_session_manager;
 pub mod middleware;
 pub mod routes;
@@ -16,7 +16,7 @@ pub mod state;
 
 use std::net::SocketAddr;
 
-use axum::extract::State;
+use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Router;
@@ -87,12 +87,28 @@ pub async fn auto_provision_personal_mode(db: &DbPool) -> Result<(), kyomi_core:
     Ok(())
 }
 
+/// Optional components that platform-specific features inject into the
+/// Leptos server-function context. Passed to [`build_router`] so the
+/// server-context struct can include them without adding enterprise
+/// dependencies to `AppState`.
+#[derive(Default)]
+pub struct ServerExtras {
+    /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
+    /// Present only when the `slack` feature is enabled and Slack is configured.
+    #[cfg(feature = "slack")]
+    pub slack_client: Option<kyomi_slack::client::SlackClient>,
+}
+
 /// Build the axum Router with all core routes and middleware.
 ///
 /// Returns a `Router<()>` (state already applied). Platform-specific routes
 /// (e.g. Slack) can be merged into this router before wrapping with
 /// `NormalizePathLayer`.
-pub fn build_router(state: state::AppState) -> Router {
+///
+/// `extras` carries optional platform-specific components (e.g. Slack client)
+/// that need to reach the Leptos server-function context without polluting
+/// `AppState`.
+pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
     let demo_mode = state.config.demo_mode;
 
     Router::new()
@@ -110,7 +126,6 @@ pub fn build_router(state: state::AppState) -> Router {
         .nest("/api/v1/users", routes::users::routes())
         .nest("/api/v1/workspaces", routes::workspaces::routes())
         .nest("/api/v1/workspaces", routes::learnings::routes())
-        .nest("/api/v1/workspaces", routes::knowledge_files::routes())
         .nest(
             "/api/v1/datasources",
             routes::datasources::routes().merge(routes::catalog::routes()),
@@ -155,7 +170,66 @@ pub fn build_router(state: state::AppState) -> Router {
         // WebSocket routes at root level (not under /api/v1)
         .route("/ws/{user_id}", axum::routing::get(routes::websocket::ws_handler))
         .route("/ws/trial/{session_id}", axum::routing::get(routes::websocket::ws_trial_handler))
-        .fallback(frontend::serve)
+        // Leptos frontend routes — auth pages
+        .route("/login", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/signup/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/google/callback", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/account/recover", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/account/recover/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/passkey-signup", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/recover-passkey", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/auth/recover-passkey/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        // Billing portal return — public bounce page for SameSite=Strict cookie flow.
+        // Stripe portal redirects here; the page does same-origin navigation to /settings/billing.
+        .route("/billing/return", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        // Leptos frontend routes — protected pages (redirect to /login without auth cookie)
+        .route("/dashboards", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/dashboard/{*path}", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/profile", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/security", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/usage", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/workspace", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/ai", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/analytics", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/team", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/billing", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/settings/datasources", axum::routing::get(leptos_frontend::serve_protected_page))
+        .route("/leptos/{*path}", axum::routing::get(leptos_frontend::serve_leptos_asset))
+        // Leptos server functions — typed RPC replacing REST calls
+        // Uses /leptos-api/ prefix to avoid conflicts with /api/v1/ REST routes
+        .route("/leptos-api/{*fn_name}", axum::routing::post({
+            let server_ctx = kyomi_ui::server_fns::ServerContext {
+                db: state.db.clone(),
+                config: state.config.clone(),
+                auth_state: kyomi_auth::middleware::AuthState::from_ref(&state),
+                encryption_key: Some(state.encryption_key.clone()),
+                kv: Some(state.kv.clone()),
+                webauthn: Some(state.webauthn.clone()),
+                embedding: state.embedding.clone(),
+                connect_registry: Some(state.connect_registry.clone()),
+                ws_manager: Some(state.ws_manager.clone()),
+                cancel_registry: Some(kyomi_ui::server_fns::CancelRegistry::from_shared(
+                    state.cancel_registry.tokens.clone(),
+                )),
+                platforms: Some(state.platforms.clone()),
+                connect_token: state.connect_token.clone(),
+                #[cfg(feature = "slack")]
+                slack_client: extras.slack_client,
+            };
+            move |req: axum::http::Request<axum::body::Body>| {
+                let ctx = server_ctx.clone();
+                async move {
+                    leptos_axum::handle_server_fns_with_context(
+                        move || {
+                            leptos::prelude::provide_context(ctx.clone());
+                        },
+                        req,
+                    )
+                    .await
+                }
+            }
+        }))
+        .fallback(leptos_frontend::serve)
         .with_state(state)
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::Extension(middleware::DemoModeFlag(demo_mode)))
@@ -217,5 +291,5 @@ pub fn build_service(
     tower_http::normalize_path::NormalizePath<Router>,
     SocketAddr,
 > {
-    wrap_service(build_router(state))
+    wrap_service(build_router(state, ServerExtras::default()))
 }

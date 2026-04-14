@@ -163,7 +163,7 @@ async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
 
     // Create a workspace (user becomes admin + owner)
     let workspace_id =
-        kyomi_auth::user_service::create_workspace_for_user(&db, &user.user_id, Some("DS Test User"), &email)
+        kyomi_auth::user_service::create_workspace_for_user(&db, &user.user_id, Some("DS Test User"), &email, None)
             .await
             .expect("should create test workspace");
 
@@ -1857,7 +1857,6 @@ async fn get_settings_for_bigquery_includes_oauth_status() {
     assert!(body.get("has_bigquery_scopes").is_some(), "BQ settings should have 'has_bigquery_scopes'");
     assert!(body.get("needs_bigquery_connect").is_some(), "BQ settings should have 'needs_bigquery_connect'");
     assert!(body.get("auth_mode").is_some() || body["auth_mode"].is_null(), "BQ settings should have 'auth_mode'");
-    assert!(body.get("enable_arrow_streaming").is_some() || body["enable_arrow_streaming"].is_null(), "BQ settings should have 'enable_arrow_streaming'");
 
     cleanup_datasource(&ctx.db, &ctx.workspace_id, "settings-bq-ds").await;
     cleanup_test_user(&ctx.db, "ds-test-settings-bq@contract-test.local").await;

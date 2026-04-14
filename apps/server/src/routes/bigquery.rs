@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! BigQuery endpoints — catalog browsing, search, info, access tokens, and Arrow streaming.
+//! BigQuery endpoints — catalog browsing, search, info, and access tokens.
 //!
 //! Wire-compatible with Python's `/api/v1/bigquery/*` endpoints.
 //!
 //! ## Endpoints
 //!
 //! - `POST /request-access-token` — Short-lived access token for direct BigQuery API calls
-//! - `POST /read-arrow` — BigQuery Arrow streaming (REST→Arrow IPC conversion)
 //! - `GET /catalog` — Full catalog tree from cache
 //! - `GET /catalog/projects` — Project list with dataset counts
 //! - `GET /catalog/{project}/datasets` — Datasets in a project
@@ -23,12 +22,10 @@
 //! - `POST /info` — Table metadata from cache
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Response,
     routing::{get, post},
     Json, Router,
 };
@@ -43,9 +40,8 @@ use crate::state::AppState;
 /// Build the `/bigquery` router.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        // Phase 6F — token + arrow
+        // Phase 6F — token
         .route("/request-access-token", post(request_access_token))
-        .route("/read-arrow", post(read_arrow))
         // Phase 7F — catalog browsing
         .route("/catalog", get(get_catalog))
         .route("/catalog/projects", get(get_catalog_projects))
@@ -249,7 +245,7 @@ fn extract_description(metadata: &Value) -> String {
 }
 
 // ===========================================================================
-// Shared auth helpers — used by both /request-access-token and /read-arrow
+// Shared auth helpers — used by /request-access-token
 // ===========================================================================
 
 /// Resolved BigQuery access context: token + billing project + expiry.
@@ -263,7 +259,7 @@ struct BqAccessContext {
 ///
 /// Supports all three auth modes (kyomi_oauth, enterprise_oauth, service_account).
 /// This is the single source of truth for BigQuery token resolution, used by both
-/// the `/request-access-token` and `/read-arrow` endpoints.
+/// the `/request-access-token` endpoint.
 ///
 /// For OAuth modes, this function checks token expiry and transparently refreshes
 /// expired tokens (matching Python's `get_oauth_credentials()` behavior):
@@ -402,11 +398,7 @@ async fn resolve_bq_access(
                 .get("oauth_token_expiry")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    // No expiry stored — this shouldn't happen after a refresh,
-                    // but provide a fallback
-                    ""
-                })
+                .unwrap_or("")
                 .to_string();
 
             let expires = if expires.is_empty() {
@@ -488,7 +480,7 @@ async fn lookup_bq_datasource(
 }
 
 // ===========================================================================
-// Request / Response Types — Phase 6F (token + arrow)
+// Request / Response Types — Phase 6F (token)
 // ===========================================================================
 
 #[derive(Deserialize)]
@@ -614,509 +606,8 @@ async fn request_access_token(
 }
 
 // ===========================================================================
-// POST /read-arrow — BigQuery Arrow streaming (REST→Arrow IPC)
+// Phase 7F — GET /catalog
 // ===========================================================================
-
-/// Request body for the `/read-arrow` endpoint.
-///
-/// The frontend sends the `job_id` of an already-completed BigQuery query.
-/// The backend fetches the query results via REST and converts them to Arrow
-/// IPC streaming format for efficient DuckDB-WASM ingestion.
-#[derive(Deserialize)]
-struct ReadArrowRequest {
-    /// BigQuery job ID from a completed query.
-    job_id: String,
-    /// Optional GCP project ID. If not provided, resolved from the
-    /// first active BigQuery datasource in the workspace.
-    #[serde(default)]
-    project_id: Option<String>,
-}
-
-/// BigQuery Arrow streaming endpoint.
-///
-/// Wire-compatible with Python's `POST /api/v1/bigquery/read-arrow`.
-///
-/// ## How it works
-///
-/// 1. The frontend has already executed a query via the BigQuery REST API
-///    (using the access token from `/request-access-token`).
-/// 2. The frontend sends the completed `job_id` to this endpoint.
-/// 3. This endpoint fetches the job metadata to get the total row count and schema.
-/// 4. It fetches ALL query results from BigQuery REST API (with pagination).
-/// 5. It converts the JSON results to Apache Arrow IPC streaming format.
-/// 6. It returns the binary IPC stream as `application/octet-stream`.
-///
-/// The frontend loads this directly into DuckDB-WASM via
-/// `conn.insertArrowFromIPCStream()`.
-///
-/// ## Why REST→Arrow instead of BigQuery Storage API (gRPC)?
-///
-/// The BigQuery Storage Read API requires `tonic` + protobuf compilation for
-/// the BQ Storage v1 protos, which is an extremely heavy dependency chain.
-/// The REST→Arrow conversion adds only the well-maintained `arrow` Rust crate
-/// and produces the exact IPC streaming format that DuckDB-WASM consumes.
-/// Since the query has already completed, we only need to fetch and convert
-/// the results — no gRPC streaming needed.
-async fn read_arrow(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Json(request): Json<ReadArrowRequest>,
-) -> Result<Response, kyomi_core::Error> {
-    let workspace_id = get_workspace_id(&user)?;
-
-    tracing::info!(
-        job_id = %request.job_id,
-        user_id = %user.user_id,
-        "Arrow data request"
-    );
-
-    // Resolve the BigQuery access token. We need to find a BigQuery datasource
-    // in the workspace. The frontend doesn't send a datasource_slug here — it
-    // uses the first active BigQuery datasource (matching Python behavior).
-    let ds = find_bq_datasource(&state.db, workspace_id)
-        .await?
-        .ok_or_else(|| {
-            kyomi_core::Error::BadRequest(
-                "No BigQuery datasource configured in this workspace".into(),
-            )
-        })?;
-
-    let bq_ctx = resolve_bq_access(&state.db, &user, &ds, &state.encryption_key, &state.config).await?;
-
-    // Use provided project_id or fall back to billing project
-    let project_id = request
-        .project_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&bq_ctx.billing_project);
-
-    let client = kyomi_datasource_server::http_client()?;
-
-    // Step 1: Fetch the completed job to get metadata (schema, total rows,
-    // destination table, execution time).
-    let job_url = format!(
-        "{BIGQUERY_API_BASE}/projects/{project_id}/jobs/{}",
-        request.job_id
-    );
-    let job_response = tokio::time::timeout(
-        kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
-        client.get(&job_url).bearer_auth(&bq_ctx.access_token).send(),
-    )
-    .await
-    .map_err(|_| kyomi_core::Error::Internal("BigQuery get-job request timed out".into()))?
-    .map_err(|e| {
-        kyomi_core::Error::Internal(format!("BigQuery get-job request failed: {e}"))
-    })?;
-
-    let job_status_code = job_response.status();
-    let job_body: Value = job_response.json().await.map_err(|e| {
-        kyomi_core::Error::Internal(format!("Failed to parse BigQuery job response: {e}"))
-    })?;
-
-    if job_status_code.is_client_error() || job_status_code.is_server_error() {
-        let msg = job_body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("Failed to fetch BigQuery job");
-        return Err(kyomi_core::Error::Internal(format!(
-            "BigQuery job fetch failed: {msg}"
-        )));
-    }
-
-    // Verify job is complete
-    let job_state = job_body
-        .get("status")
-        .and_then(|s| s.get("state"))
-        .and_then(|s| s.as_str())
-        .unwrap_or("");
-    if job_state != "DONE" {
-        return Err(kyomi_core::Error::BadRequest(format!(
-            "BigQuery job {} is not complete (state: {job_state})",
-            request.job_id
-        )));
-    }
-
-    // Check for job errors
-    if let Some(err) = job_body
-        .get("status")
-        .and_then(|s| s.get("errorResult"))
-    {
-        let msg = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("BigQuery job failed");
-        return Err(kyomi_core::Error::Internal(format!(
-            "BigQuery job error: {msg}"
-        )));
-    }
-
-    // Extract execution time from job statistics
-    let execution_time_ms = extract_execution_time_ms(&job_body);
-
-    // Step 2: Fetch all query results with pagination.
-    // We use the queries/{jobId} endpoint which returns JSON results.
-    let (schema_fields, all_rows, total_rows) = fetch_all_query_results(
-        &client,
-        &bq_ctx.access_token,
-        project_id,
-        &request.job_id,
-    )
-    .await?;
-
-    tracing::info!(
-        job_id = %request.job_id,
-        total_rows = total_rows,
-        schema_fields = schema_fields.len(),
-        "Fetched all BigQuery results, converting to Arrow IPC"
-    );
-
-    // Step 3: Convert BigQuery JSON results to Arrow IPC streaming format.
-    let arrow_bytes =
-        bigquery_json_to_arrow_ipc(&schema_fields, &all_rows)?;
-
-    tracing::info!(
-        job_id = %request.job_id,
-        total_rows = total_rows,
-        arrow_bytes = arrow_bytes.len(),
-        "Arrow IPC conversion complete"
-    );
-
-    // Step 4: Build the binary response with metadata headers.
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/octet-stream")
-        .header("x-estimated-rows", total_rows.to_string())
-        .header("x-stream-count", "1");
-
-    if let Some(ms) = execution_time_ms {
-        response = response.header("x-execution-time-ms", ms.to_string());
-    }
-
-    response
-        .body(axum::body::Body::from(arrow_bytes))
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!("Failed to build Arrow response: {e}"))
-        })
-}
-
-// ===========================================================================
-// BigQuery REST helpers for read-arrow
-// ===========================================================================
-
-/// Extract execution time in milliseconds from a BigQuery job response.
-fn extract_execution_time_ms(job_body: &Value) -> Option<i64> {
-    let start_ms = job_body
-        .get("statistics")
-        .and_then(|s| s.get("startTime"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<i64>().ok())?;
-    let end_ms = job_body
-        .get("statistics")
-        .and_then(|s| s.get("endTime"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<i64>().ok())?;
-    Some(end_ms - start_ms)
-}
-
-/// Fetch all query results from a completed BigQuery job, handling pagination.
-///
-/// Returns `(schema_fields, all_rows, total_rows)` where:
-/// - `schema_fields` is the array of `{"name":..., "type":..., "mode":...}` objects
-/// - `all_rows` is the vector of all row data from BigQuery's `rows[].f[].v` format
-/// - `total_rows` is the reported total row count
-async fn fetch_all_query_results(
-    client: &reqwest::Client,
-    access_token: &str,
-    project_id: &str,
-    job_id: &str,
-) -> Result<(Vec<Value>, Vec<Value>, u64), kyomi_core::Error> {
-    let mut all_rows: Vec<Value> = Vec::new();
-    let mut schema_fields: Vec<Value> = Vec::new();
-    let mut total_rows: u64 = 0;
-    let mut page_token: Option<String> = None;
-    let max_results_per_page = 10_000u32;
-
-    loop {
-        let mut url = format!(
-            "{BIGQUERY_API_BASE}/projects/{project_id}/queries/{job_id}?maxResults={max_results_per_page}"
-        );
-        if let Some(ref token) = page_token {
-            url.push_str(&format!("&pageToken={token}"));
-        }
-
-        let response = tokio::time::timeout(
-            kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
-            client.get(&url).bearer_auth(access_token).send(),
-        )
-        .await
-        .map_err(|_| {
-            kyomi_core::Error::Internal("BigQuery query results request timed out".into())
-        })?
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!(
-                "BigQuery query results request failed: {e}"
-            ))
-        })?;
-
-        let status_code = response.status();
-        let body: Value = response.json().await.map_err(|e| {
-            kyomi_core::Error::Internal(format!(
-                "Failed to parse BigQuery query results: {e}"
-            ))
-        })?;
-
-        if status_code.is_client_error() || status_code.is_server_error() {
-            let msg = body
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("Failed to fetch query results");
-            return Err(kyomi_core::Error::Internal(format!(
-                "BigQuery results error: {msg}"
-            )));
-        }
-
-        // Extract schema from first page
-        if schema_fields.is_empty() {
-            if let Some(fields) = body
-                .get("schema")
-                .and_then(|s| s.get("fields"))
-                .and_then(|f| f.as_array())
-            {
-                schema_fields = fields.clone();
-            }
-
-            // Extract total rows from first page
-            if let Some(tr) = body.get("totalRows").and_then(|v| {
-                v.as_str()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .or_else(|| v.as_u64())
-            }) {
-                total_rows = tr;
-            }
-        }
-
-        // Collect rows
-        if let Some(rows) = body.get("rows").and_then(|r| r.as_array()) {
-            all_rows.extend(rows.iter().cloned());
-        }
-
-        // Check for next page
-        match body.get("pageToken").and_then(|t| t.as_str()) {
-            Some(token) if !token.is_empty() => {
-                page_token = Some(token.to_string());
-            }
-            _ => break,
-        }
-    }
-
-    Ok((schema_fields, all_rows, total_rows))
-}
-
-/// Convert BigQuery JSON results to Apache Arrow IPC streaming format.
-///
-/// Takes the BigQuery schema fields and row data (in BigQuery's `rows[].f[].v`
-/// format) and produces a complete Arrow IPC stream that DuckDB-WASM can
-/// ingest via `insertArrowFromIPCStream()`.
-///
-/// ## Type mapping
-///
-/// | BigQuery Type | Arrow Type |
-/// |--------------|------------|
-/// | STRING, BYTES, GEOGRAPHY, JSON | Utf8 |
-/// | INT64, INTEGER | Int64 |
-/// | FLOAT64, FLOAT, NUMERIC, BIGNUMERIC | Float64 |
-/// | BOOL, BOOLEAN | Boolean |
-/// | DATE | Utf8 (ISO format string) |
-/// | TIME | Utf8 (ISO format string) |
-/// | DATETIME | Utf8 (ISO format string) |
-/// | TIMESTAMP | Utf8 (ISO format string) |
-/// | STRUCT, RECORD, ARRAY | Utf8 (JSON serialized) |
-///
-/// Date/time types are kept as strings rather than Arrow temporal types because:
-/// 1. BigQuery returns them as formatted strings in JSON mode
-/// 2. DuckDB-WASM can parse date/time strings efficiently
-/// 3. Avoids timezone and precision conversion complexity
-fn bigquery_json_to_arrow_ipc(
-    schema_fields: &[Value],
-    rows: &[Value],
-) -> Result<Vec<u8>, kyomi_core::Error> {
-    use arrow_array::{ArrayRef, RecordBatch};
-    use arrow_ipc::writer::StreamWriter;
-    use arrow_schema::{Field, Schema};
-
-    // Build Arrow schema from BigQuery schema fields
-    let fields: Vec<Field> = schema_fields
-        .iter()
-        .map(|field| {
-            let name = field
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let bq_type = field
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("STRING");
-            let mode = field
-                .get("mode")
-                .and_then(|m| m.as_str())
-                .unwrap_or("NULLABLE");
-            let nullable = mode != "REQUIRED";
-
-            let data_type = bq_type_to_arrow_type(bq_type);
-            Field::new(name, data_type, nullable)
-        })
-        .collect();
-
-    let schema = Arc::new(Schema::new(fields));
-    let num_columns = schema.fields().len();
-
-    // Build column arrays from BigQuery row data
-    let arrays: Vec<ArrayRef> = (0..num_columns)
-        .map(|col_idx| {
-            let data_type = schema.field(col_idx).data_type();
-            build_arrow_column(rows, col_idx, data_type)
-        })
-        .collect();
-
-    // Create a RecordBatch
-    let batch = RecordBatch::try_new(schema.clone(), arrays).map_err(|e| {
-        kyomi_core::Error::Internal(format!("Failed to create Arrow RecordBatch: {e}"))
-    })?;
-
-    // Write as IPC stream
-    let mut buf = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut buf, &schema).map_err(|e| {
-            kyomi_core::Error::Internal(format!("Failed to create Arrow IPC writer: {e}"))
-        })?;
-
-        writer.write(&batch).map_err(|e| {
-            kyomi_core::Error::Internal(format!("Failed to write Arrow batch: {e}"))
-        })?;
-
-        writer.finish().map_err(|e| {
-            kyomi_core::Error::Internal(format!("Failed to finish Arrow IPC stream: {e}"))
-        })?;
-    }
-
-    Ok(buf)
-}
-
-/// Map a BigQuery type name to an Arrow DataType.
-fn bq_type_to_arrow_type(bq_type: &str) -> arrow_schema::DataType {
-    use arrow_schema::DataType;
-
-    match bq_type.to_uppercase().as_str() {
-        "INT64" | "INTEGER" => DataType::Int64,
-        "FLOAT64" | "FLOAT" | "NUMERIC" | "BIGNUMERIC" => DataType::Float64,
-        "BOOL" | "BOOLEAN" => DataType::Boolean,
-        // Date/time types are kept as strings — BigQuery REST API returns them
-        // as formatted strings, and DuckDB can parse them efficiently.
-        "DATE" | "TIME" | "DATETIME" | "TIMESTAMP" => DataType::Utf8,
-        // Complex types are JSON-serialized strings
-        "STRUCT" | "RECORD" | "ARRAY" | "RANGE" => DataType::Utf8,
-        // String types (STRING, BYTES, GEOGRAPHY, JSON) and anything unknown
-        _ => DataType::Utf8,
-    }
-}
-
-/// Extract a cell value from a BigQuery row at the given column index.
-///
-/// BigQuery JSON format: `row.f[col_idx].v` where `v` is the value (string,
-/// null, or nested for RECORD/ARRAY types).
-fn extract_bq_cell(row: &Value, col_idx: usize) -> Option<&Value> {
-    row.get("f")
-        .and_then(|f| f.as_array())
-        .and_then(|cells| cells.get(col_idx))
-        .and_then(|cell| cell.get("v"))
-}
-
-/// Build an Arrow column array from BigQuery rows for the given column index.
-fn build_arrow_column(
-    rows: &[Value],
-    col_idx: usize,
-    data_type: &arrow_schema::DataType,
-) -> arrow_array::ArrayRef {
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
-    use arrow_schema::DataType;
-
-    match data_type {
-        DataType::Int64 => {
-            let values: Vec<Option<i64>> = rows
-                .iter()
-                .map(|row| {
-                    extract_bq_cell(row, col_idx).and_then(|v| {
-                        if v.is_null() {
-                            None
-                        } else {
-                            // BigQuery returns integers as strings in JSON
-                            v.as_str()
-                                .and_then(|s| s.parse::<i64>().ok())
-                                .or_else(|| v.as_i64())
-                        }
-                    })
-                })
-                .collect();
-            Arc::new(Int64Array::from(values)) as ArrayRef
-        }
-        DataType::Float64 => {
-            let values: Vec<Option<f64>> = rows
-                .iter()
-                .map(|row| {
-                    extract_bq_cell(row, col_idx).and_then(|v| {
-                        if v.is_null() {
-                            None
-                        } else {
-                            v.as_str()
-                                .and_then(|s| s.parse::<f64>().ok())
-                                .or_else(|| v.as_f64())
-                        }
-                    })
-                })
-                .collect();
-            Arc::new(Float64Array::from(values)) as ArrayRef
-        }
-        DataType::Boolean => {
-            let values: Vec<Option<bool>> = rows
-                .iter()
-                .map(|row| {
-                    extract_bq_cell(row, col_idx).and_then(|v| {
-                        if v.is_null() {
-                            None
-                        } else {
-                            v.as_str()
-                                .map(|s| s == "true")
-                                .or_else(|| v.as_bool())
-                        }
-                    })
-                })
-                .collect();
-            Arc::new(BooleanArray::from(values)) as ArrayRef
-        }
-        // Utf8 covers STRING, DATE, TIME, DATETIME, TIMESTAMP, STRUCT, etc.
-        _ => {
-            let values: Vec<Option<String>> = rows
-                .iter()
-                .map(|row| {
-                    extract_bq_cell(row, col_idx).and_then(|v| {
-                        if v.is_null() {
-                            None
-                        } else if let Some(s) = v.as_str() {
-                            Some(s.to_string())
-                        } else {
-                            // For complex types (STRUCT, ARRAY), serialize as JSON
-                            Some(v.to_string())
-                        }
-                    })
-                })
-                .collect();
-            Arc::new(StringArray::from(values)) as ArrayRef
-        }
-    }
-}
 
 // ===========================================================================
 // Phase 7F — GET /catalog
@@ -1934,8 +1425,7 @@ async fn search_tables(
                     workspace_id,
                 )
                 .await?
-                {
-                    if ds.datasource_type == kyomi_core::DatasourceType::Bigquery {
+                    && ds.datasource_type == kyomi_core::DatasourceType::Bigquery {
                         let setting = ds
                             .connection_config
                             .get("include_public_datasets")
@@ -1945,7 +1435,6 @@ async fn search_tables(
                             val = false;
                         }
                     }
-                }
             } else {
                 // No specific datasource — check first active BigQuery datasource
                 #[derive(sqlx::FromRow)]
@@ -2262,7 +1751,6 @@ async fn get_table_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::Array;
 
     // --- Cost estimation ---
 
@@ -2391,388 +1879,5 @@ mod tests {
             serde_urlencoded::from_str("include_dataset_counts=false")
                 .expect("deserialize false");
         assert!(!query.include_dataset_counts);
-    }
-
-    // ===========================================================================
-    // read-arrow: ReadArrowRequest deserialization
-    // ===========================================================================
-
-    #[test]
-    fn read_arrow_request_minimal() {
-        let json = r#"{"job_id": "job_abc123"}"#;
-        let req: ReadArrowRequest = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(req.job_id, "job_abc123");
-        assert!(req.project_id.is_none());
-    }
-
-    #[test]
-    fn read_arrow_request_with_project_id() {
-        let json = r#"{"job_id": "job_abc123", "project_id": "my-project"}"#;
-        let req: ReadArrowRequest = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(req.job_id, "job_abc123");
-        assert_eq!(req.project_id.as_deref(), Some("my-project"));
-    }
-
-    // ===========================================================================
-    // read-arrow: BigQuery type → Arrow type mapping
-    // ===========================================================================
-
-    #[test]
-    fn bq_type_to_arrow_int64() {
-        use arrow_schema::DataType;
-        assert_eq!(bq_type_to_arrow_type("INT64"), DataType::Int64);
-        assert_eq!(bq_type_to_arrow_type("INTEGER"), DataType::Int64);
-        assert_eq!(bq_type_to_arrow_type("int64"), DataType::Int64);
-    }
-
-    #[test]
-    fn bq_type_to_arrow_float64() {
-        use arrow_schema::DataType;
-        assert_eq!(bq_type_to_arrow_type("FLOAT64"), DataType::Float64);
-        assert_eq!(bq_type_to_arrow_type("FLOAT"), DataType::Float64);
-        assert_eq!(bq_type_to_arrow_type("NUMERIC"), DataType::Float64);
-        assert_eq!(bq_type_to_arrow_type("BIGNUMERIC"), DataType::Float64);
-    }
-
-    #[test]
-    fn bq_type_to_arrow_boolean() {
-        use arrow_schema::DataType;
-        assert_eq!(bq_type_to_arrow_type("BOOL"), DataType::Boolean);
-        assert_eq!(bq_type_to_arrow_type("BOOLEAN"), DataType::Boolean);
-    }
-
-    #[test]
-    fn bq_type_to_arrow_string_types() {
-        use arrow_schema::DataType;
-        assert_eq!(bq_type_to_arrow_type("STRING"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("BYTES"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("GEOGRAPHY"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("JSON"), DataType::Utf8);
-    }
-
-    #[test]
-    fn bq_type_to_arrow_datetime_as_string() {
-        use arrow_schema::DataType;
-        // Date/time types are kept as strings for DuckDB to parse
-        assert_eq!(bq_type_to_arrow_type("DATE"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("TIME"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("DATETIME"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("TIMESTAMP"), DataType::Utf8);
-    }
-
-    #[test]
-    fn bq_type_to_arrow_complex_as_string() {
-        use arrow_schema::DataType;
-        assert_eq!(bq_type_to_arrow_type("STRUCT"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("RECORD"), DataType::Utf8);
-        assert_eq!(bq_type_to_arrow_type("ARRAY"), DataType::Utf8);
-    }
-
-    #[test]
-    fn bq_type_to_arrow_unknown_defaults_to_string() {
-        use arrow_schema::DataType;
-        assert_eq!(bq_type_to_arrow_type("UNKNOWN_TYPE_XYZ"), DataType::Utf8);
-    }
-
-    // ===========================================================================
-    // read-arrow: Cell extraction from BigQuery row format
-    // ===========================================================================
-
-    #[test]
-    fn extract_bq_cell_returns_value() {
-        let row = json!({"f": [{"v": "hello"}, {"v": "42"}, {"v": null}]});
-        assert_eq!(extract_bq_cell(&row, 0), Some(&json!("hello")));
-        assert_eq!(extract_bq_cell(&row, 1), Some(&json!("42")));
-        assert_eq!(extract_bq_cell(&row, 2), Some(&Value::Null));
-    }
-
-    #[test]
-    fn extract_bq_cell_out_of_bounds_returns_none() {
-        let row = json!({"f": [{"v": "hello"}]});
-        assert_eq!(extract_bq_cell(&row, 5), None);
-    }
-
-    #[test]
-    fn extract_bq_cell_missing_f_returns_none() {
-        let row = json!({"x": "y"});
-        assert_eq!(extract_bq_cell(&row, 0), None);
-    }
-
-    // ===========================================================================
-    // read-arrow: Full JSON→Arrow IPC conversion
-    // ===========================================================================
-
-    #[test]
-    fn arrow_ipc_empty_result() {
-        let schema = vec![
-            json!({"name": "id", "type": "INT64", "mode": "REQUIRED"}),
-            json!({"name": "name", "type": "STRING", "mode": "NULLABLE"}),
-        ];
-        let rows: Vec<Value> = vec![];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert empty result");
-
-        // Should produce valid IPC with schema header + EOS marker
-        assert!(!ipc_bytes.is_empty(), "IPC bytes should not be empty");
-        // The IPC stream should be at least a few bytes (schema + empty batch + EOS)
-        assert!(ipc_bytes.len() > 8, "IPC bytes should contain schema");
-    }
-
-    #[test]
-    fn arrow_ipc_string_columns() {
-        let schema = vec![
-            json!({"name": "city", "type": "STRING", "mode": "NULLABLE"}),
-        ];
-        let rows = vec![
-            json!({"f": [{"v": "New York"}]}),
-            json!({"f": [{"v": "London"}]}),
-            json!({"f": [{"v": null}]}),
-        ];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert string columns");
-
-        // Verify by reading back the IPC stream
-        let batch = read_ipc_to_batch(&ipc_bytes);
-        assert_eq!(batch.num_rows(), 3);
-        assert_eq!(batch.num_columns(), 1);
-        assert_eq!(batch.schema().field(0).name(), "city");
-    }
-
-    #[test]
-    fn arrow_ipc_int64_columns() {
-        let schema = vec![
-            json!({"name": "count", "type": "INT64", "mode": "NULLABLE"}),
-        ];
-        // BigQuery returns integers as strings in JSON
-        let rows = vec![
-            json!({"f": [{"v": "42"}]}),
-            json!({"f": [{"v": "0"}]}),
-            json!({"f": [{"v": "-100"}]}),
-            json!({"f": [{"v": null}]}),
-        ];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert int64 columns");
-
-        let batch = read_ipc_to_batch(&ipc_bytes);
-        assert_eq!(batch.num_rows(), 4);
-
-        // Verify values
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::Int64Array>()
-            .expect("should be Int64Array");
-        assert_eq!(col.value(0), 42);
-        assert_eq!(col.value(1), 0);
-        assert_eq!(col.value(2), -100);
-        assert!(col.is_null(3));
-    }
-
-    #[test]
-    fn arrow_ipc_float64_columns() {
-        let schema = vec![
-            json!({"name": "price", "type": "FLOAT64", "mode": "NULLABLE"}),
-        ];
-        let rows = vec![
-            json!({"f": [{"v": "3.14"}]}),
-            json!({"f": [{"v": "0.0"}]}),
-            json!({"f": [{"v": null}]}),
-        ];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert float64 columns");
-
-        let batch = read_ipc_to_batch(&ipc_bytes);
-        assert_eq!(batch.num_rows(), 3);
-
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::Float64Array>()
-            .expect("should be Float64Array");
-        assert!((col.value(0) - 3.14).abs() < 1e-10);
-        assert!((col.value(1) - 0.0).abs() < 1e-10);
-        assert!(col.is_null(2));
-    }
-
-    #[test]
-    fn arrow_ipc_boolean_columns() {
-        let schema = vec![
-            json!({"name": "active", "type": "BOOL", "mode": "NULLABLE"}),
-        ];
-        // BigQuery returns booleans as "true"/"false" strings in JSON
-        let rows = vec![
-            json!({"f": [{"v": "true"}]}),
-            json!({"f": [{"v": "false"}]}),
-            json!({"f": [{"v": null}]}),
-        ];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert boolean columns");
-
-        let batch = read_ipc_to_batch(&ipc_bytes);
-        assert_eq!(batch.num_rows(), 3);
-
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::BooleanArray>()
-            .expect("should be BooleanArray");
-        assert!(col.value(0));
-        assert!(!col.value(1));
-        assert!(col.is_null(2));
-    }
-
-    #[test]
-    fn arrow_ipc_mixed_columns() {
-        // Test a realistic BigQuery result with multiple column types
-        let schema = vec![
-            json!({"name": "id", "type": "INT64", "mode": "REQUIRED"}),
-            json!({"name": "name", "type": "STRING", "mode": "NULLABLE"}),
-            json!({"name": "revenue", "type": "FLOAT64", "mode": "NULLABLE"}),
-            json!({"name": "is_active", "type": "BOOLEAN", "mode": "NULLABLE"}),
-            json!({"name": "created_at", "type": "TIMESTAMP", "mode": "NULLABLE"}),
-        ];
-        let rows = vec![
-            json!({"f": [
-                {"v": "1"},
-                {"v": "Alice"},
-                {"v": "1234.56"},
-                {"v": "true"},
-                {"v": "2024-01-15 10:30:00 UTC"}
-            ]}),
-            json!({"f": [
-                {"v": "2"},
-                {"v": "Bob"},
-                {"v": null},
-                {"v": "false"},
-                {"v": "2024-02-20 14:00:00 UTC"}
-            ]}),
-        ];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert mixed columns");
-
-        let batch = read_ipc_to_batch(&ipc_bytes);
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 5);
-
-        // Verify schema field names
-        assert_eq!(batch.schema().field(0).name(), "id");
-        assert_eq!(batch.schema().field(1).name(), "name");
-        assert_eq!(batch.schema().field(2).name(), "revenue");
-        assert_eq!(batch.schema().field(3).name(), "is_active");
-        assert_eq!(batch.schema().field(4).name(), "created_at");
-
-        // Verify a few values
-        let id_col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow_array::Int64Array>()
-            .expect("id should be Int64Array");
-        assert_eq!(id_col.value(0), 1);
-        assert_eq!(id_col.value(1), 2);
-
-        let name_col = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .expect("name should be StringArray");
-        assert_eq!(name_col.value(0), "Alice");
-        assert_eq!(name_col.value(1), "Bob");
-
-        // TIMESTAMP is stored as Utf8 string
-        let ts_col = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<arrow_array::StringArray>()
-            .expect("created_at should be StringArray");
-        assert_eq!(ts_col.value(0), "2024-01-15 10:30:00 UTC");
-    }
-
-    #[test]
-    fn arrow_ipc_date_types_as_strings() {
-        // Verify that all date/time types are preserved as strings for DuckDB parsing
-        let schema = vec![
-            json!({"name": "date_col", "type": "DATE", "mode": "NULLABLE"}),
-            json!({"name": "time_col", "type": "TIME", "mode": "NULLABLE"}),
-            json!({"name": "datetime_col", "type": "DATETIME", "mode": "NULLABLE"}),
-            json!({"name": "timestamp_col", "type": "TIMESTAMP", "mode": "NULLABLE"}),
-        ];
-        let rows = vec![json!({"f": [
-            {"v": "2024-03-15"},
-            {"v": "14:30:00"},
-            {"v": "2024-03-15T14:30:00"},
-            {"v": "1.710512e+09"}
-        ]})];
-
-        let ipc_bytes = bigquery_json_to_arrow_ipc(&schema, &rows)
-            .expect("should convert date/time columns");
-
-        let batch = read_ipc_to_batch(&ipc_bytes);
-        assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 4);
-
-        // All should be Utf8
-        for i in 0..4 {
-            assert_eq!(
-                *batch.schema().field(i).data_type(),
-                arrow_schema::DataType::Utf8,
-                "column {} should be Utf8",
-                i
-            );
-        }
-    }
-
-    // ===========================================================================
-    // read-arrow: execution time extraction
-    // ===========================================================================
-
-    #[test]
-    fn extract_execution_time_from_job() {
-        let job = json!({
-            "statistics": {
-                "startTime": "1710500000000",
-                "endTime": "1710500002500"
-            }
-        });
-        assert_eq!(extract_execution_time_ms(&job), Some(2500));
-    }
-
-    #[test]
-    fn extract_execution_time_missing_statistics() {
-        let job = json!({"status": {"state": "DONE"}});
-        assert_eq!(extract_execution_time_ms(&job), None);
-    }
-
-    #[test]
-    fn extract_execution_time_missing_end_time() {
-        let job = json!({
-            "statistics": {
-                "startTime": "1710500000000"
-            }
-        });
-        assert_eq!(extract_execution_time_ms(&job), None);
-    }
-
-    // ===========================================================================
-    // read-arrow: IPC stream validation helper
-    // ===========================================================================
-
-    /// Helper: read an Arrow IPC stream back into a RecordBatch for verification.
-    fn read_ipc_to_batch(ipc_bytes: &[u8]) -> arrow_array::RecordBatch {
-        use arrow_ipc::reader::StreamReader;
-        use std::io::Cursor;
-
-        let cursor = Cursor::new(ipc_bytes);
-        let mut reader = StreamReader::try_new(cursor, None)
-            .expect("should parse IPC stream");
-        reader
-            .next()
-            .expect("should have at least one batch")
-            .expect("batch should be valid")
     }
 }

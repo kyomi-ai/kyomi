@@ -432,41 +432,40 @@ import { StatusBar } from '@/components/ui/status-bar';
 
 ### EmptyState Component (No Data Displays)
 
-**Location:** `apps/frontend/src/components/ui/empty-state.jsx`
+**Location:**
+- React: `apps/frontend/src/components/ui/empty-state.jsx`
+- Leptos: `crates/kyomi-ui/src/components/empty_state.rs`
 
-For displaying empty states when no data is available:
+For displaying empty states when no data is available. ALWAYS use the shared
+EmptyState component — never build inline empty states with ad-hoc markup.
 
-```jsx
-import { EmptyState } from '@/components/ui/empty-state';
+**Leptos usage:**
+```rust
+use crate::components::{EmptyState, EmptyStateVariant};
 
-// Variants
-<EmptyState
-  variant="default"
-  title="No results found"
-  description="Try adjusting your search criteria"
-/>
+// Basic
+view! {
+    <EmptyState
+        title="No results found"
+        description="Try adjusting your search criteria"
+    />
+}
 
-<EmptyState
-  variant="warning"
-  title="No charts to display"
-  description="Charts will appear here when they are created"
-/>
-
-<EmptyState
-  variant="info"
-  title="Get started"
-  description="Create your first dashboard to begin"
-  action={<Button onClick={handleCreate}>Create Dashboard</Button>}
-/>
-
-// With custom icon
-<EmptyState
-  variant="default"
-  icon={<DatabaseIcon className="w-12 h-12" />}
-  title="No data available"
-  description="Connect a data source to get started"
-/>
+// With variant, icon, and action
+view! {
+    <EmptyState
+        variant=EmptyStateVariant::Info
+        icon=|| view! { <Icon icon=icondata_lu::LuDatabase width="48" height="48"/> }
+        title="Get started"
+        description="Connect a data source to begin"
+        action=|| view! {
+            <Button on:click=|_| {}>"Connect Datasource"</Button>
+        }
+    />
+}
 ```
+
+**Variants:** `Default`, `Warning`, `Error`, `Success`, `Info`
 
 **When to use:**
 - Empty chart grids
@@ -1051,12 +1050,21 @@ className="border border-green-200"  // Success
 
 ### Border Radius
 
+Strict 3-tier system. CSS tokens defined in `crates/kyomi-ui/style/main.css`.
+
 ```
-rounded-md   → Small (4px)  - Inputs, buttons
-rounded-lg   → Medium (8px) - Cards, containers
-rounded-xl   → Large (12px) - Modals, large cards
-rounded-full → Circle - Avatars, badges
+Token          Class        Size   Usage
+--radius-sm    rounded-md   6px    Inputs, buttons, chips, select items
+--radius-md    rounded-lg   8px    Cards, dropdowns, panels, alerts
+--radius-lg    rounded-xl   12px   Modals, dialogs, large containers
+(none)         rounded-full 100%   Avatars, badges, switch track
 ```
+
+**Rules:**
+- Do NOT use bare `rounded` (without size suffix) — always specify `rounded-md` or `rounded-lg`
+- Do NOT use inline `border-radius` styles — use Tailwind classes
+- `rounded-2xl` is allowed ONLY for chat message bubbles (conversational UI convention)
+- Directional variants (`rounded-t-lg`, `rounded-b-md`) follow the same tier they reference
 
 ### Shadow Levels
 
@@ -1198,25 +1206,66 @@ xl: 1280px  → Large desktop
 
 ## 🔄 Animation & Transitions
 
+### Design Tokens (defined in `crates/kyomi-ui/style/main.css`)
+
+```css
+/* Durations */
+--duration-fast: 100ms;    /* Color changes, hover states */
+--duration-normal: 200ms;  /* Position/size changes, mount animations */
+--duration-slow: 300ms;    /* Major layout shifts, panel slides */
+
+/* Easing curves */
+--ease-out: cubic-bezier(0.16, 1, 0.3, 1);    /* Entering elements */
+--ease-in: cubic-bezier(0.7, 0, 0.84, 0);      /* Exiting elements */
+--ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);  /* Moving elements */
+```
+
+These tokens generate Tailwind utility classes automatically:
+`duration-fast`, `duration-normal`, `duration-slow`, `ease-out`, `ease-in`, `ease-in-out`.
+
 ### Standard Transitions
 
-```jsx
-// Color transitions (buttons, links, hover states)
-className="transition-colors duration-200"
+```rust
+// Color transitions (buttons, links, hover states) — MANDATORY on all hover states
+"transition-colors"  // uses Tailwind default 150ms, which is fine
 
-// All properties (position, size, opacity)
-className="transition-all duration-300"
+// Panel/sidebar position/size changes
+"transition-all duration-slow ease-in-out"
 
-// Opacity only
-className="transition-opacity duration-200"
+// Opacity fades
+"transition-opacity duration-normal"
 ```
+
+**Rule:** Every element with `hover:bg-*` or `hover:text-*` MUST have `transition-colors`.
+
+### Entrance Animations
+
+Utility classes for mount-time animations (defined in `main.css`):
+
+```
+Class                   Animation                     Use for
+animate-fade-in         Fade in (200ms, ease-out)     Backdrop overlays, subtle reveals
+animate-fade-in-fast    Fade in (100ms, ease-out)     Modal/dialog backdrops
+animate-zoom-fade-in    Fade + scale 95→100%          Modals, dialogs, confirm dialogs
+animate-slide-fade-in   Fade + slide from top         Dropdowns, selects, popovers
+animate-slide-in-right  Fade + slide from right       Toast notifications
+```
+
+**Rule:** Every mount-animated element MUST use a named animation class — never inline durations.
+
+### Reduced Motion
+
+All animations and transitions are automatically disabled when the user has
+`prefers-reduced-motion: reduce` enabled. This is handled globally in `main.css`.
 
 ### Loading States
 
 Use the Skeleton component for loading placeholders:
 
-```jsx
-import { Skeleton } from '@/components/ui/skeleton';
+```rust
+use crate::components::Skeleton;
+
+view! { <Skeleton class="h-10 w-full" /> }
 
 <Skeleton className="h-10 w-full" />
 ```

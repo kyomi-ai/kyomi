@@ -115,6 +115,12 @@ struct CreateCollectionRequest {
     color: Option<String>,
     #[serde(default)]
     is_public: bool,
+    #[serde(default = "default_doc_type")]
+    doc_type: String,
+}
+
+fn default_doc_type() -> String {
+    "dashboard".to_string()
 }
 
 #[derive(Deserialize)]
@@ -183,6 +189,7 @@ async fn create_collection(
         request.description.as_deref(),
         request.color.as_deref(),
         request.is_public,
+        &request.doc_type,
     )
     .await?;
 
@@ -199,7 +206,7 @@ async fn list_collections(
 ) -> Result<Json<Vec<CollectionResponse>>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
 
-    let collections = collection_service::list_collections(&state.db, workspace_id).await?;
+    let collections = collection_service::list_collections(&state.db, workspace_id, None).await?;
 
     let response: Vec<CollectionResponse> = collections
         .iter()

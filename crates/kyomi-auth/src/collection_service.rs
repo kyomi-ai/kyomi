@@ -126,6 +126,7 @@ pub async fn create_collection(
     description: Option<&str>,
     color: Option<&str>,
     is_public: bool,
+    doc_type: &str,
 ) -> Result<kyomi_core::models::Collection> {
     validate_name(name)?;
     if let Some(c) = color {
@@ -143,12 +144,12 @@ pub async fn create_collection(
 
     let insert_sql = format!(
         r#"
-        INSERT INTO collections (id, workspace_id, name, description, color, is_public, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, {bool_val}, {now_expr}, {now_expr})
+        INSERT INTO collections (id, workspace_id, name, description, color, is_public, doc_type, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, {bool_val}, $6, {now_expr}, {now_expr})
         "#
     );
 
-    db_execute!(db, &insert_sql, &id, workspace_id, name.trim(), &description, &color)
+    db_execute!(db, &insert_sql, &id, workspace_id, name.trim(), &description, &color, doc_type)
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to create collection: {e}")))?;
 
     // Fetch the created row
@@ -167,23 +168,43 @@ pub async fn create_collection(
 // ─── List collections ────────────────────────────────────────────────────────
 
 /// List all collections in a workspace with their dashboards.
+///
+/// When `doc_type` is `Some`, only collections whose own `doc_type` column
+/// matches are returned. When `None`, all collections are returned.
 pub async fn list_collections(
     db: &DbPool,
     workspace_id: &str,
+    doc_type: Option<&str>,
 ) -> Result<Vec<CollectionWithDashboards>> {
-    // Fetch all collections
-    let collections = db_fetch_all!(
-        db,
-        kyomi_core::models::Collection,
-        r#"
-        SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
-        FROM collections
-        WHERE workspace_id = $1
-        ORDER BY created_at DESC
-        "#,
-        workspace_id
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?;
+    // Fetch collections — optionally filtered by their own doc_type column
+    let collections = if let Some(dt) = doc_type {
+        db_fetch_all!(
+            db,
+            kyomi_core::models::Collection,
+            r#"
+            SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+            FROM collections
+            WHERE workspace_id = $1 AND doc_type = $2
+            ORDER BY created_at DESC
+            "#,
+            workspace_id,
+            dt
+        )
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?
+    } else {
+        db_fetch_all!(
+            db,
+            kyomi_core::models::Collection,
+            r#"
+            SELECT id, workspace_id, name, description, color, is_public, created_at, updated_at
+            FROM collections
+            WHERE workspace_id = $1
+            ORDER BY created_at DESC
+            "#,
+            workspace_id
+        )
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to list collections: {e}")))?
+    };
 
     // Fetch all dashboards in collections for this workspace in one query
     let dashboard_rows = db_fetch_all!(

@@ -29,3 +29,4 @@ subtle = { workspace = true }
 bytes = { workspace = true }
 sqlx = { workspace = true }
 tokio-util = { workspace = true }
+serde_yaml = "0.9"

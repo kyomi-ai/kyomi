@@ -150,6 +150,10 @@ pub struct Config {
     /// Optional — server starts without it (no billing features).
     pub stripe_secret_key: Option<String>,
 
+    /// Stripe publishable key (pk_test_ or pk_live_).
+    /// Optional — needed for embedded checkout on the frontend.
+    pub stripe_publishable_key: Option<String>,
+
     /// Stripe webhook signing secret (whsec_...).
     /// Optional — server starts without it (webhooks rejected).
     pub stripe_webhook_secret: Option<String>,
@@ -219,6 +223,14 @@ pub struct Config {
     /// WebSocket URL embedded in Connect tokens (where the Connect binary connects).
     /// Defaults to `wss://connect.kyomi.ai/v1`.
     pub connect_url: String,
+
+    // ── Workspace Secrets (BYOK) ────────────────────────────────────────
+    /// Base64-encoded 32-byte master key for encrypting workspace-level
+    /// secrets (BYOK API keys), loaded from `WORKSPACE_SECRETS_KEY`.
+    ///
+    /// **Required in SaaS mode** — the server refuses to start without it.
+    /// Optional in self-hosted mode; absence disables BYOK features.
+    pub workspace_secrets_key: Option<String>,
 }
 
 impl Config {
@@ -345,6 +357,7 @@ impl Config {
             llm_model: env::var("LLM_MODEL").ok(),
             llm_base_url: env::var("LLM_BASE_URL").ok(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
+            stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
             slack_client_id: env::var("SLACK_CLIENT_ID").ok(),
             slack_client_secret: env::var("SLACK_CLIENT_SECRET").ok(),
@@ -372,6 +385,9 @@ impl Config {
             connect_jwt_private_key: env::var("CONNECT_JWT_PRIVATE_KEY").ok(),
             connect_url: env::var("CONNECT_URL")
                 .unwrap_or_else(|_| "wss://connect.kyomi.ai/v1".into()),
+            workspace_secrets_key: env::var("WORKSPACE_SECRETS_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }
     }
 
@@ -415,6 +431,7 @@ impl Config {
             llm_model: None,
             llm_base_url: None,
             stripe_secret_key: None,
+            stripe_publishable_key: None,
             stripe_webhook_secret: None,
             slack_client_id: None,
             slack_client_secret: None,
@@ -432,6 +449,7 @@ impl Config {
             analytics_clickhouse_secure: false,
             connect_jwt_private_key: None,
             connect_url: "wss://localhost:8003/connect/v1".into(),
+            workspace_secrets_key: None,
         }
     }
 

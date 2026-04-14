@@ -94,14 +94,13 @@ pub fn extract_client_ip(headers: &HeaderMap, peer_addr: Option<std::net::Socket
 
     // 2. X-Forwarded-For — less reliable: nginx appends but doesn't replace,
     //    so clients can inject fake first entries. Use first entry as fallback.
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first_ip) = xff.split(',').next() {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(first_ip) = xff.split(',').next() {
             let ip = first_ip.trim();
             if !ip.is_empty() && ip.parse::<IpAddr>().is_ok() {
                 return ip.to_string();
             }
         }
-    }
 
     // 3. TCP peer address — direct connection (local dev without reverse proxy).
     if let Some(addr) = peer_addr {

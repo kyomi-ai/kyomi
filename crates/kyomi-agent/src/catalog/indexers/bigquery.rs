@@ -93,7 +93,7 @@ impl CatalogIndexer for BigQueryIndexer {
                     }
                 }
             }
-            "kyomi_oauth" | _ => {
+            _ => {
                 match resolve_kyomi_oauth_token(db, ctx, user_email).await {
                     Ok(token) => token,
                     Err(e) => {
@@ -200,24 +200,23 @@ async fn resolve_enterprise_oauth_token(
     .map_err(|e| format!("{e}"))?;
 
     // If credentials changed (token was refreshed), persist them back
-    if refreshed != credentials {
-        if let Some(email) = user_email {
-            if let Some(user_id) = resolve_user_id(db, email).await {
-                let _ = kyomi_auth::datasource_service::save_user_credential(
-                    db,
-                    &ctx.encryption_key,
-                    &user_id,
-                    &ctx.datasource_config_id,
-                    &ctx.workspace_id,
-                    &refreshed,
-                )
-                .await;
-                info!(
-                    user_id,
-                    "Persisted refreshed enterprise_oauth credentials"
-                );
-            }
-        }
+    if refreshed != credentials
+        && let Some(email) = user_email
+        && let Some(user_id) = resolve_user_id(db, email).await
+    {
+        let _ = kyomi_auth::datasource_service::save_user_credential(
+            db,
+            &ctx.encryption_key,
+            &user_id,
+            &ctx.datasource_config_id,
+            &ctx.workspace_id,
+            &refreshed,
+        )
+        .await;
+        info!(
+            user_id,
+            "Persisted refreshed enterprise_oauth credentials"
+        );
     }
 
     // Extract the access token

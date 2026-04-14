@@ -26,6 +26,24 @@ async fn main() {
     let encryption_key = kyomi_auth::encryption::derive_key(&config.encryption_key)
         .expect("ENCRYPTION_KEY must be a valid 32-byte base64url-encoded key");
 
+    // Workspace-level secrets master key (BYOK). Required in SaaS mode — the
+    // server refuses to start without it so BYOK can never be silently broken
+    // in production. In self-hosted mode, absence is allowed and BYOK features
+    // gate themselves off via `workspace_secrets::is_available()`.
+    if !config.self_hosted && config.workspace_secrets_key.is_none() {
+        eprintln!(
+            "FATAL: WORKSPACE_SECRETS_KEY is required in SaaS mode.\n\
+             \n\
+             This key encrypts workspace-level BYOK API keys at rest. Generate\n\
+             a new key with:\n\
+             \n\
+             \topenssl rand -base64 32\n\
+             \n\
+             Then set WORKSPACE_SECRETS_KEY=<value> in your environment."
+        );
+        std::process::exit(1);
+    }
+
     // Lazy-load embedding model on a background thread (~440ms).
     // The server starts listening immediately; endpoints that need embeddings
     // get 503 during the brief warmup window.
@@ -46,6 +64,12 @@ async fn main() {
     let db = kyomi_core::db::DbPool::connect(&config.database_url)
         .await
         .expect("failed to connect to database");
+
+    // Post-SQL-migration hook: convert knowledge-file folders to collections,
+    // then drop the old knowledge_files table. Idempotent — no-op if already done.
+    kyomi_knowledge::unify::migrate_folders_to_collections(&db)
+        .await
+        .expect("failed to run folder-to-collection migration");
 
     // Personal mode: auto-provision local user and workspace on first boot
     if config.is_personal() {
@@ -129,7 +153,7 @@ async fn main() {
         && config_arc
             .slack_signing_secret
             .as_ref()
-            .map_or(true, |s| s.is_empty())
+            .is_none_or(|s| s.is_empty())
     {
         tracing::warn!(
             "SLACK_CLIENT_ID is set but SLACK_SIGNING_SECRET is missing — \
@@ -269,15 +293,17 @@ async fn main() {
 
         // Watch scheduler — polls for due watches every 30s
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
-            db,
-            kv.clone(),
-            encryption_key_arc,
-            embedding,
-            ws_manager,
-            config_arc.clone(),
-            Some(state.connect_registry.clone()),
-            state.platforms.clone(),
-            shutdown_token.child_token(),
+            kyomi_agent::WatchSchedulerDeps {
+                db,
+                kv: kv.clone(),
+                encryption_key: encryption_key_arc,
+                embedding,
+                ws_manager,
+                config: config_arc.clone(),
+                connect_registry: Some(state.connect_registry.clone()),
+                platforms: state.platforms.clone(),
+                cancel: shutdown_token.child_token(),
+            },
         ));
         let _handle = scheduler.clone().start();
         tracing::info!("Watch scheduler started");
@@ -399,8 +425,20 @@ async fn main() {
         tracing::info!("SQLite backend — analytics background jobs disabled");
     }
 
+    // Register Leptos server functions before building the router.
+    kyomi_ui::register_server_functions();
+
+    tracing::info!(
+        count = leptos::server_fn::axum::server_fn_paths().count(),
+        "Leptos server functions registered"
+    );
+
     // Build the core router, then conditionally mount platform-specific routes.
-    let router = kyomi_server::build_router(state);
+    let extras = kyomi_server::ServerExtras {
+        #[cfg(feature = "slack")]
+        slack_client: Some(slack_state.slack_client.clone()),
+    };
+    let router = kyomi_server::build_router(state, extras);
 
     #[cfg(feature = "slack")]
     let router = router.nest(

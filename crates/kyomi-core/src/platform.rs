@@ -170,6 +170,13 @@ pub struct WatchAlertChannel {
     pub channel_name: Option<String>,
 }
 
+/// A platform user link — maps a Kyomi user to a platform identity.
+#[derive(Debug, Clone)]
+pub struct PlatformUserLink {
+    pub platform_user_id: String,
+    pub platform_username: Option<String>,
+}
+
 // ── Database helper functions ──────────────────────────────────────
 
 /// Look up a Kyomi user_id by platform identity.
@@ -406,6 +413,54 @@ pub async fn delete_user_integration(
     crate::db_execute!(
         db,
         "DELETE FROM workspace_user_integrations \
+         WHERE workspace_id = $1 AND user_id = $2 AND platform_type = $3",
+        workspace_id,
+        user_id,
+        platform_type
+    )?;
+    Ok(())
+}
+
+/// Look up a platform user link by Kyomi user_id.
+///
+/// Returns the platform username (display name) and platform user ID
+/// for the given user on the specified platform within a workspace.
+pub async fn get_platform_user_link(
+    db: &crate::db::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+    platform_type: &str,
+) -> crate::Result<Option<PlatformUserLink>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        platform_user_id: String,
+        platform_username: Option<String>,
+    }
+    let row = crate::db_fetch_optional!(
+        db,
+        Row,
+        "SELECT platform_user_id, platform_username FROM platform_user_links \
+         WHERE workspace_id = $1 AND user_id = $2 AND platform_type = $3",
+        workspace_id,
+        user_id,
+        platform_type
+    )?;
+    Ok(row.map(|r| PlatformUserLink {
+        platform_user_id: r.platform_user_id,
+        platform_username: r.platform_username,
+    }))
+}
+
+/// Delete a platform user link for a specific user and platform.
+pub async fn delete_platform_user_link(
+    db: &crate::db::DbPool,
+    workspace_id: &str,
+    user_id: &str,
+    platform_type: &str,
+) -> crate::Result<()> {
+    crate::db_execute!(
+        db,
+        "DELETE FROM platform_user_links \
          WHERE workspace_id = $1 AND user_id = $2 AND platform_type = $3",
         workspace_id,
         user_id,

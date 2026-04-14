@@ -11,26 +11,12 @@
 #
 # Runtime: scratch with only the binary, runtime data, CA certs, and the
 # minimal set of shared libraries detected by ldd (glibc, libstdc++, libssl
-# — ONNX Runtime needs libstdc++, webauthn-rs needs libssl/libcrypto).
+# — ring crypto needs libstdc++, webauthn-rs needs libssl/libcrypto).
 # All outbound TLS uses rustls; openssl is only used locally by webauthn-rs
 # for X.509 cert parsing.
 # ---------------------------------------------------------------------------
 
-# ===== Stage 0: Build frontend =====
-FROM node:20-slim AS frontend-builder
-WORKDIR /build
-# Copy manifests only — cache npm ci unless deps change
-COPY apps/frontend/package.json apps/frontend/package-lock.json ./apps/frontend/
-COPY packages/chart-header/package.json ./packages/chart-header/package.json
-COPY packages/chartml-transform/package.json ./packages/chartml-transform/package.json
-RUN cd apps/frontend && npm ci
-# Copy full source for the build
-COPY apps/frontend/ ./apps/frontend/
-COPY packages/chart-header/ ./packages/chart-header/
-COPY packages/chartml-transform/ ./packages/chartml-transform/
-RUN cd apps/frontend && npm run build
-
-# ===== Stage 1: Build Rust binary =====
+# ===== Stage 0: Build Rust binary =====
 FROM rust:1-bookworm AS builder
 
 WORKDIR /build
@@ -49,9 +35,6 @@ COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 
-# Frontend dist — rust-embed reads this at compile time to embed into the binary
-COPY --from=frontend-builder /build/apps/frontend/dist ./apps/frontend/dist
-
 # All SQL queries use runtime string-based sqlx::query() — no compile-time
 # checking, no .sqlx/ cache, and no DATABASE_URL needed at build time.
 
@@ -62,7 +45,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/kyomi /tmp/kyomi
 
 # Collect the minimal shared libraries the binary needs at runtime.
-# ONNX Runtime (via fastembed) requires libstdc++ and glibc.
+# ring crypto requires libstdc++ and glibc.
 # Also include glibc NSS modules — getaddrinfo() loads these via dlopen()
 # at runtime, so ldd doesn't list them, but they're needed for DNS resolution.
 RUN mkdir -p /tmp/runtime-libs && \
@@ -72,10 +55,10 @@ RUN mkdir -p /tmp/runtime-libs && \
     cp /lib/x86_64-linux-gnu/libnss_files.so.2 /tmp/runtime-libs/ && \
     cp /lib/x86_64-linux-gnu/libresolv.so.2 /tmp/runtime-libs/
 
-# Create writable /tmp for ONNX Runtime temp files.
+# Create writable /tmp for runtime temp files.
 RUN mkdir -p /tmp/scratch-tmp && touch /tmp/scratch-tmp/.keep
 
-# ===== Stage 2: Scratch runtime =====
+# ===== Stage 1: Scratch runtime =====
 FROM scratch
 
 # Dynamic linker + shared libraries
@@ -95,11 +78,11 @@ COPY --from=builder /tmp/kyomi /app/kyomi
 COPY data/constants.toml /app/data/constants.toml
 COPY data/chartml-spec/ /app/data/chartml-spec/
 
-# Writable /tmp for ONNX Runtime temp files
+# Writable /tmp
 COPY --from=builder --chown=1000:1000 /tmp/scratch-tmp /tmp
 
 # Tell the binary where to find runtime data and CA certs
-# Note: ONNX model is now embedded via include_bytes!() — no runtime cache needed
+# Note: ML model is embedded via include_bytes!() — no runtime model files needed
 ENV SHARED_CONSTANTS_PATH=/app/data/constants.toml \
     CHARTML_SPEC_DIR=/app/data/chartml-spec \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \

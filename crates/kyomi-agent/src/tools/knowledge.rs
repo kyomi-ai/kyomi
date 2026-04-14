@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
+use kyomi_core::models::DocType;
 
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
@@ -44,9 +45,11 @@ impl AgentTool for SearchKnowledgeTool {
     }
 
     fn description(&self) -> &str {
-        "Search the workspace's knowledge base for relevant tables, learnings, \
-         and metrics using semantic search. Use this to discover what data is \
-         available before querying."
+        "Search the workspace's knowledge base for relevant tables, dashboards, \
+         knowledge documents, learnings, and metrics using semantic search. \
+         Use this to discover what is available before querying. Pass `doc_type` \
+         to restrict results to only dashboards or only knowledge documents \
+         (omit for everything including tables and metrics)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -60,6 +63,11 @@ impl AgentTool for SearchKnowledgeTool {
                 "datasource": {
                     "type": "string",
                     "description": "Optional datasource slug to filter"
+                },
+                "doc_type": {
+                    "type": "string",
+                    "enum": ["dashboard", "knowledge"],
+                    "description": "Optional document type filter. When set, only returns matching dashboards or knowledge documents (tables, metrics, and legacy learnings are excluded). Omit to search everything."
                 },
                 "limit": {
                     "type": "integer",
@@ -90,6 +98,17 @@ impl AgentTool for SearchKnowledgeTool {
                 kyomi_core::Error::BadRequest("Missing required parameter 'query'".into())
             })?;
         let datasource_slug = args.get("datasource").and_then(|v| v.as_str());
+        let doc_type_filter: Option<DocType> = args
+            .get("doc_type")
+            .and_then(|v| v.as_str())
+            .map(|s| match s {
+                "dashboard" => Ok(DocType::Dashboard),
+                "knowledge" => Ok(DocType::Knowledge),
+                other => Err(kyomi_core::Error::BadRequest(format!(
+                    "Invalid doc_type '{other}' — must be 'dashboard' or 'knowledge'"
+                ))),
+            })
+            .transpose()?;
         let limit = args
             .get("limit")
             .and_then(|v| v.as_i64())
@@ -150,12 +169,19 @@ impl AgentTool for SearchKnowledgeTool {
         // Search knowledge file chunks (new knowledge system)
         let query_embedding = embed.embed_passage(query)?;
         let knowledge_file_results = search_knowledge_chunks(
-            &ctx.db, &ctx.workspace_id, &query_embedding, limit,
+            &ctx.db, &ctx.workspace_id, &query_embedding, limit, doc_type_filter,
         ).await;
 
+        // When doc_type filter is specified, exclude legacy table/metric/learning
+        // entries — the caller is asking specifically for documents of that type.
+        let legacy_entries: Vec<_> = if doc_type_filter.is_some() {
+            Vec::new()
+        } else {
+            result.entries
+        };
+
         // Format entries as structured JSON
-        let mut results: Vec<serde_json::Value> = result
-            .entries
+        let mut results: Vec<serde_json::Value> = legacy_entries
             .into_iter()
             .map(|entry| {
                 let entry_type = match entry.kind {
@@ -298,12 +324,18 @@ impl AgentTool for SearchKnowledgeTool {
 
 #[derive(sqlx::FromRow)]
 struct KnowledgeChunkRow {
-    file_id: String,
+    dashboard_id: String,
     file_name: String,
-    #[allow(dead_code)]
-    file_path: Option<String>,
+    doc_type: String,
     chunk_content: String,
+    // SQLite path:   raw f32 LE bytes, cosine similarity computed in Rust.
+    // Postgres path: always empty (`''::bytea` placeholder). The field exists
+    // only because `sqlx::FromRow` requires every selected column to map to a
+    // struct field; the actual scoring on Postgres comes from `score` below.
     embedding: Vec<u8>,
+    // Postgres path: `1 - (embedding <=> $2::vector)` — real cosine similarity.
+    // SQLite path:   NULL, since we compute from `embedding` bytes in Rust.
+    score: Option<f64>,
 }
 
 async fn search_knowledge_chunks(
@@ -311,6 +343,7 @@ async fn search_knowledge_chunks(
     workspace_id: &str,
     query_embedding: &[f32],
     limit: usize,
+    doc_type_filter: Option<DocType>,
 ) -> Vec<serde_json::Value> {
     // For SQLite: load all chunks, compute cosine similarity in memory
     // For Postgres: use pgvector ORDER BY embedding <=> $2::vector
@@ -324,44 +357,65 @@ async fn search_knowledge_chunks(
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            sqlx::query_as::<_, KnowledgeChunkRow>(
-                "SELECT kc.file_id, kf.name AS file_name, NULL AS file_path, \
-                        kc.content AS chunk_content, ''::bytea AS embedding \
+            let doc_type_clause = if doc_type_filter.is_some() {
+                "AND d.doc_type = $4 "
+            } else {
+                ""
+            };
+            let sql = format!(
+                "SELECT kc.dashboard_id, d.title AS file_name, \
+                        COALESCE(d.doc_type, 'dashboard') AS doc_type, \
+                        kc.content AS chunk_content, \
+                        ''::bytea AS embedding, \
+                        (1.0 - (kc.embedding <=> $2::vector))::float8 AS score \
                  FROM knowledge_chunks kc \
-                 JOIN knowledge_files kf ON kf.id = kc.file_id \
+                 JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
                  WHERE kc.workspace_id = $1 \
+                 {doc_type_clause}\
                  ORDER BY kc.embedding <=> $2::vector \
-                 LIMIT $3",
-            )
-            .bind(workspace_id)
-            .bind(&vec_str)
-            .bind(limit as i64)
-            .fetch_all(pg)
-            .await
-            .unwrap_or_default()
+                 LIMIT $3"
+            );
+            let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql)
+                .bind(workspace_id)
+                .bind(&vec_str)
+                .bind(limit as i64);
+            if let Some(dt) = doc_type_filter {
+                query = query.bind(dt.as_str());
+            }
+            query.fetch_all(pg).await.unwrap_or_default()
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
-            sqlx::query_as::<_, KnowledgeChunkRow>(
-                "SELECT kc.file_id, kf.name AS file_name, NULL AS file_path, \
-                        kc.content AS chunk_content, kc.embedding \
+            // SQLite path loads all matching chunks and computes similarity in Rust.
+            let doc_type_clause = if doc_type_filter.is_some() {
+                "AND d.doc_type = $2 "
+            } else {
+                ""
+            };
+            let sql = format!(
+                "SELECT kc.dashboard_id, d.title AS file_name, \
+                        COALESCE(d.doc_type, 'dashboard') AS doc_type, \
+                        kc.content AS chunk_content, kc.embedding, \
+                        NULL AS score \
                  FROM knowledge_chunks kc \
-                 JOIN knowledge_files kf ON kf.id = kc.file_id \
-                 WHERE kc.workspace_id = $1",
-            )
-            .bind(workspace_id)
-            .fetch_all(sq)
-            .await
-            .unwrap_or_default()
+                 JOIN dashboards d ON d.dashboard_id = kc.dashboard_id \
+                 WHERE kc.workspace_id = $1 \
+                 {doc_type_clause}"
+            );
+            let mut query = sqlx::query_as::<_, KnowledgeChunkRow>(&sql).bind(workspace_id);
+            if let Some(dt) = doc_type_filter {
+                query = query.bind(dt.as_str());
+            }
+            query.fetch_all(sq).await.unwrap_or_default()
         }
     };
     if rows.is_empty() {
         return Vec::new();
     }
 
-    let mut file_scores: HashMap<String, (f64, String, String)> = HashMap::new();
+    let mut file_scores: HashMap<String, (f64, String, String, String)> = HashMap::new();
     for row in &rows {
-        let score = if row.embedding.is_empty() {
-            0.6 // Postgres path -- approximate score
+        let score = if let Some(s) = row.score {
+            s
         } else {
             let chunk_emb: Vec<f32> = row
                 .embedding
@@ -371,8 +425,8 @@ async fn search_knowledge_chunks(
             cosine_similarity(query_embedding, &chunk_emb)
         };
         let entry = file_scores
-            .entry(row.file_id.clone())
-            .or_insert((0.0, row.file_name.clone(), row.chunk_content.chars().take(200).collect()));
+            .entry(row.dashboard_id.clone())
+            .or_insert((0.0, row.file_name.clone(), row.chunk_content.chars().take(200).collect(), row.doc_type.clone()));
         if score > entry.0 {
             entry.0 = score;
             entry.2 = row.chunk_content.chars().take(200).collect();
@@ -382,11 +436,12 @@ async fn search_knowledge_chunks(
     let min_score = 0.25;
     let mut results: Vec<serde_json::Value> = file_scores
         .into_iter()
-        .filter(|(_, (score, _, _))| *score >= min_score)
-        .map(|(file_id, (score, name, preview))| {
+        .filter(|(_, (score, _, _, _))| *score >= min_score)
+        .map(|(dashboard_id, (score, name, preview, doc_type))| {
             serde_json::json!({
-                "type": "knowledge_file",
-                "id": file_id,
+                "type": "document",
+                "source_type": doc_type,
+                "id": dashboard_id,
                 "text": format!("{name}: {preview}"),
                 "score": format!("{:.2}", score),
                 "file_name": name,
@@ -428,21 +483,85 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
-// WriteKnowledgeFileTool
+// Helper: look up a document by title (exact match via search)
 // ---------------------------------------------------------------------------
 
-pub struct WriteKnowledgeFileTool;
+/// Search for a document by exact title match within the workspace.
+/// Returns the dashboard if found.
+async fn find_document_by_title(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    title: &str,
+) -> kyomi_core::Result<Option<kyomi_core::models::Dashboard>> {
+    let results = kyomi_auth::dashboard_service::search_dashboards(
+        db,
+        workspace_id,
+        Some(title),
+        None,
+        kyomi_auth::dashboard_service::SearchSort::Recent,
+        100,
+    )
+    .await?;
+
+    // Find exact title match (case-sensitive)
+    let matched = results.iter().find(|d| d.title == title);
+
+    if let Some(m) = matched {
+        kyomi_auth::dashboard_service::get_dashboard(db, &m.dashboard_id, workspace_id).await
+    } else {
+        Ok(None)
+    }
+}
+
+/// Resolve a document by path or ID. Supports:
+/// - UUID lookup (if input looks like a UUID)
+/// - Exact title match
+/// - Backward compat: if path contains `/`, strip directory and search by filename
+async fn resolve_document(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+    path: &str,
+) -> kyomi_core::Result<Option<kyomi_core::models::Dashboard>> {
+    // If it looks like a UUID, try direct lookup first
+    if uuid::Uuid::parse_str(path).is_ok() {
+        let doc = kyomi_auth::dashboard_service::get_dashboard(db, path, workspace_id).await?;
+        if doc.is_some() {
+            return Ok(doc);
+        }
+    }
+
+    // Try exact title match
+    let doc = find_document_by_title(db, workspace_id, path).await?;
+    if doc.is_some() {
+        return Ok(doc);
+    }
+
+    // Backward compat: if path contains `/`, strip directory and search by filename
+    if let Some(slash_pos) = path.rfind('/') {
+        let filename = &path[slash_pos + 1..];
+        if !filename.is_empty() {
+            return find_document_by_title(db, workspace_id, filename).await;
+        }
+    }
+
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// WriteDocumentTool
+// ---------------------------------------------------------------------------
+
+pub struct WriteDocumentTool;
 
 #[async_trait]
-impl AgentTool for WriteKnowledgeFileTool {
+impl AgentTool for WriteDocumentTool {
     fn name(&self) -> &str {
         "write_knowledge_file"
     }
 
     fn description(&self) -> &str {
-        "Create a new knowledge file or overwrite an existing one. Use for creating new markdown \
-         documents in the knowledge base. For updating existing files, prefer edit_knowledge_file. \
-         Parent folders are created automatically if they don't exist."
+        "Create a new document or overwrite an existing one. Use for creating new markdown \
+         documents in the knowledge base. For updating existing documents, prefer edit_knowledge_file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -451,15 +570,21 @@ impl AgentTool for WriteKnowledgeFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path (e.g. 'Revenue/Metrics.md'). Parent folders created automatically."
+                    "description": "Document title or path. If path contains '/', the last segment is used as the title."
                 },
                 "content": {
                     "type": "string",
-                    "description": "Full markdown content for the file"
+                    "description": "Full markdown content for the document"
                 },
                 "content_hash": {
                     "type": "string",
-                    "description": "Hash from a prior read_knowledge_file response. Required when overwriting an existing file."
+                    "description": "Hash from a prior read_knowledge_file response. Required when overwriting an existing document."
+                },
+                "doc_type": {
+                    "type": "string",
+                    "description": "Document type: 'knowledge' (default) or 'dashboard'",
+                    "enum": ["knowledge", "dashboard"],
+                    "default": "knowledge"
                 }
             },
             "required": ["path", "content"]
@@ -485,76 +610,109 @@ impl AgentTool for WriteKnowledgeFileTool {
             .as_str()
             .ok_or_else(|| kyomi_core::Error::BadRequest("content is required".into()))?;
         let content_hash = args["content_hash"].as_str();
+        let doc_type = args
+            .get("doc_type")
+            .and_then(|v| v.as_str())
+            .map(DocType::from_str_or_default)
+            .unwrap_or(DocType::Knowledge);
 
-        let existing = kyomi_knowledge::knowledge_files::get_file_by_path(
-            &ctx.db,
-            &ctx.workspace_id,
-            path,
-        )
-        .await
-        .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
+        // Extract title: if path contains '/', use the last segment
+        let title = if let Some(slash_pos) = path.rfind('/') {
+            &path[slash_pos + 1..]
+        } else {
+            path
+        };
 
-        if let Some(file) = existing {
-            let result = kyomi_knowledge::knowledge_files::update_file_content(
-                &ctx.db,
-                ctx.embedding.wait_ready().await?,
-                &ctx.workspace_id,
-                &file.id,
-                content,
-                &ctx.user_id,
-                content_hash,
+        let embed = ctx.embedding.wait_ready().await?;
+
+        // Look up existing document by title
+        let existing = find_document_by_title(&ctx.db, &ctx.workspace_id, title).await?;
+
+        if let Some(doc) = existing {
+            // Update existing document
+            match kyomi_auth::dashboard_service::update_dashboard(
+                kyomi_auth::dashboard_service::UpdateDashboardParams {
+                    db: &ctx.db,
+                    embed: None, // rechunking handled explicitly below
+                    dashboard_id: &doc.dashboard_id,
+                    workspace_id: &ctx.workspace_id,
+                    user_id: &ctx.user_id,
+                    title: None,
+                    content: Some(content),
+                    change_summary: None,
+                    expected_content_hash: content_hash,
+                },
             )
             .await
-            .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
-            match result {
-                Some(f) => Ok(serde_json::json!({
-                    "success": true,
-                    "action": "updated",
-                    "id": f.id,
-                    "path": path,
-                    "content_hash": f.content_hash,
-                })
-                .to_string()),
-                None => Ok(serde_json::json!({
-                    "success": false,
-                    "error": "File was modified since you last read it. Read it again to get the current content_hash.",
-                })
-                .to_string()),
+            {
+                Ok(updated) => {
+                    if !updated {
+                        return Ok(serde_json::json!({
+                            "success": false,
+                            "error": "Document not found or not updated",
+                        })
+                        .to_string());
+                    }
+
+                    // Rechunk after update
+                    kyomi_auth::dashboard_service::rechunk_document(
+                        &ctx.db,
+                        embed,
+                        &doc.dashboard_id,
+                        content,
+                        &ctx.workspace_id,
+                    )
+                    .await?;
+
+                    let new_hash = kyomi_auth::dashboard_service::hash_content(content);
+                    Ok(serde_json::json!({
+                        "success": true,
+                        "action": "updated",
+                        "id": doc.dashboard_id,
+                        "path": path,
+                        "content_hash": new_hash,
+                    })
+                    .to_string())
+                }
+                Err(kyomi_core::Error::Conflict(msg)) => {
+                    Ok(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })
+                    .to_string())
+                }
+                Err(e) => Err(e),
             }
         } else {
-            let (parent_id, file_name) = if let Some(slash_pos) = path.rfind('/') {
-                let folder_path = &path[..slash_pos];
-                let file_name = &path[slash_pos + 1..];
-                let parent = kyomi_knowledge::knowledge_files::ensure_parent_folders(
-                    &ctx.db,
-                    &ctx.workspace_id,
-                    folder_path,
-                    &ctx.user_id,
-                )
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
-                (parent, file_name)
-            } else {
-                (None, path)
-            };
-            let file = kyomi_knowledge::knowledge_files::create_file(
+            // Create new document
+            let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
                 &ctx.db,
-                ctx.embedding.wait_ready().await?,
-                &ctx.workspace_id,
-                parent_id.as_deref(),
-                file_name,
-                Some(content),
-                false,
                 &ctx.user_id,
+                &ctx.workspace_id,
+                title,
+                content,
+                doc_type,
+                None, // Agent does explicit sync rechunk below
             )
-            .await
-            .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
+            .await?;
+
+            // Rechunk the new document
+            kyomi_auth::dashboard_service::rechunk_document(
+                &ctx.db,
+                embed,
+                &dashboard_id,
+                content,
+                &ctx.workspace_id,
+            )
+            .await?;
+
+            let new_hash = kyomi_auth::dashboard_service::hash_content(content);
             Ok(serde_json::json!({
                 "success": true,
                 "action": "created",
-                "id": file.id,
+                "id": dashboard_id,
                 "path": path,
-                "content_hash": file.content_hash,
+                "content_hash": new_hash,
             })
             .to_string())
         }
@@ -562,20 +720,20 @@ impl AgentTool for WriteKnowledgeFileTool {
 }
 
 // ---------------------------------------------------------------------------
-// ReadKnowledgeFileTool
+// ReadDocumentTool
 // ---------------------------------------------------------------------------
 
-pub struct ReadKnowledgeFileTool;
+pub struct ReadDocumentTool;
 
 #[async_trait]
-impl AgentTool for ReadKnowledgeFileTool {
+impl AgentTool for ReadDocumentTool {
     fn name(&self) -> &str {
         "read_knowledge_file"
     }
 
     fn description(&self) -> &str {
-        "Read a specific knowledge file by path. Returns the full markdown content. \
-         Use this when you know which file to look at (from the knowledge tree or search results)."
+        "Read a specific document by title or ID. Returns the full markdown content. \
+         Use this when you know which document to look at (from search results)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -584,7 +742,7 @@ impl AgentTool for ReadKnowledgeFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path (e.g. 'Revenue/Metrics.md')"
+                    "description": "Document title, ID, or legacy path (e.g. 'Revenue/Metrics.md')"
                 }
             },
             "required": ["path"]
@@ -606,25 +764,21 @@ impl AgentTool for ReadKnowledgeFileTool {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| kyomi_core::Error::BadRequest("path is required".into()))?;
-        let file = kyomi_knowledge::knowledge_files::get_file_by_path(
-            &ctx.db,
-            &ctx.workspace_id,
-            path,
-        )
-        .await
-        .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
-        match file {
-            Some(f) => Ok(serde_json::json!({
-                "id": f.id,
+
+        let doc = resolve_document(&ctx.db, &ctx.workspace_id, path).await?;
+        match doc {
+            Some(d) => Ok(serde_json::json!({
+                "id": d.dashboard_id,
                 "path": path,
-                "name": f.name,
-                "content": f.content,
-                "content_hash": f.content_hash,
-                "updated_at": f.updated_at.to_rfc3339(),
+                "name": d.title,
+                "doc_type": d.doc_type().as_str(),
+                "content": d.content,
+                "content_hash": d.content_hash,
+                "updated_at": d.updated_at.to_rfc3339(),
             })
             .to_string()),
             None => Ok(serde_json::json!({
-                "error": format!("File not found: {path}"),
+                "error": format!("Document not found: {path}"),
             })
             .to_string()),
         }
@@ -632,26 +786,32 @@ impl AgentTool for ReadKnowledgeFileTool {
 }
 
 // ---------------------------------------------------------------------------
-// ListKnowledgeFilesTool
+// ListDocumentsTool
 // ---------------------------------------------------------------------------
 
-pub struct ListKnowledgeFilesTool;
+pub struct ListDocumentsTool;
 
 #[async_trait]
-impl AgentTool for ListKnowledgeFilesTool {
+impl AgentTool for ListDocumentsTool {
     fn name(&self) -> &str {
         "list_knowledge_files"
     }
 
     fn description(&self) -> &str {
-        "List all knowledge files and folders in the workspace. Returns the file tree \
-         structure with names, types (file/folder), and hierarchy."
+        "List all documents in the workspace. Returns titles, types, and metadata. \
+         Optionally filter by document type (dashboard or knowledge)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "doc_type": {
+                    "type": "string",
+                    "description": "Filter by document type: 'dashboard', 'knowledge', or omit for all",
+                    "enum": ["dashboard", "knowledge"]
+                }
+            },
             "required": []
         })
     }
@@ -668,47 +828,56 @@ impl AgentTool for ListKnowledgeFilesTool {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> kyomi_core::Result<String> {
-        let _ = args;
-        let tree = kyomi_knowledge::knowledge_files::list_tree(
+        let doc_type_filter = args
+            .get("doc_type")
+            .and_then(|v| v.as_str())
+            .map(DocType::from_str_or_default);
+
+        let results = kyomi_auth::dashboard_service::search_dashboards(
             &ctx.db,
             &ctx.workspace_id,
+            None,
+            doc_type_filter,
+            kyomi_auth::dashboard_service::SearchSort::Recent,
+            100,
         )
-        .await
-        .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
-        let entries: Vec<serde_json::Value> = tree
+        .await?;
+
+        let entries: Vec<serde_json::Value> = results
             .iter()
-            .map(|e| {
+            .map(|d| {
                 serde_json::json!({
-                    "id": e.id,
-                    "parent_id": e.parent_id,
-                    "name": e.name,
-                    "is_folder": e.is_folder,
-                    "updated_at": e.updated_at.to_rfc3339(),
+                    "id": d.dashboard_id,
+                    "title": d.title,
+                    "doc_type": d.doc_type,
+                    "updated_at": d.updated_at.to_rfc3339(),
+                    "content_preview": d.content_preview,
                 })
             })
             .collect();
+        let count = entries.len();
         Ok(serde_json::json!({
             "files": entries,
-            "count": entries.len(),
+            "count": count,
         })
         .to_string())
     }
 }
 
 // ---------------------------------------------------------------------------
-// EditKnowledgeFileTool
+// EditDocumentTool
 // ---------------------------------------------------------------------------
 
-pub struct EditKnowledgeFileTool;
+pub struct EditDocumentTool;
 
 #[async_trait]
-impl AgentTool for EditKnowledgeFileTool {
+impl AgentTool for EditDocumentTool {
     fn name(&self) -> &str {
         "edit_knowledge_file"
     }
 
     fn description(&self) -> &str {
-        "Make a targeted edit to an existing knowledge file using string replacement. \
+        "Make a targeted edit to an existing document using string replacement. \
          Send only the old and new text. Fails if old_text is not found or appears multiple times."
     }
 
@@ -718,7 +887,7 @@ impl AgentTool for EditKnowledgeFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "File path (e.g. 'Revenue/Metrics.md')"
+                    "description": "Document title, ID, or legacy path"
                 },
                 "old_text": {
                     "type": "string",
@@ -754,31 +923,86 @@ impl AgentTool for EditKnowledgeFileTool {
         let new_text = args["new_text"]
             .as_str()
             .ok_or_else(|| kyomi_core::Error::BadRequest("new_text is required".into()))?;
-        let file = kyomi_knowledge::knowledge_files::get_file_by_path(
-            &ctx.db,
-            &ctx.workspace_id,
-            path,
+
+        let doc = resolve_document(&ctx.db, &ctx.workspace_id, path)
+            .await?
+            .ok_or_else(|| kyomi_core::Error::NotFound(format!("Document not found: {path}")))?;
+
+        // Verify old_text appears exactly once
+        let occurrences = doc.content.matches(old_text).count();
+        if occurrences == 0 {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "old_text not found in document content",
+            })
+            .to_string());
+        }
+        if occurrences > 1 {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": format!("old_text appears {occurrences} times — must appear exactly once"),
+            })
+            .to_string());
+        }
+
+        // Apply the replacement
+        let new_content = doc.content.replacen(old_text, new_text, 1);
+        let content_hash = doc.content_hash.as_deref();
+
+        let embed = ctx.embedding.wait_ready().await?;
+
+        // Update via dashboard_service with CAS
+        match kyomi_auth::dashboard_service::update_dashboard(
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &ctx.db,
+                embed: None, // rechunking handled explicitly below
+                dashboard_id: &doc.dashboard_id,
+                workspace_id: &ctx.workspace_id,
+                user_id: &ctx.user_id,
+                title: None,
+                content: Some(&new_content),
+                change_summary: None,
+                expected_content_hash: content_hash,
+            },
         )
         .await
-        .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?
-        .ok_or_else(|| kyomi_core::Error::NotFound(format!("File not found: {path}")))?;
-        let updated = kyomi_knowledge::knowledge_files::edit_file_content(
-            &ctx.db,
-            ctx.embedding.wait_ready().await?,
-            &ctx.workspace_id,
-            &file.id,
-            old_text,
-            new_text,
-            &ctx.user_id,
-        )
-        .await
-        .map_err(|e| kyomi_core::Error::Internal(e.to_string()))?;
-        Ok(serde_json::json!({
-            "success": true,
-            "id": updated.id,
-            "path": path,
-            "content_hash": updated.content_hash,
-        })
-        .to_string())
+        {
+            Ok(updated) => {
+                if !updated {
+                    return Ok(serde_json::json!({
+                        "success": false,
+                        "error": "Document not found or not updated",
+                    })
+                    .to_string());
+                }
+
+                // Rechunk after edit
+                kyomi_auth::dashboard_service::rechunk_document(
+                    &ctx.db,
+                    embed,
+                    &doc.dashboard_id,
+                    &new_content,
+                    &ctx.workspace_id,
+                )
+                .await?;
+
+                let new_hash = kyomi_auth::dashboard_service::hash_content(&new_content);
+                Ok(serde_json::json!({
+                    "success": true,
+                    "id": doc.dashboard_id,
+                    "path": path,
+                    "content_hash": new_hash,
+                })
+                .to_string())
+            }
+            Err(kyomi_core::Error::Conflict(msg)) => {
+                Ok(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })
+                .to_string())
+            }
+            Err(e) => Err(e),
+        }
     }
 }

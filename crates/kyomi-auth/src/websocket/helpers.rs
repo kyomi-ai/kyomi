@@ -39,17 +39,31 @@ pub async fn send_chat_stream(
     manager.send_to_user(user_id, msg).await;
 }
 
+/// Parameters for [`send_chat_complete`].
+pub struct ChatCompleteParams<'a> {
+    pub manager: &'a WebSocketManager,
+    pub user_id: &'a str,
+    pub session_id: &'a str,
+    pub message_id: &'a str,
+    pub full_content: &'a str,
+    pub model: &'a str,
+    pub usage_stats: Option<serde_json::Value>,
+    pub context_type: Option<&'a str>,
+}
+
 /// Send a chat_complete message when AI response is finished.
-pub async fn send_chat_complete(
-    manager: &WebSocketManager,
-    user_id: &str,
-    session_id: &str,
-    message_id: &str,
-    full_content: &str,
-    model: &str,
-    usage_stats: Option<serde_json::Value>,
-    context_type: Option<&str>,
-) {
+pub async fn send_chat_complete(params: ChatCompleteParams<'_>) {
+    let ChatCompleteParams {
+        manager,
+        user_id,
+        session_id,
+        message_id,
+        full_content,
+        model,
+        usage_stats,
+        context_type,
+    } = params;
+
     let mut data = serde_json::json!({
         "full_content": full_content,
         "model": model,
@@ -320,17 +334,31 @@ pub async fn send_oauth_reconnect_required(
 // Workspace events
 // ---------------------------------------------------------------------------
 
+/// Parameters for [`send_workspace_invitation`].
+pub struct WorkspaceInvitationParams<'a> {
+    pub manager: &'a WebSocketManager,
+    pub user_id: &'a str,
+    pub invitation_id: &'a str,
+    pub workspace_id: &'a str,
+    pub workspace_name: &'a str,
+    pub invited_by_name: &'a str,
+    pub role: &'a str,
+    pub message: &'a str,
+}
+
 /// Send a workspace_invitation notification to an invitee.
-pub async fn send_workspace_invitation(
-    manager: &WebSocketManager,
-    user_id: &str,
-    invitation_id: &str,
-    workspace_id: &str,
-    workspace_name: &str,
-    invited_by_name: &str,
-    role: &str,
-    message: &str,
-) {
+pub async fn send_workspace_invitation(params: WorkspaceInvitationParams<'_>) {
+    let WorkspaceInvitationParams {
+        manager,
+        user_id,
+        invitation_id,
+        workspace_id,
+        workspace_name,
+        invited_by_name,
+        role,
+        message,
+    } = params;
+
     let msg = WebSocketMessage::new(MessageType::WorkspaceInvitation)
         .with_data(serde_json::json!({
             "invitation_id": invitation_id,
@@ -530,12 +558,12 @@ pub async fn send_shared_chat_message(
     client_msg_id: Option<&str>,
 ) {
     let mut data = serde_json::json!({
-        "message_type": message_type,
+        "type": message_type,
         "content": content,
         "timestamp": timestamp,
     });
     if let Some(user) = sent_by_user {
-        data["sent_by_user"] = serde_json::Value::String(user.to_string());
+        data["sent_by"] = serde_json::Value::String(user.to_string());
     }
     if let Some(cid) = client_msg_id {
         data["client_msg_id"] = serde_json::Value::String(cid.to_string());
@@ -565,10 +593,10 @@ pub async fn send_user_message_to_self(
         .with_session(session_id)
         .with_message_id(message_id)
         .with_data(serde_json::json!({
-            "message_type": "user",
+            "type": "user",
             "content": content,
             "timestamp": timestamp,
-            "sent_by_user": user_display_name,
+            "sent_by": user_display_name,
         }));
 
     manager.send_to_user(user_id, msg).await;
@@ -599,17 +627,31 @@ pub async fn broadcast_agent_thinking(
         .await;
 }
 
+/// Parameters for [`broadcast_chat_complete`].
+pub struct BroadcastChatCompleteParams<'a> {
+    pub manager: &'a WebSocketManager,
+    pub workspace_id: &'a str,
+    pub session_id: &'a str,
+    pub message_id: &'a str,
+    pub full_content: &'a str,
+    pub model: &'a str,
+    pub usage_stats: Option<serde_json::Value>,
+    pub exclude_user_id: Option<&'a str>,
+}
+
 /// Broadcast chat_complete to workspace members viewing a shared session.
-pub async fn broadcast_chat_complete(
-    manager: &WebSocketManager,
-    workspace_id: &str,
-    session_id: &str,
-    message_id: &str,
-    full_content: &str,
-    model: &str,
-    usage_stats: Option<serde_json::Value>,
-    exclude_user_id: Option<&str>,
-) {
+pub async fn broadcast_chat_complete(params: BroadcastChatCompleteParams<'_>) {
+    let BroadcastChatCompleteParams {
+        manager,
+        workspace_id,
+        session_id,
+        message_id,
+        full_content,
+        model,
+        usage_stats,
+        exclude_user_id,
+    } = params;
+
     let mut data = serde_json::json!({
         "full_content": full_content,
         "model": model,
@@ -730,6 +772,33 @@ pub async fn send_ownership_transfer_declined(
         }));
 
     manager.send_to_user(user_id, msg).await;
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard CRUD events
+// ---------------------------------------------------------------------------
+
+/// Broadcast a dashboard_update to all workspace members (except the author).
+pub async fn send_dashboard_update(
+    manager: &WebSocketManager,
+    workspace_id: &str,
+    dashboard_id: &str,
+    action: &str,
+    changed_by: &str,
+    changed_by_name: &str,
+    exclude_user_id: Option<&str>,
+) {
+    let msg = WebSocketMessage::new(MessageType::DashboardUpdate)
+        .with_data(serde_json::json!({
+            "action": action,
+            "dashboard_id": dashboard_id,
+            "changed_by": changed_by,
+            "changed_by_name": changed_by_name,
+        }));
+
+    manager
+        .broadcast_to_workspace(workspace_id, msg, exclude_user_id)
+        .await;
 }
 
 /// Send a dashboard_summary_ready notification.

@@ -6,40 +6,25 @@
 //! source code. Self-hosted deployments that don't use Stripe can ignore
 //! these entirely.
 //!
-//! Environment variables (test mode):
-//! - `STRIPE_TEST_STARTER_ANNUAL`, `STRIPE_TEST_STARTER_MONTHLY`
-//! - `STRIPE_TEST_PRO_ANNUAL`, `STRIPE_TEST_PRO_MONTHLY`
-//! - `STRIPE_TEST_TEAM_ANNUAL`, `STRIPE_TEST_TEAM_MONTHLY`
-//! - `STRIPE_TEST_ADDITIONAL_USER_ANNUAL`, `STRIPE_TEST_ADDITIONAL_USER_MONTHLY`
+//! Environment variables:
+//! - `STRIPE_CLOUD_MONTHLY` — Cloud plan price ID ($5/user/month)
+//! - `STRIPE_AI_BUNDLE` — AI token bundle price ID (one-time purchase)
+//! - `STRIPE_ANALYTICS_BUNDLE` — Analytics event bundle price ID (one-time purchase)
 //!
-//! Environment variables (production mode):
-//! - `STRIPE_PROD_STARTER_ANNUAL`, `STRIPE_PROD_STARTER_MONTHLY`
-//! - `STRIPE_PROD_PRO_ANNUAL`, `STRIPE_PROD_PRO_MONTHLY`
-//! - `STRIPE_PROD_TEAM_ANNUAL`, `STRIPE_PROD_TEAM_MONTHLY`
-//! - `STRIPE_PROD_ADDITIONAL_USER_ANNUAL`, `STRIPE_PROD_ADDITIONAL_USER_MONTHLY`
+//! Set the price IDs matching your Stripe environment (test or live).
+//! The app only runs in one mode at a time — no test/prod split needed.
 
 use std::sync::LazyLock;
 
 // ─── Config loaded from env ────────────────────────────────────────────────
 
 struct StripePrices {
-    test_starter_annual: Option<String>,
-    test_starter_monthly: Option<String>,
-    test_pro_annual: Option<String>,
-    test_pro_monthly: Option<String>,
-    test_team_annual: Option<String>,
-    test_team_monthly: Option<String>,
-    test_additional_user_annual: Option<String>,
-    test_additional_user_monthly: Option<String>,
-
-    prod_starter_annual: Option<String>,
-    prod_starter_monthly: Option<String>,
-    prod_pro_annual: Option<String>,
-    prod_pro_monthly: Option<String>,
-    prod_team_annual: Option<String>,
-    prod_team_monthly: Option<String>,
-    prod_additional_user_annual: Option<String>,
-    prod_additional_user_monthly: Option<String>,
+    /// Cloud plan — $5/user/month
+    cloud_monthly: Option<String>,
+    /// AI token bundle — one-time purchase
+    ai_bundle: Option<String>,
+    /// Analytics event bundle — one-time purchase
+    analytics_bundle: Option<String>,
 }
 
 fn env_opt(key: &str) -> Option<String> {
@@ -47,84 +32,34 @@ fn env_opt(key: &str) -> Option<String> {
 }
 
 static PRICES: LazyLock<StripePrices> = LazyLock::new(|| StripePrices {
-    test_starter_annual: env_opt("STRIPE_TEST_STARTER_ANNUAL"),
-    test_starter_monthly: env_opt("STRIPE_TEST_STARTER_MONTHLY"),
-    test_pro_annual: env_opt("STRIPE_TEST_PRO_ANNUAL"),
-    test_pro_monthly: env_opt("STRIPE_TEST_PRO_MONTHLY"),
-    test_team_annual: env_opt("STRIPE_TEST_TEAM_ANNUAL"),
-    test_team_monthly: env_opt("STRIPE_TEST_TEAM_MONTHLY"),
-    test_additional_user_annual: env_opt("STRIPE_TEST_ADDITIONAL_USER_ANNUAL"),
-    test_additional_user_monthly: env_opt("STRIPE_TEST_ADDITIONAL_USER_MONTHLY"),
-
-    prod_starter_annual: env_opt("STRIPE_PROD_STARTER_ANNUAL"),
-    prod_starter_monthly: env_opt("STRIPE_PROD_STARTER_MONTHLY"),
-    prod_pro_annual: env_opt("STRIPE_PROD_PRO_ANNUAL"),
-    prod_pro_monthly: env_opt("STRIPE_PROD_PRO_MONTHLY"),
-    prod_team_annual: env_opt("STRIPE_PROD_TEAM_ANNUAL"),
-    prod_team_monthly: env_opt("STRIPE_PROD_TEAM_MONTHLY"),
-    prod_additional_user_annual: env_opt("STRIPE_PROD_ADDITIONAL_USER_ANNUAL"),
-    prod_additional_user_monthly: env_opt("STRIPE_PROD_ADDITIONAL_USER_MONTHLY"),
+    cloud_monthly: env_opt("STRIPE_CLOUD_MONTHLY"),
+    ai_bundle: env_opt("STRIPE_AI_BUNDLE"),
+    analytics_bundle: env_opt("STRIPE_ANALYTICS_BUNDLE"),
 });
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /// Check whether a Stripe secret key is a test-mode key.
 ///
-/// Returns `true` for keys prefixed with `sk_test_`, `false` otherwise.
-/// Defaults to `true` (test mode) for safety if the key format is unrecognised.
+/// Used for logging only — price IDs are environment-configured and not
+/// split by test/prod mode.
 pub fn is_test_mode(secret_key: &str) -> bool {
-    if secret_key.starts_with("sk_test_") {
-        return true;
-    }
-    if secret_key.starts_with("sk_live_") {
-        return false;
-    }
-    // Default to test mode for safety
-    tracing::warn!("Could not detect Stripe environment from secret key prefix — defaulting to test mode");
-    true
+    secret_key.starts_with("sk_test_")
 }
 
-/// Look up the Stripe price ID for a given tier and billing cycle.
-///
-/// Returns `None` for unsupported tier/cycle combinations (e.g. free tier,
-/// enterprise — those do not use standard Stripe checkout) or if the
-/// corresponding environment variable is not set.
-pub fn get_price_id(tier: &str, billing_cycle: &str, is_test: bool) -> Option<&'static str> {
-    let p = &*PRICES;
-    let opt = match (tier, billing_cycle, is_test) {
-        ("starter", "annual", true) => &p.test_starter_annual,
-        ("starter", "monthly", true) => &p.test_starter_monthly,
-        ("pro", "annual", true) => &p.test_pro_annual,
-        ("pro", "monthly", true) => &p.test_pro_monthly,
-        ("team", "annual", true) => &p.test_team_annual,
-        ("team", "monthly", true) => &p.test_team_monthly,
-
-        ("starter", "annual", false) => &p.prod_starter_annual,
-        ("starter", "monthly", false) => &p.prod_starter_monthly,
-        ("pro", "annual", false) => &p.prod_pro_annual,
-        ("pro", "monthly", false) => &p.prod_pro_monthly,
-        ("team", "annual", false) => &p.prod_team_annual,
-        ("team", "monthly", false) => &p.prod_team_monthly,
-
-        _ => return None,
-    };
-    opt.as_deref()
+/// Get the Cloud plan price ID.
+pub fn get_cloud_price_id() -> Option<&'static str> {
+    PRICES.cloud_monthly.as_deref()
 }
 
-/// Look up the Stripe price ID for additional Team users.
-///
-/// Returns `None` for unsupported billing cycles or if the
-/// corresponding environment variable is not set.
-pub fn get_additional_user_price_id(billing_cycle: &str, is_test: bool) -> Option<&'static str> {
-    let p = &*PRICES;
-    let opt = match (billing_cycle, is_test) {
-        ("annual", true) => &p.test_additional_user_annual,
-        ("monthly", true) => &p.test_additional_user_monthly,
-        ("annual", false) => &p.prod_additional_user_annual,
-        ("monthly", false) => &p.prod_additional_user_monthly,
-        _ => return None,
-    };
-    opt.as_deref()
+/// Get the AI token bundle price ID for one-time purchase.
+pub fn get_ai_bundle_price_id() -> Option<&'static str> {
+    PRICES.ai_bundle.as_deref()
+}
+
+/// Get the analytics event bundle price ID.
+pub fn get_analytics_bundle_price_id() -> Option<&'static str> {
+    PRICES.analytics_bundle.as_deref()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -137,31 +72,13 @@ mod tests {
     fn test_is_test_mode() {
         assert!(is_test_mode("sk_test_abc123"));
         assert!(!is_test_mode("sk_live_abc123"));
-        // Unknown prefix defaults to test mode for safety
-        assert!(is_test_mode("sk_unknown_abc123"));
-        assert!(is_test_mode(""));
+        assert!(!is_test_mode(""));
     }
 
     #[test]
-    fn test_get_price_id_returns_none_without_env() {
-        // Without env vars set, all lookups return None
-        // (env vars are not set in the test environment)
-        assert!(get_price_id("starter", "annual", true).is_none()
-            || get_price_id("starter", "annual", true).is_some());
-    }
-
-    #[test]
-    fn test_get_price_id_unsupported() {
-        // Free tier has no Stripe price
-        assert!(get_price_id("free", "monthly", true).is_none());
-        // Enterprise uses custom pricing
-        assert!(get_price_id("enterprise", "annual", true).is_none());
-        // Invalid billing cycle
-        assert!(get_price_id("pro", "weekly", true).is_none());
-    }
-
-    #[test]
-    fn test_get_additional_user_price_id_unsupported() {
-        assert!(get_additional_user_price_id("weekly", true).is_none());
+    fn test_all_lookups_return_none_without_env() {
+        assert!(get_cloud_price_id().is_none());
+        assert!(get_ai_bundle_price_id().is_none());
+        assert!(get_analytics_bundle_price_id().is_none());
     }
 }

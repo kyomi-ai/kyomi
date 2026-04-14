@@ -79,23 +79,40 @@ pub struct LearningSearchResult {
 
 // ─── Save learning ────────────────────────────────────────────────────────────
 
+/// Parameters for [`save_learning`].
+pub struct SaveLearningParams<'a> {
+    pub db: &'a DbPool,
+    pub embedding_svc: &'a kyomi_embed::EmbeddingService,
+    pub workspace_id: &'a str,
+    pub user_id: &'a str,
+    pub session_id: &'a str,
+    pub insight: &'a str,
+    pub context: Option<&'a str>,
+    pub scope: &'a str,
+    pub datasource_config_id: Option<&'a str>,
+    pub learning_type: &'a str,
+    pub reference_queries: Option<&'a serde_json::Value>,
+    pub structured_metadata: Option<&'a serde_json::Value>,
+}
+
 /// Save a new learning with embedding.
 ///
 /// Returns the generated `learning_id`.
-pub async fn save_learning(
-    db: &DbPool,
-    embedding_svc: &kyomi_embed::EmbeddingService,
-    workspace_id: &str,
-    user_id: &str,
-    session_id: &str,
-    insight: &str,
-    context: Option<&str>,
-    scope: &str,
-    datasource_config_id: Option<&str>,
-    learning_type: &str,
-    reference_queries: Option<&serde_json::Value>,
-    structured_metadata: Option<&serde_json::Value>,
-) -> Result<String> {
+pub async fn save_learning(params: SaveLearningParams<'_>) -> Result<String> {
+    let SaveLearningParams {
+        db,
+        embedding_svc,
+        workspace_id,
+        user_id,
+        session_id,
+        insight,
+        context,
+        scope,
+        datasource_config_id,
+        learning_type,
+        reference_queries,
+        structured_metadata,
+    } = params;
     // Generate embedding from the insight text
     let embedding_vec = embedding_svc.embed_one(insight)?;
     let embedding_bytes = embedding_to_bytes(&embedding_vec);
@@ -129,12 +146,12 @@ pub async fn save_learning(
             .bind(&learning_id)
             .bind(workspace_id)
             .bind(insight)
-            .bind(&context)
+            .bind(context)
             .bind(&vec)
             .bind(scope)
             .bind(session_id)
             .bind(user_id)
-            .bind(&datasource_config_id)
+            .bind(datasource_config_id)
             .bind(learning_type)
             .bind(&ref_queries_val)
             .bind(&structured_meta_val)
@@ -155,12 +172,12 @@ pub async fn save_learning(
             .bind(&learning_id)
             .bind(workspace_id)
             .bind(insight)
-            .bind(&context)
+            .bind(context)
             .bind(&embedding_bytes)
             .bind(scope)
             .bind(session_id)
             .bind(user_id)
-            .bind(&datasource_config_id)
+            .bind(datasource_config_id)
             .bind(learning_type)
             .bind(ref_queries_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
             .bind(structured_meta_val.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
@@ -176,19 +193,34 @@ pub async fn save_learning(
 
 // ─── Get all learnings (admin view) ───────────────────────────────────────────
 
+/// Parameters for [`get_all_learnings`].
+pub struct GetAllLearningsParams<'a> {
+    pub db: &'a DbPool,
+    pub workspace_id: &'a str,
+    pub offset: i64,
+    pub limit: i64,
+    pub search: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    pub datasource_slug: Option<&'a str>,
+    pub enabled_only: bool,
+}
+
 /// Get learnings with pagination and filtering.
 ///
 /// Returns `(items, total_count)`.
 pub async fn get_all_learnings(
-    db: &DbPool,
-    workspace_id: &str,
-    offset: i64,
-    limit: i64,
-    search: Option<&str>,
-    scope: Option<&str>,
-    datasource_slug: Option<&str>,
-    enabled_only: bool,
+    params: GetAllLearningsParams<'_>,
 ) -> Result<(Vec<LearningRecord>, i64)> {
+    let GetAllLearningsParams {
+        db,
+        workspace_id,
+        offset,
+        limit,
+        search,
+        scope,
+        datasource_slug,
+        enabled_only,
+    } = params;
     let is_pg = db.is_postgres();
 
     // Build dynamic WHERE clause
@@ -200,32 +232,32 @@ pub async fn get_all_learnings(
     let mut bind_scope = false;
     let mut bind_ds_id: Option<String> = None;
 
-    if let Some(s) = search {
-        if !s.trim().is_empty() {
-            if is_pg {
-                conditions.push(format!(
-                    "search_vector @@ websearch_to_tsquery('english', ${param_idx})"
-                ));
-            } else {
-                conditions.push(format!(
-                    "learning_id IN (SELECT learning_id FROM agent_learnings_fts WHERE agent_learnings_fts MATCH ${param_idx})"
-                ));
-            }
-            param_idx += 1;
-            bind_search = true;
+    if let Some(s) = search
+        && !s.trim().is_empty()
+    {
+        if is_pg {
+            conditions.push(format!(
+                "search_vector @@ websearch_to_tsquery('english', ${param_idx})"
+            ));
+        } else {
+            conditions.push(format!(
+                "learning_id IN (SELECT learning_id FROM agent_learnings_fts WHERE agent_learnings_fts MATCH ${param_idx})"
+            ));
         }
+        param_idx += 1;
+        bind_search = true;
     }
 
-    if let Some(s) = scope {
-        if s == "workspace" || s == "user" {
-            if is_pg {
-                conditions.push(format!("scope = ${param_idx}::learning_scope"));
-            } else {
-                conditions.push(format!("scope = ${param_idx}"));
-            }
-            param_idx += 1;
-            bind_scope = true;
+    if let Some(s) = scope
+        && (s == "workspace" || s == "user")
+    {
+        if is_pg {
+            conditions.push(format!("scope = ${param_idx}::learning_scope"));
+        } else {
+            conditions.push(format!("scope = ${param_idx}"));
         }
+        param_idx += 1;
+        bind_scope = true;
     }
 
     if let Some(ds_slug) = datasource_slug {
@@ -320,7 +352,7 @@ pub async fn get_all_learnings(
             q = q.bind(limit).bind(offset);
             let rows = q.fetch_all(pg).await
                 .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
-            rows.iter().map(|row| learning_record_from_pg_row(row)).collect()
+            rows.iter().map(learning_record_from_pg_row).collect()
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             let mut q = sqlx::query(&data_sql).bind(workspace_id);
@@ -330,7 +362,7 @@ pub async fn get_all_learnings(
             q = q.bind(limit).bind(offset);
             let rows = q.fetch_all(sq).await
                 .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
-            rows.iter().map(|row| learning_record_from_sq_row(row)).collect()
+            rows.iter().map(learning_record_from_sq_row).collect()
         }
     };
 
@@ -608,6 +640,19 @@ pub async fn increment_usage(db: &DbPool, learning_id: &str) -> Result<()> {
 
 // ─── Hybrid search (BM25 + semantic, RRF fusion) ─────────────────────────────
 
+/// Parameters for [`get_relevant_learnings_hybrid`].
+pub struct GetRelevantLearningsParams<'a> {
+    pub db: &'a DbPool,
+    pub embedding_svc: &'a kyomi_embed::EmbeddingService,
+    pub workspace_id: &'a str,
+    pub query: &'a str,
+    pub user_id: Option<&'a str>,
+    pub limit: usize,
+    pub min_similarity: f64,
+    pub semantic_weight: f64,
+    pub keyword_weight: f64,
+}
+
 /// Legacy pgvector-based learning retrieval (superseded by kyomi-knowledge).
 ///
 /// Get relevant learnings using hybrid search (BM25 + pgvector cosine).
@@ -619,16 +664,19 @@ pub async fn increment_usage(db: &DbPool, learning_id: &str) -> Result<()> {
 /// - High confidence: semantic >= 0.5 or keyword >= 0.5 (up to HARD_CAP)
 /// - Moderate confidence: semantic >= min_similarity (up to 3)
 pub async fn get_relevant_learnings_hybrid(
-    db: &DbPool,
-    embedding_svc: &kyomi_embed::EmbeddingService,
-    workspace_id: &str,
-    query: &str,
-    user_id: Option<&str>,
-    limit: usize,
-    min_similarity: f64,
-    semantic_weight: f64,
-    keyword_weight: f64,
+    params: GetRelevantLearningsParams<'_>,
 ) -> Result<Vec<LearningSearchResult>> {
+    let GetRelevantLearningsParams {
+        db,
+        embedding_svc,
+        workspace_id,
+        query,
+        user_id,
+        limit,
+        min_similarity,
+        semantic_weight,
+        keyword_weight,
+    } = params;
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -844,10 +892,10 @@ pub async fn get_relevant_learnings_hybrid(
                 if high_confidence.len() < HARD_CAP {
                     high_confidence.push(entry.clone());
                 }
-            } else if entry.semantic_score >= min_similarity {
-                if moderate_confidence.len() < MODERATE_CONFIDENCE_LIMIT {
-                    moderate_confidence.push(entry.clone());
-                }
+            } else if entry.semantic_score >= min_similarity
+                && moderate_confidence.len() < MODERATE_CONFIDENCE_LIMIT
+            {
+                moderate_confidence.push(entry.clone());
             }
         }
     }
@@ -922,20 +970,35 @@ fn extract_scored_rows_sq(rows: &[sqlx::sqlite::SqliteRow]) -> Vec<(String, Lear
 
 // ─── Search learnings (for agent tool / admin) ────────────────────────────────
 
+/// Parameters for [`search_learnings`].
+pub struct SearchLearningsParams<'a> {
+    pub db: &'a DbPool,
+    pub embedding_svc: &'a kyomi_embed::EmbeddingService,
+    pub workspace_id: &'a str,
+    pub query: &'a str,
+    pub user_id: Option<&'a str>,
+    pub datasource_config_id: Option<&'a str>,
+    pub include_disabled: bool,
+    pub limit: usize,
+}
+
 /// Search learnings using hybrid search.
 ///
 /// Unlike `get_relevant_learnings_hybrid` (for auto-injection), this method
 /// can include disabled learnings and returns more details.
 pub async fn search_learnings(
-    db: &DbPool,
-    embedding_svc: &kyomi_embed::EmbeddingService,
-    workspace_id: &str,
-    query: &str,
-    user_id: Option<&str>,
-    datasource_config_id: Option<&str>,
-    include_disabled: bool,
-    limit: usize,
+    params: SearchLearningsParams<'_>,
 ) -> Result<Vec<LearningSearchResult>> {
+    let SearchLearningsParams {
+        db,
+        embedding_svc,
+        workspace_id,
+        query,
+        user_id,
+        datasource_config_id,
+        include_disabled,
+        limit,
+    } = params;
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -1197,34 +1260,34 @@ pub fn format_learning_with_queries(
         parts.push(format!("[{}]", learning.learning_id));
     }
 
-    if let (Some(map), Some(ds_id)) = (ds_id_to_slug, &learning.datasource_config_id) {
-        if let Some(slug) = map.get(ds_id) {
-            parts.push(format!("(datasource: {slug})"));
-        }
+    if let (Some(map), Some(ds_id)) = (ds_id_to_slug, &learning.datasource_config_id)
+        && let Some(slug) = map.get(ds_id)
+    {
+        parts.push(format!("(datasource: {slug})"));
     }
 
     parts.push(learning.insight.clone());
     let mut line = format!("- {}", parts.join(" "));
 
     // Append reference queries if present
-    if let Some(ref rqs) = learning.reference_queries {
-        if let Some(arr) = rqs.as_array() {
-            let mut query_lines = Vec::new();
-            for rq in arr {
-                let comment = rq.get("comment").and_then(|v| v.as_str()).unwrap_or("Reference query");
-                let sql = rq.get("sql").and_then(|v| v.as_str()).unwrap_or("");
-                let ds = rq.get("datasource").and_then(|v| v.as_str()).unwrap_or("");
-                let mut header = format!("  Reference query ({comment})");
-                if !ds.is_empty() {
-                    header.push_str(&format!(" — datasource: {ds}"));
-                }
-                query_lines.push(format!("{header}:"));
-                query_lines.push(format!("  ```sql\n  {sql}\n  ```"));
+    if let Some(ref rqs) = learning.reference_queries
+        && let Some(arr) = rqs.as_array()
+    {
+        let mut query_lines = Vec::new();
+        for rq in arr {
+            let comment = rq.get("comment").and_then(|v| v.as_str()).unwrap_or("Reference query");
+            let sql = rq.get("sql").and_then(|v| v.as_str()).unwrap_or("");
+            let ds = rq.get("datasource").and_then(|v| v.as_str()).unwrap_or("");
+            let mut header = format!("  Reference query ({comment})");
+            if !ds.is_empty() {
+                header.push_str(&format!(" — datasource: {ds}"));
             }
-            if !query_lines.is_empty() {
-                line.push('\n');
-                line.push_str(&query_lines.join("\n"));
-            }
+            query_lines.push(format!("{header}:"));
+            query_lines.push(format!("  ```sql\n  {sql}\n  ```"));
+        }
+        if !query_lines.is_empty() {
+            line.push('\n');
+            line.push_str(&query_lines.join("\n"));
         }
     }
 

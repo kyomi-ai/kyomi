@@ -384,7 +384,7 @@ async fn create_session(
             generate_trial_token(secret, &session.session_token, &ip, expires_at);
         let expires_at_str =
             chrono::DateTime::from_timestamp(expires_at, 0)
-                .unwrap_or_else(|| Utc::now())
+                .unwrap_or_else(Utc::now)
                 .to_rfc3339();
         let queries_remaining = MAX_SESSION_QUERIES.saturating_sub(session.query_count);
 
@@ -421,7 +421,7 @@ async fn create_session(
     let trial_access_token = generate_trial_token(secret, &session_token, &ip, expires_at);
     let expires_at_str =
         chrono::DateTime::from_timestamp(expires_at, 0)
-            .unwrap_or_else(|| Utc::now())
+            .unwrap_or_else(Utc::now)
             .to_rfc3339();
 
     tracing::info!("Created trial session for IP {ip}");
@@ -744,6 +744,7 @@ async fn trial_chat(
         user_message_id: None,
         assistant_message_id: None,
         conversation_history,
+        user_display_name: "Trial User".to_string(),
     };
 
     // Generate a refreshed trial access token for the response
@@ -755,16 +756,22 @@ async fn trial_chat(
     // Execute the agent synchronously — the frontend expects the full response
     // in the HTTP body (matching Python's synchronous pattern). Thinking events
     // still stream via WebSocket in real-time during execution.
+    //
+    // Trial chat is anonymous — no workspace. `execute_agent_chat` detects
+    // `context_type == "trial_chat"` and routes through the legacy global
+    // provider config (server-side Kyomi keys), bypassing WorkspaceAiConfig.
     let exec_result = kyomi_agent::execute_agent_chat(
         exec_config,
-        &state.db,
-        &state.kv,
-        &state.encryption_key,
-        &state.embedding,
-        &state.ws_manager,
-        &state.config,
-        None, // Trial chat does not use Connect
-        state.platforms.clone(),
+        kyomi_agent::AgentExecutionEnv {
+            db: &state.db,
+            kv: &state.kv,
+            encryption_key: &state.encryption_key,
+            embedding: &state.embedding,
+            ws_manager: &state.ws_manager,
+            app_config: &state.config,
+            connect_registry: None, // Trial chat does not use Connect
+            platforms: state.platforms.clone(),
+        },
     )
     .await;
 

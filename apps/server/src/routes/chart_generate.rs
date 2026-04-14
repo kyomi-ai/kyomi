@@ -142,11 +142,9 @@ fn infer_chart_type(analyses: &[ColumnAnalysis]) -> &'static str {
     if let Some(cat) = analyses
         .iter()
         .find(|a| !a.is_numeric && !a.is_date)
-    {
-        if cat.cardinality <= 20 {
+        && cat.cardinality <= 20 {
             return "bar";
         }
-    }
     // Default to table
     "table"
 }

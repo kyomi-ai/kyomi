@@ -1,0 +1,17 @@
+# Trunk build configuration for kyomi-ui
+# https://trunkrs.dev/configuration/
+
+[build]
+# Output directory for trunk build artifacts
+dist = "dist"
+
+[[hooks]]
+# Run Tailwind CSS build before trunk processes assets.
+# Scans .rs source files for Tailwind class names and produces compiled CSS.
+stage = "pre_build"
+command = "tailwindcss"
+command_arguments = [
+    "--input", "style/main.css",
+    "--output", "style/output.css",
+    "--content", "src/**/*.rs",
+]

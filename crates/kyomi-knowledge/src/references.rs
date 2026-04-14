@@ -80,8 +80,8 @@ pub async fn materialize_learning_references(
     let mut metric_refs: Vec<String> = Vec::new();
 
     // Parse reference_queries SQL to extract table references
-    if let Some(ref ref_queries) = ref_queries_json {
-        if let Some(queries) = ref_queries.as_array() {
+    if let Some(ref ref_queries) = ref_queries_json
+        && let Some(queries) = ref_queries.as_array() {
             for query_val in queries {
                 if let Some(sql) = query_val.as_str() {
                     let refs = sql_references::extract_references(sql);
@@ -91,7 +91,6 @@ pub async fn materialize_learning_references(
                 }
             }
         }
-    }
 
     // Extract from structured_metadata
     if let Some(ref meta) = structured_meta_json {
@@ -154,13 +153,12 @@ pub async fn materialize_learning_references(
         if let Some(last_dot) = col_ref.rfind('.') {
             let table_part = &col_ref[..last_dot];
             let col_name = &col_ref[last_dot + 1..];
-            if !col_name.is_empty() {
-                if let Some(full_table) = resolve_table_name(table_part, known_full_names) {
+            if !col_name.is_empty()
+                && let Some(full_table) = resolve_table_name(table_part, known_full_names) {
                     // Format: "full_table_name#column_name"
                     resolved_refs
                         .insert(("column".to_string(), format!("{full_table}#{col_name}")));
                 }
-            }
         }
     }
 

@@ -195,6 +195,7 @@ async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
         &user.user_id,
         Some("Feedback Test User"),
         &email,
+        None,
     )
     .await
     .expect("should create test workspace");

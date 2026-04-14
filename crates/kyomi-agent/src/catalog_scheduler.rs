@@ -421,14 +421,16 @@ impl CatalogRefreshScheduler {
         };
 
         let result = crate::catalog::indexing_service::CatalogIndexingService::index_datasource(
-            &self.db,
-            self.encryption_key.clone(),
-            embedding,
-            workspace_id,
-            datasource_config_id,
-            Some(effective_email),
-            indexing_creds.as_ref(),
-            None, // max_tables_per_dataset
+            crate::catalog::indexing_service::IndexDatasourceParams {
+                db: &self.db,
+                encryption_key: self.encryption_key.clone(),
+                embedding,
+                workspace_id,
+                datasource_config_id,
+                user_email: Some(effective_email),
+                credentials: indexing_creds.as_ref(),
+                max_tables_per_dataset: None,
+            },
         )
         .await;
 
@@ -706,9 +708,7 @@ impl CatalogRefreshScheduler {
         .ok()
         .flatten();
 
-        let Some(row) = row else {
-            return None;
-        };
+        let row = row?;
 
         // Exchange service account JWT for access token
         let client = match kyomi_datasource_server::http_client() {

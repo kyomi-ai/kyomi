@@ -9,8 +9,9 @@
 //! - User name and workspace/user knowledge sections
 //! - Cross-session learning injection (user-scoped learnings)
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use chrono::{DateTime, Utc};
 use kyomi_core::{DbPool, KVPool};
 use tracing::info;
 
@@ -60,13 +61,13 @@ pub async fn build_system_prompt(
         ""
     };
 
-    // Build knowledge file tree for system prompt injection.
-    let knowledge_tree = match kyomi_knowledge::knowledge_files::build_knowledge_tree_text(db, workspace_id).await {
-        Ok(tree) if !tree.is_empty() => format!(
-            "\n\n## Knowledge Files\n\n\
-             Your workspace has a knowledge base of markdown documents. \
-             The file tree is shown below — use `read_knowledge_file` to read any file, \
-             or `search_knowledge` to find relevant content by topic.\n\n{tree}\n\n"
+    // Build document list for system prompt injection.
+    let documents = match build_documents_text(db, workspace_id).await {
+        Ok(text) if !text.is_empty() => format!(
+            "\n\n## Documents\n\n\
+             Your workspace has knowledge documents and dashboards organized in collections. \
+             The document list is shown below — use `read_knowledge_file` to read any document, \
+             or `search_knowledge` to find relevant content by topic.\n\n{text}\n\n"
         ),
         _ => String::new(),
     };
@@ -110,7 +111,7 @@ pub async fn build_system_prompt(
         .replace("{user_name}", &user_name_section)
         .replace("{workspace_knowledge}", &workspace_knowledge_section)
         .replace("{user_knowledge}", &user_knowledge_section)
-        .replace("{knowledge_tree}", &knowledge_tree)
+        .replace("{documents}", &documents)
         .replace("{chartml_reference}", chartml_reference);
 
     Ok(prompt)
@@ -139,15 +140,17 @@ pub async fn get_learnings_for_system_prompt(
     // to scope to user learnings. The hybrid search with an empty query
     // will degrade gracefully.
     let learnings = learning_service::get_relevant_learnings_hybrid(
-        db,
-        embedding,
-        workspace_id,
-        "general data warehouse navigation",
-        Some(user_id),
-        20, // generous limit for system prompt
-        0.0, // low threshold -- we want all user learnings
-        0.7,
-        0.3,
+        learning_service::GetRelevantLearningsParams {
+            db,
+            embedding_svc: embedding,
+            workspace_id,
+            query: "general data warehouse navigation",
+            user_id: Some(user_id),
+            limit: 20, // generous limit for system prompt
+            min_similarity: 0.0, // we want all user learnings
+            semantic_weight: 0.7,
+            keyword_weight: 0.3,
+        },
     )
     .await?;
 
@@ -235,9 +238,6 @@ pub async fn get_learnings_for_system_prompt(
          **Your accumulated knowledge from past investigations:**\n\
          These were learned from previous conversations with you. \
          They're always active - apply them automatically when relevant.\n\n\
-         **Note:** Each learning has an ID in brackets [like-this]. \
-         If you discover a learning is outdated or wrong, you can supersede it by \
-         passing the ID to `save_learning(supersedes_learning_id=\"...\")`.\n\n\
          {learning_text}\n\n"
     )))
 }
@@ -245,6 +245,139 @@ pub async fn get_learnings_for_system_prompt(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// -- Document list for system prompt ----------------------------------------
+
+/// Row returned by the documents query.
+#[derive(sqlx::FromRow)]
+struct DocumentRow {
+    dashboard_id: String,
+    title: String,
+    doc_type: String,
+    updated_at: DateTime<Utc>,
+    collection_name: Option<String>,
+}
+
+/// Build a human-readable document list grouped by type and collection.
+///
+/// Groups documents by `doc_type` (Knowledge first, then Dashboards),
+/// then by collection name (named collections before "Uncollected"),
+/// then alphabetically by title. A document appearing in multiple
+/// collections is only listed once (under its first collection).
+///
+/// Returns an empty string if no documents exist.
+async fn build_documents_text(db: &DbPool, workspace_id: &str) -> kyomi_core::Result<String> {
+    let rows: Vec<DocumentRow> = kyomi_core::db_fetch_all!(
+        db,
+        DocumentRow,
+        "SELECT d.dashboard_id, d.title, d.doc_type, d.updated_at, \
+                c.name AS collection_name \
+         FROM dashboards d \
+         LEFT JOIN collection_dashboards cd ON cd.dashboard_id = d.dashboard_id \
+         LEFT JOIN collections c ON c.id = cd.collection_id \
+         WHERE d.workspace_id = $1 \
+         ORDER BY d.doc_type, c.name NULLS LAST, d.title",
+        workspace_id
+    )?;
+
+    if rows.is_empty() {
+        return Ok(String::new());
+    }
+
+    // Deduplicate: each dashboard_id only appears once (first occurrence wins).
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::new();
+    for row in rows {
+        if seen.insert(row.dashboard_id.clone()) {
+            deduped.push(row);
+        }
+    }
+
+    // Display order: Knowledge first, then Dashboard.
+    let type_order: &[(&str, &str)] = &[
+        ("knowledge", "Knowledge"),
+        ("dashboard", "Dashboards"),
+    ];
+
+    let now = Utc::now();
+
+    let mut output = String::from("<workspace_documents>\n");
+
+    for &(type_key, type_label) in type_order {
+        // Group by collection name for this doc_type.
+        // Use BTreeMap for deterministic ordering by collection name.
+        // Key: Option<String> where None = uncollected.
+        let mut by_collection: BTreeMap<Option<String>, Vec<&DocumentRow>> = BTreeMap::new();
+        for row in &deduped {
+            if row.doc_type == type_key {
+                by_collection
+                    .entry(row.collection_name.clone())
+                    .or_default()
+                    .push(row);
+            }
+        }
+
+        if by_collection.is_empty() {
+            continue;
+        }
+
+        output.push_str(&format!("[{type_label}]\n"));
+
+        // Named collections first (Some), then Uncollected (None).
+        // BTreeMap sorts None before Some, so we partition manually.
+        let mut named: Vec<_> = by_collection.iter()
+            .filter(|(k, _)| k.is_some())
+            .collect();
+        named.sort_by_key(|(k, _)| k.as_ref().unwrap().to_lowercase());
+
+        let uncollected = by_collection.get(&None);
+
+        for (collection_name, docs) in &named {
+            let name = collection_name.as_ref().unwrap();
+            output.push_str(&format!("  {name} (collection)\n"));
+            for doc in *docs {
+                output.push_str(&format!("    - {}{}\n", doc.title, format_relative_time(doc.updated_at, now)));
+            }
+        }
+
+        if let Some(docs) = uncollected {
+            output.push_str("  Uncollected\n");
+            for doc in docs {
+                output.push_str(&format!("    - {}{}\n", doc.title, format_relative_time(doc.updated_at, now)));
+            }
+        }
+
+        output.push('\n');
+    }
+
+    // Trim trailing newlines and close tag.
+    let trimmed = output.trim_end().to_string();
+    Ok(format!("{trimmed}\n</workspace_documents>"))
+}
+
+/// Format a relative time suffix for documents updated within 30 days.
+///
+/// Returns an empty string for documents older than 30 days.
+fn format_relative_time(updated_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let duration = now.signed_duration_since(updated_at);
+    let days = duration.num_days();
+
+    if !(0..=30).contains(&days) {
+        return String::new();
+    }
+
+    if days == 0 {
+        let hours = duration.num_hours();
+        if hours == 0 {
+            return " (updated just now)".to_string();
+        }
+        return format!(" (updated {hours}h ago)");
+    }
+
+    format!(" (updated {days}d ago)")
+}
+
+// -- User & workspace info --------------------------------------------------
 
 /// Load user name and knowledge from the database.
 async fn load_user_info(db: &DbPool, user_id: &str) -> kyomi_core::Result<(String, String)> {
@@ -357,11 +490,10 @@ The ID helps distinguish between users who may have the same name.
 
 {shared_context}**Your Superpower: Cross-Session Learning**
 You're not just an assistant - you're an evolving expert on this workspace's data warehouse. \
-You have two ways to persist knowledge across ALL future conversations:
-
-1. **`save_learning`** — quick-save a data navigation insight (table names, field meanings, query patterns)
-2. **Knowledge files** (`write_knowledge_file` / `edit_knowledge_file`) — create or update markdown \
-   documents for richer, structured knowledge (metric definitions, onboarding guides, data dictionaries)
+Persist knowledge across ALL future conversations by writing knowledge documents \
+(`write_knowledge_file` / `edit_knowledge_file`) — metric definitions, data dictionaries, \
+onboarding guides, query patterns, business logic, and anything your future self would \
+benefit from knowing next time.
 
 Over time, you transform from a general analytics assistant into a domain expert who knows:
 - Which tables are best for which questions
@@ -370,19 +502,20 @@ Over time, you transform from a general analytics assistant into a domain expert
 - User and team preferences
 
 **Think like an analyst building knowledge that grows with each investigation.**
-{knowledge_tree}
+{documents}
 
 **CRITICAL: How to Deliver Your Final Answer**
 When your investigation is complete, provide your answer in your response text with no tool calls. \
 This signals you're done and delivers the response to the user.
 
-**Important:** You can call `save_learning` alongside other tools during your investigation, \
-but **you cannot call save_learning and deliver your final response at the same time**. \
-The user only receives a response when you return text with no tool calls. \
-**This means you MUST save learnings DURING your investigation, not at the end.** \
-If you wait until you're ready to respond, it's too late — you won't be able to save. \
-Make it a habit: the moment you discover something about the data structure, field meanings, \
-or query patterns — save it immediately as your next tool call, then continue your investigation.
+**Important:** You can call `write_knowledge_file` alongside other tools during your \
+investigation, but **you cannot write a knowledge document and deliver your final response \
+at the same time**. The user only receives a response when you return text with no tool calls. \
+**This means you MUST persist knowledge DURING your investigation, not at the end.** \
+If you wait until you're ready to respond, it's too late. Make it a habit: the moment you \
+discover something about the data structure, field meanings, or query patterns that your \
+future self would benefit from — capture it immediately as your next tool call, then \
+continue your investigation.
 
 {user_name}**Current Time Context**: Each user message includes `current_time_user_tz` \
 (user's local time with timezone offset). Use this to understand relative time queries like \
@@ -400,48 +533,43 @@ not \"slack_channel_id: C0A83MRQABE\". IDs are for tools and internal use - user
 {workspace_knowledge}{user_knowledge}\
 ## Knowledge Management
 
-**Two complementary systems for persistent knowledge:**
+**Knowledge documents are your single persistent memory.** Dashboards and knowledge \
+documents share the same storage — a knowledge doc is just a dashboard with \
+`doc_type=\"knowledge\"`. The agent uses them to persist everything it learns across \
+sessions: metric definitions, data dictionaries, onboarding guides, business logic, \
+query patterns, and data quirks worth remembering.
 
-### 1. Quick Learnings (`save_learning`)
-For bite-sized data navigation insights that persist across ALL sessions:
-- DATA NAVIGATION: which tables to use, field meanings, query patterns
-- User corrections: \"Use table X, not Y\" or \"Field Z means this in our warehouse\"
-- Data structure facts: field encodings, join keys, date ranges available
-- DON'T save analysis results: what the data shows, business insights, metric values
+**Tools:**
+- `search_knowledge` — find relevant documents by topic (semantic search). Filter by \
+  `doc_type` if you want only knowledge docs or only dashboards.
+- `list_knowledge_files` — enumerate documents in the workspace (filter by `doc_type`).
+- `read_knowledge_file` — read the full markdown content of a specific document.
+- `write_knowledge_file` — create new documents. Pass `doc_type=\"knowledge\"` (default) \
+  for reference material or `doc_type=\"dashboard\"` for a chart-bearing dashboard.
+- `edit_knowledge_file` — targeted find-and-replace edits to an existing document.
 
-**Structured fields for graph construction:**
-- `related_tables`: Table names (e.g., [\"public.orders\", \"analytics.events\"])
-- `related_columns`: Important columns in table.column format (e.g., [\"public.orders.total_amount\"])
-- `related_metrics`: Metric names discussed (e.g., [\"MRR\", \"churn_rate\"])
-- For metric learnings (`learning_type=\"metric\"`):
-  - `metric_name`: Canonical name (e.g., \"MRR\", \"Churn Rate\")
-  - `metric_formula`: How it's calculated (e.g., \"SUM(amount) WHERE status='active'\")
-  - `metric_unit`: Unit of measurement (USD, %, count, etc.)
-
-### 2. Knowledge Files (`write_knowledge_file` / `edit_knowledge_file` / `read_knowledge_file` / `list_knowledge_files`)
-For richer, structured documentation:
-- Metric definitions with SQL formulas
-- Data dictionaries and onboarding guides
-- Business logic and domain explanations
-- Use `search_knowledge` to find relevant files by topic
-- Use `read_knowledge_file` to read a specific file
-- Use `write_knowledge_file` to create new files (parent folders auto-created)
-- Use `edit_knowledge_file` for targeted edits (find-and-replace)
+**What to save:**
+- DATA NAVIGATION: which tables to use, field meanings, query patterns, join keys, date \
+  ranges available, NULL semantics, field encodings.
+- User corrections: \"Use table X, not Y\" or \"Field Z means this in our warehouse\".
+- Metric definitions: canonical name, formula (SQL or plain language), unit of measurement.
+- DO NOT save one-off analysis results: what the data shows today, business insights, \
+  specific numbers. Those belong in the response, not persistent memory.
 
 ## Your Investigative Mindset
 
 **When things don't make sense, get curious:**
 - Got zero results? Don't report \"no data\" - investigate why (wrong date range? wrong table? try different search terms)
-- Query failed? Don't just fix syntax - understand what it reveals about data structure (save if it's reusable knowledge!)
-- User corrects you? This is gold - immediately `save_learning` before proceeding
-- Discovered a better table after trial and error? Save it so you never waste time again
+- Query failed? Don't just fix syntax - understand what it reveals about data structure (persist it if it's reusable knowledge!)
+- User corrects you? This is gold - immediately capture it in a knowledge document before proceeding
+- Discovered a better table after trial and error? Write it to a knowledge document so you never waste time again
 
-**Save learnings proactively during investigation — don't wait to be asked:**
-- Discovered what a field means? (e.g. \"visitor_id is anonymous, user_id is for authenticated users\") → SAVE IT NOW
-- Learned which fields to join on, or which table is best for a question? → SAVE IT NOW
-- Found a data quirk like NULL semantics, default values, or encoding patterns? → SAVE IT NOW
-- Realized a column name is misleading or has specific business meaning? → SAVE IT NOW
-- **Rule of thumb:** If your future self would benefit from knowing this next time, save it immediately as a tool call in your current step. Don't plan to save it \"later\" — you'll forget or run out of tool calls.
+**Persist knowledge proactively during investigation — don't wait to be asked:**
+- Discovered what a field means? (e.g. \"visitor_id is anonymous, user_id is for authenticated users\") → WRITE IT NOW
+- Learned which fields to join on, or which table is best for a question? → WRITE IT NOW
+- Found a data quirk like NULL semantics, default values, or encoding patterns? → WRITE IT NOW
+- Realized a column name is misleading or has specific business meaning? → WRITE IT NOW
+- **Rule of thumb:** If your future self would benefit from knowing this next time, write it to a knowledge document immediately as a tool call in your current step. Don't plan to save it \"later\" — you'll forget or run out of tool calls.
 
 **After each query, sanity-check results:**
 - Does this number make sense? (0 customers seems wrong...)
@@ -589,7 +717,7 @@ mod tests {
             .replace("{user_name}", user_name)
             .replace("{workspace_knowledge}", workspace_knowledge)
             .replace("{user_knowledge}", user_knowledge)
-            .replace("{knowledge_tree}", "")
+            .replace("{documents}", "")
             .replace("{chartml_reference}", chartml_reference)
     }
 
@@ -676,7 +804,7 @@ mod tests {
     fn system_prompt_template_includes_cross_session_learning() {
         let result = format_template("", "", "", "", "");
         assert!(result.contains("Cross-Session Learning"));
-        assert!(result.contains("save_learning"));
+        assert!(result.contains("write_knowledge_file"));
         assert!(result.contains("persist"));
     }
 
@@ -775,8 +903,8 @@ mod tests {
             "Leftover {{user_knowledge}} placeholder"
         );
         assert!(
-            !result.contains("{knowledge_tree}"),
-            "Leftover {{knowledge_tree}} placeholder"
+            !result.contains("{documents}"),
+            "Leftover {{documents}} placeholder"
         );
         assert!(
             !result.contains("{chartml_reference}"),
@@ -880,8 +1008,8 @@ mod tests {
             "Unresolved placeholder: user_knowledge"
         );
         assert!(
-            !result.contains("{knowledge_tree}"),
-            "Unresolved placeholder: knowledge_tree"
+            !result.contains("{documents}"),
+            "Unresolved placeholder: documents"
         );
         assert!(
             !result.contains("{chartml_reference}"),

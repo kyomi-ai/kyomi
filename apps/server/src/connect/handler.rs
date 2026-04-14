@@ -419,12 +419,11 @@ async fn route_response(
             } else {
                 // Non-terminal (Header, Chunk): send without removing
                 let id = response.id.clone();
-                if let Some(ResponseChannel::Stream(tx)) = pending.get(&id) {
-                    if tx.send(response).await.is_err() {
+                if let Some(ResponseChannel::Stream(tx)) = pending.get(&id)
+                    && tx.send(response).await.is_err() {
                         // Receiver dropped — clean up
                         pending.remove(&id);
                     }
-                }
             }
         }
         None => {
@@ -441,7 +440,7 @@ async fn route_response(
 async fn close_with_code(socket: WebSocket, code: u16, reason: &str) {
     let (mut sender, _) = socket.split();
     let close_frame = ws::CloseFrame {
-        code: code.into(),
+        code,
         reason: reason.to_string().into(),
     };
     let _ = sender.send(ws::Message::Close(Some(close_frame))).await;

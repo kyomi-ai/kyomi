@@ -371,6 +371,7 @@ async fn signup_complete(
         &user.user_id,
         Some(&data.name),
         &email,
+        Some(&state.config),
     )
     .await?;
 

@@ -1,0 +1,42 @@
+# This crate is NOT part of the kyomi workspace — it targets wasm32-unknown-unknown
+# and is built independently by Trunk.
+[workspace]
+
+[package]
+name = "mcp-chart-app-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+chartml-core = { path = "../../../chartml-rs/crates/chartml-core" }
+chartml-chart-cartesian = { path = "../../../chartml-rs/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "../../../chartml-rs/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "../../../chartml-rs/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "../../../chartml-rs/crates/chartml-chart-metric" }
+chartml-leptos = { path = "../../../chartml-rs/crates/chartml-leptos" }
+# No chartml-datafusion — MCP app receives pre-resolved data, no transforms needed
+
+leptos = { version = "0.8", features = ["csr"] }
+web-sys = { version = "0.3", features = [
+    "HtmlElement", "HtmlInputElement", "Document", "Window", "Element",
+    "CustomEvent", "CustomEventInit", "Event", "EventTarget",
+    "CssStyleDeclaration", "DomTokenList",
+    "Navigator", "Clipboard",
+    "MessageEvent",
+] }
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true
+panic = "abort"

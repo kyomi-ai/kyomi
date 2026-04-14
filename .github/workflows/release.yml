@@ -54,12 +54,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build frontend
-        working-directory: apps/frontend
-        run: |
-          npm ci
-          npm run build
-
       - name: Build MCP chart app
         working-directory: apps/mcp-chart-app
         run: |
@@ -105,12 +99,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Build frontend
-        working-directory: apps/frontend
-        run: |
-          npm ci
-          npm run build
 
       - name: Build MCP chart app
         working-directory: apps/mcp-chart-app
@@ -158,12 +146,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build frontend
-        working-directory: apps/frontend
-        run: |
-          npm ci
-          npm run build
-
       - name: Build MCP chart app
         working-directory: apps/mcp-chart-app
         run: |
@@ -209,12 +191,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Build frontend
-        working-directory: apps/frontend
-        run: |
-          npm ci
-          npm run build
 
       - name: Build MCP chart app
         working-directory: apps/mcp-chart-app

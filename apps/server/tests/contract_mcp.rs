@@ -151,6 +151,7 @@ async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
         &user.user_id,
         Some("MCP Test User"),
         &email,
+        None,
     )
     .await
     .expect("should create test workspace");
@@ -216,6 +217,7 @@ async fn setup_free_auth_context(suffix: &str) -> Option<AuthContext> {
         &user.user_id,
         Some("MCP Free User"),
         &email,
+        None,
     )
     .await
     .expect("should create test workspace");

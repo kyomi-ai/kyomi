@@ -24,39 +24,25 @@ impl AnalyticsTierConfig {
     }
 }
 
-/// Default tier configurations. Values are intentionally generous — tune after stress testing.
+/// Cloud analytics configuration. All tiers map to the same config.
+///
+/// - 100K events/month included
+/// - 20% grace (120K hard limit)
+/// - 180 days (6 months) retention
+/// - Additional events via purchased bundles (tracked on workspace)
 pub fn default_tier_configs() -> HashMap<String, AnalyticsTierConfig> {
-    let mut m = HashMap::new();
-    m.insert("free".into(), AnalyticsTierConfig {
-        monthly_event_limit: 50_000,
-        grace_percent: 20,
-        retention_days: 30,
-    });
-    m.insert("basic".into(), AnalyticsTierConfig {
-        monthly_event_limit: 50_000,
-        grace_percent: 20,
-        retention_days: 30,
-    });
-    m.insert("starter".into(), AnalyticsTierConfig {
-        monthly_event_limit: 1_000_000,
+    let cloud = AnalyticsTierConfig {
+        monthly_event_limit: 100_000,
         grace_percent: 20,
         retention_days: 180,
-    });
-    m.insert("pro".into(), AnalyticsTierConfig {
-        monthly_event_limit: 5_000_000,
-        grace_percent: 20,
-        retention_days: 365,
-    });
-    m.insert("team".into(), AnalyticsTierConfig {
-        monthly_event_limit: 25_000_000,
-        grace_percent: 20,
-        retention_days: 730,
-    });
-    m.insert("enterprise".into(), AnalyticsTierConfig {
-        monthly_event_limit: 100_000_000,
-        grace_percent: 20,
-        retention_days: 730,
-    });
+    };
+    let mut m = HashMap::new();
+    // All tier names map to the same Cloud config for backward compatibility.
+    // The DB still stores old tier strings (free, starter, pro, etc.) for
+    // existing workspaces — they all get Cloud-level quotas now.
+    for tier in &["cloud", "free", "basic", "starter", "pro", "team", "enterprise"] {
+        m.insert((*tier).to_string(), cloud.clone());
+    }
     m
 }
 
@@ -162,10 +148,10 @@ pub async fn get_per_site_counts_from_clickhouse(
                     if line.trim().is_empty() {
                         continue;
                     }
-                    if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
-                        if let Some(cnt) = row.get("cnt").and_then(|v| v.as_u64()) {
-                            return (site_id, Some(cnt));
-                        }
+                    if let Ok(row) = serde_json::from_str::<serde_json::Value>(line)
+                        && let Some(cnt) = row.get("cnt").and_then(|v| v.as_u64())
+                    {
+                        return (site_id, Some(cnt));
                     }
                 }
                 (site_id, None)
@@ -222,7 +208,8 @@ pub async fn reconcile_counters(
     for (ws_id, site_id, database, tier) in rows {
         map.entry(ws_id).or_insert_with(|| (tier, Vec::new())).1.push((site_id, database));
     }
-    let workspaces: Vec<(String, String, Vec<(String, String)>)> = map.into_iter()
+    type WorkspaceWithSites = (String, String, Vec<(String, String)>);
+    let workspaces: Vec<WorkspaceWithSites> = map.into_iter()
         .map(|(ws_id, (tier, sites))| (ws_id, tier, sites))
         .collect();
 
@@ -241,10 +228,10 @@ pub async fn reconcile_counters(
     for (workspace_id, tier, site_pairs) in &workspaces {
         // Ensure quota hash exists in Redis (idempotent — fixes missing quota from
         // sites created before spawn_analytics_post_create was added, or after Redis restart)
-        if let Some(config) = tier_configs.get(tier.as_str()) {
-            if let Err(e) = sync_quota_to_redis(redis, workspace_id, config).await {
-                tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to sync quota during reconciliation");
-            }
+        if let Some(config) = tier_configs.get(tier.as_str())
+            && let Err(e) = sync_quota_to_redis(redis, workspace_id, config).await
+        {
+            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to sync quota during reconciliation");
         }
 
         // If any site's ClickHouse query failed it will be absent from ch_counts.
@@ -401,18 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn test_default_tier_configs_ascending_limits() {
+    fn test_all_tiers_have_same_config() {
         let configs = default_tier_configs();
-        assert!(configs["free"].monthly_event_limit < configs["starter"].monthly_event_limit);
-        assert!(configs["starter"].monthly_event_limit < configs["pro"].monthly_event_limit);
-        assert!(configs["pro"].monthly_event_limit < configs["team"].monthly_event_limit);
-    }
-
-    #[test]
-    fn test_default_tier_configs_ascending_retention() {
-        let configs = default_tier_configs();
-        assert!(configs["free"].retention_days < configs["starter"].retention_days);
-        assert!(configs["starter"].retention_days < configs["pro"].retention_days);
-        assert!(configs["pro"].retention_days <= configs["team"].retention_days);
+        for (_, config) in &configs {
+            assert_eq!(config.monthly_event_limit, 100_000);
+            assert_eq!(config.grace_percent, 20);
+            assert_eq!(config.retention_days, 180);
+        }
     }
 }

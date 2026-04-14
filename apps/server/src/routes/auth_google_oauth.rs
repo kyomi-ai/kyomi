@@ -289,6 +289,7 @@ async fn google_callback(
                     &user.user_id,
                     user.name.as_deref(),
                     &email,
+                    Some(&state.config),
                 )
                 .await?;
             }
@@ -423,6 +424,7 @@ async fn accept_terms(
             &user.user_id,
             Some(name),
             email,
+            Some(&state.config),
         )
         .await?;
 

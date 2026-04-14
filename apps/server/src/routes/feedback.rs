@@ -119,8 +119,8 @@ async fn submit_feedback(
     };
 
     // Handle screenshot in context
-    if let Some(ref screenshot_b64) = data.screenshot {
-        if data.include_context {
+    if let Some(ref screenshot_b64) = data.screenshot
+        && data.include_context {
             // Estimate decoded size: base64 is ~4/3 of original
             let estimated_size = screenshot_b64.len() * 3 / 4;
             if estimated_size <= MAX_SCREENSHOT_BYTES {
@@ -130,16 +130,13 @@ async fn submit_feedback(
                         serde_json::Value::String(screenshot_b64.clone()),
                     );
                 }
-            } else {
-                if let Some(obj) = context.as_object_mut() {
-                    obj.insert(
-                        "screenshot_too_large".to_string(),
-                        serde_json::Value::Bool(true),
-                    );
-                }
+            } else if let Some(obj) = context.as_object_mut() {
+                obj.insert(
+                    "screenshot_too_large".to_string(),
+                    serde_json::Value::Bool(true),
+                );
             }
         }
-    }
 
     // Resolve workspace_id: from request body or from auth context
     let workspace_id = data
@@ -365,10 +362,10 @@ async fn send_feedback_slack_notification(
             };
             let error_lines: Vec<String> = errors_to_show
                 .iter()
-                .filter_map(|e| {
+                .map(|e| {
                     let msg = e.get("message").and_then(|v| v.as_str()).unwrap_or("N/A");
                     let truncated: String = msg.chars().take(150).collect();
-                    Some(format!("• {truncated}"))
+                    format!("• {truncated}")
                 })
                 .collect();
             if !error_lines.is_empty() {
@@ -390,12 +387,12 @@ async fn send_feedback_slack_notification(
             };
             let request_lines: Vec<String> = requests_to_show
                 .iter()
-                .filter_map(|r| {
+                .map(|r| {
                     let method = r.get("method").and_then(|v| v.as_str()).unwrap_or("");
                     let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
                     let url_truncated: String = url.chars().take(80).collect();
                     let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("N/A");
-                    Some(format!("• `{method} {url_truncated}` → {status}"))
+                    format!("• `{method} {url_truncated}` → {status}")
                 })
                 .collect();
             if !request_lines.is_empty() {
@@ -694,16 +691,16 @@ async fn send_feedback_email_notification(
         }
 
         // Console errors — show last 3
-        if let Some(errors) = obj.get("console_errors").and_then(|v| v.as_array()) {
-            if !errors.is_empty() {
+        if let Some(errors) = obj.get("console_errors").and_then(|v| v.as_array())
+            && !errors.is_empty() {
                 let total = errors.len();
                 let errors_to_show = if total > 3 { &errors[total - 3..] } else { errors.as_slice() };
                 let error_html: Vec<String> = errors_to_show
                     .iter()
-                    .filter_map(|e| {
+                    .map(|e| {
                         let msg = e.get("message").and_then(|v| v.as_str()).unwrap_or("N/A");
                         let truncated: String = msg.chars().take(200).collect();
-                        Some(format!("<li><code>{}</code></li>", html_escape(&truncated)))
+                        format!("<li><code>{}</code></li>", html_escape(&truncated))
                     })
                     .collect();
                 let label = if total > 3 {
@@ -716,26 +713,25 @@ async fn send_feedback_email_notification(
                     error_html.join("")
                 ));
             }
-        }
 
         // Failed requests — show last 3
-        if let Some(requests) = obj.get("failed_requests").and_then(|v| v.as_array()) {
-            if !requests.is_empty() {
+        if let Some(requests) = obj.get("failed_requests").and_then(|v| v.as_array())
+            && !requests.is_empty() {
                 let total = requests.len();
                 let requests_to_show = if total > 3 { &requests[total - 3..] } else { requests.as_slice() };
                 let request_html: Vec<String> = requests_to_show
                     .iter()
-                    .filter_map(|r| {
+                    .map(|r| {
                         let method = r.get("method").and_then(|v| v.as_str()).unwrap_or("");
                         let url = r.get("url").and_then(|v| v.as_str()).unwrap_or("");
                         let url_truncated: String = url.chars().take(100).collect();
                         let status = r.get("status").and_then(|v| v.as_str()).unwrap_or("N/A");
-                        Some(format!(
+                        format!(
                             "<li><code>{} {}</code> &rarr; {}</li>",
                             html_escape(method),
                             html_escape(&url_truncated),
                             html_escape(status)
-                        ))
+                        )
                     })
                     .collect();
                 let label = if total > 3 {
@@ -748,7 +744,6 @@ async fn send_feedback_email_notification(
                     request_html.join("")
                 ));
             }
-        }
     }
 
     // Screenshot as inline base64 img tag

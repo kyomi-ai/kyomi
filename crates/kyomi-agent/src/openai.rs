@@ -82,12 +82,7 @@ fn get_model_pricing(model: &str) -> Option<ModelPricing> {
             input: 2.50,
             output: 10.00,
         })
-    } else if model.contains("o4-mini") {
-        Some(ModelPricing {
-            input: 1.10,
-            output: 4.40,
-        })
-    } else if model.contains("o3-mini") {
+    } else if model.contains("o4-mini") || model.contains("o3-mini") {
         Some(ModelPricing {
             input: 1.10,
             output: 4.40,

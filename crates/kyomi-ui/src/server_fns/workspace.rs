@@ -1,0 +1,371 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! Server functions for the Workspace settings page.
+//!
+//! These replace the REST API calls that WorkspaceSettings.jsx makes
+//! to `/api/v1/workspaces/*` endpoints. Each function calls the same
+//! service-layer code as the existing REST route handlers in
+//! `apps/server/src/routes/workspaces.rs`.
+
+use leptos::prelude::*;
+
+use crate::types::{GraphRebuildResult, WorkspaceSettingsData};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers (server-only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reject non-workspace-admin users.
+///
+/// Mirrors `require_workspace_admin()` in `apps/server/src/routes/workspaces.rs`.
+#[cfg(feature = "ssr")]
+fn require_workspace_admin(
+    auth: &kyomi_auth::middleware::AuthUser,
+) -> Result<(), ServerFnError> {
+    if !auth
+        .workspace
+        .workspace_roles
+        .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
+    {
+        return Err(ServerFnError::new("Workspace admin access required"));
+    }
+    Ok(())
+}
+
+/// Read a nested key from `settings.custom_settings[key]`.
+///
+/// Mirrors `custom_settings_get()` in `apps/server/src/routes/workspaces.rs`.
+#[cfg(feature = "ssr")]
+fn custom_settings_get<'a>(
+    settings: &'a Option<serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    settings
+        .as_ref()
+        .and_then(|s| s.get("custom_settings"))
+        .and_then(|cs| cs.get(key))
+}
+
+/// Merge a key-value pair into `settings.custom_settings`.
+///
+/// Mirrors `merge_custom_settings()` in `apps/server/src/routes/workspaces.rs`.
+#[cfg(feature = "ssr")]
+fn merge_custom_settings(
+    settings: &Option<serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    let mut s = settings
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // Ensure custom_settings exists
+    if s.get("custom_settings").is_none()
+        && let Some(obj) = s.as_object_mut()
+    {
+        obj.insert(
+            "custom_settings".to_string(),
+            serde_json::json!({}),
+        );
+    }
+
+    if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
+        cs.insert(key.to_string(), value);
+    }
+
+    s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Read operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Load workspace settings for the admin settings page.
+///
+/// Returns workspace name, default AI model, and chart palette.
+/// Requires workspace admin role.
+#[server(prefix = "/leptos-api")]
+pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let ws_id = workspace_id(&auth)?;
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let default_model = custom_settings_get(&workspace.settings, "default_model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude-sonnet-4-5-20250929")
+        .to_string();
+
+    let chart_palette = custom_settings_get(&workspace.settings, "chartml_config")
+        .and_then(|v| v.get("config"))
+        .and_then(|c| c.get("style"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("kyomi")
+        .to_string();
+
+    Ok(WorkspaceSettingsData {
+        workspace_name: workspace.name.unwrap_or_default(),
+        default_model,
+        chart_palette,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Write operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Update the workspace name. Requires admin role.
+#[server(prefix = "/leptos-api")]
+pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(ServerFnError::new("Workspace name cannot be empty"));
+    }
+
+    let ws_id = workspace_id(&auth)?;
+    kyomi_auth::workspace_service::update_workspace_name(&ctx.db, ws_id, trimmed)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Update the workspace default AI model. Requires admin role.
+#[server(prefix = "/leptos-api")]
+pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let ws_id = workspace_id(&auth)?;
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let updated_settings = merge_custom_settings(
+        &workspace.settings,
+        "default_model",
+        serde_json::json!(model),
+    );
+
+    kyomi_auth::workspace_service::update_workspace_settings(
+        &ctx.db,
+        ws_id,
+        &updated_settings,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Update the workspace ChartML config (chart palette). Requires admin role.
+#[server(prefix = "/leptos-api")]
+pub async fn update_workspace_chartml_config(palette: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let ws_id = workspace_id(&auth)?;
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let config_value = serde_json::json!({
+        "config": {
+            "type": "config",
+            "version": 1,
+            "style": palette
+        }
+    });
+
+    let updated_settings = merge_custom_settings(
+        &workspace.settings,
+        "chartml_config",
+        config_value,
+    );
+
+    kyomi_auth::workspace_service::update_workspace_settings(
+        &ctx.db,
+        ws_id,
+        &updated_settings,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(())
+}
+
+/// Rebuild the workspace knowledge graph. Requires admin role.
+///
+/// Runs the full population pipeline: tables, columns, learnings, and
+/// backfills learning references. Idempotent — safe to run multiple times.
+#[server(prefix = "/leptos-api")]
+pub async fn populate_knowledge_graph() -> Result<GraphRebuildResult, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let ws_id = workspace_id(&auth)?;
+    let embed = ctx.embedding.get()
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    kyomi_knowledge::populate::populate_workspace(&ctx.db, embed, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(format!("Knowledge population failed: {e}")))?;
+
+    let refs_count = kyomi_knowledge::references::backfill_all_references(&ctx.db, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(format!("Reference backfill failed: {e}")))?;
+
+    Ok(GraphRebuildResult {
+        status: "complete".to_string(),
+        learnings_with_references: refs_count as i64,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace-level Slack integration (install/uninstall)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Get workspace-level Slack integration status.
+///
+/// Returns whether the Kyomi Slack app is installed in the workspace,
+/// along with the Slack team name and ID if installed.
+#[cfg(feature = "slack")]
+#[server(prefix = "/leptos-api")]
+pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlackStatus, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    let ws_config =
+        kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let installed = ws_config.is_some();
+    let team_id = ws_config
+        .as_ref()
+        .and_then(|cfg| cfg.get("team_id"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let team_name = ws_config
+        .as_ref()
+        .and_then(|cfg| cfg.get("team_name"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(crate::types::WorkspaceSlackStatus {
+        installed,
+        team_id,
+        team_name,
+    })
+}
+
+/// Get the Slack OAuth install URL for adding Kyomi to a workspace.
+///
+/// Returns the OAuth authorization URL. The frontend redirects the user
+/// to this URL to complete the Slack app installation.
+/// Requires workspace admin role.
+#[cfg(feature = "slack")]
+#[server(prefix = "/leptos-api")]
+pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let ws_id = workspace_id(&auth)?;
+
+    let client_id = ctx
+        .config
+        .slack_client_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ServerFnError::new("Slack integration not configured"))?;
+
+    let kv = ctx
+        .kv
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("OAuth state store not available"))?;
+
+    // Generate CSRF state token and store in KV
+    let oauth_state = kyomi_auth::redis_ops::generate_token();
+
+    kyomi_auth::redis_ops::store_oauth_state(
+        kv,
+        "slack_install",
+        &oauth_state,
+        &serde_json::json!({
+            "user_id": auth.user_id,
+            "workspace_id": ws_id,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+        }),
+    )
+    .await
+    .map_err(|e| ServerFnError::new(format!("Failed to store OAuth state: {e}")))?;
+
+    let base = ctx.config.frontend_url.trim_end_matches('/');
+    let redirect_uri = format!("{base}/api/v1/slack/oauth/callback");
+
+    let auth_url = format!(
+        "{}?client_id={}&scope={}&redirect_uri={}&state={}",
+        kyomi_slack::client::OAUTH_AUTHORIZE_URL,
+        client_id,
+        kyomi_slack::client::SLACK_BOT_SCOPES,
+        redirect_uri,
+        oauth_state,
+    );
+
+    Ok(auth_url)
+}
+
+/// Remove the Slack integration from the workspace.
+///
+/// Removes the workspace integration record from the database.
+/// Requires workspace admin role.
+#[cfg(feature = "slack")]
+#[server(prefix = "/leptos-api")]
+pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    require_workspace_admin(&auth)?;
+
+    let ws_id = workspace_id(&auth)?;
+
+    // Verify the integration exists
+    let integration =
+        kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    if integration.is_none() {
+        return Err(ServerFnError::new(
+            "Slack integration not found for this workspace",
+        ));
+    }
+
+    // Remove the workspace integration
+    kyomi_core::platform::delete_workspace_integration(&ctx.db, ws_id, "slack")
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let _ = team_id; // used by React for cache invalidation — we verify server-side
+
+    Ok(())
+}
+
+// Helpers — delegate to shared extractors in parent module
+#[cfg(feature = "ssr")]
+use super::{extract_auth, extract_context, workspace_id};

@@ -43,7 +43,7 @@ pub use collection::{Collection, CollectionDashboard};
 pub use chat_message::ChatMessage;
 pub use chat_session::ChatSession;
 pub use conversation_read_status::ConversationReadStatus;
-pub use dashboard::{Dashboard, DashboardVersion, DashboardView};
+pub use dashboard::{Dashboard, DashboardVersion, DashboardView, DocType};
 pub use datasource::{DatasourceConfig, UserDatasourceCredential, UserDatasourcePreference};
 pub use email_subscriber::EmailSubscriber;
 pub use feedback::Feedback;

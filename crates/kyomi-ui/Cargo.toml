@@ -1,0 +1,169 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "kyomi-ui"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[features]
+default = []
+# Server-side rendering — includes leptos_axum, accesses DB/services directly
+ssr = [
+    "leptos/ssr",
+    "dep:leptos_axum",
+    "leptos_router/ssr",
+    "leptos_meta/ssr",
+    "dep:kyomi-core",
+    "dep:kyomi-auth",
+    "dep:kyomi-agent",
+    "dep:kyomi-embed",
+    "dep:kyomi-knowledge",
+    "dep:kyomi-datasource-server",
+    "dep:kyomi-connect-protocol",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:dashmap",
+    "dep:uuid",
+    "dep:axum",
+    "dep:sqlx",
+    "dep:webauthn-rs",
+    "dep:sha2",
+    "dep:hmac",
+    "dep:arrow-schema",
+    "dep:arrow-array",
+    "dep:arrow-ipc",
+    "dep:futures-util",
+    "dep:reqwest",
+]
+# Client-side hydration — compiles to WASM, no server deps
+hydrate = [
+    "leptos/hydrate",
+    "leptos/csr",
+]
+# Slack integration — adds server functions for Slack connection management
+slack = ["dep:kyomi-slack"]
+
+[dependencies]
+# Leptos framework
+leptos = "0.8"
+leptos_router = "0.8"
+leptos_meta = "0.8"
+leptos_axum = { version = "0.8", optional = true }
+
+# Serialization (shared types cross server/client boundary)
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Icons — Lucide icon set (same as lucide-react in the React frontend)
+leptos_icons = "0.7"
+icondata_core = "0.1"
+icondata_lu = "0.1"
+
+# WASM error handling (client-only, but always compiled — no-op on server)
+console_error_panic_hook = "0.1"
+
+# Browser DOM access (for theme toggling, clipboard, etc.)
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "HtmlElement", "HtmlTextAreaElement", "HtmlInputElement",
+    "Element", "EventTarget", "Node",
+    "KeyboardEvent", "DomTokenList", "MediaQueryList", "Location",
+    "ScrollIntoViewOptions", "ScrollBehavior", "CssStyleDeclaration",
+    "RequestCredentials", "RequestInit", "Headers",
+    "Navigator", "Clipboard", "Storage", "ServiceWorkerContainer",
+    # WebSocket support (dashboard live updates)
+    "WebSocket", "MessageEvent", "CloseEvent",
+    # WebAuthn / passkey support
+    "CredentialsContainer", "Credential", "PublicKeyCredential",
+    "AuthenticatorResponse", "AuthenticatorAttestationResponse",
+    "AuthenticatorAssertionResponse",
+    "CredentialCreationOptions", "CredentialRequestOptions",
+    # PDF export (fetch → blob → download)
+    "Response", "Blob", "Url", "CustomEvent", "CustomEventInit",
+    # IntersectionObserver (infinite scroll in query history)
+    "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
+    # SQL Editor: crypto.randomUUID() and performance.now()
+    "Crypto", "Performance",
+] }
+
+# SendWrapper for non-Send JS values in Leptos reactive closures
+send_wrapper = "0.6"
+
+# WASM interop (session refresh via JS fetch)
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# Base64 encoding (for Cursor deep-link config)
+base64 = { workspace = true }
+
+# Async timers for WASM (copy feedback reset)
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+# Logging
+tracing = { workspace = true }
+
+# Internal crates (server-only — gated behind ssr feature)
+kyomi-core = { workspace = true, optional = true }
+kyomi-auth = { workspace = true, optional = true }
+kyomi-agent = { workspace = true, optional = true }
+kyomi-datasource-server = { workspace = true, optional = true }
+kyomi-connect-protocol = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+webauthn-rs = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+
+# Knowledge graph + embedding (server-only — gated behind ssr feature)
+kyomi-embed = { workspace = true, optional = true }
+kyomi-knowledge = { workspace = true, optional = true }
+
+# ChartML (Arrow-backed data tables for chart rendering)
+chartml-core = { workspace = true }
+chartml-leptos = { workspace = true }
+chartml-chart-cartesian = { workspace = true }
+chartml-chart-pie = { workspace = true }
+chartml-chart-scatter = { workspace = true }
+chartml-chart-metric = { workspace = true }
+chartml-datafusion = { workspace = true }
+# Shared chart palettes + editorial theme — wasm-compatible, no server deps.
+kyomi-chart-theme = { workspace = true }
+async-trait = { workspace = true }
+
+# Markdown rendering (shared — works in both SSR and WASM)
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+# Code editor (WASM-only — uses web-sys DOM APIs)
+kode-leptos = { path = "../../../kode/kode-leptos" }
+
+# ChartML parser (YAML parsing + block extraction)
+serde_yaml = { workspace = true }
+regex = { workspace = true }
+similar = { workspace = true }
+
+# Date/time (used in both SSR and WASM for date formatting)
+chrono = { workspace = true }
+
+# HMAC (for trial chat token generation/validation — server-only)
+hmac = { workspace = true, optional = true }
+
+# Arrow (for converting query results to IPC bytes — server-only)
+arrow-schema = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-ipc = { workspace = true, optional = true }
+
+# Futures (for StreamExt in streaming query server functions — server-only)
+futures-util = { workspace = true, optional = true }
+
+# Enterprise crates (optional, behind feature flags)
+kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
+
+[dev-dependencies]
+kyomi-core = { workspace = true, features = ["test-helpers"] }
+kyomi-auth = { workspace = true }
+tokio = { workspace = true }

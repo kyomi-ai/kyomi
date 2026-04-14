@@ -501,7 +501,7 @@ async fn search_sessions(
 // ---------------------------------------------------------------------------
 
 async fn get_models() -> Json<serde_json::Value> {
-    let models = vec![
+    let models = [
         ModelInfo {
             id: "claude-haiku-4-5-20251001".into(),
             name: "Claude Haiku 4.5".into(),
@@ -597,8 +597,7 @@ async fn send_message(
             Some(workspace_id),
         )
         .await
-        {
-            if let Ok(data) = serde_json::to_value(&session_info) {
+            && let Ok(data) = serde_json::to_value(&session_info) {
                 kyomi_auth::websocket::helpers::send_session_created(
                     &state.ws_manager,
                     &user.user_id,
@@ -607,7 +606,6 @@ async fn send_message(
                 )
                 .await;
             }
-        }
 
         new_sid
     };
@@ -689,6 +687,7 @@ async fn send_message(
         user_message_id: Some(user_message_id.clone()),
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
+        user_display_name: user.name.as_deref().unwrap_or(&user.email).to_string(),
     };
 
     // Register cancel token so WebSocket cancel_request can stop this task.
@@ -715,14 +714,16 @@ async fn send_message(
     tokio::spawn(async move {
         let result = kyomi_agent::execute_agent_chat(
             exec_config,
-            &db,
-            &kv,
-            &encryption_key,
-            &embedding,
-            &ws_manager,
-            &app_config,
-            Some(connect_registry),
-            platforms,
+            kyomi_agent::AgentExecutionEnv {
+                db: &db,
+                kv: &kv,
+                encryption_key: &encryption_key,
+                embedding: &embedding,
+                ws_manager: &ws_manager,
+                app_config: &app_config,
+                connect_registry: Some(connect_registry),
+                platforms,
+            },
         )
         .await;
 
@@ -810,19 +811,21 @@ async fn send_message(
         cancel_registry.remove(&spawn_user_id, &spawn_session_id);
     });
 
-    // Fire-and-forget title generation for new sessions.
+    // Fire-and-forget title generation for new sessions. The spawned task
+    // loads WorkspaceAiConfig (Kyomi or BYOK) and logs a warning on failure,
+    // so no server-side config guard is needed here — gating on
+    // `resolve_provider_config` would silently skip titles for BYOK-only
+    // deployments that never set server Kyomi keys.
     if is_new_session {
-        // Only attempt title generation if an LLM provider is configured.
-        if kyomi_agent::resolve_provider_config(&state.config).is_ok() {
-            kyomi_agent::generate_session_title(
-                state.db.clone(),
-                state.ws_manager.clone(),
-                session_id.clone(),
-                user.user_id.clone(),
-                first_message,
-                state.config.clone(),
-            );
-        }
+        kyomi_agent::generate_session_title(
+            state.db.clone(),
+            state.ws_manager.clone(),
+            session_id.clone(),
+            user.user_id.clone(),
+            workspace_id.to_string(),
+            first_message,
+            state.config.clone(),
+        );
     }
 
     tracing::info!(
@@ -870,12 +873,11 @@ async fn share_session(
     }
 
     let now = Utc::now();
-    let now_str = now.to_rfc3339();
 
     kyomi_core::db_execute!(
         &state.db,
         "UPDATE chat_sessions SET shared = true, shared_at = $1 WHERE session_id = $2",
-        &now_str,
+        &now,
         &session_id
     )?;
 
@@ -915,8 +917,8 @@ async fn unshare_session(
     // Block unsharing platform channel/group conversations — they're visible
     // to other channel members on the platform so "private" doesn't make sense.
     // Platform DMs (Slack D prefix) can be unshared like regular sessions.
-    if let Some(ref platform) = row.platform_type {
-        if platform == "slack" {
+    if let Some(ref platform) = row.platform_type
+        && platform == "slack" {
             // Slack thread keys are "channel_id:thread_ts"; extract channel_id
             let channel_id = row.platform_thread_key.as_deref()
                 .and_then(|k| k.split(':').next())
@@ -930,7 +932,6 @@ async fn unshare_session(
                 ));
             }
         }
-    }
 
     kyomi_core::db_execute!(
         &state.db,

@@ -50,5 +50,4 @@ JavaScript Dependencies (Frontend):
   - Zustand (MIT)                       - State management
 
 Full dependency lists are available in:
-  - apps/backend-rust/Cargo.lock (Rust)
-  - apps/frontend/package-lock.json (Frontend)
+  - Cargo.lock (Rust)

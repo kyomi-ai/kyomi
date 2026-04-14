@@ -97,7 +97,7 @@ pub async fn populate_table_embeddings(
             DbPool::Postgres(pg) => {
                 // Bind pgvector::Vector directly from f32 slices -- no byte round-trip.
                 let name_vec = pgvector::Vector::from(name_embeddings[i].clone());
-                let desc_vec = desc_emb.map(|e| pgvector::Vector::from(e));
+                let desc_vec = desc_emb.map(pgvector::Vector::from);
                 sqlx::query(
                     "UPDATE datasource_table_cache \
                      SET name_embedding = $1, desc_embedding = $2 \
@@ -253,7 +253,7 @@ pub async fn populate_column_embeddings(
             DbPool::Postgres(pg) => {
                 // Bind pgvector::Vector directly from f32 slices -- no byte round-trip.
                 let name_vec = pgvector::Vector::from(name_embeddings[i].clone());
-                let desc_vec = desc_emb.map(|e| pgvector::Vector::from(e));
+                let desc_vec = desc_emb.map(pgvector::Vector::from);
                 sqlx::query(
                     "INSERT INTO column_embeddings \
                          (table_cache_id, workspace_id, column_name, data_type, description, \

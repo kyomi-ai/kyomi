@@ -207,7 +207,7 @@ async fn mcp_www_authenticate_layer(request: Request, next: Next) -> Response {
 ///
 /// Returns HTTP 402 (Payment Required) if the workspace tier doesn't include MCP.
 /// This matches the Python behavior exactly.
-fn check_mcp_capability(user: &AuthUser, self_hosted: bool) -> Result<(), Response> {
+fn check_mcp_capability(user: &AuthUser, self_hosted: bool) -> Result<(), Box<Response>> {
     if self_hosted {
         return Ok(());
     }
@@ -217,7 +217,7 @@ fn check_mcp_capability(user: &AuthUser, self_hosted: bool) -> Result<(), Respon
             "detail": "MCP access requires Starter, Pro, Team, or Enterprise plan. \
                        Please upgrade at https://kyomi.ai/pricing"
         });
-        return Err((StatusCode::PAYMENT_REQUIRED, Json(body)).into_response());
+        return Err(Box::new((StatusCode::PAYMENT_REQUIRED, Json(body)).into_response()));
     }
     Ok(())
 }
@@ -278,7 +278,7 @@ async fn handle_mcp_request(
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<Response, Response> {
     // Check MCP capability (Starter/Pro/Team/Enterprise)
-    check_mcp_capability(&user, state.config.self_hosted)?;
+    check_mcp_capability(&user, state.config.self_hosted).map_err(|e| *e)?;
 
     let workspace_id = get_workspace_id(&user).map_err(IntoResponse::into_response)?;
     let msg_id = request.id.clone();
@@ -299,8 +299,8 @@ async fn handle_mcp_request(
     // have everything needed. This prevents the Anthropic proxy from getting stuck
     // after server restarts — it doesn't reliably re-initialize on 404.
     let mut healed_session_id: Option<String> = None;
-    if request.method != "initialize" {
-        if let Some(session_id_value) = headers.get(MCP_SESSION_ID_HEADER) {
+    if request.method != "initialize"
+        && let Some(session_id_value) = headers.get(MCP_SESSION_ID_HEADER) {
             let session_id = session_id_value.to_str().unwrap_or("");
             if state.mcp_sessions.validate_session(session_id).await.is_none() {
                 let new_session_id = state
@@ -317,7 +317,6 @@ async fn handle_mcp_request(
                 healed_session_id = Some(new_session_id);
             }
         }
-    }
 
     // Create the tool registry once for the entire request (shared by tools/list and tools/call).
     let registry = create_default_registry();
@@ -393,11 +392,10 @@ async fn handle_mcp_request(
 
     // If session was auto-healed, include the new session ID so the client
     // can adopt it for future requests.
-    if let Some(ref new_sid) = healed_session_id {
-        if let Ok(val) = new_sid.parse() {
+    if let Some(ref new_sid) = healed_session_id
+        && let Ok(val) = new_sid.parse() {
             resp.headers_mut().insert(MCP_SESSION_ID_HEADER, val);
         }
-    }
 
     Ok(resp)
 }
@@ -418,7 +416,7 @@ async fn handle_mcp_sse(
     user: AuthUser,
     headers: HeaderMap,
 ) -> Result<Response, Response> {
-    check_mcp_capability(&user, state.config.self_hosted)?;
+    check_mcp_capability(&user, state.config.self_hosted).map_err(|e| *e)?;
 
     // GET SSE requires a session ID header
     let session_id_str = headers
@@ -487,7 +485,7 @@ async fn handle_mcp_delete(
     user: AuthUser,
     headers: HeaderMap,
 ) -> Result<StatusCode, Response> {
-    check_mcp_capability(&user, state.config.self_hosted)?;
+    check_mcp_capability(&user, state.config.self_hosted).map_err(|e| *e)?;
 
     if let Some(session_id_value) = headers.get(MCP_SESSION_ID_HEADER) {
         let session_id = session_id_value.to_str().unwrap_or("");
@@ -541,11 +539,10 @@ fn handle_tools_list(registry: &ToolRegistry) -> Value {
             });
 
             // Add MCP tool annotations if present
-            if let Some(annotations) = tool.annotations() {
-                if let Ok(ann_value) = serde_json::to_value(&annotations) {
+            if let Some(annotations) = tool.annotations()
+                && let Ok(ann_value) = serde_json::to_value(&annotations) {
                     tool_def["annotations"] = ann_value;
                 }
-            }
 
             // Add MCP Apps UI resource reference for render_chart
             if tool.name() == "render_chart" {
@@ -748,6 +745,11 @@ fn build_tool_context(
     workspace_id: &str,
     supports_mcp_apps: bool,
 ) -> ToolContext {
+    let user_display_name = user
+        .name
+        .clone()
+        .unwrap_or_else(|| user.email.clone());
+
     ToolContext {
         db: state.db.clone(),
         kv: state.kv.clone(),
@@ -763,6 +765,7 @@ fn build_tool_context(
         workspace_roles: user.workspace.workspace_roles.clone(),
         connect_registry: Some(state.connect_registry.clone()),
         platforms: state.platforms.clone(),
+        user_display_name,
     }
 }
 
@@ -1276,6 +1279,8 @@ mod tests {
                 workspace_roles: vec![],
                 workspace_status: Some(kyomi_core::WorkspaceStatus::Active),
                 subscription_tier,
+                subscription_status: kyomi_core::enums::SubscriptionStatus::Active,
+                trial_ends_at: None,
                 is_owner: true,
             },
             token_exp: None,

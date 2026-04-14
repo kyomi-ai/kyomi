@@ -182,18 +182,20 @@ impl AgentTool for CreateAnalyticsSiteTool {
             return Ok("Error: Analytics is not configured on this instance.".into());
         }
 
-        let site = analytics_site_service::create_site(
-            &ctx.db,
-            &ctx.workspace_id,
+        let site = analytics_site_service::create_site(analytics_site_service::CreateSiteParams {
+            db: &ctx.db,
+            workspace_id: &ctx.workspace_id,
             name,
-            &allowed_domains,
-            &ctx.config.analytics_signing_secret,
+            domains: &allowed_domains,
+            secret: &ctx.config.analytics_signing_secret,
             datasource_slug,
-            &ctx.config.analytics_clickhouse_host,
-            ctx.config.analytics_clickhouse_port,
-            &ctx.config.analytics_clickhouse_password,
-            ctx.config.analytics_clickhouse_secure,
-        )
+            clickhouse: analytics_site_service::ClickHouseProvisioning {
+                host: &ctx.config.analytics_clickhouse_host,
+                port: ctx.config.analytics_clickhouse_port,
+                admin_password: &ctx.config.analytics_clickhouse_password,
+                secure: ctx.config.analytics_clickhouse_secure,
+            },
+        })
         .await?;
 
         // Spawn background quota sync + catalog indexing
@@ -318,16 +320,16 @@ impl AgentTool for UpdateAnalyticsSiteTool {
             return Ok("Error: Provide at least one of 'name', 'allowed_domains', or 'datasource_slug' to update.".into());
         }
 
-        if let Some(ref n) = name {
-            if n.is_empty() || n.len() > 255 {
-                return Ok("Error: Site name must be 1-255 characters.".into());
-            }
+        if let Some(ref n) = name
+            && (n.is_empty() || n.len() > 255)
+        {
+            return Ok("Error: Site name must be 1-255 characters.".into());
         }
 
-        if let Some(ref domains) = allowed_domains {
-            if domains.is_empty() {
-                return Ok("Error: allowed_domains must contain at least one domain.".into());
-            }
+        if let Some(ref domains) = allowed_domains
+            && domains.is_empty()
+        {
+            return Ok("Error: allowed_domains must contain at least one domain.".into());
         }
 
         if allowed_domains.is_some() && ctx.config.analytics_signing_secret.is_empty() {
@@ -448,11 +450,15 @@ mod tests {
     use super::*;
     use crate::tools::AgentTool;
 
-    /// Load shared constants needed by snippet_tag (idempotent — OnceLock ignores repeat calls).
+    /// Load shared constants needed by snippet_tag.
+    ///
+    /// Uses `load_with_fallback` so the call works regardless of the current
+    /// working directory when `cargo test` is invoked: if no `constants.toml`
+    /// is found on disk, the embedded copy compiled into `kyomi-core` is used.
+    /// The underlying `OnceLock` makes subsequent calls a no-op, so this is
+    /// safe to call from every test that needs constants.
     fn load_constants_for_test() {
-        if let Ok(path) = kyomi_core::constants::find_constants_file() {
-            let _ = kyomi_core::constants::load(&path);
-        }
+        let _ = kyomi_core::constants::load_with_fallback();
     }
 
     // -----------------------------------------------------------------------

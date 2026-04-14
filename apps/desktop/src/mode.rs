@@ -37,10 +37,10 @@ pub fn load_mode() -> AppMode {
         Ok(c) => c,
         Err(_) => {
             // Check for existing personal install (has config.toml but no mode.json)
-            if let Some(parent) = path.parent() {
-                if parent.join("config.toml").exists() {
-                    return AppMode::Personal;
-                }
+            if let Some(parent) = path.parent()
+                && parent.join("config.toml").exists()
+            {
+                return AppMode::Personal;
             }
             return AppMode::FirstLaunch;
         }

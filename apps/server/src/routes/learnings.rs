@@ -64,8 +64,7 @@ fn verify_workspace_access(
 fn is_workspace_admin(user: &AuthUser) -> bool {
     user.workspace
         .workspace_roles
-        .iter()
-        .any(|r| *r == kyomi_core::WorkspaceRole::WorkspaceAdmin)
+        .contains(&kyomi_core::WorkspaceRole::WorkspaceAdmin)
 }
 
 /// Check learning management permission.
@@ -242,14 +241,16 @@ async fn list_learnings(
     let offset = params.offset.max(0);
 
     let (learnings, total) = learning_service::get_all_learnings(
-        &state.db,
-        &workspace_id,
-        offset,
-        limit,
-        params.search.as_deref(),
-        params.scope.as_deref(),
-        params.datasource.as_deref(),
-        params.enabled_only,
+        learning_service::GetAllLearningsParams {
+            db: &state.db,
+            workspace_id: &workspace_id,
+            offset,
+            limit,
+            search: params.search.as_deref(),
+            scope: params.scope.as_deref(),
+            datasource_slug: params.datasource.as_deref(),
+            enabled_only: params.enabled_only,
+        },
     )
     .await?;
 

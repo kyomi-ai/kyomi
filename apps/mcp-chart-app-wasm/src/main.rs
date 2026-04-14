@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+//! MCP Chart App — Pure Rust/WASM frontend for rendering interactive ChartML
+//! charts inside Claude.ai and other MCP hosts.
+//!
+//! Architecture:
+//! - Rust MCP transport handles postMessage protocol (no JS SDK needed)
+//! - chartml-leptos renders charts via WASM
+//! - All UI is Leptos components (ChartHeaderBar, info panel, dashboard panel)
+
+mod app;
+mod chart_header;
+mod dashboard_panel;
+mod info_panel;
+mod mcp_interop;
+pub mod mcp_transport;
+mod theme;
+mod type_convert;
+
+fn main() {
+    console_error_panic_hook::set_once();
+    leptos::mount::mount_to_body(app::App);
+}

@@ -23,7 +23,6 @@ use kyomi_agent::chartml_utils::{self, ExtractionResult};
 use kyomi_agent::d3_format;
 use kyomi_agent::tools::chart_data_resolver;
 use kyomi_agent::tools::chart_palettes;
-use kyomi_agent::tools::chart_renderer::ChartRendererClient;
 use kyomi_agent::tools::QueryContext;
 
 // ---------------------------------------------------------------------------
@@ -202,7 +201,7 @@ pub async fn process_and_build_slack_blocks(
     bot_token: &str,
     slack_client: &SlackClient,
     query_ctx: &QueryContext,
-    chart_renderer_url: &str,
+    _chart_renderer_url: &str,
     footer_url: Option<&str>,
     footer_text: &str,
     header_text: Option<&str>,
@@ -218,28 +217,7 @@ pub async fn process_and_build_slack_blocks(
     let mut failed_indices: HashSet<usize> = HashSet::new();
 
     if !extraction.specs.is_empty() {
-        // Health check the chart renderer
-        let renderer = if !chart_renderer_url.is_empty() {
-            match ChartRendererClient::new(chart_renderer_url) {
-                Ok(r) if r.health_check().await => Some(r),
-                Ok(_) => {
-                    warn!("Chart renderer unavailable — charts will be placeholders");
-                    None
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to create chart renderer client");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let user_palette = if renderer.is_some() {
-            chart_palettes::get_user_palette(&query_ctx.db, &query_ctx.user_id).await
-        } else {
-            Vec::new()
-        };
+        let user_palette = chart_palettes::get_user_palette(&query_ctx.db, &query_ctx.user_id).await;
 
         for idx in 0..charts_to_render {
             let spec = &extraction.specs[idx];
@@ -274,19 +252,23 @@ pub async fn process_and_build_slack_blocks(
                 _ => {}
             }
 
-            // Chart types need the chart-renderer PNG pipeline
-            let Some(ref renderer) = renderer else {
-                failed_indices.insert(idx);
-                continue;
-            };
-
             let chart_title = get_chart_title(&resolved_spec);
             info!(chart_title = %chart_title, "Rendering chart to PNG");
 
-            match renderer
-                .render_chart(&resolved_spec, CHART_WIDTH, CHART_HEIGHT, Some(&user_palette), None)
-                .await
-            {
+            // Convert resolved spec to YAML for chartml-rs
+            let resolved_yaml = match serde_yaml::to_string(&resolved_spec) {
+                Ok(y) => y,
+                Err(e) => {
+                    warn!(error = %e, chart_idx = idx, "Failed to serialize spec to YAML");
+                    failed_indices.insert(idx);
+                    continue;
+                }
+            };
+
+            // Render via chartml-rs (Rust-native, no HTTP)
+            match kyomi_agent::chartml_factory::render_chart_to_png(
+                &resolved_yaml, CHART_WIDTH, CHART_HEIGHT, 72, Some(&user_palette),
+            ).await {
                 Ok(png_bytes) => {
                     let filename = format!(
                         "{}_{}.png",
@@ -309,15 +291,6 @@ pub async fn process_and_build_slack_blocks(
                 }
                 Err(e) => {
                     warn!(error = %e, chart_idx = idx, "Failed to render chart");
-                    failed_indices.insert(idx);
-                }
-            }
-        }
-
-        // Mark all non-native charts beyond render limit as failed
-        if renderer.is_none() {
-            for idx in 0..charts_to_render {
-                if !native_blocks.contains_key(&idx) {
                     failed_indices.insert(idx);
                 }
             }
@@ -518,7 +491,7 @@ fn replace_chartml_with_markers(
     message: &str,
     extraction: &ExtractionResult,
     rendered_indices: &HashSet<usize>,
-    failed_indices: &HashSet<usize>,
+    _failed_indices: &HashSet<usize>,
 ) -> String {
     if extraction.blocks.is_empty() {
         return message.to_string();
@@ -538,17 +511,13 @@ fn replace_chartml_with_markers(
         let parts: Vec<String> = block
             .spec_indices
             .iter()
-            .filter_map(|&spec_idx| {
+            .map(|&spec_idx| {
                 let spec = &extraction.specs[spec_idx];
                 if rendered_indices.contains(&spec_idx) {
-                    Some(format!("\n<<<SLACK_CHART_{spec_idx}>>>\n"))
-                } else if failed_indices.contains(&spec_idx) {
-                    let title = get_chart_title(spec);
-                    Some(format!("_[{title}] (view at Kyomi.ai)_"))
+                    format!("\n<<<SLACK_CHART_{spec_idx}>>>\n")
                 } else {
-                    // Beyond render limit or otherwise unrendered
                     let title = get_chart_title(spec);
-                    Some(format!("_[{title}] (view at Kyomi.ai)_"))
+                    format!("_[{title}] (view at Kyomi.ai)_")
                 }
             })
             .collect();
@@ -1037,13 +1006,12 @@ fn render_table_slack_blocks(spec: &Value) -> Vec<Value> {
 
 /// Extract column names from the first data row.
 fn columns_from_first_row(rows: &[Value]) -> (Vec<String>, Vec<String>) {
-    if let Some(first) = rows.first() {
-        if let Some(obj) = first.as_object() {
+    if let Some(first) = rows.first()
+        && let Some(obj) = first.as_object() {
             let cols: Vec<String> = obj.keys().cloned().collect();
             let labels = cols.clone();
             return (cols, labels);
         }
-    }
     (Vec::new(), Vec::new())
 }
 
@@ -1065,19 +1033,18 @@ fn find_next_marker(text: &str) -> Option<MarkerInfo> {
     }
 
     // Divider marker
-    if let Some(pos) = text.find(DIVIDER_MARKER) {
-        if earliest.as_ref().map_or(true, |e| pos < e.position) {
+    if let Some(pos) = text.find(DIVIDER_MARKER)
+        && earliest.as_ref().is_none_or(|e| pos < e.position) {
             earliest = Some(MarkerInfo {
                 position: pos,
                 marker_type: MarkerType::Divider,
                 marker_text: DIVIDER_MARKER.to_string(),
             });
         }
-    }
 
     // Chart markers
-    if let Some(m) = RE_CHART_MARKER.find(text) {
-        if earliest.as_ref().map_or(true, |e| m.start() < e.position) {
+    if let Some(m) = RE_CHART_MARKER.find(text)
+        && earliest.as_ref().is_none_or(|e| m.start() < e.position) {
             let idx: usize = RE_CHART_MARKER
                 .captures(text)
                 .and_then(|c| c.get(1))
@@ -1089,7 +1056,6 @@ fn find_next_marker(text: &str) -> Option<MarkerInfo> {
                 marker_text: m.as_str().to_string(),
             });
         }
-    }
 
     earliest
 }

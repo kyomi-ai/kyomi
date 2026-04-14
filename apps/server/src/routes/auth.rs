@@ -511,13 +511,12 @@ async fn revoke_session(
         )?
         .map(|r| r.family_id);
 
-        if let (Some(current_fam), Some(target_fam)) = (&current_family, &target_family) {
-            if current_fam == target_fam {
+        if let (Some(current_fam), Some(target_fam)) = (&current_family, &target_family)
+            && current_fam == target_fam {
                 return Err(kyomi_core::Error::BadRequest(
                     "Cannot revoke your current session. Use logout instead.".into()
                 ));
             }
-        }
     }
 
     let revoked = token_service::revoke_user_refresh_token(&state.db, &user.user_id, &token_id).await?;

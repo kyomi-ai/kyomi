@@ -63,6 +63,22 @@ pub fn get_indexer(ds_type: &DatasourceType) -> Option<Box<dyn CatalogIndexer>> 
 
 // ─── CatalogIndexingService ────────────────────────────────────────────────────
 
+/// Arguments for [`CatalogIndexingService::index_datasource`].
+///
+/// Packaged into a struct to keep the call signature under clippy's
+/// `too_many_arguments` threshold while keeping every field explicit at
+/// the call site.
+pub struct IndexDatasourceParams<'a> {
+    pub db: &'a DbPool,
+    pub encryption_key: std::sync::Arc<[u8; 32]>,
+    pub embedding: &'a EmbeddingService,
+    pub workspace_id: &'a str,
+    pub datasource_config_id: &'a str,
+    pub user_email: Option<&'a str>,
+    pub credentials: Option<&'a Value>,
+    pub max_tables_per_dataset: Option<usize>,
+}
+
 /// Provider-agnostic catalog indexing service.
 ///
 /// Routes indexing requests to the correct provider-specific indexer based on
@@ -75,16 +91,17 @@ impl CatalogIndexingService {
     /// 1. Loads datasource config from the database
     /// 2. Resolves the appropriate indexer for the datasource type
     /// 3. Dispatches the indexing call
-    pub async fn index_datasource(
-        db: &DbPool,
-        encryption_key: std::sync::Arc<[u8; 32]>,
-        embedding: &EmbeddingService,
-        workspace_id: &str,
-        datasource_config_id: &str,
-        user_email: Option<&str>,
-        credentials: Option<&Value>,
-        max_tables_per_dataset: Option<usize>,
-    ) -> CatalogIndexResult {
+    pub async fn index_datasource(params: IndexDatasourceParams<'_>) -> CatalogIndexResult {
+        let IndexDatasourceParams {
+            db,
+            encryption_key,
+            embedding,
+            workspace_id,
+            datasource_config_id,
+            user_email,
+            credentials,
+            max_tables_per_dataset,
+        } = params;
         // Load datasource config
         let ds_config = kyomi_core::db_fetch_optional!(
             db, DsConfigRow,
@@ -198,16 +215,16 @@ impl CatalogIndexingService {
                 continue;
             }
 
-            let result = Self::index_datasource(
+            let result = Self::index_datasource(IndexDatasourceParams {
                 db,
-                encryption_key.clone(),
+                encryption_key: encryption_key.clone(),
                 embedding,
                 workspace_id,
-                &config_id,
+                datasource_config_id: config_id,
                 user_email,
                 credentials,
                 max_tables_per_dataset,
-            )
+            })
             .await;
 
             results.push(result);
@@ -246,16 +263,15 @@ impl CatalogIndexingService {
             // 1. Sync analytics quota to Redis (requires raw Redis connection)
             if let Some(mut redis_conn) = redis {
                 let configs = kyomi_auth::analytics_quota::default_tier_configs();
-                if let Some(config) = configs.get(&subscription_tier) {
-                    if let Err(e) = kyomi_auth::analytics_quota::sync_quota_to_redis(
+                if let Some(config) = configs.get(&subscription_tier)
+                    && let Err(e) = kyomi_auth::analytics_quota::sync_quota_to_redis(
                         &mut redis_conn,
                         &workspace_id,
                         config,
                     )
                     .await
-                    {
-                        warn!(error = %e, "Failed to sync analytics quota to Redis");
-                    }
+                {
+                    warn!(error = %e, "Failed to sync analytics quota to Redis");
                 }
             } else {
                 tracing::debug!("Skipping analytics quota sync — Redis not available");
@@ -270,16 +286,16 @@ impl CatalogIndexingService {
                 }
             };
 
-            let result = Self::index_datasource(
-                &db,
+            let result = Self::index_datasource(IndexDatasourceParams {
+                db: &db,
                 encryption_key,
-                &embed,
-                &workspace_id,
-                &datasource_id,
-                None, // no user email — shared credentials
-                None, // no per-user credentials — uses connection_config
-                None, // default max tables
-            )
+                embedding: embed,
+                workspace_id: &workspace_id,
+                datasource_config_id: &datasource_id,
+                user_email: None,         // shared credentials
+                credentials: None,        // uses connection_config
+                max_tables_per_dataset: None, // default max tables
+            })
             .await;
 
             info!(

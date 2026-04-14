@@ -107,6 +107,7 @@ struct WorkspaceBilling {
     user_limit: Option<i32>,
     subscription_tier: kyomi_core::SubscriptionTier,
     created_at: DateTime<Utc>,
+    ai_bundle_balance_usd: f64,
 }
 
 // ─── Service ────────────────────────────────────────────────────────────────
@@ -178,7 +179,8 @@ impl BillingService {
                      subscription_period_end, trial_ends_at,
                      user_limit,
                      subscription_tier,
-                     created_at
+                     created_at,
+                     COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd
                      FROM workspaces WHERE workspace_id = $1"#,
                     workspace_id
                 )
@@ -190,14 +192,6 @@ impl BillingService {
 
                         let start = if period_start.is_some() {
                             period_start.unwrap_or(now)
-                        } else if ws.subscription_tier == kyomi_core::SubscriptionTier::Free {
-                            // Free tier: calendar-month reset (1st of current month)
-                            now.with_day(1)
-                                .unwrap_or(now)
-                                .with_hour(0).unwrap_or(now)
-                                .with_minute(0).unwrap_or(now)
-                                .with_second(0).unwrap_or(now)
-                                .with_nanosecond(0).unwrap_or(now)
                         } else if ws.billing_cycle.as_deref() == Some("annual") {
                             if let Some(sub_start) = ws.subscription_period_start {
                                 // Annual plan: monthly reset from subscription start
@@ -209,7 +203,8 @@ impl BillingService {
                                     .unwrap_or(ws.created_at)
                             }
                         } else {
-                            // Monthly plan or no subscription: use period start
+                            // Monthly plan or no subscription yet: use period start,
+                            // falling back to calendar month via created_at.
                             ws.subscription_period_start.unwrap_or(ws.created_at)
                         };
 
@@ -276,7 +271,8 @@ impl BillingService {
              subscription_period_end, trial_ends_at,
              user_limit,
              subscription_tier,
-             created_at
+             created_at,
+             COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd
              FROM workspaces WHERE workspace_id = $1"#,
             workspace_id
         )
@@ -286,8 +282,9 @@ impl BillingService {
             kyomi_core::Error::NotFound(format!("Workspace {workspace_id} not found"))
         })?;
 
-        // Get budget for this tier
-        let budget_usd = Self::get_ai_budget_for_tier(ws.subscription_tier, ws.user_limit);
+        // Get budget for this tier, plus any purchased bundle balance
+        let budget_usd = Self::get_ai_budget_for_tier(ws.subscription_tier, ws.user_limit)
+            + ws.ai_bundle_balance_usd;
 
         // Get actual usage for current billing period
         let usage = self
@@ -304,25 +301,23 @@ impl BillingService {
         };
         let mut exhausted = percentage_used >= 100.0 || budget_usd == 0.0;
 
-        // Expiration check: subscription_period_end applies to paid tiers only.
-        // Free tier uses calendar-month resets — no subscription expiry.
-        if ws.subscription_tier != kyomi_core::SubscriptionTier::Free {
-            if let Some(period_end) = ws.subscription_period_end {
-                if now > period_end {
-                    tracing::warn!(
-                        workspace_id,
-                        %period_end,
-                        tier = %ws.subscription_tier,
-                        "Subscription period expired"
-                    );
-                    exhausted = true;
-                }
-            } else {
+        // Expiration check: all Cloud users have subscription periods.
+        if let Some(period_end) = ws.subscription_period_end {
+            if now > period_end {
                 tracing::warn!(
                     workspace_id,
-                    "Workspace has no subscription_period_end"
+                    %period_end,
+                    tier = %ws.subscription_tier,
+                    "Subscription period expired"
                 );
+                exhausted = true;
             }
+        } else {
+            // Free/new workspaces have no subscription period — this is expected.
+            tracing::debug!(
+                workspace_id,
+                "Workspace has no subscription_period_end"
+            );
         }
 
         Ok(CreditsInfo {
@@ -369,7 +364,7 @@ impl BillingService {
                 percentage_used: percentage,
                 message: Some(format!(
                     "AI budget exhausted ({percentage:.1}% used). \
-                     Upgrade your plan or wait for your billing period to reset."
+                     Add an AI token bundle or connect your own API key."
                 )),
             })
         } else if percentage >= 90.0 {
@@ -380,7 +375,7 @@ impl BillingService {
                 percentage_used: percentage,
                 message: Some(format!(
                     "AI budget critically low ({percentage:.1}% used). \
-                     Consider upgrading to avoid interruption."
+                     Consider purchasing an AI token bundle to avoid interruption."
                 )),
             })
         } else if percentage >= 80.0 {
@@ -391,7 +386,7 @@ impl BillingService {
                 percentage_used: percentage,
                 message: Some(format!(
                     "AI budget at {percentage:.1}%. \
-                     You may want to upgrade your plan soon."
+                     You may want to purchase additional AI credits soon."
                 )),
             })
         } else {
@@ -426,7 +421,8 @@ impl BillingService {
              subscription_period_end, trial_ends_at,
              user_limit,
              subscription_tier,
-             created_at
+             created_at,
+             COALESCE(ai_bundle_balance_usd, 0) AS ai_bundle_balance_usd
              FROM workspaces WHERE workspace_id = $1"#,
             workspace_id
         )
@@ -436,19 +432,7 @@ impl BillingService {
             Some(ws) => {
                 let now = Utc::now();
                 // AI reset date = end of current monthly billing period
-                let reset = if ws.subscription_tier == kyomi_core::SubscriptionTier::Free {
-                    // Free tier: resets on 1st of next month
-                    let next_month = if now.month() == 12 {
-                        now.with_year(now.year() + 1).and_then(|d| d.with_month(1))
-                    } else {
-                        now.with_month(now.month() + 1)
-                    };
-                    next_month.and_then(|d| d.with_day(1))
-                        .map(|d| d.with_hour(0).unwrap_or(d)
-                            .with_minute(0).unwrap_or(d)
-                            .with_second(0).unwrap_or(d)
-                            .with_nanosecond(0).unwrap_or(d))
-                } else if ws.billing_cycle.as_deref() == Some("annual") {
+                let reset = if ws.billing_cycle.as_deref() == Some("annual") {
                     if let Some(sub_start) = ws.subscription_period_start {
                         let (_, period_end) =
                             Self::calculate_monthly_period(sub_start, now);
@@ -460,16 +444,9 @@ impl BillingService {
                     ws.subscription_period_end
                 };
 
-                // Don't send trial_ends_at for Free tier (no longer a trial)
-                let trial_ends_at = if ws.subscription_tier == kyomi_core::SubscriptionTier::Free {
-                    None
-                } else {
-                    ws.trial_ends_at
-                };
-
-                (reset, trial_ends_at, ws.user_limit.unwrap_or(1))
+                (reset, ws.trial_ends_at, ws.user_limit.unwrap_or(999_999))
             }
-            None => (None, None, 1),
+            None => (None, None, 999_999),
         };
 
         // Per-user fair share (simple: user gets 100% of their share)
@@ -604,6 +581,79 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+// ─── Seat billing sync ─────────────────────────────────────────────────────
+
+/// Sync the Stripe subscription quantity to match the actual active member count.
+///
+/// Called after invite accept (`increment = 1`) or member removal (`increment = -1`).
+/// Checks that `user_count == stripe_quantity + increment` — if not, logs a
+/// warning indicating drift between Stripe and the DB.
+pub async fn update_billing_users(
+    db: &kyomi_core::DbPool,
+    stripe_service: &crate::stripe_service::StripeService,
+    workspace_id: &str,
+    user_count: i64,
+    increment: i64,
+) -> kyomi_core::Result<()> {
+    let sub_id: Option<String> = kyomi_core::db_fetch_optional!(
+        db,
+        SubIdRow,
+        "SELECT stripe_subscription_id FROM workspaces WHERE workspace_id = $1",
+        workspace_id
+    )?
+    .and_then(|row| row.stripe_subscription_id);
+
+    let Some(sub_id) = sub_id else {
+        // No subscription — ensure user_limit is at least user_count
+        // SQLite doesn't have GREATEST(); MAX(a,b) works on both.
+        kyomi_core::db_execute!(
+            db,
+            "UPDATE workspaces SET user_limit = MAX(user_limit, $1) WHERE workspace_id = $2",
+            user_count as i32,
+            workspace_id
+        )?;
+        return Ok(());
+    };
+
+    let stripe_quantity = stripe_service
+        .get_subscription_quantity(&sub_id)
+        .await
+        .map_err(|e| kyomi_core::Error::Internal(format!("Failed to get Stripe quantity: {e}")))?;
+
+    let expected = stripe_quantity as i64 + increment;
+    if user_count != expected {
+        tracing::warn!(
+            workspace_id = %workspace_id,
+            user_count = user_count,
+            stripe_quantity = stripe_quantity,
+            increment = increment,
+            expected = expected,
+            "Seat count drift detected — DB member count does not match Stripe quantity + increment"
+        );
+    }
+
+    if user_count as u64 != stripe_quantity {
+        stripe_service
+            .update_seat_count(&sub_id, user_count as u64)
+            .await
+            .map_err(|e| kyomi_core::Error::Internal(format!("Failed to update Stripe seats: {e}")))?;
+
+        tracing::info!(
+            workspace_id = %workspace_id,
+            previous = stripe_quantity,
+            new = user_count,
+            "Updated Stripe seat count"
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SubIdRow {
+    stripe_subscription_id: Option<String>,
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -614,29 +664,31 @@ mod tests {
 
     #[test]
     fn test_get_ai_budget_delegates_to_capability() {
-        // BillingService::get_ai_budget_for_tier delegates to capability::get_credits_limit.
-        // Verify they return the same values for all tiers.
+        // All tiers now use the same Cloud budget. Verify BillingService delegates
+        // correctly and all tiers return the same value.
         use kyomi_core::capability::get_credits_limit;
+        let expected = get_credits_limit(SubscriptionTier::Free, None);
+
         for tier in [
             SubscriptionTier::Free,
             SubscriptionTier::Starter,
             SubscriptionTier::Basic,
             SubscriptionTier::Pro,
+            SubscriptionTier::Team,
             SubscriptionTier::Enterprise,
+            SubscriptionTier::Cloud,
         ] {
+            let budget = BillingService::get_ai_budget_for_tier(tier, None);
             assert!(
-                (BillingService::get_ai_budget_for_tier(tier, None) - get_credits_limit(tier, None))
-                    .abs()
-                    < f64::EPSILON,
-                "Budget mismatch for {tier:?}"
+                (budget - expected).abs() < f64::EPSILON,
+                "All tiers should return the same budget, but {tier:?} returned {budget} (expected {expected})"
             );
         }
-        // Team tier with user_limit
+        // user_limit should not affect the budget in single-tier model
+        let with_limit = BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(8));
         assert!(
-            (BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(8))
-                - get_credits_limit(SubscriptionTier::Team, Some(8)))
-            .abs()
-                < f64::EPSILON
+            (with_limit - expected).abs() < f64::EPSILON,
+            "user_limit should not affect budget"
         );
     }
 

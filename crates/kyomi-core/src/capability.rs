@@ -10,13 +10,15 @@
 //!
 //! - No `BillingService` integration — uses `workspace.ai_credits_used_usd`
 //!   directly with hardcoded credit budgets.
-//! - BigQuery Arrow streaming derived from `bq_arrow_enabled` parameter.
 //! - No async DB queries for `has_capability` — operates on a `&Workspace`.
 
 use serde::Serialize;
 
 use crate::enums::{SubscriptionStatus, SubscriptionTier};
 use crate::models::Workspace;
+
+/// Included analytics events per month for all Cloud subscribers.
+pub const ANALYTICS_EVENTS_INCLUDED: u64 = 100_000;
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -43,7 +45,6 @@ pub struct Capabilities {
 
     // BigQuery
     pub bigquery_access_level: String,
-    pub bigquery_retrieval_mode: String,
 
     // Organization features
     pub multi_user_enabled: bool,
@@ -62,7 +63,6 @@ pub struct Capabilities {
 
     // Premium flags
     pub kyomi_watch_enabled: bool,
-    pub arrow_streaming_enabled: bool,
     pub slack_integration_enabled: bool,
     pub mcp_access_enabled: bool,
     pub pdf_export_enabled: bool,
@@ -90,17 +90,16 @@ pub fn get_subscription_tier(workspace: &Workspace) -> SubscriptionTier {
         && let Some(custom) = settings.get("custom_settings")
         && let Some(tier_val) = custom.get("subscription_tier")
         && let Some(tier_str) = tier_val.as_str()
+        && let Some(tier) = parse_tier(tier_str)
     {
-        if let Some(tier) = parse_tier(tier_str) {
-            return tier;
-        }
+        return tier;
     }
 
     // Use the DB field directly — it's already a SubscriptionTier enum
     workspace.subscription_tier
 }
 
-/// Parse a tier string, mapping legacy `"regular"` to `Pro`.
+/// Parse a tier string, mapping legacy names to enum variants.
 fn parse_tier(s: &str) -> Option<SubscriptionTier> {
     match s {
         "free" => Some(SubscriptionTier::Free),
@@ -109,31 +108,18 @@ fn parse_tier(s: &str) -> Option<SubscriptionTier> {
         "pro" | "regular" => Some(SubscriptionTier::Pro),
         "team" => Some(SubscriptionTier::Team),
         "enterprise" => Some(SubscriptionTier::Enterprise),
+        "cloud" => Some(SubscriptionTier::Cloud),
         _ => None,
     }
 }
 
-/// Get the monthly AI credit budget in USD for a given tier.
+/// Get the monthly AI credit budget in USD.
 ///
-/// Budget values are read from environment variables via `ai_budget::CONFIG`.
-/// For Team tier, the budget scales with `user_limit`:
-/// `base + per_user * max(0, user_limit - base_users)` for additional users.
-/// Pass `user_limit` from `workspace.user_limit` for accurate Team budgets.
+/// Cloud plan — all tiers use the same budget from `AI_BUDGET_CLOUD` env var.
 pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64 {
+    let _ = (tier, user_limit);
     let cfg = &crate::ai_budget::CONFIG;
-    match tier {
-        SubscriptionTier::Free => cfg.free,
-        SubscriptionTier::Basic | SubscriptionTier::Starter => cfg.starter,
-        SubscriptionTier::Pro => cfg.pro,
-        SubscriptionTier::Team => {
-            let effective_limit = user_limit
-                .filter(|&u| u > 0)
-                .unwrap_or(cfg.team_base_users);
-            let additional_users = (effective_limit - cfg.team_base_users).max(0);
-            cfg.team_base + (cfg.team_per_user * f64::from(additional_users))
-        }
-        SubscriptionTier::Enterprise => cfg.enterprise,
-    }
+    cfg.cloud
 }
 
 /// Compute credit usage info from `workspace.ai_credits_used_usd`.
@@ -143,14 +129,15 @@ pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64
 /// `BillingService::calculate_credits_info()` and pass the result to
 /// `compute_capabilities_with_credits()`.
 pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> CreditsInfo {
-    let limit = get_credits_limit(tier, workspace.user_limit);
+    // Total budget = tier budget (from AI_BUDGET_CLOUD) + purchased bundle balance
+    let limit = get_credits_limit(tier, workspace.user_limit) + workspace.ai_bundle_balance_usd;
     let used = workspace.ai_credits_used_usd;
     let remaining = (limit - used).max(0.0);
-    let exhausted = used >= limit;
+    let exhausted = limit == 0.0 || used >= limit;
     let percentage_used = if limit > 0.0 {
         ((used / limit) * 100.0).min(100.0)
     } else {
-        100.0 // No budget = fully exhausted
+        0.0 // No budget and no bundles — show 0% (not 100%)
     };
 
     CreditsInfo {
@@ -162,69 +149,48 @@ pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> Credit
     }
 }
 
-/// Get the user limit for a subscription tier.
+/// Get the user limit for a workspace.
 ///
-/// - `free`, `basic`, `starter`, `pro`: 1 user
-/// - `team`: uses `workspace.user_limit` (default 1, matching DB `server_default=text("1")`)
-///   The Stripe webhook handler sets `user_limit` explicitly when creating Team subscriptions.
-/// - `enterprise`: effectively unlimited (999999)
+/// Cloud plan — uses `workspace.user_limit` for all tiers, defaulting to
+/// 999_999 (effectively unlimited) when not set.
 pub fn get_user_limit(workspace: &Workspace, tier: SubscriptionTier) -> i32 {
-    match tier {
-        SubscriptionTier::Enterprise => 999_999,
-        SubscriptionTier::Team => workspace.user_limit.unwrap_or(1),
-        _ => 1, // free, basic, starter, pro
-    }
+    let _ = tier;
+    workspace.user_limit.unwrap_or(999_999)
 }
 
 /// Check if a tier has a specific premium capability.
 ///
-/// Returns `true` for capabilities available to all tiers if the
-/// capability name is not in the premium lookup table.
+/// Cloud plan — all capabilities are available to all tiers.
+/// The tier and capability parameters are kept for backward compatibility.
 pub fn has_capability(tier: SubscriptionTier, capability: &str) -> bool {
-    use SubscriptionTier::*;
-
-    let allowed_tiers: &[SubscriptionTier] = match capability {
-        "kyomi_watch" => &[Pro, Team, Enterprise],
-        "arrow_streaming" => &[Pro, Team, Enterprise],
-        "slack_integration" => &[Team, Enterprise],
-        "multi_user" => &[Team, Enterprise],
-        "dashboard_sharing" => &[Team, Enterprise],
-        "api_access" => &[Pro, Team, Enterprise],
-        "mcp_access" => &[Free, Starter, Basic, Pro, Team, Enterprise],
-        "pdf_export" => &[Pro, Team, Enterprise],
-        _ => return true, // Not a premium capability — available to all
-    };
-
-    allowed_tiers.contains(&tier)
+    let _ = (tier, capability);
+    true
 }
 
 // ─── Limit helpers ───────────────────────────────────────────────────────────
 
-/// Catalog refresh limit per hour by tier.
+/// Catalog refresh limit per hour.
 ///
-/// Python: free=1, all paid tiers=5.
+/// Cloud plan — all tiers get the same limit.
 fn get_catalog_refresh_limit(tier: SubscriptionTier) -> i32 {
-    match tier {
-        SubscriptionTier::Free => 1,
-        _ => 5, // All paid tiers get the same limit
-    }
+    let _ = tier;
+    5
 }
 
-/// Maximum dashboards by tier. `0` means unlimited (Python convention).
+/// Maximum dashboards. `0` means unlimited (Python convention).
+///
+/// Cloud plan — unlimited for all tiers.
 fn get_dashboard_limit(tier: SubscriptionTier) -> i32 {
-    match tier {
-        SubscriptionTier::Free => 5,
-        _ => 0, // basic, pro, team, enterprise: unlimited
-    }
+    let _ = tier;
+    0
 }
 
 /// Query history retention in days. `0` means unlimited (Python convention).
+///
+/// Cloud plan — unlimited for all tiers.
 fn get_query_history_retention(tier: SubscriptionTier) -> i32 {
-    match tier {
-        SubscriptionTier::Free => 7,
-        SubscriptionTier::Basic | SubscriptionTier::Starter => 30,
-        _ => 0, // pro, team, enterprise: unlimited
-    }
+    let _ = tier;
+    0
 }
 
 // ─── Main entry point ────────────────────────────────────────────────────────
@@ -234,12 +200,8 @@ fn get_query_history_retention(tier: SubscriptionTier) -> i32 {
 /// This is the main entry point, equivalent to Python's
 /// `CapabilityService.compute_capabilities()`.
 ///
-/// `bq_arrow_enabled` should be `true` when at least one BigQuery datasource
-/// in the workspace has `connection_config.enable_arrow_streaming = true`.
-/// The route handler queries `datasource_configs` for this flag.
-///
 /// Field names and values match the Python JSON output exactly.
-pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Capabilities {
+pub fn compute_capabilities(workspace: &Workspace) -> Capabilities {
     let tier = get_subscription_tier(workspace);
     let credits = get_credits_info(workspace, tier);
 
@@ -254,28 +216,23 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
         credits_limit: credits.limit_usd,
         credits_exhausted: credits.exhausted,
 
-        // AI features
+        // AI features gated by credits only
         ai_chat_enabled: ai_enabled,
         ai_sql_generation_enabled: ai_enabled,
         ai_autocomplete_enabled: ai_enabled,
         ai_chart_copilot_enabled: ai_enabled,
 
-        // BigQuery — uses arrow_streaming when enabled + tier supports it
+        // BigQuery
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: if bq_arrow_enabled && has_capability(tier, "arrow_streaming") {
-            "arrow_streaming".to_string()
-        } else {
-            "direct_api".to_string()
-        },
 
-        // Organization features
-        multi_user_enabled: has_capability(tier, "multi_user"),
-        user_management_enabled: has_capability(tier, "multi_user"), // same gate
-        dashboard_sharing_enabled: has_capability(tier, "dashboard_sharing"),
+        // Cloud plan — all organization features enabled
+        multi_user_enabled: true,
+        user_management_enabled: true,
+        dashboard_sharing_enabled: true,
 
-        // Data features — Python reads from workspace.settings, default true
+        // Cloud plan — all data features enabled
         export_enabled: true,
-        api_access_enabled: has_capability(tier, "api_access"),
+        api_access_enabled: true,
 
         // Limits
         catalog_refresh_limit_per_hour: get_catalog_refresh_limit(tier),
@@ -283,12 +240,11 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
         query_history_retention_days: get_query_history_retention(tier),
         user_limit: get_user_limit(workspace, tier),
 
-        // Premium flags
-        kyomi_watch_enabled: has_capability(tier, "kyomi_watch"),
-        arrow_streaming_enabled: has_capability(tier, "arrow_streaming"),
-        slack_integration_enabled: has_capability(tier, "slack_integration"),
-        mcp_access_enabled: has_capability(tier, "mcp_access"),
-        pdf_export_enabled: has_capability(tier, "pdf_export"),
+        // Cloud plan — all premium flags enabled
+        kyomi_watch_enabled: true,
+        slack_integration_enabled: true,
+        mcp_access_enabled: true,
+        pdf_export_enabled: true,
     }
 }
 
@@ -300,12 +256,8 @@ pub fn compute_capabilities(workspace: &Workspace, bq_arrow_enabled: bool) -> Ca
 /// 1. Call `BillingService::calculate_credits_info()` to get real usage data
 /// 2. Convert the result to `CreditsInfo`
 /// 3. Pass it here
-///
-/// This preserves all existing tier-based feature gating logic — only the
-/// credits/budget **source** changes.
 pub fn compute_capabilities_with_credits(
     workspace: &Workspace,
-    bq_arrow_enabled: bool,
     credits: &CreditsInfo,
 ) -> Capabilities {
     let tier = get_subscription_tier(workspace);
@@ -321,28 +273,23 @@ pub fn compute_capabilities_with_credits(
         credits_limit: credits.limit_usd,
         credits_exhausted: credits.exhausted,
 
-        // AI features
+        // AI features gated by credits only
         ai_chat_enabled: ai_enabled,
         ai_sql_generation_enabled: ai_enabled,
         ai_autocomplete_enabled: ai_enabled,
         ai_chart_copilot_enabled: ai_enabled,
 
-        // BigQuery — uses arrow_streaming when enabled + tier supports it
+        // BigQuery
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: if bq_arrow_enabled && has_capability(tier, "arrow_streaming") {
-            "arrow_streaming".to_string()
-        } else {
-            "direct_api".to_string()
-        },
 
-        // Organization features
-        multi_user_enabled: has_capability(tier, "multi_user"),
-        user_management_enabled: has_capability(tier, "multi_user"), // same gate
-        dashboard_sharing_enabled: has_capability(tier, "dashboard_sharing"),
+        // Cloud plan — all organization features enabled
+        multi_user_enabled: true,
+        user_management_enabled: true,
+        dashboard_sharing_enabled: true,
 
-        // Data features — Python reads from workspace.settings, default true
+        // Cloud plan — all data features enabled
         export_enabled: true,
-        api_access_enabled: has_capability(tier, "api_access"),
+        api_access_enabled: true,
 
         // Limits
         catalog_refresh_limit_per_hour: get_catalog_refresh_limit(tier),
@@ -350,12 +297,11 @@ pub fn compute_capabilities_with_credits(
         query_history_retention_days: get_query_history_retention(tier),
         user_limit: get_user_limit(workspace, tier),
 
-        // Premium flags
-        kyomi_watch_enabled: has_capability(tier, "kyomi_watch"),
-        arrow_streaming_enabled: has_capability(tier, "arrow_streaming"),
-        slack_integration_enabled: has_capability(tier, "slack_integration"),
-        mcp_access_enabled: has_capability(tier, "mcp_access"),
-        pdf_export_enabled: has_capability(tier, "pdf_export"),
+        // Cloud plan — all premium flags enabled
+        kyomi_watch_enabled: true,
+        slack_integration_enabled: true,
+        mcp_access_enabled: true,
+        pdf_export_enabled: true,
     }
 }
 
@@ -364,10 +310,7 @@ pub fn compute_capabilities_with_credits(
 /// Returns enterprise-level capabilities with unlimited credits and all features
 /// enabled. Self-hosted users pay their own LLM provider directly, so there are
 /// no credit budgets or tier restrictions.
-///
-/// `bq_arrow_enabled` should be `true` when at least one BigQuery datasource
-/// in the workspace has `connection_config.enable_arrow_streaming = true`.
-pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities {
+pub fn compute_capabilities_self_hosted() -> Capabilities {
     Capabilities {
         subscription_tier: SubscriptionTier::Enterprise,
         subscription_status: SubscriptionStatus::Active,
@@ -382,13 +325,8 @@ pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities 
         ai_autocomplete_enabled: true,
         ai_chart_copilot_enabled: true,
 
-        // BigQuery — arrow streaming derived from datasource config
+        // BigQuery
         bigquery_access_level: "full".to_string(),
-        bigquery_retrieval_mode: if bq_arrow_enabled {
-            "arrow_streaming".to_string()
-        } else {
-            "direct_api".to_string()
-        },
 
         // Organization features — all enabled
         multi_user_enabled: true,
@@ -399,8 +337,8 @@ pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities 
         export_enabled: true,
         api_access_enabled: true,
 
-        // Limits — unlimited (0 = unlimited by convention, except user_limit
-        // which uses 999_999 to match Enterprise tier convention from get_user_limit())
+        // Limits — unlimited (0 = unlimited by convention). Self-hosted gets
+        // unlimited catalog refresh (0); Cloud SaaS uses 5 — see get_catalog_refresh_limit().
         catalog_refresh_limit_per_hour: 0,
         max_dashboards: 0,
         query_history_retention_days: 0,
@@ -408,7 +346,6 @@ pub fn compute_capabilities_self_hosted(bq_arrow_enabled: bool) -> Capabilities 
 
         // Premium flags — all enabled
         kyomi_watch_enabled: true,
-        arrow_streaming_enabled: bq_arrow_enabled,
         slack_integration_enabled: true,
         mcp_access_enabled: true,
         pdf_export_enabled: true,
@@ -439,10 +376,11 @@ mod tests {
             subscription_period_end: None,
             trial_ends_at: None,
             ai_credits_used_usd: credits_used,
+            ai_bundle_balance_usd: 0.0,
+            analytics_bundle_events: 0,
             user_limit: None,
             stripe_customer_id: None,
             stripe_subscription_id: None,
-            stripe_additional_users_item_id: None,
             settings: None,
             business_knowledge: None,
             knowledge_updated_at: None,
@@ -485,31 +423,18 @@ mod tests {
     }
 
     #[test]
-    fn test_credits_limit_by_tier() {
+    fn test_credits_limit_cloud_plan() {
         use SubscriptionTier::*;
-        let cfg = &crate::ai_budget::CONFIG;
-        assert!((get_credits_limit(Free, None) - cfg.free).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Basic, None) - cfg.starter).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Starter, None) - cfg.starter).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Pro, None) - cfg.pro).abs() < f64::EPSILON);
-        // Team with base users = base budget
-        assert!(
-            (get_credits_limit(Team, Some(cfg.team_base_users)) - cfg.team_base)
-                .abs()
-                < f64::EPSILON
-        );
-        // Team with 3 additional users
-        let extra = 3;
-        let expected_team = cfg.team_base + (f64::from(extra) * cfg.team_per_user);
-        assert!(
-            (get_credits_limit(Team, Some(cfg.team_base_users + extra)) - expected_team).abs()
-                < f64::EPSILON
-        );
-        // Team with None defaults to base users
-        assert!(
-            (get_credits_limit(Team, None) - cfg.team_base).abs() < f64::EPSILON
-        );
-        assert!((get_credits_limit(Enterprise, None) - cfg.enterprise).abs() < f64::EPSILON);
+        // All tiers return the same budget — verify they're equal to each other.
+        let free_limit = get_credits_limit(Free, None);
+        assert!((get_credits_limit(Basic, None) - free_limit).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Starter, None) - free_limit).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Pro, None) - free_limit).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Team, Some(5)) - free_limit).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Team, None) - free_limit).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Enterprise, None) - free_limit).abs() < f64::EPSILON);
+        // User limit param is ignored — Team with extra users gets same budget.
+        assert!((get_credits_limit(Team, Some(20)) - free_limit).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -524,7 +449,7 @@ mod tests {
             exhausted: false,
             percentage_used: 33.333333333333336,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
         assert!(!caps.credits_exhausted);
         assert!(caps.ai_chat_enabled);
         assert!((caps.credits_remaining - 6.0).abs() < f64::EPSILON);
@@ -540,51 +465,49 @@ mod tests {
     }
 
     #[test]
-    fn test_user_limit_single_user_tiers() {
+    fn test_user_limit_default_unlimited() {
+        // Cloud plan — no user_limit set defaults to 999_999
         let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        assert_eq!(get_user_limit(&ws, SubscriptionTier::Free), 1);
-        assert_eq!(get_user_limit(&ws, SubscriptionTier::Basic), 1);
-        assert_eq!(get_user_limit(&ws, SubscriptionTier::Pro), 1);
-    }
-
-    #[test]
-    fn test_user_limit_team_default() {
-        let ws = test_workspace(SubscriptionTier::Team, 0.0);
-        assert_eq!(get_user_limit(&ws, SubscriptionTier::Team), 1);
-    }
-
-    #[test]
-    fn test_user_limit_team_custom() {
-        let mut ws = test_workspace(SubscriptionTier::Team, 0.0);
-        ws.user_limit = Some(10);
-        assert_eq!(get_user_limit(&ws, SubscriptionTier::Team), 10);
-    }
-
-    #[test]
-    fn test_user_limit_enterprise() {
-        let ws = test_workspace(SubscriptionTier::Enterprise, 0.0);
+        assert_eq!(get_user_limit(&ws, SubscriptionTier::Free), 999_999);
+        assert_eq!(get_user_limit(&ws, SubscriptionTier::Basic), 999_999);
+        assert_eq!(get_user_limit(&ws, SubscriptionTier::Pro), 999_999);
         assert_eq!(get_user_limit(&ws, SubscriptionTier::Enterprise), 999_999);
     }
 
     #[test]
-    fn test_has_capability_premium() {
-        use SubscriptionTier::*;
-        assert!(!has_capability(Free, "kyomi_watch"));
-        assert!(has_capability(Pro, "kyomi_watch"));
-        assert!(has_capability(Team, "slack_integration"));
-        assert!(!has_capability(Pro, "slack_integration"));
-        assert!(has_capability(Basic, "mcp_access"));
-        assert!(has_capability(Free, "mcp_access"));
+    fn test_user_limit_custom() {
+        // Cloud plan — workspace.user_limit is respected for all tiers
+        let mut ws = test_workspace(SubscriptionTier::Free, 0.0);
+        ws.user_limit = Some(10);
+        assert_eq!(get_user_limit(&ws, SubscriptionTier::Free), 10);
+        assert_eq!(get_user_limit(&ws, SubscriptionTier::Team), 10);
+        assert_eq!(get_user_limit(&ws, SubscriptionTier::Enterprise), 10);
     }
 
     #[test]
-    fn test_has_capability_non_premium() {
-        // Unknown capabilities are available to all tiers
+    fn test_has_capability_cloud_plan() {
+        use SubscriptionTier::*;
+        // Cloud plan — all capabilities available to all tiers
+        assert!(has_capability(Free, "kyomi_watch"));
+        assert!(has_capability(Free, "slack_integration"));
+        assert!(has_capability(Free, "multi_user"));
+        assert!(has_capability(Free, "dashboard_sharing"));
+        assert!(has_capability(Free, "api_access"));
+        assert!(has_capability(Free, "mcp_access"));
+        assert!(has_capability(Free, "pdf_export"));
+        assert!(has_capability(Pro, "kyomi_watch"));
+        assert!(has_capability(Pro, "slack_integration"));
+        assert!(has_capability(Enterprise, "kyomi_watch"));
+    }
+
+    #[test]
+    fn test_has_capability_unknown() {
+        // Unknown capabilities are still available
         assert!(has_capability(SubscriptionTier::Free, "some_random_thing"));
     }
 
     #[test]
-    fn test_compute_capabilities_free_tier() {
+    fn test_compute_capabilities_free_tier_cloud() {
         let ws = test_workspace(SubscriptionTier::Free, 0.0);
         let credits = CreditsInfo {
             limit_usd: 1.0,
@@ -593,19 +516,19 @@ mod tests {
             exhausted: false,
             percentage_used: 0.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Free);
         assert!(caps.ai_chat_enabled); // Not exhausted
-        assert!(!caps.multi_user_enabled);
-        assert!(!caps.kyomi_watch_enabled);
-        assert!(!caps.slack_integration_enabled);
+        // Cloud plan — all features enabled regardless of tier
+        assert!(caps.multi_user_enabled);
+        assert!(caps.kyomi_watch_enabled);
+        assert!(caps.slack_integration_enabled);
         assert!(caps.mcp_access_enabled);
-        assert_eq!(caps.max_dashboards, 5);
-        assert_eq!(caps.catalog_refresh_limit_per_hour, 1);
-        assert_eq!(caps.query_history_retention_days, 7);
-        assert_eq!(caps.user_limit, 1);
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
+        assert_eq!(caps.max_dashboards, 0); // unlimited
+        assert_eq!(caps.catalog_refresh_limit_per_hour, 5);
+        assert_eq!(caps.query_history_retention_days, 0); // unlimited
+        assert_eq!(caps.user_limit, 999_999); // default unlimited
     }
 
     #[test]
@@ -618,40 +541,25 @@ mod tests {
             exhausted: false,
             percentage_used: 0.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Pro);
         assert!(caps.ai_chat_enabled);
         assert!(caps.kyomi_watch_enabled);
-        assert!(caps.arrow_streaming_enabled);
         assert!(caps.api_access_enabled);
         assert!(caps.mcp_access_enabled);
-        assert!(!caps.multi_user_enabled);
-        assert!(!caps.slack_integration_enabled);
+        // Cloud plan — all features enabled
+        assert!(caps.multi_user_enabled);
+        assert!(caps.slack_integration_enabled);
         assert_eq!(caps.max_dashboards, 0); // unlimited
         assert_eq!(caps.query_history_retention_days, 0); // unlimited
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
-    }
-
-    #[test]
-    fn test_compute_capabilities_pro_tier_with_arrow() {
-        let ws = test_workspace(SubscriptionTier::Pro, 0.0);
-        let caps = compute_capabilities(&ws, true);
-        assert_eq!(caps.bigquery_retrieval_mode, "arrow_streaming");
-    }
-
-    #[test]
-    fn test_compute_capabilities_free_tier_with_arrow() {
-        let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        let caps = compute_capabilities(&ws, true);
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
     }
 
     #[test]
     fn test_compute_capabilities_team_tier() {
         let mut ws = test_workspace(SubscriptionTier::Team, 0.0);
         ws.user_limit = Some(5);
-        let caps = compute_capabilities(&ws, false);
+        let caps = compute_capabilities(&ws);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Team);
         assert!(caps.multi_user_enabled);
@@ -666,7 +574,7 @@ mod tests {
     #[test]
     fn test_compute_capabilities_credits_exhausted() {
         let ws = test_workspace(SubscriptionTier::Pro, 10.0);
-        let caps = compute_capabilities(&ws, false);
+        let caps = compute_capabilities(&ws);
 
         assert!(caps.credits_exhausted);
         assert!(!caps.ai_chat_enabled);
@@ -678,7 +586,7 @@ mod tests {
     #[test]
     fn test_capabilities_json_field_names_match_python() {
         let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        let caps = compute_capabilities(&ws, false);
+        let caps = compute_capabilities(&ws);
         let json = serde_json::to_value(&caps).unwrap();
 
         // Verify every JSON key matches the Python compute_capabilities() return dict
@@ -694,7 +602,6 @@ mod tests {
             "ai_autocomplete_enabled",
             "ai_chart_copilot_enabled",
             "bigquery_access_level",
-            "bigquery_retrieval_mode",
             "multi_user_enabled",
             "user_management_enabled",
             "dashboard_sharing_enabled",
@@ -705,7 +612,6 @@ mod tests {
             "query_history_retention_days",
             "user_limit",
             "kyomi_watch_enabled",
-            "arrow_streaming_enabled",
             "slack_integration_enabled",
             "mcp_access_enabled",
             "pdf_export_enabled",
@@ -734,7 +640,7 @@ mod tests {
             exhausted: false,
             percentage_used: 50.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert_eq!(caps.subscription_tier, SubscriptionTier::Pro);
         assert!(caps.ai_chat_enabled);
@@ -753,7 +659,7 @@ mod tests {
             exhausted: true,
             percentage_used: 100.0,
         };
-        let caps = compute_capabilities_with_credits(&ws, false, &credits);
+        let caps = compute_capabilities_with_credits(&ws, &credits);
 
         assert!(caps.credits_exhausted);
         assert!(!caps.ai_chat_enabled);
@@ -762,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_compute_capabilities_self_hosted() {
-        let caps = compute_capabilities_self_hosted(false);
+        let caps = compute_capabilities_self_hosted();
         assert_eq!(caps.subscription_tier, SubscriptionTier::Enterprise);
         assert_eq!(caps.subscription_status, SubscriptionStatus::Active);
         assert!(!caps.billing_enabled);
@@ -774,9 +680,8 @@ mod tests {
         assert!(caps.ai_autocomplete_enabled);
         assert!(caps.ai_chart_copilot_enabled);
 
-        // BigQuery — no arrow when not configured
+        // BigQuery
         assert_eq!(caps.bigquery_access_level, "full");
-        assert_eq!(caps.bigquery_retrieval_mode, "direct_api");
 
         // Organization features
         assert!(caps.multi_user_enabled);
@@ -795,7 +700,6 @@ mod tests {
 
         // Premium flags
         assert!(caps.kyomi_watch_enabled);
-        assert!(!caps.arrow_streaming_enabled); // false when bq_arrow_enabled=false
         assert!(caps.slack_integration_enabled);
         assert!(caps.mcp_access_enabled);
         assert!(caps.pdf_export_enabled);
@@ -803,12 +707,5 @@ mod tests {
         // Credits — effectively unlimited
         assert!((caps.credits_remaining - 999_999.0).abs() < f64::EPSILON);
         assert!((caps.credits_limit - 999_999.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_compute_capabilities_self_hosted_with_arrow() {
-        let caps = compute_capabilities_self_hosted(true);
-        assert_eq!(caps.bigquery_retrieval_mode, "arrow_streaming");
-        assert!(caps.arrow_streaming_enabled);
     }
 }

@@ -1,0 +1,9 @@
+# WASM-specific build configuration.
+#
+# rustflags apply to all wasm32 builds (debug and release).
+# build-std is NOT configured here — it only works with nightly and
+# crashes the linker in debug mode. Instead, release builds pass it
+# via environment variables in rebuild-leptos.sh.
+
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=has_std"]

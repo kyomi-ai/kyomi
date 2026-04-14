@@ -164,6 +164,7 @@ async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
         &user.user_id,
         Some("BQ Test User"),
         &email,
+        None,
     )
     .await
     .expect("should create test workspace");
@@ -1208,68 +1209,3 @@ async fn bq_catalog_refresh_returns_result() {
     cleanup_test_user(&ctx.db, "bq-test-bq-refresh@contract-test.local").await;
 }
 
-// ===========================================================================
-// 13. read-arrow returns 401 without auth
-// ===========================================================================
-
-#[tokio::test]
-async fn bq_read_arrow_returns_401_without_auth() {
-    let base = base_url().await;
-    let resp = client()
-        .post(format!("{base}/api/v1/bigquery/read-arrow"))
-        .header("origin", "http://localhost:5173")
-        .header("content-type", "application/json")
-        .body(json!({"job_id": "test-job-123"}).to_string())
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(
-        resp.status(),
-        401,
-        "POST /read-arrow without auth should be 401"
-    );
-}
-
-// ===========================================================================
-// 14. read-arrow requires BigQuery datasource in workspace
-// ===========================================================================
-
-#[tokio::test]
-async fn bq_read_arrow_requires_bq_datasource() {
-    let ctx = setup_auth_context("bq-arrow-no-ds").await;
-    if ctx.is_none() {
-        eprintln!(
-            "SKIP: bq_read_arrow_requires_bq_datasource — requires Rust-backend mode"
-        );
-        return;
-    }
-    let ctx = ctx.unwrap();
-
-    // No BigQuery datasource configured — should get 400
-    let resp = auth_post(
-        &ctx.base_url,
-        "/api/v1/bigquery/read-arrow",
-        &ctx.access_token,
-    )
-    .body(json!({"job_id": "test-job-123"}).to_string())
-    .send()
-    .await
-    .expect("read-arrow request should succeed");
-
-    assert_eq!(
-        resp.status(),
-        400,
-        "read-arrow without BigQuery datasource should return 400"
-    );
-
-    let body: Value = resp.json().await.expect("should return JSON");
-    let detail = body["detail"].as_str().unwrap_or("");
-    assert!(
-        detail.contains("No BigQuery datasource"),
-        "Error should mention missing datasource, got: {detail}"
-    );
-
-    // Clean up
-    cleanup_test_user(&ctx.db, "bq-test-bq-arrow-no-ds@contract-test.local").await;
-}

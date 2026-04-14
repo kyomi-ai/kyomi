@@ -709,15 +709,17 @@ pub async fn get_workspace_learnings_for_watch(
 
     // Search for workspace-scoped learnings relevant to this prompt
     let learnings_result = learning_service::get_relevant_learnings_hybrid(
-        db,
-        embedding,
-        workspace_id,
-        watch_prompt,
-        None, // workspace scope (no user_id)
-        5,
-        0.01,
-        0.5,
-        0.5,
+        learning_service::GetRelevantLearningsParams {
+            db,
+            embedding_svc: embedding,
+            workspace_id,
+            query: watch_prompt,
+            user_id: None, // workspace scope
+            limit: 5,
+            min_similarity: 0.01,
+            semantic_weight: 0.5,
+            keyword_weight: 0.5,
+        },
     )
     .await;
 
@@ -1022,9 +1024,10 @@ async fn execute_watch_inner(
                subscription_period_start, subscription_period_end, \
                trial_ends_at, \
                ai_credits_used_usd, \
+               ai_bundle_balance_usd, \
+               analytics_bundle_events, \
                user_limit, \
                stripe_customer_id, stripe_subscription_id, \
-               stripe_additional_users_item_id, \
                settings, \
                business_knowledge, knowledge_updated_at, \
                last_catalog_refresh, \
@@ -1177,19 +1180,22 @@ async fn execute_watch_inner(
         user_message_id: None,
         assistant_message_id: None,
         conversation_history: None,
+        user_display_name: "Kyomi Watch".to_string(),
     };
 
     let lazy_embedding = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
     let agent_result = execute_agent_chat(
         agent_config,
-        db,
-        kv,
-        encryption_key,
-        &lazy_embedding,
-        ws_manager,
-        app_config,
-        connect_registry.clone(),
-        platforms.clone(),
+        crate::execution::AgentExecutionEnv {
+            db,
+            kv,
+            encryption_key,
+            embedding: &lazy_embedding,
+            ws_manager,
+            app_config,
+            connect_registry: connect_registry.clone(),
+            platforms: platforms.clone(),
+        },
     )
     .await?;
 
@@ -1253,19 +1259,22 @@ async fn execute_watch_inner(
                         user_message_id: None,
                         assistant_message_id: None,
                         conversation_history: None,
+                        user_display_name: "Kyomi Watch".to_string(),
                     };
 
                     let lazy_embedding_retry = kyomi_embed::LazyEmbedding::loaded(embedding.clone());
                     match execute_agent_chat(
                         retry_config,
-                        db,
-                        kv,
-                        encryption_key,
-                        &lazy_embedding_retry,
-                        ws_manager,
-                        app_config,
-                        connect_registry.clone(),
-                        platforms.clone(),
+                        crate::execution::AgentExecutionEnv {
+                            db,
+                            kv,
+                            encryption_key,
+                            embedding: &lazy_embedding_retry,
+                            ws_manager,
+                            app_config,
+                            connect_registry: connect_registry.clone(),
+                            platforms: platforms.clone(),
+                        },
                     )
                     .await
                     {
@@ -1744,12 +1753,15 @@ mod tests {
 
     #[test]
     fn watch_tools_contains_expected_tools() {
-        assert_eq!(WATCH_TOOLS.len(), 5);
+        assert_eq!(WATCH_TOOLS.len(), 8);
         assert!(WATCH_TOOLS.contains(&"search_knowledge"));
         assert!(WATCH_TOOLS.contains(&"get_table_info"));
+        assert!(WATCH_TOOLS.contains(&"browse_catalog"));
         assert!(WATCH_TOOLS.contains(&"query_datasource"));
         assert!(WATCH_TOOLS.contains(&"list_datasources"));
         assert!(WATCH_TOOLS.contains(&"forecast_data"));
+        assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
+        assert!(WATCH_TOOLS.contains(&"read_knowledge_file"));
     }
 
     // -- Constants --

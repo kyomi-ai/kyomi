@@ -177,8 +177,8 @@ async fn login(
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
     };
 
-    if let Some(totp_method) = totp_method {
-        if totp_method.active {
+    if let Some(totp_method) = totp_method
+        && totp_method.active {
             match &data.totp_code {
                 None => {
                     return error_response(
@@ -201,7 +201,6 @@ async fn login(
                 }
             }
         }
-    }
 
     // Create authenticated session
     let device = crate::helpers::extract_device_info(&headers);
@@ -360,8 +359,8 @@ async fn signup_start(
 
     // Self-hosted without SMTP: only the first user can self-register.
     // Subsequent users must have a pending invitation from the admin.
-    if smtp_less_self_hosted && existing_user.is_none() {
-        if user_service::has_any_users(&state.db).await? {
+    if smtp_less_self_hosted && existing_user.is_none()
+        && user_service::has_any_users(&state.db).await? {
             let pending = kyomi_auth::workspace_service::get_pending_invitations_for_email(
                 &state.db, &email,
             ).await?;
@@ -371,7 +370,6 @@ async fn signup_start(
                 ));
             }
         }
-    }
 
     match existing_user {
         None => {
@@ -423,6 +421,7 @@ async fn signup_start(
                         &user.user_id,
                         Some(name),
                         &email,
+                        Some(&state.config),
                     )
                     .await?;
                 }
@@ -538,6 +537,7 @@ async fn signup_start(
                     &user.user_id,
                     Some(name),
                     &email,
+                    Some(&state.config),
                 )
                 .await?;
 
@@ -701,6 +701,7 @@ async fn signup_complete(
         &user.user_id,
         Some(&name),
         &email,
+        Some(&state.config),
     )
     .await?;
 

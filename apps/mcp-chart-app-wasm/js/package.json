@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.0.0",
+    "@kyomi/chart-header": "file:../../../packages/chart-header"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "scripts": {
+    "bundle": "esbuild mcp-bridge.js --bundle --format=esm --outfile=bridge-bundle.js"
+  }
+}

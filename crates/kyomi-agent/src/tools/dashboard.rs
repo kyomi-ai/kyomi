@@ -4,6 +4,8 @@
 
 use async_trait::async_trait;
 
+use kyomi_auth::websocket::helpers as ws_helpers;
+
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -50,6 +52,11 @@ impl AgentTool for SearchDashboardsTool {
                     "type": "boolean",
                     "description": "If true, returns top 10 most popular dashboards (ignores limit)",
                     "default": false
+                },
+                "doc_type": {
+                    "type": "string",
+                    "description": "Filter by document type: 'dashboard', 'knowledge', or omit for all",
+                    "enum": ["dashboard", "knowledge"]
                 }
             },
             "required": []
@@ -81,6 +88,10 @@ impl AgentTool for SearchDashboardsTool {
             .get("top_popular")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let doc_type_filter = args
+            .get("doc_type")
+            .and_then(|v| v.as_str())
+            .map(kyomi_core::models::DocType::from_str_or_default);
 
         if top_popular {
             limit = 10;
@@ -96,14 +107,22 @@ impl AgentTool for SearchDashboardsTool {
             &ctx.db,
             &ctx.workspace_id,
             query,
+            doc_type_filter,
             sort_by,
             limit,
         )
         .await?;
 
-        let total_workspace_dashboards =
-            kyomi_auth::dashboard_service::get_dashboard_count(&ctx.db, &ctx.workspace_id, None)
-                .await?;
+        // Count documents matching the same filter the search used, so the
+        // total reported to the agent is consistent with the result set
+        // (e.g. filtering to doc_type=knowledge should count knowledge docs,
+        // not dashboards).
+        let total_workspace_documents = kyomi_auth::dashboard_service::get_document_count(
+            &ctx.db,
+            &ctx.workspace_id,
+            doc_type_filter,
+        )
+        .await?;
 
         let frontend_url = &ctx.config.frontend_url;
 
@@ -114,6 +133,7 @@ impl AgentTool for SearchDashboardsTool {
                     "dashboard_id": d.dashboard_id,
                     "url": format!("{frontend_url}/dashboard/{}", d.dashboard_id),
                     "title": d.title,
+                    "doc_type": d.doc_type,
                     "content": d.content_preview,
                     "created_at": d.created_at.to_rfc3339(),
                     "updated_at": d.updated_at.to_rfc3339(),
@@ -128,9 +148,12 @@ impl AgentTool for SearchDashboardsTool {
         let count = dashboards.len();
 
         Ok(serde_json::json!({
+            "documents": dashboards,
+            // Backward-compatible alias — older prompts expect `dashboards`.
+            // Kept pointing at the same array until we deprecate it.
             "dashboards": dashboards,
             "count": count,
-            "total_workspace_dashboards": total_workspace_dashboards,
+            "total_workspace_documents": total_workspace_documents,
             "sorted_by": sort_by_str,
         })
         .to_string())
@@ -311,17 +334,16 @@ impl AgentTool for CreateDashboardTool {
         }
 
         // Validate SQL in ChartML blocks before saving (skip for trial mode).
-        if !ctx.is_trial {
-            if let Some(sql_errors) =
+        if !ctx.is_trial
+            && let Some(sql_errors) =
                 super::query_utils::validate_chartml_sql(&ctx.query_context(), content).await
-            {
-                return Ok(serde_json::json!({
-                    "success": false,
-                    "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
-                    "validation_errors": [sql_errors],
-                })
-                .to_string());
-            }
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
+                "validation_errors": [sql_errors],
+            })
+            .to_string());
         }
 
         let dashboard_id = match kyomi_auth::dashboard_service::create_dashboard(
@@ -330,6 +352,8 @@ impl AgentTool for CreateDashboardTool {
             &ctx.workspace_id,
             title,
             content,
+            kyomi_core::models::DocType::Dashboard,
+            None, // Embedding generation handled separately below
         )
         .await
         {
@@ -364,6 +388,18 @@ impl AgentTool for CreateDashboardTool {
                 content.to_string(),
             );
         }
+
+        // Broadcast dashboard creation to workspace members.
+        ws_helpers::send_dashboard_update(
+            &ctx.ws_manager,
+            &ctx.workspace_id,
+            &dashboard_id,
+            "created",
+            &ctx.user_id,
+            &ctx.user_display_name,
+            Some(&ctx.user_id),
+        )
+        .await;
 
         let frontend_url = &ctx.config.frontend_url;
 
@@ -459,29 +495,31 @@ impl AgentTool for ModifyDashboardTool {
         }
 
         // Validate SQL in ChartML blocks before saving (skip for trial mode).
-        if !ctx.is_trial {
-            if let Some(c) = content {
-                if let Some(sql_errors) =
-                    super::query_utils::validate_chartml_sql(&ctx.query_context(), c).await
-                {
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
-                        "validation_errors": [sql_errors],
-                    })
-                    .to_string());
-                }
-            }
+        if !ctx.is_trial
+            && let Some(c) = content
+            && let Some(sql_errors) =
+                super::query_utils::validate_chartml_sql(&ctx.query_context(), c).await
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": format!("Dashboard contains invalid SQL: {sql_errors}"),
+                "validation_errors": [sql_errors],
+            })
+            .to_string());
         }
 
         match kyomi_auth::dashboard_service::update_dashboard(
-            &ctx.db,
-            dashboard_id,
-            &ctx.workspace_id,
-            &ctx.user_id,
-            title,
-            content,
-            change_summary,
+            kyomi_auth::dashboard_service::UpdateDashboardParams {
+                db: &ctx.db,
+                embed: None, // no rechunking from agent tool (yet)
+                dashboard_id,
+                workspace_id: &ctx.workspace_id,
+                user_id: &ctx.user_id,
+                title,
+                content,
+                change_summary,
+                expected_content_hash: None, // no CAS for agent tool
+            },
         )
         .await
         {
@@ -526,6 +564,18 @@ impl AgentTool for ModifyDashboardTool {
                 c.to_string(),
             );
         }
+
+        // Broadcast dashboard update to workspace members.
+        ws_helpers::send_dashboard_update(
+            &ctx.ws_manager,
+            &ctx.workspace_id,
+            dashboard_id,
+            "updated",
+            &ctx.user_id,
+            &ctx.user_display_name,
+            Some(&ctx.user_id),
+        )
+        .await;
 
         let frontend_url = &ctx.config.frontend_url;
         let display_title = title.map(|t| t.trim()).unwrap_or("(unchanged)");
@@ -601,12 +651,26 @@ impl AgentTool for DeleteDashboardTool {
         )
         .await
         {
-            Ok(_) => Ok(serde_json::json!({
-                "success": true,
-                "dashboard_id": dashboard_id,
-                "message": format!("Deleted dashboard '{dashboard_id}'"),
-            })
-            .to_string()),
+            Ok(_) => {
+                // Broadcast dashboard deletion to workspace members.
+                ws_helpers::send_dashboard_update(
+                    &ctx.ws_manager,
+                    &ctx.workspace_id,
+                    dashboard_id,
+                    "deleted",
+                    &ctx.user_id,
+                    &ctx.user_display_name,
+                    Some(&ctx.user_id),
+                )
+                .await;
+
+                Ok(serde_json::json!({
+                    "success": true,
+                    "dashboard_id": dashboard_id,
+                    "message": format!("Deleted dashboard '{dashboard_id}'"),
+                })
+                .to_string())
+            }
             Err(kyomi_core::Error::NotFound(msg)) => {
                 Ok(serde_json::json!({ "error": msg }).to_string())
             }

@@ -161,7 +161,7 @@ async fn resolve_named_sources(
         let inline_rows: Vec<Value> = rows
             .rows
             .into_iter()
-            .map(|m| Value::Object(m))
+            .map(Value::Object)
             .collect();
 
         tracing::info!(
@@ -212,7 +212,7 @@ async fn resolve_single_source(
     let inline_rows: Vec<Value> = rows
         .rows
         .into_iter()
-        .map(|m| Value::Object(m))
+        .map(Value::Object)
         .collect();
 
     tracing::info!(rows = inline_rows.len(), "Resolved chart data");

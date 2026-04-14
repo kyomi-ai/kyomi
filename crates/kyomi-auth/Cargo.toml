@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 kyomi-core = { workspace = true }
 kyomi-embed = { workspace = true }
+kyomi-knowledge = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 pgvector = { workspace = true }
@@ -48,3 +49,4 @@ hmac = { workspace = true }
 totp-rs = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
+thiserror = { workspace = true }

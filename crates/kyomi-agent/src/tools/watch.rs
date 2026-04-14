@@ -149,46 +149,46 @@ impl AgentTool for CreateWatchTool {
         let queries = args.get("queries").cloned();
 
         // Validate each reference query's SQL via dry-run before saving.
-        if !ctx.is_trial {
-            if let Some(serde_json::Value::Array(ref query_list)) = queries {
-                let query_ctx = ctx.query_context();
-                let mut validation_errors: Vec<serde_json::Value> = Vec::new();
+        if !ctx.is_trial
+            && let Some(serde_json::Value::Array(ref query_list)) = queries
+        {
+            let query_ctx = ctx.query_context();
+            let mut validation_errors: Vec<serde_json::Value> = Vec::new();
 
-                for (i, q) in query_list.iter().enumerate() {
-                    let sql = match q.get("sql").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => continue, // no SQL to validate
-                    };
-                    let datasource_slug = match q.get("datasource").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => continue, // no datasource — can't validate
-                    };
-                    let comment = q.get("comment").and_then(|v| v.as_str()).unwrap_or("");
+            for (i, q) in query_list.iter().enumerate() {
+                let sql = match q.get("sql").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => continue, // no SQL to validate
+                };
+                let datasource_slug = match q.get("datasource").and_then(|v| v.as_str()) {
+                    Some(s) => s,
+                    None => continue, // no datasource — can't validate
+                };
+                let comment = q.get("comment").and_then(|v| v.as_str()).unwrap_or("");
 
-                    if let Err(err) = super::query_utils::dry_run_datasource_query(
-                        &query_ctx,
-                        datasource_slug,
-                        sql,
-                    )
-                    .await
-                    {
-                        validation_errors.push(serde_json::json!({
-                            "query_index": i,
-                            "comment": comment,
-                            "datasource": datasource_slug,
-                            "error": err,
-                        }));
-                    }
+                if let Err(err) = super::query_utils::dry_run_datasource_query(
+                    &query_ctx,
+                    datasource_slug,
+                    sql,
+                )
+                .await
+                {
+                    validation_errors.push(serde_json::json!({
+                        "query_index": i,
+                        "comment": comment,
+                        "datasource": datasource_slug,
+                        "error": err,
+                    }));
                 }
+            }
 
-                if !validation_errors.is_empty() {
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "error": "One or more reference queries have invalid SQL. Fix the SQL and try again.",
-                        "validation_errors": validation_errors,
-                    })
-                    .to_string());
-                }
+            if !validation_errors.is_empty() {
+                return Ok(serde_json::json!({
+                    "success": false,
+                    "error": "One or more reference queries have invalid SQL. Fix the SQL and try again.",
+                    "validation_errors": validation_errors,
+                })
+                .to_string());
             }
         }
 

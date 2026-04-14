@@ -112,17 +112,36 @@ impl WebSocketManager {
     /// items from the receiver to the actual WebSocket sink.
     ///
     /// Starts a Redis subscriber if this is the first connection for the user.
-    pub fn connect(&self, user_id: &str) -> Result<(u64, mpsc::Receiver<String>), ()> {
-        // Enforce per-user connection limit.
-        if let Some(conns) = self.inner.connections.get(user_id) {
-            if conns.len() >= MAX_CONNECTIONS_PER_USER {
-                tracing::warn!(
+    pub fn connect(&self, user_id: &str) -> Result<(u64, mpsc::Receiver<String>), String> {
+        // Prune stale connections before checking the limit.
+        // A connection is stale when its mpsc sender is closed (the outbound
+        // task dropped the receiver — e.g., after a server restart killed the
+        // TCP socket). Without this, dead connections count toward the limit
+        // and block new connections indefinitely.
+        if let Some(mut conns) = self.inner.connections.get_mut(user_id) {
+            let before = conns.len();
+            conns.retain(|c| !c.sender.is_closed());
+            let pruned = before - conns.len();
+            if pruned > 0 {
+                tracing::info!(
                     user_id,
-                    limit = MAX_CONNECTIONS_PER_USER,
-                    "WebSocket connection rejected: per-user limit reached"
+                    pruned,
+                    remaining = conns.len(),
+                    "Pruned stale WebSocket connections"
                 );
-                return Err(());
             }
+        }
+
+        // Enforce per-user connection limit.
+        if let Some(conns) = self.inner.connections.get(user_id)
+            && conns.len() >= MAX_CONNECTIONS_PER_USER
+        {
+            tracing::warn!(
+                user_id,
+                limit = MAX_CONNECTIONS_PER_USER,
+                "WebSocket connection rejected: per-user limit reached"
+            );
+            return Err("per-user connection limit reached".into());
         }
 
         let conn_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
@@ -177,10 +196,10 @@ impl WebSocketManager {
             .remove_if(user_id, |_, conns| conns.is_empty())
             .is_some();
 
-        if removed_last && self.inner.redis.is_some() {
-            if let Some((_, handle)) = self.inner.subscribers.remove(user_id) {
-                handle.abort();
-            }
+        if removed_last && self.inner.redis.is_some()
+            && let Some((_, handle)) = self.inner.subscribers.remove(user_id)
+        {
+            handle.abort();
         }
     }
 
@@ -344,10 +363,10 @@ impl WebSocketManager {
         }
 
         // Clean up stale connections.
-        if !stale_ids.is_empty() {
-            if let Some(mut conns) = self.inner.connections.get_mut(user_id) {
-                conns.retain(|c| !stale_ids.contains(&c.id));
-            }
+        if !stale_ids.is_empty()
+            && let Some(mut conns) = self.inner.connections.get_mut(user_id)
+        {
+            conns.retain(|c| !stale_ids.contains(&c.id));
         }
     }
 }

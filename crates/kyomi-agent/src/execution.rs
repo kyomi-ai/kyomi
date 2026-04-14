@@ -28,10 +28,30 @@ use kyomi_core::{DbPool, KVPool};
 use kyomi_embed::LazyEmbedding;
 
 use crate::adapter::ChatAgentAdapter;
+
+/// SQL used to persist a row to `api_usage_log` after an agent turn.
+///
+/// Semantics of the two cost columns (see [`kyomi_core::models::ApiUsageLog`]):
+/// * `cost_estimate` is what `BillingService::calculate_credits_info` sums —
+///   it is the amount debited from Kyomi bundle credits. For BYOK rows it is
+///   always `0.0` so BYOK traffic does not touch Kyomi billing.
+/// * `provider_cost_usd` is BYOK-only observability — the real upstream
+///   provider cost in USD. `NULL` for Kyomi rows where `cost_estimate` is
+///   already the real cost.
+///
+/// Extracted as a const so it can be unit-tested without a database.
+pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
+     (user_id, workspace_id, session_id, timestamp, provider, model, \
+      input_tokens, output_tokens, total_tokens, \
+      cache_creation_input_tokens, cache_read_input_tokens, \
+      cost_estimate, component, provider_cost_usd) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
 use crate::agent::{AgentConfig, CustomAgent};
 use crate::anthropic::{AUDIT_MODEL, DEFAULT_MODEL};
 use crate::prompt;
-use crate::provider::{create_provider, resolve_provider_config, ProviderKind};
+use crate::provider::{
+    create_provider, create_provider_from_workspace, resolve_provider_config, ProviderKind,
+};
 use crate::thinking::AgentThinkingTracker;
 use crate::tools::{create_default_registry, ToolContext, ToolFilter, TRIAL_CHAT_TOOLS};
 
@@ -64,6 +84,9 @@ pub struct AgentExecutionConfig {
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
     /// Used by trial chat to pass prior messages (max 10).
     pub conversation_history: Option<Vec<(String, String)>>,
+    /// Display name for event attribution (e.g., WebSocket dashboard updates).
+    /// Populated by the caller from the authenticated user record.
+    pub user_display_name: String,
 }
 
 impl Default for AgentExecutionConfig {
@@ -88,6 +111,7 @@ impl Default for AgentExecutionConfig {
             user_message_id: None,
             assistant_message_id: None,
             conversation_history: None,
+            user_display_name: "Unknown".to_string(),
         }
     }
 }
@@ -108,21 +132,41 @@ pub struct AgentExecutionResult {
 // Main execution
 // ---------------------------------------------------------------------------
 
+/// Shared runtime dependencies needed to run an agent chat turn.
+///
+/// Packaged into a borrow-friendly struct so [`execute_agent_chat`] stays
+/// under clippy's `too_many_arguments` threshold. Owned fields
+/// (`connect_registry`, `platforms`) are moved in; the rest are borrowed
+/// from the caller's long-lived state.
+pub struct AgentExecutionEnv<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub encryption_key: &'a Arc<[u8; 32]>,
+    pub embedding: &'a LazyEmbedding,
+    pub ws_manager: &'a WebSocketManager,
+    pub app_config: &'a Arc<kyomi_core::Config>,
+    pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
+    pub platforms: Arc<kyomi_core::platform::PlatformRegistry>,
+}
+
 /// Execute the agent chat loop for a single user message.
 ///
 /// This is the main entry point that coordinates all the pieces:
 /// system prompt, agent creation, adapter wiring, and execution.
 pub async fn execute_agent_chat(
     config: AgentExecutionConfig,
-    db: &DbPool,
-    kv: &KVPool,
-    encryption_key: &Arc<[u8; 32]>,
-    embedding: &LazyEmbedding,
-    ws_manager: &WebSocketManager,
-    app_config: &Arc<kyomi_core::Config>,
-    connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
-    platforms: Arc<kyomi_core::platform::PlatformRegistry>,
+    env: AgentExecutionEnv<'_>,
 ) -> kyomi_core::Result<AgentExecutionResult> {
+    let AgentExecutionEnv {
+        db,
+        kv,
+        encryption_key,
+        embedding,
+        ws_manager,
+        app_config,
+        connect_registry,
+        platforms,
+    } = env;
     // 1. Build system prompt (or use provided custom one).
     let mut system_prompt = if let Some(ref custom) = config.system_prompt {
         custom.clone()
@@ -152,18 +196,71 @@ pub async fn execute_agent_chat(
     }
 
     // 3. Create LLM provider via factory.
-    let mut provider_config = resolve_provider_config(app_config)?;
-    // Apply model override from AgentExecutionConfig if specified.
-    if let Some(ref model) = config.model_name {
-        provider_config.model = Some(model.clone());
-    } else if provider_config.model.is_none() && provider_config.provider == ProviderKind::Anthropic
-    {
-        // For Anthropic without an explicit model, default to DEFAULT_MODEL.
-        provider_config.model = Some(DEFAULT_MODEL.to_string());
-    }
-    // Other providers use their own built-in default when model is None.
-    let provider_kind = provider_config.provider;
-    let client = create_provider(provider_config)?;
+    //
+    // Trial chat is unauthenticated and uses a synthetic `"trial-workspace"`
+    // ID that does not exist in the DB — it must stay on the legacy global
+    // path that reads server-side Kyomi keys from env vars. Every real
+    // workspace goes through the BYOK-aware factory.
+    let is_trial_context = config.context_type == "trial_chat";
+    let (client, provider_kind, is_byok) = if is_trial_context {
+        let mut provider_config = resolve_provider_config(app_config)?;
+        if let Some(ref model) = config.model_name {
+            provider_config.model = Some(model.clone());
+        } else if provider_config.model.is_none()
+            && provider_config.provider == ProviderKind::Anthropic
+        {
+            provider_config.model = Some(DEFAULT_MODEL.to_string());
+        }
+        let provider_kind = provider_config.provider;
+        let client = create_provider(provider_config)?;
+        (client, provider_kind, false)
+    } else {
+        let mut ws_config =
+            kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
+                .await
+                .map_err(|e| {
+                    kyomi_core::Error::Internal(format!(
+                        "failed to load workspace AI config for {}: {e}",
+                        config.workspace_id
+                    ))
+                })?;
+            // Per-request model override (from AgentExecutionConfig) always
+            // wins over the workspace default.
+        if let Some(ref model) = config.model_name {
+            ws_config.model = Some(model.clone());
+        } else if ws_config.model.is_none()
+            && ws_config.provider == kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+        {
+            // Preserve legacy behaviour for Anthropic Kyomi workspaces that
+            // had no explicit default model configured.
+            ws_config.model = Some(DEFAULT_MODEL.to_string());
+        }
+        let is_byok = ws_config.is_byok();
+        let client = create_provider_from_workspace(&ws_config, app_config)?;
+        let provider_kind = match ws_config.provider {
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic => {
+                ProviderKind::Anthropic
+            }
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::OpenAI => ProviderKind::OpenAI,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Gemini => ProviderKind::Gemini,
+        };
+        // For Kyomi-mode workspaces, the effective provider kind reflects
+        // whatever the server env keys resolve to (which may be OpenAI or
+        // Gemini for self-hosted tenants). Re-read it from the resolved
+        // fallback in that case so usage logs attribute to the right vendor.
+        let provider_kind = if matches!(
+            ws_config.provider,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+        ) {
+            resolve_provider_config(app_config)
+                .map(|c| c.provider)
+                .unwrap_or(provider_kind)
+        } else {
+            provider_kind
+        };
+        (client, provider_kind, is_byok)
+    };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
 
@@ -220,6 +317,7 @@ pub async fn execute_agent_chat(
 
     // 6. Create tool context.
     let is_trial = config.context_type == "trial_chat";
+
     let tool_context = ToolContext {
         db: db.clone(),
         kv: kv.clone(),
@@ -235,6 +333,7 @@ pub async fn execute_agent_chat(
         workspace_roles: vec![], // Chat/watch — no admin checks needed
         connect_registry: connect_registry.clone(),
         platforms,
+        user_display_name: config.user_display_name.clone(),
     };
 
     // 7. Create agent and inject system prompt as the first message.
@@ -310,15 +409,15 @@ pub async fn execute_agent_chat(
 
     // 12. Run the agent loop.
     let result = adapter
-        .chat(
-            &config.message,
-            config.cancel_token.clone(),
-            config.current_time_user_tz.as_deref(),
-            config.message_source.as_deref(),
-            Some(&config.user_id),
-            config.user_message_id.as_deref(),
-            Some(&assistant_message_id),
-        )
+        .chat(crate::adapter::ChatParams {
+            message: &config.message,
+            cancel_token: config.cancel_token.clone(),
+            current_time_user_tz: config.current_time_user_tz.as_deref(),
+            message_source: config.message_source.as_deref(),
+            user_id: Some(&config.user_id),
+            user_message_id: config.user_message_id.as_deref(),
+            assistant_message_id: Some(&assistant_message_id),
+        })
         .await;
 
     // 13. Handle result.
@@ -369,18 +468,35 @@ pub async fn execute_agent_chat(
     };
 
     // 14b. Log usage to api_usage_log for billing (skip trial users).
+    // Apply 10% markup to cover payment processing fees.
+    //
+    // BYOK (workspace-owned keys): the workspace pays the provider directly,
+    // so we record the row with `cost_estimate = 0.0` — token counts and
+    // model names are preserved for diagnostics, but `check_ai_usage_allowed`
+    // sums `cost_estimate` from this table and must not charge BYOK usage
+    // against `ai_credits_used_usd`. Writing 0 keeps the single source of
+    // truth for billing consistent without a parallel BYOK-only code path.
+    const AI_COST_MULTIPLIER: f64 = 1.1;
     if !config.user_id.starts_with("trial_") && (input_tokens > 0 || output_tokens > 0) {
         let total_tokens = (input_tokens + output_tokens) as i32;
+        // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
+        //       `provider_cost_usd = total_cost` so we keep observability into
+        //       the real upstream provider spend. `total_cost` already comes
+        //       from the tracker, which aggregates per-call costs computed
+        //       from token counts × the provider's pricing table.
+        // Kyomi: `cost_estimate = total_cost * markup` (billed) and
+        //       `provider_cost_usd = NULL` — `cost_estimate` already reflects
+        //       the real cost, so the extra column would be redundant.
+        let (billed_cost, provider_cost_usd): (f64, Option<f64>) = if is_byok {
+            (0.0, Some(total_cost))
+        } else {
+            (total_cost * AI_COST_MULTIPLIER, None)
+        };
         let now = chrono::Utc::now();
         let provider_str = provider_kind.to_string();
         if let Err(e) = kyomi_core::db_execute!(
             db,
-            "INSERT INTO api_usage_log \
-             (user_id, workspace_id, session_id, timestamp, provider, model, \
-              input_tokens, output_tokens, total_tokens, \
-              cache_creation_input_tokens, cache_read_input_tokens, \
-              cost_estimate, component) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11)",
+            API_USAGE_LOG_INSERT_SQL,
             &config.user_id,
             &config.workspace_id,
             &config.session_id as &str,
@@ -390,8 +506,9 @@ pub async fn execute_agent_chat(
             input_tokens as i32,
             output_tokens as i32,
             total_tokens,
-            total_cost,
-            &config.component
+            billed_cost,
+            &config.component,
+            provider_cost_usd
         ) {
             warn!(error = %e, "Failed to log API usage to database");
         }
@@ -571,30 +688,30 @@ pub async fn deliver_response(
         )
         .await;
     } else {
-        ws_helpers::send_chat_complete(
-            ws_manager,
+        ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
+            manager: ws_manager,
             user_id,
             session_id,
             message_id,
-            response,
+            full_content: response,
             model,
-            usage.clone(),
-            Some(context_type),
-        )
+            usage_stats: usage.clone(),
+            context_type: Some(context_type),
+        })
         .await;
 
         // Broadcast completion to shared conversation members.
         if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
-            ws_helpers::broadcast_chat_complete(
-                ws_manager,
-                wid,
+            ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
+                manager: ws_manager,
+                workspace_id: wid,
                 session_id,
                 message_id,
-                response,
+                full_content: response,
                 model,
-                usage,
-                Some(user_id),
-            )
+                usage_stats: usage,
+                exclude_user_id: Some(user_id),
+            })
             .await;
         }
     }
@@ -614,6 +731,7 @@ pub fn generate_session_title(
     ws_manager: WebSocketManager,
     session_id: String,
     user_id: String,
+    workspace_id: String,
     first_message: String,
     app_config: Arc<kyomi_core::Config>,
 ) {
@@ -623,6 +741,7 @@ pub fn generate_session_title(
             &ws_manager,
             &session_id,
             &user_id,
+            &workspace_id,
             &first_message,
             &app_config,
         )
@@ -644,6 +763,7 @@ async fn generate_title_inner(
     ws_manager: &WebSocketManager,
     session_id: &str,
     user_id: &str,
+    workspace_id: &str,
     first_message: &str,
     app_config: &kyomi_core::Config,
 ) -> kyomi_core::Result<()> {
@@ -658,15 +778,44 @@ async fn generate_title_inner(
                          user's first message. Return ONLY the title text, nothing else. \
                          No quotes, no hashes, no prefixes.";
 
-    // Use a cheap/fast model for title generation.
-    // For Anthropic, override to AUDIT_MODEL (Haiku — cheapest).
+    // Use a cheap/fast model for title generation, routed through the
+    // workspace's configured provider (Kyomi-managed or BYOK).
+    //
+    // Design decision: in Kyomi mode we override Anthropic to AUDIT_MODEL
+    // (Haiku) to minimise server-side cost. In BYOK mode we honour whatever
+    // model the workspace configured — overriding a BYOK customer's chosen
+    // model (which might be a specific GPT variant, a Gemini tier, or an
+    // Anthropic tier they explicitly chose) would be a surprising silent
+    // downgrade. If the workspace has no model set, `create_provider_from_workspace`
+    // falls back to the provider's built-in default, and for Anthropic BYOK
+    // with no model we still prefer AUDIT_MODEL to keep title-gen cheap.
     // TODO: Add per-provider cheapest-model selection for OpenAI/Gemini
     // (currently uses their default model, which may be more expensive than needed).
-    let mut provider_config = resolve_provider_config(app_config)?;
-    if provider_config.provider == ProviderKind::Anthropic {
-        provider_config.model = Some(AUDIT_MODEL.to_string());
+    let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to load workspace AI config for title generation ({workspace_id}): {e}"
+            ))
+        })?;
+    let provider_is_anthropic = matches!(
+        ws_config.provider,
+        kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic
+    );
+    if provider_is_anthropic
+        && matches!(
+            ws_config.provider,
+            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+        )
+    {
+        // Kyomi-managed: always force Haiku for title generation.
+        ws_config.model = Some(AUDIT_MODEL.to_string());
+    } else if provider_is_anthropic && ws_config.model.is_none() {
+        // BYOK Anthropic with no explicit model: use Haiku to keep cost low.
+        ws_config.model = Some(AUDIT_MODEL.to_string());
     }
-    let client = create_provider(provider_config)?;
+    let client = create_provider_from_workspace(&ws_config, app_config)?;
 
     let messages = vec![
         crate::types::Message::system(system_prompt),
@@ -742,6 +891,40 @@ async fn record_conversation_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Contract: api_usage_log INSERT includes provider_cost_usd -----------
+    //
+    // Guards the BYOK observability column: `provider_cost_usd` must appear
+    // in both the column list and the VALUES clause, and the parameter count
+    // must match. If someone accidentally drops the column or reorders the
+    // INSERT, this test catches it at `cargo test` time rather than in prod.
+
+    #[test]
+    fn api_usage_log_insert_has_provider_cost_usd_column() {
+        let sql = API_USAGE_LOG_INSERT_SQL;
+        assert!(
+            sql.contains("provider_cost_usd"),
+            "INSERT must reference provider_cost_usd: {sql}"
+        );
+        // Must be the 12th bind parameter (after the 11 existing ones).
+        assert!(
+            sql.contains("$12"),
+            "INSERT must bind $12 for provider_cost_usd: {sql}"
+        );
+        // Sanity: the 12 placeholders line up with 12 named columns (two of
+        // the columns — cache_creation_input_tokens / cache_read_input_tokens
+        // — are hard-coded to 0 in VALUES, so 14 columns total, 12 binds).
+        let placeholder_count = (1..=12).filter(|n| sql.contains(&format!("${n}"))).count();
+        assert_eq!(
+            placeholder_count, 12,
+            "INSERT should have exactly 12 bind placeholders: {sql}"
+        );
+    }
+
+    #[test]
+    fn api_usage_log_insert_targets_correct_table() {
+        assert!(API_USAGE_LOG_INSERT_SQL.contains("INSERT INTO api_usage_log"));
+    }
 
     #[test]
     fn agent_execution_config_defaults() {
@@ -837,10 +1020,12 @@ mod tests {
             max_iterations: 10,
             component: "watch_agent".into(),
             assistant_message_id: Some("msg-pre-created".into()),
+            user_message_id: Some("msg-user-123".into()),
             conversation_history: Some(vec![
                 ("user".into(), "What's our MRR?".into()),
                 ("assistant".into(), "Let me look that up.".into()),
             ]),
+            user_display_name: "Test User".to_string(),
         };
 
         assert_eq!(config.session_id, "sess-123");

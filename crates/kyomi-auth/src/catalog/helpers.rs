@@ -210,17 +210,31 @@ pub async fn update_datasource_last_refresh(
 /// 4. Otherwise → upsert cache entry, delete old embeddings, generate new ones
 ///
 /// Returns `true` if the table was cached/updated, `false` on error.
-pub async fn cache_table(
-    db: &DbPool,
-    embedding: &EmbeddingService,
-    ctx: &IndexerContext,
-    project_id: &str,
-    dataset_id: &str,
-    table_name: &str,
-    table_type: &str,
-    columns: &[ColumnEntry],
-    full_table_id: &str,
-) -> bool {
+/// Parameters for [`cache_table`].
+pub struct CacheTableParams<'a> {
+    pub db: &'a DbPool,
+    pub embedding: &'a EmbeddingService,
+    pub ctx: &'a IndexerContext,
+    pub project_id: &'a str,
+    pub dataset_id: &'a str,
+    pub table_name: &'a str,
+    pub table_type: &'a str,
+    pub columns: &'a [ColumnEntry],
+    pub full_table_id: &'a str,
+}
+
+pub async fn cache_table(params: CacheTableParams<'_>) -> bool {
+    let CacheTableParams {
+        db,
+        embedding,
+        ctx,
+        project_id,
+        dataset_id,
+        table_name,
+        table_type,
+        columns,
+        full_table_id,
+    } = params;
     // Build table_metadata JSON
     let columns_json: Vec<Value> = columns
         .iter()
@@ -336,10 +350,17 @@ pub async fn cache_table(
         }
 
         // Generate and store new embeddings
-        return generate_and_store_embeddings(
-            db, embedding, &ctx.workspace_id, &ctx.datasource_config_id,
-            project_id, dataset_id, table_name, columns, cache_id,
-        )
+        return generate_and_store_embeddings(GenerateEmbeddingsParams {
+            db,
+            embedding,
+            workspace_id: &ctx.workspace_id,
+            datasource_config_id: &ctx.datasource_config_id,
+            project_id,
+            dataset_id,
+            table_name,
+            columns,
+            cache_id,
+        })
         .await;
     }
 
@@ -379,10 +400,17 @@ pub async fn cache_table(
         }
     };
 
-    generate_and_store_embeddings(
-        db, embedding, &ctx.workspace_id, &ctx.datasource_config_id,
-        project_id, dataset_id, table_name, columns, cache_id,
-    )
+    generate_and_store_embeddings(GenerateEmbeddingsParams {
+        db,
+        embedding,
+        workspace_id: &ctx.workspace_id,
+        datasource_config_id: &ctx.datasource_config_id,
+        project_id,
+        dataset_id,
+        table_name,
+        columns,
+        cache_id,
+    })
     .await
 }
 
@@ -418,18 +446,31 @@ fn extract_schema_signature(table_metadata: &Value) -> Vec<(String, String, Stri
     sig
 }
 
-/// Generate search entries, compute embeddings, and store them.
-async fn generate_and_store_embeddings(
-    db: &DbPool,
-    embedding: &EmbeddingService,
-    workspace_id: &str,
-    datasource_config_id: &str,
-    project_id: &str,
-    dataset_id: &str,
-    table_name: &str,
-    columns: &[ColumnEntry],
+struct GenerateEmbeddingsParams<'a> {
+    db: &'a DbPool,
+    embedding: &'a EmbeddingService,
+    workspace_id: &'a str,
+    datasource_config_id: &'a str,
+    project_id: &'a str,
+    dataset_id: &'a str,
+    table_name: &'a str,
+    columns: &'a [ColumnEntry],
     cache_id: i32,
-) -> bool {
+}
+
+/// Generate search entries, compute embeddings, and store them.
+async fn generate_and_store_embeddings(params: GenerateEmbeddingsParams<'_>) -> bool {
+    let GenerateEmbeddingsParams {
+        db,
+        embedding,
+        workspace_id,
+        datasource_config_id,
+        project_id,
+        dataset_id,
+        table_name,
+        columns,
+        cache_id,
+    } = params;
     let entries = create_search_entries(dataset_id, table_name, table_name, columns);
 
     if entries.is_empty() {

@@ -227,18 +227,39 @@ async fn pg_fetch_optional_site(
 ///
 /// On failure, best-effort cleanup removes any ClickHouse objects created
 /// before the failure and the orphaned PostgreSQL row so the caller can retry.
-pub async fn create_site(
-    db: &DbPool,
-    workspace_id: &str,
-    name: &str,
-    domains: &[String],
-    secret: &str,
-    datasource_slug: Option<&str>,
-    ch_host: &str,
-    ch_port: u16,
-    ch_admin_password: &str,
-    ch_secure: bool,
-) -> Result<AnalyticsSite> {
+/// ClickHouse provisioning configuration shared by analytics site operations.
+pub struct ClickHouseProvisioning<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub admin_password: &'a str,
+    pub secure: bool,
+}
+
+/// Parameters for [`create_site`].
+pub struct CreateSiteParams<'a> {
+    pub db: &'a DbPool,
+    pub workspace_id: &'a str,
+    pub name: &'a str,
+    pub domains: &'a [String],
+    pub secret: &'a str,
+    pub datasource_slug: Option<&'a str>,
+    pub clickhouse: ClickHouseProvisioning<'a>,
+}
+
+pub async fn create_site(params: CreateSiteParams<'_>) -> Result<AnalyticsSite> {
+    let CreateSiteParams {
+        db,
+        workspace_id,
+        name,
+        domains,
+        secret,
+        datasource_slug,
+        clickhouse,
+    } = params;
+    let ch_host = clickhouse.host;
+    let ch_port = clickhouse.port;
+    let ch_admin_password = clickhouse.admin_password;
+    let ch_secure = clickhouse.secure;
     let site_id = generate_site_id();
     let signed_key = generate_signed_key(&site_id, workspace_id, domains, secret);
 
@@ -279,7 +300,19 @@ pub async fn create_site(
     let ch_database = analytics_clickhouse::database_name(&row.site_id);
 
     // Auto-provision ClickHouse datasource (password may be empty for default user)
-    match provision_datasource(db, &row, &ch_database, datasource_slug, ch_host, ch_port, ch_admin_password, ch_secure).await {
+    let provision_params = ProvisionDatasourceParams {
+        db,
+        site: &row,
+        ch_database: &ch_database,
+        datasource_slug,
+        clickhouse: ClickHouseProvisioning {
+            host: ch_host,
+            port: ch_port,
+            admin_password: ch_admin_password,
+            secure: ch_secure,
+        },
+    };
+    match provision_datasource(provision_params).await {
         Ok(ds_id) => {
             // Update the site with the datasource_id and clickhouse_database
             kyomi_core::db_execute!(
@@ -323,16 +356,26 @@ pub async fn create_site(
 /// `ch_database` is pre-computed by the caller so the Err arm can clean up ClickHouse
 /// objects if this function fails partway (e.g. user created, database creation failed).
 /// Returns datasource_id on success.
-async fn provision_datasource(
-    db: &DbPool,
-    site: &AnalyticsSite,
-    ch_database: &str,
-    datasource_slug: Option<&str>,
-    ch_host: &str,
-    ch_port: u16,
-    ch_admin_password: &str,
-    ch_secure: bool,
-) -> Result<String> {
+struct ProvisionDatasourceParams<'a> {
+    db: &'a DbPool,
+    site: &'a AnalyticsSite,
+    ch_database: &'a str,
+    datasource_slug: Option<&'a str>,
+    clickhouse: ClickHouseProvisioning<'a>,
+}
+
+async fn provision_datasource(params: ProvisionDatasourceParams<'_>) -> Result<String> {
+    let ProvisionDatasourceParams {
+        db,
+        site,
+        ch_database,
+        datasource_slug,
+        clickhouse,
+    } = params;
+    let ch_host = clickhouse.host;
+    let ch_port = clickhouse.port;
+    let ch_admin_password = clickhouse.admin_password;
+    let ch_secure = clickhouse.secure;
     // 1. Create ClickHouse user + per-site database + events table + grant
     let (ch_username, ch_password) =
         analytics_clickhouse::create_site_user(ch_host, ch_port, ch_admin_password, &site.site_id, ch_database, ch_secure)
@@ -451,20 +494,20 @@ pub async fn update_site(
     }
 
     // Update datasource slug if requested and a datasource is linked
-    if let Some(new_slug) = datasource_slug {
-        if let Some(ref ds_id) = existing.datasource_id {
-            datasource_service::update_datasource(
-                db,
-                ds_id,
-                workspace_id,
-                None,
-                Some(new_slug),
-                None,
-                None,
-                None,
-            )
-            .await?;
-        }
+    if let Some(new_slug) = datasource_slug
+        && let Some(ref ds_id) = existing.datasource_id
+    {
+        datasource_service::update_datasource(
+            db,
+            ds_id,
+            workspace_id,
+            None,
+            Some(new_slug),
+            None,
+            None,
+            None,
+        )
+        .await?;
     }
 
     // Re-fetch with JOIN to get datasource_slug
@@ -503,24 +546,23 @@ pub async fn delete_site(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete analytics site: {e}")))?;
 
     // Clean up ClickHouse database + user (best-effort)
-    if let Some(ref ch_db) = site.clickhouse_database {
-        if let Err(e) =
+    if let Some(ref ch_db) = site.clickhouse_database
+        && let Err(e) =
             analytics_clickhouse::delete_site_user(ch_host, ch_port, ch_admin_password, &site.site_id, ch_db, ch_secure)
                 .await
-        {
-            tracing::error!(site_id = %site.site_id, error = %e, "Failed to delete ClickHouse database/user");
-        }
+    {
+        tracing::error!(site_id = %site.site_id, error = %e, "Failed to delete ClickHouse database/user");
     }
 
     // Clean up the auto-provisioned datasource
-    if let Some(ds_id) = &site.datasource_id {
-        if let Err(e) = kyomi_core::db_execute!(
+    if let Some(ds_id) = &site.datasource_id
+        && let Err(e) = kyomi_core::db_execute!(
             db,
             "DELETE FROM datasource_configs WHERE id = $1",
             ds_id
-        ) {
-            tracing::error!(datasource_id = %ds_id, error = %e, "Failed to delete auto-provisioned datasource");
-        }
+        )
+    {
+        tracing::error!(datasource_id = %ds_id, error = %e, "Failed to delete auto-provisioned datasource");
     }
 
     tracing::info!(site_id = %site.site_id, "Deleted analytics site");

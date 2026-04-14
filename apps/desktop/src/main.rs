@@ -141,8 +141,6 @@ fn start_remote_mode(server_url: &str) {
 
 fn start_personal_mode() {
     use std::sync::Arc;
-    use tokio_util::sync::CancellationToken;
-
     // Pick port: prefer 3000, fall back to random
     let port = if std::net::TcpListener::bind("127.0.0.1:3000").is_ok() {
         3000u16
@@ -161,12 +159,12 @@ fn start_personal_mode() {
     }
 
     // Use OS-standard app data directory if DATA_DIR not already set
-    if std::env::var("DATA_DIR").is_err() {
-        if let Some(data_dir) = dirs::data_dir() {
-            let kyomi_data = data_dir.join("ai.kyomi.desktop");
-            unsafe {
-                std::env::set_var("DATA_DIR", kyomi_data.to_string_lossy().as_ref());
-            }
+    if std::env::var("DATA_DIR").is_err()
+        && let Some(data_dir) = dirs::data_dir()
+    {
+        let kyomi_data = data_dir.join("ai.kyomi.desktop");
+        unsafe {
+            std::env::set_var("DATA_DIR", kyomi_data.to_string_lossy().as_ref());
         }
     }
 
@@ -351,24 +349,26 @@ async fn start_server(
         tracing::info!("Catalog refresh scheduler started");
 
         let scheduler = Arc::new(kyomi_agent::WatchScheduler::new(
-            db,
-            kv,
-            encryption_key_arc,
-            embedding,
-            ws_manager,
-            config_arc.clone(),
-            Some(connect_registry),
-            platforms,
-            shutdown_token.child_token(),
+            kyomi_agent::WatchSchedulerDeps {
+                db,
+                kv,
+                encryption_key: encryption_key_arc,
+                embedding,
+                ws_manager,
+                config: config_arc.clone(),
+                connect_registry: Some(connect_registry),
+                platforms,
+                cancel: shutdown_token.child_token(),
+            },
         ));
-        let _ = scheduler.clone().start();
+        let _scheduler_handle = scheduler.clone().start();
         tracing::info!("Watch scheduler started");
         Some(scheduler)
     } else {
         None
     };
 
-    let router = kyomi_server::build_router(state);
+    let router = kyomi_server::build_router(state, kyomi_server::ServerExtras::default());
     let app = kyomi_server::wrap_service(router);
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 

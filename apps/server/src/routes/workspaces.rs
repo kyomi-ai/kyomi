@@ -17,12 +17,12 @@ use axum::{
 use serde::Deserialize;
 
 use kyomi_auth::{
-    datasource_service, email_service::EmailService, middleware::AuthUser, user_service,
+    email_service::EmailService, middleware::AuthUser, user_service,
     websocket::helpers as ws_helpers, workspace_service,
 };
 use kyomi_core::capability;
 use kyomi_core::enums::{
-    DatasourceType, InvitationStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
+    InvitationStatus, SubscriptionTier, TransferStatus, WorkspaceRole,
 };
 
 use crate::state::AppState;
@@ -165,27 +165,6 @@ async fn get_current_ws(
         .ok_or_else(|| kyomi_core::Error::NotFound("Workspace not found".into()))
 }
 
-/// Check if any BigQuery datasource in the workspace has arrow streaming enabled.
-///
-/// Queries `datasource_configs` for active BigQuery datasources and inspects
-/// `connection_config.enable_arrow_streaming`. Returns `false` on any error
-/// (fail-open — the capability will simply be "direct_api").
-async fn has_bq_arrow_streaming(db: &kyomi_core::DbPool, workspace_id: &str) -> bool {
-    let datasources = match datasource_service::list_datasources(db, workspace_id, false).await {
-        Ok(ds) => ds,
-        Err(_) => return false,
-    };
-
-    datasources.iter().any(|ds| {
-        ds.datasource_type == DatasourceType::Bigquery
-            && ds
-                .connection_config
-                .get("enable_arrow_streaming")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-    })
-}
-
 /// Read a nested key from the workspace settings JSON.
 ///
 /// `workspace.settings` is a JSON object. This helper digs into
@@ -282,7 +261,6 @@ fn merge_custom_settings(
 #[derive(Deserialize)]
 struct UpdateSettingsRequest {
     name: Option<String>,
-    arrow_download_enabled: Option<bool>,
     default_dashboard_id: Option<serde_json::Value>, // can be string or null
 }
 
@@ -438,32 +416,22 @@ async fn get_settings(
 
     // Compute capabilities
     let capabilities = if state.config.self_hosted {
-        capability::compute_capabilities_self_hosted(false)
+        capability::compute_capabilities_self_hosted()
     } else {
-        let bq_arrow_enabled = has_bq_arrow_streaming(&state.db, &workspace.workspace_id).await;
-        capability::compute_capabilities(&workspace, bq_arrow_enabled)
+        capability::compute_capabilities(&workspace)
     };
     let capabilities_json = serde_json::to_value(&capabilities)
         .map_err(|e| kyomi_core::Error::Internal(format!("capability serialization: {e}")))?;
 
-    // Add bigquery_mode alias for frontend compatibility
-    let mut caps_map = capabilities_json
+    let caps_map = capabilities_json
         .as_object()
         .cloned()
         .unwrap_or_default();
-    if let Some(mode) = caps_map.get("bigquery_retrieval_mode").cloned() {
-        caps_map.insert("bigquery_mode".to_string(), mode);
-    }
 
     // Extract default_model from settings.custom_settings
     let default_model = custom_settings_get(&workspace.settings, "default_model")
         .and_then(|v| v.as_str())
         .unwrap_or("claude-sonnet-4-5-20250929");
-
-    // Extract arrow_download_enabled from settings
-    let arrow_download_enabled = settings_get(&workspace.settings, "arrow_download_enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
 
     // Build user BigQuery preferences for database_connections
     let db_user = user_service::get_user_by_id(&state.db, &user.user_id).await?;
@@ -487,7 +455,6 @@ async fn get_settings(
         "workspace_id": workspace.workspace_id,
         "name": workspace.name,
         "subscription_tier": capabilities.subscription_tier,
-        "arrow_download_enabled": arrow_download_enabled,
         "database_connections": database_connections,
         "default_model": default_model,
         "settings": settings_blob,
@@ -524,26 +491,6 @@ async fn update_settings(
             workspace.workspace_id,
             trimmed
         );
-    }
-
-    // Update arrow_download_enabled if provided
-    if let Some(arrow_enabled) = data.arrow_download_enabled {
-        // Ensure workspace is on Pro tier or higher (check raw DB tier, matching Python)
-        if !matches!(
-            workspace.subscription_tier,
-            SubscriptionTier::Pro | SubscriptionTier::Team | SubscriptionTier::Enterprise
-        ) {
-            return Err(kyomi_core::Error::Forbidden(
-                "Arrow download is only available on Pro, Team, and Enterprise plans".into(),
-            ));
-        }
-
-        if let Some(obj) = current_settings.as_object_mut() {
-            obj.insert(
-                "arrow_download_enabled".to_string(),
-                serde_json::json!(arrow_enabled),
-            );
-        }
     }
 
     // Update default_dashboard_id if provided
@@ -607,23 +554,23 @@ async fn get_billing(
 
     let workspace = get_current_ws(&state.db, &user).await?;
     let capabilities = if state.config.self_hosted {
-        capability::compute_capabilities_self_hosted(false)
+        capability::compute_capabilities_self_hosted()
     } else {
-        let bq_arrow_enabled = has_bq_arrow_streaming(&state.db, &workspace.workspace_id).await;
-        capability::compute_capabilities(&workspace, bq_arrow_enabled)
+        capability::compute_capabilities(&workspace)
     };
     let tier = capabilities.subscription_tier;
     let credits = capability::get_credits_info(&workspace, tier);
 
     // Tier pricing table
-    let (tier_name, price_monthly, price_annual) = match tier {
-        SubscriptionTier::Free => ("Free", 0.0, 0.0),
-        SubscriptionTier::Basic => ("Basic", 12.0, 108.0),
-        SubscriptionTier::Starter => ("Starter", 12.0, 108.0),
-        SubscriptionTier::Pro => ("Pro", 25.0, 228.0),
-        SubscriptionTier::Team => ("Team", 65.0, 588.0),
-        SubscriptionTier::Enterprise => ("Enterprise", 299.0, 3588.0),
+    // Cloud plan: $5/user/month, no annual option.
+    let (tier_name, price_monthly) = match tier {
+        SubscriptionTier::Cloud => ("Cloud", 5.0),
+        SubscriptionTier::Free => ("Free", 0.0),
+        // Legacy tiers — map to Cloud pricing
+        SubscriptionTier::Basic | SubscriptionTier::Starter | SubscriptionTier::Pro
+        | SubscriptionTier::Team | SubscriptionTier::Enterprise => ("Cloud", 5.0),
     };
+    let price_annual = price_monthly * 12.0; // No annual discount — kept for compat
 
     let billing_cycle = workspace
         .billing_cycle
@@ -684,7 +631,6 @@ async fn get_billing(
         },
         "features": {
             "ai_enabled": capabilities.ai_chat_enabled,
-            "bigquery_mode": capabilities.bigquery_retrieval_mode,
             "multi_user": capabilities.multi_user_enabled,
         },
     })))
@@ -1268,6 +1214,32 @@ async fn remove_member_handler(
     )
     .await;
 
+    // Sync billing: count active members and update Stripe quantity
+    if let Some(ref stripe_service) = state.stripe {
+        match workspace_service::count_workspace_users(
+            &state.db, &workspace.workspace_id,
+        ).await {
+            Ok(member_count) => {
+                if let Err(e) = kyomi_auth::billing_service::update_billing_users(
+                    &state.db, stripe_service, &workspace.workspace_id, member_count, -1,
+                ).await {
+                    tracing::error!(
+                        workspace_id = %workspace.workspace_id,
+                        error = %e,
+                        "Failed to sync billing after member removal"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    workspace_id = %workspace.workspace_id,
+                    error = %e,
+                    "Failed to count members for billing sync after removal"
+                );
+            }
+        }
+    }
+
     tracing::info!(
         "Removed member {} from workspace {} (transferred {} shared sessions)",
         member_user_id,
@@ -1334,11 +1306,11 @@ async fn create_invitation_handler(
             workspace_service::count_workspace_users(&state.db, &workspace.workspace_id).await?;
         let pending_invitations =
             workspace_service::count_pending_invitations(&state.db, &workspace.workspace_id).await?;
-        let user_limit = workspace.user_limit.unwrap_or(1) as i64;
+        let user_limit = workspace.user_limit.unwrap_or(999_999) as i64;
 
         if current_users + pending_invitations >= user_limit {
             return Err(kyomi_core::Error::BadRequest(
-                "Workspace user limit reached. Upgrade your plan to add more users.".into(),
+                format!("User limit reached ({user_limit}). The workspace owner can increase the limit on the billing page."),
             ));
         }
     }
@@ -1379,16 +1351,16 @@ async fn create_invitation_handler(
             "You have been invited by {} to join \"{}\"",
             inviter_name, workspace_name
         );
-        ws_helpers::send_workspace_invitation(
-            &state.ws_manager,
-            &invited.user_id,
-            &invitation_id,
-            &workspace.workspace_id,
-            &workspace_name,
-            &inviter_name,
-            &data.role,
-            &ws_message,
-        )
+        ws_helpers::send_workspace_invitation(ws_helpers::WorkspaceInvitationParams {
+            manager: &state.ws_manager,
+            user_id: &invited.user_id,
+            invitation_id: &invitation_id,
+            workspace_id: &workspace.workspace_id,
+            workspace_name: &workspace_name,
+            invited_by_name: &inviter_name,
+            role: &data.role,
+            message: &ws_message,
+        })
         .await;
     }
 
@@ -1659,6 +1631,32 @@ async fn accept_invitation_handler(
         db_role,
     )
     .await;
+
+    // Sync billing: count active members and update Stripe quantity
+    if let Some(ref stripe_service) = state.stripe {
+        match workspace_service::count_workspace_users(
+            &state.db, &invitation.workspace_id,
+        ).await {
+            Ok(member_count) => {
+                if let Err(e) = kyomi_auth::billing_service::update_billing_users(
+                    &state.db, stripe_service, &invitation.workspace_id, member_count, 1,
+                ).await {
+                    tracing::error!(
+                        workspace_id = %invitation.workspace_id,
+                        error = %e,
+                        "Failed to sync billing after invite accept"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    workspace_id = %invitation.workspace_id,
+                    error = %e,
+                    "Failed to count members for billing sync after invite accept"
+                );
+            }
+        }
+    }
 
     tracing::info!(
         "User {} accepted invitation {} to workspace {}",

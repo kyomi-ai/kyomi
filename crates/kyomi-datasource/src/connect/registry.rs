@@ -594,14 +594,10 @@ impl ConnectRegistry {
             };
             let key = presence_key(datasource_config_id);
             let mut conn = redis_pool.clone();
-            let exists: bool = match redis::cmd("EXISTS")
+            let exists: bool = matches!(redis::cmd("EXISTS")
                 .arg(&key)
                 .query_async::<i64>(&mut conn)
-                .await
-            {
-                Ok(1) => true,
-                _ => false,
-            };
+                .await, Ok(1));
 
             if !exists {
                 return Err(kyomi_core::Error::ServiceUnavailable(format!(

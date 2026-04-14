@@ -8,7 +8,8 @@
 //! Key design decisions:
 //! - Free-function pattern (`&DbPool` first arg) matching `dashboard_service.rs`
 //! - 5-field cron validation with the `cron` crate (converts to 7-field internally)
-//! - Tier-based watch limits (free=0, pro=10, team=50, enterprise=200)
+//! - Cloud plan — uniform watch cap for all tiers (see `WATCH_LIMIT`),
+//!   matching the "all capabilities, all tiers" policy in `capability.rs`.
 //! - Rate limiting: max 5 manual runs per hour
 //! - Soft-delete for alerts (deleted_at / deleted_by)
 
@@ -21,11 +22,15 @@ use std::str::FromStr;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/// Watch limits per subscription tier.
-const WATCH_LIMIT_FREE: i64 = 0;
-const WATCH_LIMIT_PRO: i64 = 10;
-const WATCH_LIMIT_TEAM: i64 = 50;
-const WATCH_LIMIT_ENTERPRISE: i64 = 200;
+/// Maximum watches per workspace, uniform across all subscription tiers.
+///
+/// The rest of the capability model (see `kyomi_core::capability`) was
+/// flattened to "Cloud plan — all capabilities, unlimited for all tiers"
+/// when manual seat management was removed. Watches intentionally keep a
+/// finite cap because each watch schedules async LLM + datasource work —
+/// unlimited scheduled jobs on a trial is a foot-gun. Bump this constant
+/// if the operational guardrails change.
+const WATCH_LIMIT: i64 = 50;
 
 /// Maximum manual runs per hour (rate limit).
 const MAX_MANUAL_RUNS_PER_HOUR: i64 = 5;
@@ -409,14 +414,12 @@ pub fn calculate_next_run(cron_expr: &str) -> Result<DateTime<Utc>> {
 // ─── Tier limit helper ──────────────────────────────────────────────────────
 
 /// Get the watch limit for a subscription tier.
+///
+/// Cloud plan — uniform cap for all tiers. The tier parameter is kept
+/// for call-site compatibility with the legacy per-tier API.
 fn watch_limit_for_tier(tier: kyomi_core::SubscriptionTier) -> i64 {
-    use kyomi_core::SubscriptionTier::*;
-    match tier {
-        Pro => WATCH_LIMIT_PRO,
-        Team => WATCH_LIMIT_TEAM,
-        Enterprise => WATCH_LIMIT_ENTERPRISE,
-        _ => WATCH_LIMIT_FREE, // free, starter, basic
-    }
+    let _ = tier;
+    WATCH_LIMIT
 }
 
 // ─── Create watch ───────────────────────────────────────────────────────────
@@ -502,11 +505,11 @@ pub async fn create_watch(
 
     // Serialize JSON values for binding
     let datasource_hints_str = datasource_hints
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize datasource_hints: {e}")))?;
     let queries_str = queries
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize queries: {e}")))?;
 
@@ -517,7 +520,7 @@ pub async fn create_watch(
             datasource_hints, queries, alert_emails,
             alert_emails_enabled, enabled, next_run_at, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, {enabled}, $12, $13, $13)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, {enabled}, $12, $13, $13)
         RETURNING watch_id, workspace_id, created_by, name, prompt, schedule,
                   mode, datasource_hints, queries, alert_emails,
                   alert_emails_enabled, enabled, last_run_at, last_run_status,
@@ -712,11 +715,11 @@ pub async fn update_watch(
         param_idx += 1;
     }
     if updates.queries.is_some() {
-        set_parts.push(format!("queries = ${param_idx}"));
+        set_parts.push(format!("queries = ${param_idx}::jsonb"));
         param_idx += 1;
     }
     if updates.datasource_hints.is_some() {
-        set_parts.push(format!("datasource_hints = ${param_idx}"));
+        set_parts.push(format!("datasource_hints = ${param_idx}::jsonb"));
         param_idx += 1;
     }
     if next_run_at.is_some() {
@@ -1015,7 +1018,7 @@ pub async fn complete_execution(
     let status_str = status.as_ref();
 
     let trace_str = execution_trace
-        .map(|v| serde_json::to_string(v))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize execution_trace: {e}")))?;
 
@@ -2138,15 +2141,16 @@ mod contract_tests {
     // ── Tier limits ─────────────────────────────────────────────────────
 
     #[test]
-    fn tier_limits_are_correct() {
+    fn tier_limits_are_uniform() {
         use kyomi_core::SubscriptionTier::*;
-        assert_eq!(watch_limit_for_tier(Free), 0);
-        assert_eq!(watch_limit_for_tier(Pro), 10);
-        assert_eq!(watch_limit_for_tier(Team), 50);
-        assert_eq!(watch_limit_for_tier(Enterprise), 200);
-        // Non-watch tiers default to free
-        assert_eq!(watch_limit_for_tier(Starter), 0);
-        assert_eq!(watch_limit_for_tier(Basic), 0);
+        // Cloud plan — every tier returns the same cap.
+        assert_eq!(watch_limit_for_tier(Free), WATCH_LIMIT);
+        assert_eq!(watch_limit_for_tier(Starter), WATCH_LIMIT);
+        assert_eq!(watch_limit_for_tier(Basic), WATCH_LIMIT);
+        assert_eq!(watch_limit_for_tier(Pro), WATCH_LIMIT);
+        assert_eq!(watch_limit_for_tier(Team), WATCH_LIMIT);
+        assert_eq!(watch_limit_for_tier(Enterprise), WATCH_LIMIT);
+        assert_eq!(watch_limit_for_tier(Cloud), WATCH_LIMIT);
     }
 
     // ── format_time edge cases ──────────────────────────────────────────

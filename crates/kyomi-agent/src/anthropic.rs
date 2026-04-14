@@ -147,21 +147,6 @@ impl AnthropicClient {
     // Message & Tool Conversion
     // -----------------------------------------------------------------------
 
-    /// Determine which messages should receive explicit cache breakpoints.
-    ///
-    /// With request-level `cache_control`, Anthropic automatically caches
-    /// the last block. We add explicit breakpoints on the system prompt
-    /// (handled separately) and the last tool definition (handled in
-    /// `convert_tools_to_anthropic`). No per-message markers needed —
-    /// automatic caching extends the cache incrementally as the
-    /// conversation grows.
-    ///
-    /// Kept for backward compatibility with tests; returns `None` since
-    /// automatic caching handles message-level breakpoints.
-    pub fn get_cache_marker_index(_messages: &[Message]) -> Option<usize> {
-        None
-    }
-
     /// Convert internal [`Message`] list to Anthropic API format.
     ///
     /// Returns `(system_prompt, anthropic_messages)` where:
@@ -179,14 +164,10 @@ impl AnthropicClient {
         messages: &[Message],
         user_names: &HashMap<String, String>,
     ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
-        let cache_marker_idx = Self::get_cache_marker_index(messages);
-
         let mut system_prompt = None;
         let mut anthropic_messages: Vec<serde_json::Value> = Vec::new();
 
-        for (msg_idx, msg) in messages.iter().enumerate() {
-            let should_cache = cache_marker_idx == Some(msg_idx);
-
+        for msg in messages.iter() {
             match msg.role {
                 MessageRole::System => {
                     // System prompt with cache_control for prompt caching.
@@ -201,22 +182,10 @@ impl AnthropicClient {
 
                 MessageRole::User => {
                     let content = Self::format_user_message(msg, user_names);
-
-                    if should_cache {
-                        anthropic_messages.push(json!({
-                            "role": "user",
-                            "content": [{
-                                "type": "text",
-                                "text": content,
-                                "cache_control": {"type": "ephemeral"}
-                            }]
-                        }));
-                    } else {
-                        anthropic_messages.push(json!({
-                            "role": "user",
-                            "content": content
-                        }));
-                    }
+                    anthropic_messages.push(json!({
+                        "role": "user",
+                        "content": content
+                    }));
                 }
 
                 MessageRole::Assistant => {
@@ -226,14 +195,10 @@ impl AnthropicClient {
                         let mut content_blocks: Vec<serde_json::Value> = Vec::new();
 
                         if !msg.content.is_empty() {
-                            let mut text_block = json!({
+                            content_blocks.push(json!({
                                 "type": "text",
                                 "text": msg.content
-                            });
-                            if should_cache {
-                                text_block["cache_control"] = json!({"type": "ephemeral"});
-                            }
-                            content_blocks.push(text_block);
+                            }));
                         }
 
                         for tc in tool_calls {
@@ -251,39 +216,22 @@ impl AnthropicClient {
                         }));
                     } else {
                         // Simple text assistant message.
-                        if should_cache {
-                            anthropic_messages.push(json!({
-                                "role": "assistant",
-                                "content": [{
-                                    "type": "text",
-                                    "text": msg.content,
-                                    "cache_control": {"type": "ephemeral"}
-                                }]
-                            }));
-                        } else {
-                            anthropic_messages.push(json!({
-                                "role": "assistant",
-                                "content": msg.content
-                            }));
-                        }
+                        anthropic_messages.push(json!({
+                            "role": "assistant",
+                            "content": msg.content
+                        }));
                     }
                 }
 
                 MessageRole::Tool => {
                     // Tool results are sent as user messages with tool_result blocks.
-                    let mut tool_result_block = json!({
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": msg.content
-                    });
-
-                    if should_cache {
-                        tool_result_block["cache_control"] = json!({"type": "ephemeral"});
-                    }
-
                     anthropic_messages.push(json!({
                         "role": "user",
-                        "content": [tool_result_block]
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": msg.tool_call_id,
+                            "content": msg.content
+                        }]
                     }));
                 }
             }
@@ -705,42 +653,6 @@ fn maybe_log_llm(label: &str, payload: &serde_json::Value) {
 mod tests {
     use super::*;
 
-    // -- Cache marker tests -------------------------------------------------
-
-    #[test]
-    fn cache_marker_empty_messages() {
-        assert_eq!(AnthropicClient::get_cache_marker_index(&[]), None);
-    }
-
-    #[test]
-    fn cache_marker_single_message() {
-        let messages = vec![Message::system("prompt")];
-        assert_eq!(AnthropicClient::get_cache_marker_index(&messages), None);
-    }
-
-    #[test]
-    fn cache_marker_two_messages() {
-        let messages = vec![Message::system("prompt"), Message::user("hello")];
-        assert_eq!(
-            AnthropicClient::get_cache_marker_index(&messages),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn cache_marker_multiple_messages() {
-        let messages = vec![
-            Message::system("prompt"),
-            Message::user("hello"),
-            Message::assistant("hi"),
-            Message::user("show me data"),
-        ];
-        assert_eq!(
-            AnthropicClient::get_cache_marker_index(&messages),
-            Some(3)
-        );
-    }
-
     // -- User attribution tests ---------------------------------------------
 
     #[test]
@@ -797,23 +709,6 @@ mod tests {
         // Only user message in the messages array.
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0]["role"], "user");
-    }
-
-    #[test]
-    fn convert_user_message_with_cache_marker() {
-        let messages = vec![
-            Message::system("prompt"),
-            Message::user("hello"),
-        ];
-        let names = HashMap::new();
-        let (_, msgs) = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
-
-        // Index 1 (user message) is the cache marker (last message).
-        assert_eq!(msgs.len(), 1);
-        // Should be structured format with cache_control.
-        let content = &msgs[0]["content"];
-        assert!(content.is_array());
-        assert_eq!(content[0]["cache_control"], json!({"type": "ephemeral"}));
     }
 
     #[test]
@@ -909,26 +804,6 @@ mod tests {
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "tc_1");
         assert_eq!(content[0]["content"], r#"{"found": true}"#);
-    }
-
-    #[test]
-    fn convert_tool_result_with_cache_marker() {
-        // When tool result is the last message, it gets cache_control.
-        let messages = vec![
-            Message::system("prompt"),
-            Message::user("hello"),
-            Message::tool_result("tc_1", "search", "result"),
-        ];
-        let names = HashMap::new();
-        let (_, msgs) = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
-
-        // Index 2 is the cache marker (last message).
-        let tool_msg = &msgs[1]; // tool is second in output (after user)
-        let content = tool_msg["content"].as_array().unwrap();
-        assert_eq!(
-            content[0]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
     }
 
     // -- Tool conversion tests ----------------------------------------------
@@ -1360,63 +1235,6 @@ mod tests {
         assert!(result.contains("Query my data"));
     }
 
-    // -- Contract: Cache marker on last tool result --------------------------
-
-    #[test]
-    fn cache_marker_on_last_tool_result_message() {
-        // When the last message in the list is a tool result, it should get cached.
-        let messages = vec![
-            Message::system("prompt"),
-            Message::user("search for tables"),
-            Message::assistant_with_tool_calls(
-                "Searching.",
-                vec![ToolCall {
-                    id: "tc_1".into(),
-                    name: "search_catalog".into(),
-                    arguments: json!({"query": "orders"}),
-                }],
-            ),
-            Message::tool_result("tc_1", "search_catalog", r#"{"tables": ["orders"]}"#),
-        ];
-        let names = HashMap::new();
-        let (_, msgs) = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
-
-        // Cache marker is on the last message (index 3 in original, which is
-        // index 2 in output since system is extracted).
-        let last = &msgs[2]; // tool result
-        assert_eq!(last["role"], "user"); // tool results are sent as user role
-        let content = last["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "tool_result");
-        assert_eq!(
-            content[0]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
-    }
-
-    // -- Contract: Cache marker on assistant message -------------------------
-
-    #[test]
-    fn cache_marker_on_assistant_simple_text() {
-        // When an assistant text message is the last one, it gets cache_control.
-        let messages = vec![
-            Message::system("prompt"),
-            Message::user("hello"),
-            Message::assistant("Here are results."),
-        ];
-        let names = HashMap::new();
-        let (_, msgs) = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
-
-        // Assistant at index 1 (system extracted) is the last message.
-        let assistant = &msgs[1];
-        assert_eq!(assistant["role"], "assistant");
-        let content = assistant["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(
-            content[0]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
-    }
-
     // -- Contract: Tool schema JSON structure --------------------------------
 
     #[test]
@@ -1660,13 +1478,16 @@ mod tests {
         assert_eq!(msgs[2]["role"], "user"); // tool results are user role
         assert_eq!(msgs[3]["role"], "assistant");
 
-        // Last message (index 4 in original, 3 in output) should have cache marker.
-        let last_assistant = &msgs[3];
-        let content = last_assistant["content"].as_array().unwrap();
-        assert_eq!(
-            content[0]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
+        // Assistant-with-tool-calls block has text + tool_use.
+        let assistant_with_tools = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_with_tools[0]["type"], "text");
+        assert_eq!(assistant_with_tools[1]["type"], "tool_use");
+        assert_eq!(assistant_with_tools[1]["name"], "search_catalog");
+
+        // Tool result block structured correctly under user role.
+        let tool_result = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(tool_result[0]["type"], "tool_result");
+        assert_eq!(tool_result[0]["tool_use_id"], "tc_1");
     }
 
     // -- Contract: parse_response thinking-only (no text, no tools) ----------
