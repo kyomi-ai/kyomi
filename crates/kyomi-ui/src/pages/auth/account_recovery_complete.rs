@@ -220,7 +220,7 @@ pub fn AccountRecoveryCompletePage() -> impl IntoView {
                             || current_confirm_password.is_empty();
                         let current_error = error.get();
 
-                        ready_view(
+                        ready_view(ReadyViewParams {
                             has_passkeys,
                             is_submitting,
                             btn_disabled,
@@ -230,7 +230,7 @@ pub fn AccountRecoveryCompletePage() -> impl IntoView {
                             confirm_password,
                             set_confirm_password,
                             on_submit,
-                        )
+                        })
                             .into_any()
                     }
                 }
@@ -256,8 +256,10 @@ fn verifying_view() -> impl IntoView {
 // Ready view (password form)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn ready_view(
+struct ReadyViewParams<F>
+where
+    F: Fn(leptos::ev::SubmitEvent) + Send + 'static,
+{
     has_passkeys: bool,
     is_submitting: bool,
     btn_disabled: bool,
@@ -266,8 +268,24 @@ fn ready_view(
     set_new_password: WriteSignal<String>,
     confirm_password: ReadSignal<String>,
     set_confirm_password: WriteSignal<String>,
-    on_submit: impl Fn(leptos::ev::SubmitEvent) + Send + 'static,
-) -> impl IntoView {
+    on_submit: F,
+}
+
+fn ready_view<F>(params: ReadyViewParams<F>) -> impl IntoView
+where
+    F: Fn(leptos::ev::SubmitEvent) + Send + 'static,
+{
+    let ReadyViewParams {
+        has_passkeys,
+        is_submitting,
+        btn_disabled,
+        current_error,
+        new_password,
+        set_new_password,
+        confirm_password,
+        set_confirm_password,
+        on_submit,
+    } = params;
     view! {
         <div>
             <div class="text-center">

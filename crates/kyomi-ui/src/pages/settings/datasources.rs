@@ -1381,49 +1381,53 @@ pub fn DatasourceModal(
 
                                     // Connection fields (provider-specific)
                                     <ProviderConnectionFields
-                                        ds_type=ds_type
-                                        sf_auth_mode=sf_auth_mode
-                                        cfg_host=cfg_host
-                                        set_cfg_host=set_cfg_host
-                                        cfg_port=cfg_port
-                                        set_cfg_port=set_cfg_port
-                                        cfg_ssl_mode=cfg_ssl_mode
-                                        set_cfg_ssl_mode=set_cfg_ssl_mode
-                                        cfg_database=cfg_database
-                                        set_cfg_database=set_cfg_database
-                                        cfg_account=cfg_account
-                                        set_cfg_account=set_cfg_account
-                                        cfg_server_hostname=cfg_server_hostname
-                                        set_cfg_server_hostname=set_cfg_server_hostname
-                                        cfg_http_path=cfg_http_path
-                                        set_cfg_http_path=set_cfg_http_path
-                                        cfg_secure=cfg_secure
-                                        set_cfg_secure=set_cfg_secure
-                                        cfg_encrypt=cfg_encrypt
-                                        set_cfg_encrypt=set_cfg_encrypt
-                                        cfg_trust_cert=cfg_trust_cert
-                                        set_cfg_trust_cert=set_cfg_trust_cert
-                                        cfg_oauth_client_id=cfg_oauth_client_id
-                                        set_cfg_oauth_client_id=set_cfg_oauth_client_id
-                                        cfg_oauth_client_secret=cfg_oauth_client_secret
-                                        set_cfg_oauth_client_secret=set_cfg_oauth_client_secret
+                                        signals=ConnectionFieldsSignals {
+                                            ds_type,
+                                            sf_auth_mode,
+                                            cfg_host,
+                                            set_cfg_host,
+                                            cfg_port,
+                                            set_cfg_port,
+                                            cfg_ssl_mode,
+                                            set_cfg_ssl_mode,
+                                            cfg_database,
+                                            set_cfg_database,
+                                            cfg_account,
+                                            set_cfg_account,
+                                            cfg_server_hostname,
+                                            set_cfg_server_hostname,
+                                            cfg_http_path,
+                                            set_cfg_http_path,
+                                            cfg_secure,
+                                            set_cfg_secure,
+                                            cfg_encrypt,
+                                            set_cfg_encrypt,
+                                            cfg_trust_cert,
+                                            set_cfg_trust_cert,
+                                            cfg_oauth_client_id,
+                                            set_cfg_oauth_client_id,
+                                            cfg_oauth_client_secret,
+                                            set_cfg_oauth_client_secret,
+                                        }
                                     />
 
                                     // Credentials section (non-BigQuery / non-Snowflake-OAuth)
                                     <ProviderCredentialsFields
-                                        ds_type=ds_type
-                                        sf_auth_mode=sf_auth_mode
-                                        bq_auth_mode=bq_auth_mode
-                                        cred_username=cred_username
-                                        set_cred_username=set_cred_username
-                                        cred_password=cred_password
-                                        set_cred_password=set_cred_password
-                                        cred_access_token=cred_access_token
-                                        set_cred_access_token=set_cred_access_token
-                                        cred_private_key=cred_private_key
-                                        set_cred_private_key=set_cred_private_key
-                                        cfg_shared_credentials=cfg_shared_credentials
-                                        set_cfg_shared_credentials=set_cfg_shared_credentials
+                                        signals=CredentialsFieldsSignals {
+                                            ds_type,
+                                            sf_auth_mode,
+                                            bq_auth_mode,
+                                            cred_username,
+                                            set_cred_username,
+                                            cred_password,
+                                            set_cred_password,
+                                            cred_access_token,
+                                            set_cred_access_token,
+                                            cred_private_key,
+                                            set_cred_private_key,
+                                            cfg_shared_credentials,
+                                            set_cfg_shared_credentials,
+                                        }
                                     />
 
                                     // Test & Discover button
@@ -1482,22 +1486,24 @@ pub fn DatasourceModal(
                                         t != "bigquery" && (!is_create || discovery_succeeded.get())
                                     }>
                                         <DiscoveryFields
-                                            ds_type=ds_type
-                                            discovery_succeeded=discovery_succeeded
-                                            discovered_databases=discovered_databases
-                                            discovered_schemas=discovered_schemas
-                                            discovered_warehouses=discovered_warehouses
-                                            discovered_catalogs=discovered_catalogs
-                                            cfg_database=cfg_database
-                                            set_cfg_database=set_cfg_database
-                                            cfg_schema=cfg_schema
-                                            set_cfg_schema=set_cfg_schema
-                                            cfg_warehouse=cfg_warehouse
-                                            set_cfg_warehouse=set_cfg_warehouse
-                                            cfg_catalog=cfg_catalog
-                                            set_cfg_catalog=set_cfg_catalog
-                                            cfg_role=cfg_role
-                                            set_cfg_role=set_cfg_role
+                                            signals=DiscoveryFieldsSignals {
+                                                ds_type,
+                                                discovery_succeeded,
+                                                discovered_databases,
+                                                discovered_schemas,
+                                                discovered_warehouses,
+                                                discovered_catalogs,
+                                                cfg_database,
+                                                set_cfg_database,
+                                                cfg_schema,
+                                                set_cfg_schema,
+                                                cfg_warehouse,
+                                                set_cfg_warehouse,
+                                                cfg_catalog,
+                                                set_cfg_catalog,
+                                                cfg_role,
+                                                set_cfg_role,
+                                            }
                                         />
                                     </Show>
 
@@ -1795,12 +1801,11 @@ fn SnowflakeAuthModeSection(
 // Provider Connection Fields
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Renders the connection fields (host/port/ssl_mode/account/etc.) for the active provider.
-/// Also renders the database text input so users can type a database name before Test & Discover.
-/// After Test & Discover, DiscoveryFields replaces the text input with a dropdown of real db names.
-#[allow(clippy::too_many_arguments)]
-#[component]
-fn ProviderConnectionFields(
+/// Bundle of every signal `ProviderConnectionFields` needs.
+/// Packed as a single prop to keep the component signature small;
+/// signals are `Copy`, so cloning the struct is cheap.
+#[derive(Clone, Copy)]
+struct ConnectionFieldsSignals {
     ds_type: ReadSignal<String>,
     sf_auth_mode: ReadSignal<String>,
     cfg_host: ReadSignal<String>,
@@ -1827,7 +1832,41 @@ fn ProviderConnectionFields(
     set_cfg_oauth_client_id: WriteSignal<String>,
     cfg_oauth_client_secret: ReadSignal<String>,
     set_cfg_oauth_client_secret: WriteSignal<String>,
-) -> impl IntoView {
+}
+
+/// Renders the connection fields (host/port/ssl_mode/account/etc.) for the active provider.
+/// Also renders the database text input so users can type a database name before Test & Discover.
+/// After Test & Discover, DiscoveryFields replaces the text input with a dropdown of real db names.
+#[component]
+fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
+    let ConnectionFieldsSignals {
+        ds_type,
+        sf_auth_mode,
+        cfg_host,
+        set_cfg_host,
+        cfg_port,
+        set_cfg_port,
+        cfg_ssl_mode,
+        set_cfg_ssl_mode,
+        cfg_database,
+        set_cfg_database,
+        cfg_account,
+        set_cfg_account,
+        cfg_server_hostname,
+        set_cfg_server_hostname,
+        cfg_http_path,
+        set_cfg_http_path,
+        cfg_secure,
+        set_cfg_secure,
+        cfg_encrypt,
+        set_cfg_encrypt,
+        cfg_trust_cert,
+        set_cfg_trust_cert,
+        cfg_oauth_client_id,
+        set_cfg_oauth_client_id,
+        cfg_oauth_client_secret,
+        set_cfg_oauth_client_secret,
+    } = signals;
     view! {
         {move || {
             let t = ds_type.get();
@@ -2089,11 +2128,9 @@ fn ProviderConnectionFields(
 // Provider Credentials Fields
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Renders credentials fields for the active provider.
-/// Skipped for BigQuery (handled in BigQueryAuthModeSection) and Snowflake OAuth.
-#[allow(clippy::too_many_arguments)]
-#[component]
-fn ProviderCredentialsFields(
+/// Bundle of every signal `ProviderCredentialsFields` needs.
+#[derive(Clone, Copy)]
+struct CredentialsFieldsSignals {
     ds_type: ReadSignal<String>,
     sf_auth_mode: ReadSignal<String>,
     bq_auth_mode: ReadSignal<String>,
@@ -2107,7 +2144,27 @@ fn ProviderCredentialsFields(
     set_cred_private_key: WriteSignal<String>,
     cfg_shared_credentials: ReadSignal<bool>,
     set_cfg_shared_credentials: WriteSignal<bool>,
-) -> impl IntoView {
+}
+
+/// Renders credentials fields for the active provider.
+/// Skipped for BigQuery (handled in BigQueryAuthModeSection) and Snowflake OAuth.
+#[component]
+fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView {
+    let CredentialsFieldsSignals {
+        ds_type,
+        sf_auth_mode,
+        bq_auth_mode,
+        cred_username,
+        set_cred_username,
+        cred_password,
+        set_cred_password,
+        cred_access_token,
+        set_cred_access_token,
+        cred_private_key,
+        set_cred_private_key,
+        cfg_shared_credentials,
+        set_cfg_shared_credentials,
+    } = signals;
     view! {
         {move || {
             let t = ds_type.get();
@@ -2257,11 +2314,9 @@ fn ProviderCredentialsFields(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Renders the discovery fields (database/schema/warehouse/catalog) for the active provider.
-/// In create mode after successful Test & Discover, shows dropdowns.
-/// In edit mode, shows text inputs pre-filled from saved config.
-#[allow(clippy::too_many_arguments)]
-#[component]
-fn DiscoveryFields(
+/// Bundle of every signal `DiscoveryFields` needs.
+#[derive(Clone, Copy)]
+struct DiscoveryFieldsSignals {
     ds_type: ReadSignal<String>,
     discovery_succeeded: Signal<bool>,
     discovered_databases: ReadSignal<Vec<String>>,
@@ -2278,7 +2333,30 @@ fn DiscoveryFields(
     set_cfg_catalog: WriteSignal<String>,
     cfg_role: ReadSignal<String>,
     set_cfg_role: WriteSignal<String>,
-) -> impl IntoView {
+}
+
+/// In create mode after successful Test & Discover, shows dropdowns.
+/// In edit mode, shows text inputs pre-filled from saved config.
+#[component]
+fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
+    let DiscoveryFieldsSignals {
+        ds_type,
+        discovery_succeeded,
+        discovered_databases,
+        discovered_schemas,
+        discovered_warehouses,
+        discovered_catalogs,
+        cfg_database,
+        set_cfg_database,
+        cfg_schema,
+        set_cfg_schema,
+        cfg_warehouse,
+        set_cfg_warehouse,
+        cfg_catalog,
+        set_cfg_catalog,
+        cfg_role,
+        set_cfg_role,
+    } = signals;
     view! {
         <div class="border-t border-border pt-4 mt-4">
             <h4 class="text-sm font-medium mb-3">

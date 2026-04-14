@@ -21,9 +21,10 @@ use crate::components::{
     CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, INPUT_CLASS,
 };
 use crate::server_fns::security::{
-    complete_passkey_registration, delete_passkey, list_passkeys, rename_passkey,
-    start_passkey_registration, PasskeyInfo,
+    delete_passkey, list_passkeys, rename_passkey, PasskeyInfo,
 };
+#[cfg(target_arch = "wasm32")]
+use crate::server_fns::security::{complete_passkey_registration, start_passkey_registration};
 
 /// Format an RFC 3339 date string as "Mon DD, YYYY".
 ///
@@ -852,27 +853,28 @@ pub fn PasskeyManager() -> impl IntoView {
 /// 1. Call server to start registration (get challenge + options)
 /// 2. Call browser WebAuthn API to create credential
 /// 3. Call server to complete registration
-#[allow(unreachable_code, unused_variables)]
 async fn add_passkey_flow(device_name: &str) -> Result<String, String> {
-    // Step 1: Start registration on server
-    let options_json = start_passkey_registration(device_name.to_string())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Step 2: Browser creates credential (only on WASM)
-    #[cfg(target_arch = "wasm32")]
-    let credential_json = browser_create_credential(&options_json).await?;
-
     #[cfg(not(target_arch = "wasm32"))]
-    let credential_json = {
-        let _ = &options_json;
-        return Err("Passkey registration requires a browser".to_string());
-    };
+    {
+        let _ = device_name;
+        Err("Passkey registration requires a browser".to_string())
+    }
 
-    // Step 3: Complete registration on server
-    complete_passkey_registration(credential_json)
-        .await
-        .map_err(|e| e.to_string())
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Step 1: Start registration on server
+        let options_json = start_passkey_registration(device_name.to_string())
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Step 2: Browser creates credential
+        let credential_json = browser_create_credential(&options_json).await?;
+
+        // Step 3: Complete registration on server
+        complete_passkey_registration(credential_json)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// A single row in the passkeys table.
