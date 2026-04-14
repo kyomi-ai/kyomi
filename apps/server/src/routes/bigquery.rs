@@ -218,7 +218,7 @@ async fn find_bq_datasource(
          datasource_type, connection_config, \
          active, connection_type, connect_token_jti, \
          created_at, updated_at, \
-         last_catalog_refresh, auto_refresh_allowed \
+         last_catalog_refresh, last_index_started_at, auto_refresh_allowed \
          FROM datasource_configs \
          WHERE workspace_id = $1 AND datasource_type = 'bigquery' AND active = true \
          LIMIT 1",

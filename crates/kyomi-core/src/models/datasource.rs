@@ -54,6 +54,21 @@ pub struct DatasourceConfig {
     /// When the catalog was last refreshed (null if never).
     pub last_catalog_refresh: Option<DateTime<Utc>>,
 
+    /// When the most recent catalog indexing run *started* (null if never).
+    ///
+    /// Stamped at the top of [`CatalogIndexingService::index_datasource`]
+    /// and checked by callers to skip concurrent runs — if an indexing run
+    /// started within the last hour, new runs are rejected unless `force`
+    /// is set. Complements [`last_catalog_refresh`] (which is the *finish*
+    /// timestamp): the two gates are orthogonal — finish guards against
+    /// "just finished, don't re-index", start guards against "just started,
+    /// don't double up". Self-healing on panic: the stamp ages out after
+    /// 60 minutes so a crashed run is retried automatically.
+    ///
+    /// [`CatalogIndexingService::index_datasource`]: (see crate `kyomi-agent`)
+    /// [`last_catalog_refresh`]: Self::last_catalog_refresh
+    pub last_index_started_at: Option<DateTime<Utc>>,
+
     /// Whether charts are allowed to auto-refresh with this datasource.
     pub auto_refresh_allowed: bool,
 }
