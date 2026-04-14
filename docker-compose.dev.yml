@@ -114,26 +114,6 @@ services:
     # After starting, run: ./scripts/sample-data/seed_sample_data.sh
 
   #######################################
-  # ChartML Chart Renderer Service
-  #######################################
-  chart-renderer:
-    build:
-      context: ..
-      dockerfile: kyomi/apps/chart-renderer/Dockerfile
-    container_name: kyomi-chart-renderer-dev
-    environment:
-      CHART_RENDERER_PORT: "3030"
-      NODE_ENV: "development"
-    ports:
-      - "3030:3030"
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3030/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    restart: unless-stopped
-
-  #######################################
   # Kyomi API server
   #######################################
   kyomi-api:

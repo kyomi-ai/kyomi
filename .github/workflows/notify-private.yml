@@ -6,12 +6,14 @@
 # submodule pointer, and triggers targeted deploy workflows based on which
 # services have changed files.
 #
-# Path-to-service mapping (mirrors the old per-service workflow triggers):
-#   api:                apps/server/**, crates/**, enterprise/**, Cargo.*, apps/mcp-chart-app/**, data/**, packages/chart-header/**
-#   chart_renderer:     apps/chart-renderer/**, packages/chartml-transform/**
-#   frontend:           (removed — Leptos frontend is compiled into the Rust binary)
-#   marketing:          apps/marketing/**, apps/docs/**
-#   infra:              k8s/**
+# Path-to-service mapping (only services whose source lives in this repo):
+#   api:        apps/server/**, crates/**, enterprise/**, Cargo.*,
+#               apps/mcp-chart-app/**, data/**, packages/chart-header/**
+#   frontend:   apps/frontend/**
+#
+# Services whose source lives exclusively in kyomi-private (chart-renderer,
+# marketing, analytics-collector, k8s infra) are deployed from there and
+# do not need a dispatch from this repo.
 # =============================================================================
 
 name: Notify Private Repo
@@ -39,40 +41,21 @@ jobs:
             echo "$CHANGED" | grep -qE "$pattern"
           }
 
-          # Map changed paths to service flags
           API=false
-          CHART_RENDERER=false
-          ANALYTICS_COLLECTOR=false
-          MARKETING=false
-          INFRA=false
+          FRONTEND=false
 
           if has_match '^apps/server/|^crates/|^enterprise/|^Cargo\.|^apps/mcp-chart-app/|^data/|^packages/chart-header/|^packages/chartml-core/'; then
             API=true
           fi
 
-          if has_match '^apps/chart-renderer/|^packages/chartml-transform/'; then
-            CHART_RENDERER=true
-          fi
-
-          if has_match '^apps/analytics-collector/'; then
-            ANALYTICS_COLLECTOR=true
-          fi
-
-          if has_match '^apps/marketing/|^apps/docs/'; then
-            MARKETING=true
-          fi
-
-          if has_match '^k8s/'; then
-            INFRA=true
+          if has_match '^apps/frontend/'; then
+            FRONTEND=true
           fi
 
           echo "api=$API" >> "$GITHUB_OUTPUT"
-          echo "chart_renderer=$CHART_RENDERER" >> "$GITHUB_OUTPUT"
-          echo "analytics_collector=$ANALYTICS_COLLECTOR" >> "$GITHUB_OUTPUT"
-          echo "marketing=$MARKETING" >> "$GITHUB_OUTPUT"
-          echo "infra=$INFRA" >> "$GITHUB_OUTPUT"
+          echo "frontend=$FRONTEND" >> "$GITHUB_OUTPUT"
 
-          echo "Changed services: api=$API chart_renderer=$CHART_RENDERER analytics_collector=$ANALYTICS_COLLECTOR marketing=$MARKETING infra=$INFRA"
+          echo "Changed services: api=$API frontend=$FRONTEND"
 
       - name: Dispatch to kyomi-private
         uses: peter-evans/repository-dispatch@v3
@@ -86,9 +69,6 @@ jobs:
               "ref": "${{ github.ref }}",
               "services": {
                 "api": ${{ steps.changes.outputs.api }},
-                "chart_renderer": ${{ steps.changes.outputs.chart_renderer }},
-                "analytics_collector": ${{ steps.changes.outputs.analytics_collector }},
-                "marketing": ${{ steps.changes.outputs.marketing }},
-                "infra": ${{ steps.changes.outputs.infra }}
+                "frontend": ${{ steps.changes.outputs.frontend }}
               }
             }
