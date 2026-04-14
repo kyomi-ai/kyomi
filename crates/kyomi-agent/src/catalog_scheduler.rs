@@ -333,7 +333,8 @@ impl CatalogRefreshScheduler {
             }
 
             // Get workspace owner's email (needed for credential lookup)
-            let owner_email = get_workspace_owner_email(&self.db, workspace_id).await;
+            let owner_email =
+                catalog_helpers::get_workspace_owner_email(&self.db, workspace_id).await;
 
             for ds_row in &datasources {
                 let ds_id = &ds_row.id;
@@ -1064,32 +1065,6 @@ fn get_indexing_credentials(connection_config: &Value) -> (Option<String>, Optio
     debug!(cred_type, "Using dedicated indexing credentials");
 
     (None, Some(creds.clone()))
-}
-
-// ---------------------------------------------------------------------------
-// Workspace owner lookup
-// ---------------------------------------------------------------------------
-
-/// Get the workspace owner's email address.
-///
-/// Returns the first user in the workspace (workspace creator/owner).
-async fn get_workspace_owner_email(db: &DbPool, workspace_id: &str) -> Option<String> {
-    #[derive(sqlx::FromRow)]
-    struct EmailRow { email: String }
-
-    let row = kyomi_core::db_fetch_optional!(
-        db, EmailRow,
-        "SELECT u.email \
-         FROM workspace_users wu \
-         JOIN users u ON u.user_id = wu.user_id \
-         WHERE wu.workspace_id = $1 \
-         LIMIT 1",
-        workspace_id
-    )
-    .ok()
-    .flatten();
-
-    row.map(|r| r.email)
 }
 
 // ---------------------------------------------------------------------------

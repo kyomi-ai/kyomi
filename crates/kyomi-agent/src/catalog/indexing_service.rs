@@ -242,6 +242,82 @@ impl CatalogIndexingService {
         can_refresh_now(db, datasource_config_id, hours_threshold).await
     }
 
+    /// Spawn background catalog indexing for a newly-created datasource.
+    ///
+    /// This is the provider-agnostic entry point called by the datasource
+    /// creation route right after a new datasource is persisted. It:
+    ///
+    /// 1. Looks up the workspace owner's email so the credential resolver
+    ///    can fall back to the owner's stored per-user credentials if neither
+    ///    `indexing_credentials` nor shared credentials are configured.
+    /// 2. Waits for the embedding model to finish loading.
+    /// 3. Dispatches to [`index_datasource`], which routes through the
+    ///    polymorphic [`CatalogIndexer`] trait — no per-provider branching.
+    ///
+    /// The rate limit check (`can_refresh_now`) is intentionally skipped:
+    /// this is the *initial* index for a brand-new datasource, so there is
+    /// nothing to rate-limit. Any failure (missing credentials, unreachable
+    /// database, permission errors) is logged — the datasource row is left
+    /// in place so the user can fix credentials and retry via the manual
+    /// refresh button.
+    ///
+    /// Credential resolution order (handled by `resolve_indexing_credentials`
+    /// in `catalog/traits.rs`):
+    /// 1. `indexing_credentials` from connection_config (dedicated indexer creds)
+    /// 2. Shared workspace credentials
+    /// 3. Workspace owner's stored per-user credentials
+    ///
+    /// [`index_datasource`]: Self::index_datasource
+    /// [`CatalogIndexer`]: crate::catalog::traits::CatalogIndexer
+    pub fn spawn_post_create(
+        db: kyomi_core::DbPool,
+        encryption_key: Arc<[u8; 32]>,
+        embedding: kyomi_embed::LazyEmbedding,
+        workspace_id: String,
+        datasource_id: String,
+    ) {
+        tokio::spawn(async move {
+            // Resolve workspace owner email so the third-tier credential
+            // fallback (owner's stored creds) can run if shared/dedicated
+            // creds aren't configured.
+            let owner_email =
+                kyomi_auth::catalog::helpers::get_workspace_owner_email(&db, &workspace_id).await;
+
+            let embed = match embedding.wait_ready().await {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(
+                        datasource_id = %datasource_id,
+                        workspace_id = %workspace_id,
+                        error = %e,
+                        "Embedding model not ready, skipping initial catalog indexing"
+                    );
+                    return;
+                }
+            };
+
+            let result = Self::index_datasource(IndexDatasourceParams {
+                db: &db,
+                encryption_key,
+                embedding: embed,
+                workspace_id: &workspace_id,
+                datasource_config_id: &datasource_id,
+                user_email: owner_email.as_deref(),
+                credentials: None,
+                max_tables_per_dataset: None,
+            })
+            .await;
+
+            info!(
+                datasource_id = %datasource_id,
+                workspace_id = %workspace_id,
+                status = ?result.status,
+                tables = result.tables_indexed,
+                "Initial catalog indexing completed for new datasource"
+            );
+        });
+    }
+
     /// Spawn background post-creation tasks for a new analytics site.
     ///
     /// Performs two operations in a background `tokio::spawn`:
