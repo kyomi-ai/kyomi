@@ -769,9 +769,14 @@ pub fn AlertsHistory(
                                         // Agent response for expanded content
                                         let agent_response = alert.agent_response.clone().unwrap_or_default();
 
-                                        // Card classes — matches React exactly
+                                        // Card classes. `shadow-sm` gives the list items
+                                        // perceptual lift off `bg-background` — without it
+                                        // `bg-card` (#ffffff) on `bg-background` (#FAFAF8)
+                                        // is too subtle to read as "separate surface" in
+                                        // light mode. Matches the lift chat message cards
+                                        // get from their `shadow` class.
                                         let card_class = format!(
-                                            "rounded-lg border overflow-hidden {}{}",
+                                            "rounded-lg border overflow-hidden shadow-sm {}{}",
                                             if is_deleted {
                                                 "opacity-60 border-border bg-muted/30"
                                             } else if is_unread {
