@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Middleware stack — CORS, security headers, request logging.
+//! Middleware stack — CORS, security headers, request logging,
+//! transparent access-token auto-refresh.
 //!
 //! All configuration values are read from `shared/constants.toml` via
 //! `kyomi_core::constants`. Nothing is hardcoded here.
+
+pub mod auth_refresh;
+
+pub use auth_refresh::auth_refresh_middleware;
 
 use axum::{
     body::Body,

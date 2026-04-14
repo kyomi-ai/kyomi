@@ -19,6 +19,7 @@ use kyomi_auth::{
     jwt,
     middleware::AuthUser,
     rate_limiter,
+    token_refresh,
     token_service::{self, DeviceInfo, RefreshTokenVerifyResult},
     user_service,
 };
@@ -50,7 +51,7 @@ pub fn routes() -> Router<AppState> {
 // Helper: extract device info from headers
 // ---------------------------------------------------------------------------
 
-fn extract_device_info(headers: &HeaderMap) -> DeviceInfo {
+pub(crate) fn extract_device_info(headers: &HeaderMap) -> DeviceInfo {
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
@@ -151,78 +152,32 @@ async fn refresh_token(
         ));
     }
 
-    // Verify refresh token (handles grace period + theft detection)
-    let verify_result = token_service::verify_refresh_token(&state.db, &refresh_token_value).await?;
-
-    let user_data = match verify_result {
-        RefreshTokenVerifyResult::Valid(data)
-        | RefreshTokenVerifyResult::GracePeriod(data) => data,
-        RefreshTokenVerifyResult::TheftDetected { .. } => {
-            return Err(kyomi_core::Error::Unauthorized(
-                "Refresh token has been revoked (possible token theft detected)".into(),
-            ));
-        }
-        RefreshTokenVerifyResult::Invalid => {
-            return Err(kyomi_core::Error::Unauthorized(
-                "Invalid or expired refresh token".into(),
-            ));
-        }
-    };
-
-    // Get workspace context for the user
-    let mut extra = std::collections::HashMap::new();
-    extra.insert("user_id".into(), serde_json::json!(user_data.user_id));
-    extra.insert("email".into(), serde_json::json!(user_data.email));
-    extra.insert("name".into(), serde_json::json!(user_data.name));
-    extra.insert("roles".into(), serde_json::json!(user_data.roles));
-
-    // Load workspace context
-    if let Ok(Some((ws, wu))) = user_service::get_user_workspace_context(&state.db, &user_data.user_id).await {
-        extra.insert("workspace_id".into(), serde_json::json!(ws.workspace_id));
-        extra.insert("workspace_roles".into(), serde_json::json!(vec![wu.role]));
-    }
-
-    // Create new access token
-    let jwt_config = &kyomi_core::constants::get().jwt;
-    let new_access_token = jwt::create_access_token_str(
-        &user_data.user_id,
-        &state.config.jwt_secret,
-        jwt_config.access_token_expire_minutes,
-        extra,
-    )?;
-
-    // Always rotate: every tab gets a fresh token (prevents multi-tab sign-out bug)
-    let new_raw_refresh = jwt::create_refresh_token();
-    let new_token_hash = token_service::hash_refresh_token(&new_raw_refresh);
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(jwt_config.refresh_token_expire_days);
-
-    token_service::rotate_refresh_token(
+    // Shared refresh-token flow (verify + mint + rotate).
+    let refreshed = token_refresh::refresh_tokens(
         &state.db,
-        &user_data.token_id,
-        &user_data.user_id,
-        &user_data.family_id,
-        &new_token_hash,
-        expires_at,
+        &state.config.jwt_secret,
+        &refresh_token_value,
         &device,
-    ).await?;
+    )
+    .await?;
 
     // Set cookies
     let mut response_headers = HeaderMap::new();
     cookies::set_token_cookies(
         &mut response_headers,
-        Some(&new_access_token),
-        Some(&new_raw_refresh),
+        Some(&refreshed.access_token),
+        Some(&refreshed.raw_refresh_token),
     );
 
     let body = serde_json::json!({
-        "access_token": new_access_token,
+        "access_token": refreshed.access_token,
         "token_type": "bearer",
-        "expires_in": jwt_config.access_token_expire_minutes * 60,
+        "expires_in": refreshed.access_expires_in_secs,
         "user": {
-            "user_id": user_data.user_id,
-            "email": user_data.email,
-            "name": user_data.name,
-            "roles": user_data.roles,
+            "user_id": refreshed.user_id,
+            "email": refreshed.email,
+            "name": refreshed.name,
+            "roles": refreshed.roles,
         }
     });
 

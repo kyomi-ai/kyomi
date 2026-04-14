@@ -230,6 +230,14 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
             }
         }))
         .fallback(leptos_frontend::serve)
+        // Transparent access-token auto-refresh — must be applied BEFORE
+        // `.with_state()` so it can access `AppState` via `from_fn_with_state`.
+        // On requests without any auth cookies this is a cheap no-op, so it is
+        // safe to layer globally.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_refresh_middleware,
+        ))
         .with_state(state)
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::Extension(middleware::DemoModeFlag(demo_mode)))

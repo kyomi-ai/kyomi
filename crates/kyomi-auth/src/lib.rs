@@ -45,6 +45,7 @@ pub mod sql_history_service;
 pub mod stripe_config;
 pub mod stripe_service;
 pub mod totp;
+pub mod token_refresh;
 pub mod token_service;
 pub mod user_service;
 pub mod watch_service;
