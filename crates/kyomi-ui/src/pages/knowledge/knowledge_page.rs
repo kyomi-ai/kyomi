@@ -12,8 +12,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
 use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
@@ -185,7 +184,7 @@ pub fn KnowledgePage() -> impl IntoView {
                         aria_label=MaybeProp::from(Some("Manage Collections".to_string()))
                         on:click=move |_| set_collections_open.update(|v| *v = !*v)
                     >
-                        <Icon icon=icondata_lu::LuLayers width="16" height="16" />
+                        <Icon icon=phosphor_leptos::STACK size="16px" />
                         <span class="hidden sm:inline">"Collections"</span>
                     </ToggleButton>
 
@@ -199,7 +198,7 @@ pub fn KnowledgePage() -> impl IntoView {
                             when=move || !creating.get()
                             fallback=|| view! { <Spinner class="text-primary-foreground" /> }
                         >
-                            <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                            <Icon icon=phosphor_leptos::PLUS size="14px" />
                         </Show>
                         <span class="hidden sm:inline whitespace-nowrap">"New Document"</span>
                     </Button>
@@ -300,7 +299,7 @@ pub fn KnowledgePage() -> impl IntoView {
 #[component]
 fn KnowledgeIcon() -> impl IntoView {
     view! {
-        <Icon icon=icondata_lu::LuBookOpen attr:class="w-12 h-12" />
+        <Icon icon=phosphor_leptos::BOOK_OPEN attr:class="w-12 h-12" />
     }
 }
 
@@ -328,7 +327,7 @@ fn KnowledgeEmptyState(
                         description="What does your team need to know? Create your first knowledge document."
                         action=Arc::new(move || view! {
                             <Button on:click=move |ev| on_create.run(ev)>
-                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                <Icon icon=phosphor_leptos::PLUS size="14px" />
                                 "Create Your First Document"
                             </Button>
                         }.into_any())

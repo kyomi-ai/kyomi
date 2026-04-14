@@ -55,10 +55,11 @@ leptos_axum = { version = "0.8", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Icons — Lucide icon set (same as lucide-react in the React frontend)
-leptos_icons = "0.7"
-icondata_core = "0.1"
-icondata_lu = "0.1"
+# Icons — Phosphor icon set. Uses the Light weight for inactive nav items
+# and the Fill weight for active nav items (see NavItem in components/layout.rs).
+# DESIGN.md convention: Light for form/utility icons, Regular for buttons,
+# Fill for active-state moments, Duotone for brand illustrations at 64px+.
+phosphor-leptos = "0.8"
 
 # WASM error handling (client-only, but always compiled — no-op on server)
 console_error_panic_hook = "0.1"

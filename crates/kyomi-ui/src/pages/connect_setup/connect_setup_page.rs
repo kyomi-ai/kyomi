@@ -17,7 +17,7 @@
 //!    local callback server automatically.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use leptos_router::hooks::use_query_map;
 use wasm_bindgen::JsCast;
 
@@ -499,7 +499,7 @@ fn SelectStep(
                         }
                     >
                         <span class="h-4 w-4 inline-flex items-center justify-center">
-                            <Icon icon=icondata_lu::LuPlus/>
+                            <Icon icon=phosphor_leptos::PLUS/>
                         </span>
                         "Create new datasource"
                     </Button>
@@ -545,7 +545,7 @@ fn CreateStep(
                 class="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground transition-colors -mt-1 mb-2"
             >
                 <span class="h-3.5 w-3.5 inline-flex items-center justify-center">
-                    <Icon icon=icondata_lu::LuArrowLeft/>
+                    <Icon icon=phosphor_leptos::ARROW_LEFT/>
                 </span>
                 "Back"
             </button>
@@ -692,7 +692,7 @@ fn SuccessStep(
             <Show when=move || has_callback.get() && delivery_status.get() == Some(DeliveryStatus::Delivered)>
                 <div class="flex items-center justify-center gap-2 text-sm text-foreground py-2">
                     <span class="h-5 w-5 text-green-500 inline-flex items-center justify-center">
-                        <Icon icon=icondata_lu::LuCircleCheck/>
+                        <Icon icon=phosphor_leptos::CHECK_CIRCLE/>
                     </span>
                     "Token delivered to CLI. You can close this tab."
                 </div>
@@ -773,13 +773,13 @@ fn CopyButton(
                 if copied.get() {
                     view! {
                         <span class="h-4 w-4 text-green-500 inline-flex items-center justify-center">
-                            <Icon icon=icondata_lu::LuCheck/>
+                            <Icon icon=phosphor_leptos::CHECK/>
                         </span>
                     }.into_any()
                 } else {
                     view! {
                         <span class="h-4 w-4 inline-flex items-center justify-center">
-                            <Icon icon=icondata_lu::LuCopy/>
+                            <Icon icon=phosphor_leptos::COPY/>
                         </span>
                     }.into_any()
                 }
@@ -804,7 +804,7 @@ fn DatasourceIconInline(ds_type: String, #[prop(default = false)] small: bool) -
 
     view! {
         <span class=class>
-            <Icon icon=icondata_lu::LuDatabase/>
+            <Icon icon=phosphor_leptos::DATABASE/>
         </span>
     }
 }

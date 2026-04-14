@@ -9,8 +9,7 @@
 //! CSS classes are copied verbatim from the React source.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 
 /// Inline editable title component.
@@ -115,7 +114,7 @@ pub fn InlineEditableTitle(
                                 if v.is_empty() { placeholder.to_string() } else { v }
                             }}
                         </span>
-                        <Icon icon=icondata_lu::LuPencil attr:class="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" width="16" height="16" />
+                        <Icon icon=phosphor_leptos::PENCIL_SIMPLE attr:class="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" size="16px" />
                     </button>
                 }
             }
@@ -159,7 +158,7 @@ pub fn InlineEditableTitle(
                     attr:class="h-7 w-7 flex-shrink-0"
                     on:click=move |_| handle_save()
                 >
-                    <Icon icon=icondata_lu::LuCheck width="16" height="16" />
+                    <Icon icon=phosphor_leptos::CHECK size="16px" />
                 </Button>
                 // Cancel button (X icon)
                 <Button
@@ -168,7 +167,7 @@ pub fn InlineEditableTitle(
                     attr:class="h-7 w-7 flex-shrink-0"
                     on:click=move |_| handle_cancel()
                 >
-                    <Icon icon=icondata_lu::LuX width="16" height="16" />
+                    <Icon icon=phosphor_leptos::X size="16px" />
                 </Button>
             </div>
         </Show>

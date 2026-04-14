@@ -36,8 +36,7 @@ pub use types::{
 // ─── Page-level component ────────────────────────────────────────────────────
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 #[cfg(target_arch = "wasm32")]
 use kode_leptos::EditorHandle;
 
@@ -331,7 +330,7 @@ pub fn SqlEditorPage() -> impl IntoView {
                         aria_label="Toggle catalog sidebar"
                         on:click=toggle_sidebar
                     >
-                        <Icon icon=icondata_lu::LuDatabase width="16" height="16" />
+                        <Icon icon=phosphor_leptos::DATABASE size="16px" />
                         <span class="hidden sm:inline whitespace-nowrap">"Catalog"</span>
                     </ToggleButton>
                 </div>
@@ -340,7 +339,7 @@ pub fn SqlEditorPage() -> impl IntoView {
             // ── "No datasource" banner ────────────────────────────────────
             <Show when=move || !has_datasource.get()>
                 <div class="px-4 md:px-6 py-2 bg-warning/10 border-b border-warning/30 flex items-center gap-2 text-sm text-warning-foreground flex-shrink-0">
-                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="flex-shrink-0" width="16" height="16" />
+                    <Icon icon=phosphor_leptos::WARNING attr:class="flex-shrink-0" size="16px" />
                     <span>"No datasource selected. "</span>
                     <a href="/settings" class="text-primary hover:underline font-medium">"Connect a datasource in Settings"</a>
                     <span>" to start querying."</span>

@@ -8,8 +8,7 @@
 //! timezone but stored as UTC cron expressions.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{DynSelect, Label, Switch, INPUT_CLASS};
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes, local_hour_to_utc, utc_to_local_hour};
 
@@ -559,7 +558,7 @@ pub fn ScheduleSelector(
             <div class="flex items-center justify-between">
                 <Label>
                     <span class="flex items-center gap-2">
-                        <Icon icon=icondata_lu::LuClock attr:class="h-4 w-4"/>
+                        <Icon icon=phosphor_leptos::CLOCK attr:class="h-4 w-4"/>
                         "Schedule"
                     </span>
                 </Label>
@@ -575,7 +574,7 @@ pub fn ScheduleSelector(
                             />
                         }
                     }}
-                    <Icon icon=icondata_lu::LuCode attr:class="h-4 w-4 text-muted-foreground"/>
+                    <Icon icon=phosphor_leptos::CODE attr:class="h-4 w-4 text-muted-foreground"/>
                 </div>
             </div>
 
@@ -821,7 +820,7 @@ pub fn ScheduleSelector(
                     <div class=container_class>
                         <div class="flex items-start gap-2">
                             {(!desc.valid).then(|| view! {
-                                <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
+                                <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
                             })}
                             <div class="flex-1">
                                 <span class=text_class>{desc.description}</span>

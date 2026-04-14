@@ -14,8 +14,7 @@
 //! State machine: Verifying | Ready | Creating | Success | Error
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
     ButtonVariant,
@@ -254,7 +253,7 @@ fn ready_view(
         <div class="space-y-6">
             <div class="text-center">
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                    <Icon icon=icondata_lu::LuKeyRound attr:class="w-8 h-8 text-primary"/>
+                    <Icon icon=phosphor_leptos::KEY attr:class="w-8 h-8 text-primary"/>
                 </div>
             </div>
             // Show email if available
@@ -321,7 +320,7 @@ fn success_view() -> impl IntoView {
         <div class="space-y-4">
             <div class="text-center">
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-6">
-                    <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
+                    <Icon icon=phosphor_leptos::CHECK attr:class="w-8 h-8 text-success-foreground"/>
                 </div>
             </div>
             // Branded moment (auth page) — DESIGN.md Loading State Pattern
@@ -339,7 +338,7 @@ fn error_view() -> impl IntoView {
         <div class="space-y-4">
             <div class="text-center">
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-6">
-                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
+                    <Icon icon=phosphor_leptos::WARNING attr:class="w-8 h-8 text-error-foreground"/>
                 </div>
             </div>
             <ButtonLink href="/auth/recover-passkey" variant=ButtonVariant::Default class="w-full">

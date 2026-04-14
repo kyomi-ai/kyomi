@@ -10,8 +10,7 @@
 //! - Empty state: "No datasources available" with link to settings
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{DynSelect, Spinner};
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
@@ -138,7 +137,7 @@ pub fn DatasourceSelector() -> impl IntoView {
                     href="/settings"
                     class="inline-flex items-center gap-1 text-primary hover:underline"
                 >
-                    <Icon icon=icondata_lu::LuSettings width="12" height="12" />
+                    <Icon icon=phosphor_leptos::GEAR size="12px" />
                     <span>"Connect in Settings"</span>
                 </a>
             </div>

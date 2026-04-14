@@ -7,7 +7,7 @@
 
 use leptos::prelude::*;
 use leptos::tachys::view::any_view::AnyView;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use serde_json::Value;
 
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
@@ -1833,9 +1833,9 @@ fn render_watch_info(schema: &Value) -> impl IntoView {
                                                 let error_message = str_field(exec, "error_message").map(String::from);
 
                                                 let status_icon = match status.as_str() {
-                                                    "success" => view! { <Icon icon=icondata_lu::LuCircleCheck width="12" height="12" attr:class="text-success-foreground" /> }.into_any(),
-                                                    "error" => view! { <Icon icon=icondata_lu::LuCircleX width="12" height="12" attr:class="text-error-foreground" /> }.into_any(),
-                                                    _ => view! { <Icon icon=icondata_lu::LuCircle width="12" height="12" attr:class="text-muted-foreground" /> }.into_any(),
+                                                    "success" => view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE size="12px" attr:class="text-success-foreground" /> }.into_any(),
+                                                    "error" => view! { <Icon icon=phosphor_leptos::X_CIRCLE size="12px" attr:class="text-error-foreground" /> }.into_any(),
+                                                    _ => view! { <Icon icon=phosphor_leptos::CIRCLE size="12px" attr:class="text-muted-foreground" /> }.into_any(),
                                                 };
 
                                                 view! {

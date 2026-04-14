@@ -226,10 +226,10 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
         async move { update_theme(theme).await }
     });
 
-    static THEME_OPTIONS: &[(&str, &str, &icondata_core::IconData)] = &[
-        ("light", "Light", icondata_lu::LuSun),
-        ("dark", "Dark", icondata_lu::LuMoon),
-        ("system", "System", icondata_lu::LuMonitor),
+    static THEME_OPTIONS: &[(&str, &str, phosphor_leptos::IconData)] = &[
+        ("light", "Light", phosphor_leptos::SUN),
+        ("dark", "Dark", phosphor_leptos::MOON),
+        ("system", "System", phosphor_leptos::MONITOR),
     ];
 
     view! {
@@ -242,8 +242,17 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
                 <div class="flex flex-wrap gap-3">
                     {THEME_OPTIONS.iter().map(|(value, label, icon_data)| {
                         let value_str = value.to_string();
+                        let value_for_weight = value.to_string();
                         let value_for_click = value.to_string();
                         let label_str = label.to_string();
+                        let icon = *icon_data;
+                        let theme_weight = Memo::new(move |_| {
+                            if current_theme.get() == value_for_weight {
+                                phosphor_leptos::IconWeight::Fill
+                            } else {
+                                phosphor_leptos::IconWeight::Light
+                            }
+                        });
                         view! {
                             <button
                                 class=move || {
@@ -268,7 +277,7 @@ fn AppearanceCard(data: ProfileData) -> impl IntoView {
                                     }
                                 }
                             >
-                                <leptos_icons::Icon icon=*icon_data width="16" height="16"/>
+                                <phosphor_leptos::Icon icon=icon weight=theme_weight size="16px"/>
                                 <span>{label_str}</span>
                             </button>
                         }
@@ -572,7 +581,7 @@ fn McpConnectionCard(is_personal: bool) -> impl IntoView {
             <CardHeader>
                 <CardTitle>
                     <span class="flex items-center gap-2">
-                        <leptos_icons::Icon icon=icondata_lu::LuPlug width="20" height="20"/>
+                        <phosphor_leptos::Icon icon=phosphor_leptos::PLUG weight=phosphor_leptos::IconWeight::Light size="20px"/>
                         "MCP Connection"
                     </span>
                 </CardTitle>
@@ -664,7 +673,7 @@ fn McpConnectionCard(is_personal: bool) -> impl IntoView {
                                         target="_blank"
                                         class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-secondary transition-colors"
                                     >
-                                        <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                                        <phosphor_leptos::Icon icon=phosphor_leptos::ARROW_SQUARE_OUT weight=phosphor_leptos::IconWeight::Light size="16px"/>
                                         "Connect with Cursor"
                                     </a>
                                 }.into_any()
@@ -676,7 +685,7 @@ fn McpConnectionCard(is_personal: bool) -> impl IntoView {
                                         href="#"
                                         class="inline-flex items-center gap-2 px-4 py-2 rounded-md border border-border text-sm font-medium text-foreground hover:bg-secondary transition-colors"
                                     >
-                                        <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                                        <phosphor_leptos::Icon icon=phosphor_leptos::ARROW_SQUARE_OUT weight=phosphor_leptos::IconWeight::Light size="16px"/>
                                         "Connect with Cursor"
                                     </a>
                                 }.into_any()
@@ -727,9 +736,9 @@ fn CopyButton(text: String) -> impl IntoView {
         >
             {move || {
                 if copied.get() {
-                    view! { <leptos_icons::Icon icon=icondata_lu::LuCopyCheck width="16" height="16"/> }.into_any()
+                    view! { <phosphor_leptos::Icon icon=phosphor_leptos::CHECK weight=phosphor_leptos::IconWeight::Bold size="16px"/> }.into_any()
                 } else {
-                    view! { <leptos_icons::Icon icon=icondata_lu::LuCopy width="16" height="16"/> }.into_any()
+                    view! { <phosphor_leptos::Icon icon=phosphor_leptos::COPY weight=phosphor_leptos::IconWeight::Light size="16px"/> }.into_any()
                 }
             }}
         </button>

@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use wasm_bindgen::JsCast;
 
 use super::types::{ColumnMetadata, QueryResult};
@@ -515,14 +515,14 @@ fn PaginationControls(
                         disabled=MaybeProp::derive(move || Some(is_first))
                         aria_label="First page" on:click=move |_| on_page_change.run(1)
                     >
-                        <Icon icon=icondata_lu::LuChevronsLeft width="16" height="16" />
+                        <Icon icon=phosphor_leptos::CARET_DOUBLE_LEFT size="16px" />
                     </Button>
                     <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
                         disabled=MaybeProp::derive(move || Some(is_first))
                         aria_label="Previous page"
                         on:click=move |_| on_page_change.run(current_page.saturating_sub(1).max(1))
                     >
-                        <Icon icon=icondata_lu::LuChevronLeft width="16" height="16" />
+                        <Icon icon=phosphor_leptos::CARET_LEFT size="16px" />
                     </Button>
                     <span class="text-xs px-2 text-muted-foreground">
                         "Page "{current_page}
@@ -537,13 +537,13 @@ fn PaginationControls(
                         aria_label="Next page"
                         on:click=move |_| on_page_change.run((current_page + 1).min(total_pages))
                     >
-                        <Icon icon=icondata_lu::LuChevronRight width="16" height="16" />
+                        <Icon icon=phosphor_leptos::CARET_RIGHT size="16px" />
                     </Button>
                     <Button variant=ButtonVariant::GhostMuted size=ButtonSize::IconSm
                         disabled=MaybeProp::derive(move || Some(is_last))
                         aria_label="Last page" on:click=move |_| on_page_change.run(total_pages)
                     >
-                        <Icon icon=icondata_lu::LuChevronsRight width="16" height="16" />
+                        <Icon icon=phosphor_leptos::CARET_DOUBLE_RIGHT size="16px" />
                     </Button>
                 </div>
             </div>

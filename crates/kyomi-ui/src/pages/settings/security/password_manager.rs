@@ -12,8 +12,7 @@
 //! - Success/error feedback
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonVariant, Card, CardContent,
     CardDescription, CardHeader, CardTitle, Label, Skeleton, INPUT_CLASS,
@@ -68,9 +67,9 @@ fn PasswordField(
                 >
                     <Show
                         when=move || visible.get()
-                        fallback=|| view! { <Icon icon=icondata_lu::LuEye width="16" height="16"/> }
+                        fallback=|| view! { <Icon icon=phosphor_leptos::EYE size="16px"/> }
                     >
-                        <Icon icon=icondata_lu::LuEyeOff width="16" height="16"/>
+                        <Icon icon=phosphor_leptos::EYE_SLASH size="16px"/>
                     </Show>
                 </button>
             </div>
@@ -214,7 +213,7 @@ pub fn PasswordManager() -> impl IntoView {
                                                 view! { <span>"Change Password"</span> }.into_any()
                                             } else {
                                                 view! {
-                                                    <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
+                                                    <Icon icon=phosphor_leptos::PLUS size="16px"/>
                                                     <span>"Set Password"</span>
                                                 }
                                                     .into_any()

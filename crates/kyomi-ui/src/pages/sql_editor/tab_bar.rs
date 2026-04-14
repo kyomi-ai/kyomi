@@ -7,8 +7,7 @@
 //! pin button, and close button. Double-click restores query + datasource.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, ButtonVariant, Spinner};
 use super::state::SqlEditorState;
 use super::types::{QueryStatus, ResultTab};
@@ -264,7 +263,7 @@ fn SingleTab(
             // Status icon: info circle for error
             {has_error.then(|| {
                 view! {
-                    <Icon icon=icondata_lu::LuInfo attr:class="w-3 h-3 text-info-foreground flex-shrink-0" />
+                    <Icon icon=phosphor_leptos::INFO attr:class="w-3 h-3 text-info-foreground flex-shrink-0" />
                 }
             })}
 
@@ -285,11 +284,11 @@ fn SingleTab(
             >
                 {if pinned {
                     view! {
-                        <Icon icon=icondata_lu::LuPin attr:class="w-3.5 h-3.5" />
+                        <Icon icon=phosphor_leptos::PUSH_PIN attr:class="w-3.5 h-3.5" />
                     }.into_any()
                 } else {
                     view! {
-                        <Icon icon=icondata_lu::LuBookmark attr:class="w-3.5 h-3.5" />
+                        <Icon icon=phosphor_leptos::BOOKMARK attr:class="w-3.5 h-3.5" />
                     }.into_any()
                 }}
             </Button>
@@ -305,7 +304,7 @@ fn SingleTab(
                     on_close();
                 }
             >
-                <Icon icon=icondata_lu::LuX attr:class="w-3.5 h-3.5" />
+                <Icon icon=phosphor_leptos::X attr:class="w-3.5 h-3.5" />
             </Button>
 
             // Active tab indicator (colored bottom border)

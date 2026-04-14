@@ -11,8 +11,7 @@
 //! (lines 35-203). CSS classes are copied verbatim from the React source.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::chat::{AgentThinking, ThinkingState};
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::Tooltip;
@@ -273,7 +272,7 @@ pub fn ChatMessage(
                                     aria-label=move || if is_pinned.get() { "Unpin message" } else { "Pin message" }
                                     on:click=move |_| on_toggle_pin.run(message_id_for_pin.get_value())
                                 >
-                                    <Icon icon=icondata_lu::LuStar attr:class=move || if is_pinned.get() { "fill-current" } else { "" } width="16" height="16" />
+                                    <Icon icon=phosphor_leptos::STAR attr:class=move || if is_pinned.get() { "fill-current" } else { "" } size="16px" />
                                 </button>
                             </Tooltip>
                             <Tooltip content="Save to Dashboard">
@@ -282,7 +281,7 @@ pub fn ChatMessage(
                                     aria-label="Save to Dashboard"
                                     on:click=move |_| on_open_dashboard_modal.run(message_content_for_save.get_value())
                                 >
-                                    <Icon icon=icondata_lu::LuDownload width="16" height="16" />
+                                    <Icon icon=phosphor_leptos::DOWNLOAD_SIMPLE size="16px" />
                                     <span>"Save to Dashboard"</span>
                                 </button>
                             </Tooltip>

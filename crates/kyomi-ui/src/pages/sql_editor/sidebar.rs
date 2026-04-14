@@ -9,7 +9,7 @@
 //! - On mobile (<768px): slide-in overlay with backdrop
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -287,8 +287,8 @@ pub fn SqlEditorSidebar(
                                 on:click=handle_refresh_catalog
                             >
                                 <Icon
-                                    icon=icondata_lu::LuRefreshCw
-                                    width="14" height="14"
+                                    icon=phosphor_leptos::ARROWS_CLOCKWISE
+                                    size="14px"
                                     attr:class=move || if refreshing_catalog.get() { "animate-spin" } else { "" }
                                 />
                             </Button>
@@ -300,7 +300,7 @@ pub fn SqlEditorSidebar(
                             aria_label="Close sidebar"
                             on:click=close_sidebar
                         >
-                            <Icon icon=icondata_lu::LuX width="16" height="16" />
+                            <Icon icon=phosphor_leptos::X size="16px" />
                         </Button>
                     </div>
                 </div>

@@ -10,8 +10,7 @@
 //! - Error message display if execution errored
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{Badge, BadgeVariant, Spinner};
 use crate::types::WatchExecutionItem;
@@ -278,7 +277,7 @@ pub fn ExecutionLogViewer(
                         {error_message.clone().map(|err_msg| view! {
                             <div class="p-3 bg-error/10 border border-error-border rounded-lg">
                                 <div class="flex items-start gap-2">
-                                    <Icon icon=icondata_lu::LuCircleX attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
+                                    <Icon icon=phosphor_leptos::X_CIRCLE attr:class="h-4 w-4 text-error-foreground mt-0.5 shrink-0"/>
                                     <div>
                                         <p class="text-sm font-medium text-error-foreground">"Execution Error"</p>
                                         <p class="text-sm text-error-foreground/80 mt-1">{err_msg}</p>

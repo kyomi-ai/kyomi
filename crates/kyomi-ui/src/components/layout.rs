@@ -12,7 +12,7 @@
 //! - User Menu: avatar + name + workspace, dropdown with Settings/Help/Feedback/Logout
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 
@@ -446,7 +446,7 @@ fn Sidebar(
                         on:click=move |_| set_collapsed.update(|c| *c = !*c)
                         class="p-3 hover:bg-[var(--color-sidebar-hover)] rounded-md transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     >
-                        <span class="text-[var(--color-sidebar-foreground-secondary)]"><Icon icon=icondata_lu::LuPanelLeft width="20" height="20"/></span>
+                        <span class="text-[var(--color-sidebar-foreground-secondary)]"><Icon icon=phosphor_leptos::SIDEBAR weight=IconWeight::Light size="20px"/></span>
                     </button>
                     // Logo — full logo to the right of the toggle, fades when collapsed.
                     // React: kyomi_full_logo_white.svg at h-12 in expanded mode.
@@ -479,7 +479,7 @@ fn Sidebar(
                         }
                     >
                         <div class="w-5 h-5 rounded-full flex items-center justify-center bg-primary flex-shrink-0">
-                            <span class="text-primary-foreground"><Icon icon=icondata_lu::LuPlus width="12" height="12"/></span>
+                            <span class="text-primary-foreground"><Icon icon=phosphor_leptos::PLUS weight=IconWeight::Bold size="12px"/></span>
                         </div>
                         <span
                             class="text-sm font-medium text-[var(--color-sidebar-foreground)] whitespace-nowrap overflow-hidden transition-opacity duration-300"
@@ -489,11 +489,11 @@ fn Sidebar(
                         </span>
                     </a>
 
-                    <NavItem href="/chats" icon=icondata_lu::LuMessagesSquare label="Chats" collapsed=effective_collapsed/>
-                    <NavItem href="/dashboards" icon=icondata_lu::LuChartBar label="Dashboards" collapsed=effective_collapsed/>
+                    <NavItem href="/chats" icon=phosphor_leptos::CHATS label="Chats" collapsed=effective_collapsed/>
+                    <NavItem href="/dashboards" icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed/>
                     <NavItem
                         href="/watches"
-                        icon=icondata_lu::LuEye
+                        icon=phosphor_leptos::EYE
                         label="Watches"
                         collapsed=effective_collapsed
                         badge_count=Signal::derive(move || {
@@ -504,8 +504,8 @@ fn Sidebar(
                             }
                         })
                     />
-                    <NavItem href="/knowledge" icon=icondata_lu::LuBookOpen label="Knowledge" collapsed=effective_collapsed/>
-                    <NavItem href="/sql-editor" icon=icondata_lu::LuDatabase label="SQL Editor" collapsed=effective_collapsed/>
+                    <NavItem href="/knowledge" icon=phosphor_leptos::BOOK_OPEN label="Knowledge" collapsed=effective_collapsed/>
+                    <NavItem href="/sql-editor" icon=phosphor_leptos::DATABASE label="SQL Editor" collapsed=effective_collapsed/>
                 </div>
 
                 // ── Recent Chats ───────────────────────────────────────────
@@ -617,7 +617,7 @@ fn Sidebar(
                                 >
                                     <div class="w-6 h-6 bg-primary rounded-full flex items-center justify-center flex-shrink-0">
                                         {if is_personal_avatar {
-                                            view! { <span class="text-primary-foreground"><Icon icon=icondata_lu::LuSettings width="14" height="14"/></span> }.into_any()
+                                            view! { <span class="text-primary-foreground"><Icon icon=phosphor_leptos::GEAR weight=IconWeight::Fill size="14px"/></span> }.into_any()
                                         } else {
                                             view! { <span class="text-xs font-medium text-primary-foreground">{initial.clone()}</span> }.into_any()
                                         }}
@@ -641,7 +641,7 @@ fn Sidebar(
                                             format!("{visibility}{rotation}")
                                         }
                                     >
-                                        <Icon icon=icondata_lu::LuChevronDown width="16" height="16"/>
+                                        <Icon icon=phosphor_leptos::CARET_DOWN weight=IconWeight::Regular size="16px"/>
                                     </span>
                                 </button>
 
@@ -665,7 +665,7 @@ fn Sidebar(
                                             on:click=move |_| set_user_menu_open.set(false)
                                             class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
                                         >
-                                            <Icon icon=icondata_lu::LuSettings width="16" height="16"/>
+                                            <Icon icon=phosphor_leptos::GEAR weight=IconWeight::Light size="16px"/>
                                             <span>"Settings"</span>
                                         </a>
                                         <a
@@ -674,7 +674,7 @@ fn Sidebar(
                                             rel="noopener noreferrer"
                                             class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
                                         >
-                                            <Icon icon=icondata_lu::LuBookOpen width="16" height="16"/>
+                                            <Icon icon=phosphor_leptos::BOOK_OPEN weight=IconWeight::Light size="16px"/>
                                             <span>"Help & Docs"</span>
                                         </a>
                                         {if !is_personal {
@@ -686,7 +686,7 @@ fn Sidebar(
                                                     }
                                                     class="w-full text-left px-4 py-2 text-sm text-error-foreground transition-colors hover:bg-error/10 flex items-center space-x-3"
                                                 >
-                                                    <Icon icon=icondata_lu::LuLogOut width="16" height="16"/>
+                                                    <Icon icon=phosphor_leptos::SIGN_OUT weight=IconWeight::Light size="16px"/>
                                                     <span>"Logout"</span>
                                                 </button>
                                             })
@@ -715,7 +715,7 @@ fn Sidebar(
 #[component]
 fn NavItem(
     href: &'static str,
-    icon: &'static icondata_core::IconData,
+    icon: phosphor_leptos::IconData,
     label: &'static str,
     collapsed: Signal<bool>,
     /// Optional badge count (e.g. unread alerts). When > 0, shows a count badge
@@ -738,6 +738,13 @@ fn NavItem(
         }
     });
 
+    // Phosphor weight convention: Light when inactive, Fill when active.
+    // The state change is at the shape level, not just color — amber outline + amber fill
+    // makes Dashboards/Chats/etc unmistakable even when you squint.
+    let icon_weight = Memo::new(move |_| {
+        if is_active.get() { IconWeight::Fill } else { IconWeight::Light }
+    });
+
     view! {
         <a
             href=href
@@ -753,7 +760,7 @@ fn NavItem(
         >
             <div class="relative flex-shrink-0">
                 <span class="w-5 h-5 flex items-center justify-center">
-                    <Icon icon=icon width="20" height="20"/>
+                    <Icon icon=icon weight=icon_weight size="20px"/>
                 </span>
                 // Collapsed dot indicator — React: "absolute -top-1 -right-1 h-2 w-2 rounded-full bg-primary"
                 {move || (count.get() > 0 && collapsed.get()).then(|| view! {

@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use leptos_router::hooks::use_params_map;
 
 use crate::components::dashboard::{
@@ -154,7 +154,7 @@ fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<Editor
                 on:click=move |_| set_mode.set(EditorMode::Source)
                 aria-label="Source editor"
             >
-                <Icon icon=icondata_lu::LuCode attr:class="w-3.5 h-3.5" />
+                <Icon icon=phosphor_leptos::CODE attr:class="w-3.5 h-3.5" />
                 <span class="hidden sm:inline">"Source"</span>
             </button>
             <button
@@ -169,7 +169,7 @@ fn editor_mode_toggle(mode: ReadSignal<EditorMode>, set_mode: WriteSignal<Editor
                 on:click=move |_| set_mode.set(EditorMode::Visual)
                 aria-label="Visual editor"
             >
-                <Icon icon=icondata_lu::LuEye attr:class="w-3.5 h-3.5" />
+                <Icon icon=phosphor_leptos::EYE attr:class="w-3.5 h-3.5" />
                 <span class="hidden sm:inline">"Visual"</span>
             </button>
         </div>
@@ -616,7 +616,7 @@ fn DashboardEditorInner(
                     <ButtonLink href=list_href().to_string() variant=ButtonVariant::Ghost size=ButtonSize::Icon
                         class="flex-shrink-0 text-muted-foreground hover:text-foreground"
                         aria_label=(if is_knowledge.get() { "Back to knowledge" } else { "Back to dashboards" }).to_string()>
-                        <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+                        <Icon icon=phosphor_leptos::CARET_LEFT size="18px" />
                     </ButtonLink>
 
                     <div class="min-w-0 flex-1">
@@ -674,7 +674,7 @@ fn DashboardEditorInner(
                                             }
                                         }
                                     >
-                                        <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                                        <Icon icon=phosphor_leptos::CLOCK size="14px" />
                                         <span class="hidden @6xl:inline whitespace-nowrap">"History"</span>
                                     </ToggleButton>
                                 </div>
@@ -701,7 +701,7 @@ fn DashboardEditorInner(
                                             }
                                         }
                                     >
-                                        <Icon icon=icondata_lu::LuSparkles width="14" height="14" />
+                                        <Icon icon=phosphor_leptos::SPARKLE size="14px" />
                                         <span class="hidden @6xl:inline whitespace-nowrap">"Copilot"</span>
                                     </ToggleButton>
                                 </div>
@@ -718,7 +718,7 @@ fn DashboardEditorInner(
                             nav(&href, leptos_router::NavigateOptions::default());
                         }
                     >
-                        <Icon icon=icondata_lu::LuX width="14" height="14" />
+                        <Icon icon=phosphor_leptos::X size="14px" />
                         <span class="hidden @6xl:inline whitespace-nowrap">"Close"</span>
                     </Button>
 
@@ -732,9 +732,9 @@ fn DashboardEditorInner(
                             if saving.get() {
                                 view! { <Spinner class="w-4 h-4" /> }.into_any()
                             } else if save_success.get() {
-                                view! { <Icon icon=icondata_lu::LuCheck width="14" height="14" /> }.into_any()
+                                view! { <Icon icon=phosphor_leptos::CHECK size="14px" /> }.into_any()
                             } else {
-                                view! { <Icon icon=icondata_lu::LuSave width="14" height="14" /> }.into_any()
+                                view! { <Icon icon=phosphor_leptos::FLOPPY_DISK size="14px" /> }.into_any()
                             }
                         }}
                         <span class="hidden @6xl:inline whitespace-nowrap">
@@ -872,7 +872,7 @@ fn DashboardEditorInner(
                             // Add Chart — uses kode-toolbar-button class to match builtins
                             ToolbarItem::Custom(CustomToolbarButton {
                                 label: view! {
-                                    <Icon icon=icondata_lu::LuChartColumnBig width="16" height="16" />
+                                    <Icon icon=phosphor_leptos::CHART_BAR size="16px" />
                                     <span class="hidden sm:inline">"Add Chart"</span>
                                 }.into_any(),
                                 title: "Add Chart".to_string(),
@@ -882,7 +882,7 @@ fn DashboardEditorInner(
                             // Link — uses kode-toolbar-button class to match builtins
                             ToolbarItem::Custom(CustomToolbarButton {
                                 label: view! {
-                                    <Icon icon=icondata_lu::LuLink width="16" height="16" />
+                                    <Icon icon=phosphor_leptos::LINK size="16px" />
                                     <span class="hidden sm:inline">"Link"</span>
                                 }.into_any(),
                                 title: if is_knowledge.get_untracked() { "Link to Document".to_string() } else { "Link to Dashboard".to_string() },

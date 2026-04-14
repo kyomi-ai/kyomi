@@ -15,8 +15,7 @@
 //! - Right side: cursor position (line and column)
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, Spinner};
 use crate::server_fns::sql_editor::DryRunResult;
 
@@ -78,7 +77,7 @@ pub fn StatusBar(
                             if result.valid {
                                 view! {
                                     <div class="flex items-center gap-2 text-xs" style="min-height: 20px">
-                                        <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground" />
+                                        <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-5 w-5 text-success-foreground" />
                                         <span class="text-muted-foreground">{result.message}</span>
                                     </div>
                                 }.into_any()
@@ -96,7 +95,7 @@ pub fn StatusBar(
                                 if is_auth_error {
                                     view! {
                                         <div class="flex items-center gap-2 text-xs" style="min-height: 20px">
-                                            <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-5 w-5 text-warning-foreground flex-shrink-0" />
+                                            <Icon icon=phosphor_leptos::WARNING attr:class="h-5 w-5 text-warning-foreground flex-shrink-0" />
                                             <span class="text-warning-foreground text-xs truncate">
                                                 "Authentication required - check datasource credentials in Settings"
                                             </span>
@@ -105,7 +104,7 @@ pub fn StatusBar(
                                 } else {
                                     view! {
                                         <div class="flex items-center gap-2 text-xs" style="min-height: 20px">
-                                            <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-5 w-5 text-error-foreground flex-shrink-0" />
+                                            <Icon icon=phosphor_leptos::WARNING attr:class="h-5 w-5 text-error-foreground flex-shrink-0" />
                                             <span class="text-error-foreground text-xs truncate">
                                                 {message}
                                             </span>

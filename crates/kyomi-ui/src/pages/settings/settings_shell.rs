@@ -18,7 +18,7 @@
 //! - Team: team tier + admin, hidden in personal mode
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::components::Outlet;
 use leptos_router::hooks::use_location;
 
@@ -28,22 +28,22 @@ use crate::server_fns::context::{get_user_context, UserContext};
 struct SettingsTab {
     id: &'static str,
     name: &'static str,
-    icon: &'static icondata_core::IconData,
+    icon: phosphor_leptos::IconData,
     /// URL path suffix. Defaults to `id` but can differ (e.g. datasources → datasources-v2).
     path: &'static str,
 }
 
 /// All settings tabs (visibility filtered at render time based on user context).
 const TABS: &[SettingsTab] = &[
-    SettingsTab { id: "profile", name: "Profile", icon: icondata_lu::LuUser, path: "profile" },
-    SettingsTab { id: "security", name: "Security", icon: icondata_lu::LuShield, path: "security" },
-    SettingsTab { id: "workspace", name: "Workspace", icon: icondata_lu::LuSettings, path: "workspace" },
-    SettingsTab { id: "datasources", name: "Data Sources", icon: icondata_lu::LuServer, path: "datasources" },
-    SettingsTab { id: "ai", name: "AI", icon: icondata_lu::LuSparkles, path: "ai" },
-    SettingsTab { id: "analytics", name: "Analytics", icon: icondata_lu::LuActivity, path: "analytics" },
-    SettingsTab { id: "usage", name: "Usage", icon: icondata_lu::LuChartBar, path: "usage" },
-    SettingsTab { id: "billing", name: "Billing", icon: icondata_lu::LuCreditCard, path: "billing" },
-    SettingsTab { id: "team", name: "Team", icon: icondata_lu::LuUsers, path: "team" },
+    SettingsTab { id: "profile", name: "Profile", icon: phosphor_leptos::USER, path: "profile" },
+    SettingsTab { id: "security", name: "Security", icon: phosphor_leptos::SHIELD, path: "security" },
+    SettingsTab { id: "workspace", name: "Workspace", icon: phosphor_leptos::GEAR, path: "workspace" },
+    SettingsTab { id: "datasources", name: "Data Sources", icon: phosphor_leptos::HARD_DRIVES, path: "datasources" },
+    SettingsTab { id: "ai", name: "AI", icon: phosphor_leptos::SPARKLE, path: "ai" },
+    SettingsTab { id: "analytics", name: "Analytics", icon: phosphor_leptos::PULSE, path: "analytics" },
+    SettingsTab { id: "usage", name: "Usage", icon: phosphor_leptos::CHART_BAR, path: "usage" },
+    SettingsTab { id: "billing", name: "Billing", icon: phosphor_leptos::CREDIT_CARD, path: "billing" },
+    SettingsTab { id: "team", name: "Team", icon: phosphor_leptos::USERS, path: "team" },
 ];
 
 /// Return the list of tab IDs that should be visible for the given user context.
@@ -150,10 +150,13 @@ pub fn SettingsShell() -> impl IntoView {
                                             "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
                                         }
                                     };
+                                    let tab_weight = Memo::new(move |_| {
+                                        if active_tab.get() == tab_path { IconWeight::Fill } else { IconWeight::Light }
+                                    });
                                     let href = format!("/settings/{}", tab.path);
                                     view! {
                                         <a href=href class=tab_class>
-                                            <Icon icon=tab.icon width="16" height="16"/>
+                                            <Icon icon=tab.icon weight=tab_weight size="16px"/>
                                             <span>{tab.name}</span>
                                         </a>
                                     }
@@ -177,10 +180,13 @@ pub fn SettingsShell() -> impl IntoView {
                                                 "flex items-center space-x-2 py-4 border-b-2 font-medium text-sm transition-colors whitespace-nowrap flex-shrink-0 border-transparent text-muted-foreground hover:text-foreground hover:border-border"
                                             }
                                         };
+                                        let tab_weight = Memo::new(move |_| {
+                                            if active_tab.get() == tab_path { IconWeight::Fill } else { IconWeight::Light }
+                                        });
                                         let href = format!("/settings/{}", tab.path);
                                         view! {
                                             <a href=href class=tab_class>
-                                                <Icon icon=tab.icon width="16" height="16"/>
+                                                <Icon icon=tab.icon weight=tab_weight size="16px"/>
                                                 <span>{tab.name}</span>
                                             </a>
                                         }

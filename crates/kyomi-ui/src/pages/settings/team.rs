@@ -364,7 +364,7 @@ fn TeamPageInner() -> impl IntoView {
                                 >
                                     <span class="inline-flex items-center gap-0 sm:gap-2">
                                         <span class="inline-flex">
-                                            <leptos_icons::Icon icon=icondata_lu::LuArrowLeftRight width="16" height="16"/>
+                                            <phosphor_leptos::Icon icon=phosphor_leptos::ARROWS_LEFT_RIGHT size="16px"/>
                                         </span>
                                         <span class="hidden sm:inline">"Transfer Ownership"</span>
                                     </span>
@@ -381,7 +381,7 @@ fn TeamPageInner() -> impl IntoView {
                     >
                         <span class="inline-flex items-center gap-0 sm:gap-2">
                             <span class="inline-flex">
-                                <leptos_icons::Icon icon=icondata_lu::LuUserPlus width="16" height="16"/>
+                                <phosphor_leptos::Icon icon=phosphor_leptos::USER_PLUS size="16px"/>
                             </span>
                             <span class="hidden sm:inline">"Invite Member"</span>
                         </span>
@@ -660,7 +660,7 @@ fn InvitationRow(
                         attr:title="Cancel invitation"
                     >
                         <span class="inline-flex">
-                            <leptos_icons::Icon icon=icondata_lu::LuTrash2 width="16" height="16"/>
+                            <phosphor_leptos::Icon icon=phosphor_leptos::TRASH size="16px"/>
                         </span>
                     </Button>
                 </div>
@@ -689,7 +689,7 @@ fn TransferRow(
                 <div class="space-y-4">
                     <div class="flex items-start gap-3">
                         <span class="inline-flex mt-1 text-primary flex-shrink-0">
-                            <leptos_icons::Icon icon=icondata_lu::LuArrowLeftRight width="20" height="20"/>
+                            <phosphor_leptos::Icon icon=phosphor_leptos::ARROWS_LEFT_RIGHT size="20px"/>
                         </span>
                         <div class="flex-1">
                             <h4 class="font-semibold text-foreground mb-1">
@@ -735,7 +735,7 @@ fn TransferRow(
                         attr:title="Cancel transfer"
                     >
                         <span class="inline-flex">
-                            <leptos_icons::Icon icon=icondata_lu::LuTrash2 width="16" height="16"/>
+                            <phosphor_leptos::Icon icon=phosphor_leptos::TRASH size="16px"/>
                         </span>
                     </Button>
                 </div>
@@ -840,7 +840,7 @@ fn MemberRow(
                                         attr:title="Remove member"
                                     >
                                         <span class="inline-flex">
-                                            <leptos_icons::Icon icon=icondata_lu::LuTrash2 width="16" height="16"/>
+                                            <phosphor_leptos::Icon icon=phosphor_leptos::TRASH size="16px"/>
                                         </span>
                                     </Button>
                                 }.into_any()

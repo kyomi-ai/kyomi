@@ -13,7 +13,7 @@
 //! Mirrors `apps/frontend/src/pages/DatasourceOnboarding.jsx`.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 
@@ -201,7 +201,7 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
                             <div class="border border-border rounded-lg p-5">
                                 <div class="flex items-start gap-4">
                                     <Icon
-                                        icon=icondata_lu::LuDatabase
+                                        icon=phosphor_leptos::DATABASE
                                         attr:class="h-6 w-6 mt-0.5 text-muted-foreground flex-shrink-0"
                                     />
                                     <div class="flex-1">
@@ -228,7 +228,7 @@ fn AdminChoiceCard(sample_available: bool) -> impl IntoView {
                         <div class="border border-border rounded-lg p-5">
                             <div class="flex items-start gap-4">
                                 <Icon
-                                    icon=icondata_lu::LuDatabase
+                                    icon=phosphor_leptos::DATABASE
                                     attr:class="h-6 w-6 mt-0.5 text-muted-foreground flex-shrink-0"
                                 />
                                 <div class="flex-1">
@@ -575,7 +575,7 @@ fn CredentialRow(
 
         view! {
             <Button on:click=handle_password>
-                <Icon icon=icondata_lu::LuKey attr:class="h-4 w-4 mr-2"/>
+                <Icon icon=phosphor_leptos::KEY attr:class="h-4 w-4 mr-2"/>
                 "Enter Credentials"
             </Button>
         }
@@ -589,7 +589,7 @@ fn CredentialRow(
         <div class="flex items-center justify-between p-4 border border-border rounded-lg bg-card">
             <div class="flex items-center gap-3">
                 <Icon
-                    icon=icondata_lu::LuDatabase
+                    icon=phosphor_leptos::DATABASE
                     attr:class="w-8 h-8 text-muted-foreground"
                 />
                 <div>

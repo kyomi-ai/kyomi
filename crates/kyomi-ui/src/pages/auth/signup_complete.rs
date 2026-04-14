@@ -13,8 +13,7 @@
 //! State machine: Form | Creating | Success | Error
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Checkbox,
     Label, INPUT_CLASS,
@@ -205,7 +204,7 @@ pub fn SignupCompletePage() -> impl IntoView {
                         <div>
                             <div class="text-center">
                                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                    <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-primary"/>
+                                    <Icon icon=phosphor_leptos::CHECK attr:class="w-8 h-8 text-primary"/>
                                 </div>
                             </div>
                             <form on:submit=on_submit class="space-y-6">
@@ -335,7 +334,7 @@ fn error_view() -> impl IntoView {
         <div class="space-y-4">
             <div class="text-center">
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-error/10 mx-auto mb-6">
-                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-8 h-8 text-error-foreground"/>
+                    <Icon icon=phosphor_leptos::WARNING attr:class="w-8 h-8 text-error-foreground"/>
                 </div>
             </div>
             <ButtonLink href="/login" variant=ButtonVariant::Outline class="w-full">
@@ -354,7 +353,7 @@ fn success_view() -> impl IntoView {
         <div class="space-y-4">
             <div class="text-center">
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-success/10 mx-auto mb-6">
-                    <Icon icon=icondata_lu::LuCheck attr:class="w-8 h-8 text-success-foreground"/>
+                    <Icon icon=phosphor_leptos::CHECK attr:class="w-8 h-8 text-success-foreground"/>
                 </div>
             </div>
             // Branded moment (auth page) — DESIGN.md Loading State Pattern

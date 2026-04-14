@@ -15,8 +15,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::pages::sql_editor::types::{CatalogNode, CatalogNodeType};
 use crate::server_fns::sql_editor::get_catalog_tree;
 
@@ -90,7 +89,7 @@ pub fn CatalogTree(
                         // No datasource selected
                         view! {
                             <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                <Icon icon=icondata_lu::LuDatabase attr:class="w-12 h-12 text-muted-foreground mb-2" />
+                                <Icon icon=phosphor_leptos::DATABASE attr:class="w-12 h-12 text-muted-foreground mb-2" />
                                 <p class="text-sm text-muted-foreground">"Select a datasource"</p>
                                 <p class="text-xs text-muted-foreground mt-1">"Choose a datasource to browse its catalog"</p>
                             </div>
@@ -100,7 +99,7 @@ pub fn CatalogTree(
                         // Error state
                         view! {
                             <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-12 h-12 text-error-foreground mb-2" />
+                                <Icon icon=phosphor_leptos::WARNING attr:class="w-12 h-12 text-error-foreground mb-2" />
                                 <p class="text-sm text-error-foreground">"Failed to load catalog"</p>
                                 <p class="text-xs text-muted-foreground mt-1">{e}</p>
                             </div>
@@ -111,7 +110,7 @@ pub fn CatalogTree(
                             // Empty catalog
                             view! {
                                 <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                    <Icon icon=icondata_lu::LuInbox attr:class="w-12 h-12 text-muted-foreground mb-2" />
+                                    <Icon icon=phosphor_leptos::TRAY attr:class="w-12 h-12 text-muted-foreground mb-2" />
                                     <p class="text-sm text-muted-foreground">"No tables indexed"</p>
                                     <p class="text-xs text-muted-foreground mt-1">"Index the catalog in datasource settings"</p>
                                 </div>
@@ -179,7 +178,7 @@ fn CatalogTreeView(
                     // Empty search results — matches React "No tables found" state
                     view! {
                         <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                            <Icon icon=icondata_lu::LuSearch attr:class="w-12 h-12 text-muted-foreground mb-2" />
+                            <Icon icon=phosphor_leptos::MAGNIFYING_GLASS attr:class="w-12 h-12 text-muted-foreground mb-2" />
                             <p class="text-sm text-muted-foreground">"No tables found"</p>
                             <p class="text-xs text-muted-foreground mt-1">"Try a different search term"</p>
                         </div>
@@ -280,7 +279,7 @@ fn CatalogNodeView(
                     let nid = node_id.clone();
                     view! {
                         <Icon
-                            icon=icondata_lu::LuChevronRight
+                            icon=phosphor_leptos::CARET_RIGHT
                             attr:class=move || {
                                 let expanded = expanded_nodes.get().contains(&nid);
                                 if expanded {
@@ -367,25 +366,25 @@ fn NodeIcon(node_type: CatalogNodeType) -> impl IntoView {
     match node_type {
         CatalogNodeType::Project | CatalogNodeType::Database => {
             view! {
-                <Icon icon=icondata_lu::LuFolder attr:class="w-4 h-4 flex-shrink-0 text-muted-foreground" />
+                <Icon icon=phosphor_leptos::FOLDER attr:class="w-4 h-4 flex-shrink-0 text-muted-foreground" />
             }
             .into_any()
         }
         CatalogNodeType::Dataset | CatalogNodeType::Schema => {
             view! {
-                <Icon icon=icondata_lu::LuDatabase attr:class="w-4 h-4 flex-shrink-0 text-muted-foreground" />
+                <Icon icon=phosphor_leptos::DATABASE attr:class="w-4 h-4 flex-shrink-0 text-muted-foreground" />
             }
             .into_any()
         }
         CatalogNodeType::Table | CatalogNodeType::View => {
             view! {
-                <Icon icon=icondata_lu::LuTable attr:class="w-3 h-3 flex-shrink-0 text-primary" />
+                <Icon icon=phosphor_leptos::TABLE attr:class="w-3 h-3 flex-shrink-0 text-primary" />
             }
             .into_any()
         }
         CatalogNodeType::Column(_) => {
             view! {
-                <Icon icon=icondata_lu::LuTag attr:class="w-3 h-3 flex-shrink-0 text-muted-foreground" />
+                <Icon icon=phosphor_leptos::TAG attr:class="w-3 h-3 flex-shrink-0 text-muted-foreground" />
             }
             .into_any()
         }

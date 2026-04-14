@@ -14,8 +14,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::chat::CopilotChat;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
@@ -831,7 +830,7 @@ pub fn ChartBuilderModal(
                                 // Datasource selector row with catalog toggle
                                 <div class="flex items-center gap-3 flex-shrink-0">
                                     // Database icon before dropdown
-                                    <Icon icon=icondata_lu::LuDatabase attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                                    <Icon icon=phosphor_leptos::DATABASE attr:class="w-4 h-4 text-muted-foreground flex-shrink-0" />
                                     <div class="w-full sm:w-[240px] min-w-0 sm:flex-shrink-0">
                                         <Suspense fallback=move || view! {
                                             <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
@@ -856,7 +855,7 @@ pub fn ChartBuilderModal(
                                         }
                                         on:click=move |_| set_catalog_open.update(|v| *v = !*v)
                                     >
-                                        <Icon icon=icondata_lu::LuDatabase width="14" height="14" />
+                                        <Icon icon=phosphor_leptos::DATABASE size="14px" />
                                         "Catalog"
                                     </button>
                                 </div>
@@ -991,7 +990,7 @@ pub fn ChartBuilderModal(
                                                     class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Refresh catalog"
                                                 >
-                                                    <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
+                                                    <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="14px" />
                                                 </button>
                                                 <button
                                                     type="button"
@@ -999,7 +998,7 @@ pub fn ChartBuilderModal(
                                                     title="Close catalog"
                                                     on:click=move |_| set_catalog_open.set(false)
                                                 >
-                                                    <Icon icon=icondata_lu::LuX width="14" height="14" />
+                                                    <Icon icon=phosphor_leptos::X size="14px" />
                                                 </button>
                                             </div>
                                         </div>
@@ -1052,7 +1051,7 @@ pub fn ChartBuilderModal(
                                                 // History tab placeholder
                                                 view! {
                                                     <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                                        <Icon icon=icondata_lu::LuClock width="40" height="40" attr:class="text-muted-foreground mb-2" />
+                                                        <Icon icon=phosphor_leptos::CLOCK size="40px" attr:class="text-muted-foreground mb-2" />
                                                         <p class="text-sm text-muted-foreground">"Query history"</p>
                                                         <p class="text-xs text-muted-foreground mt-1">"Coming soon"</p>
                                                     </div>
@@ -1292,7 +1291,7 @@ pub fn ChartBuilderModal(
                                                                             on:click=move |_| remove_series(idx)
                                                                             title="Remove series"
                                                                         >
-                                                                            <Icon icon=icondata_lu::LuX width="16" height="16" />
+                                                                            <Icon icon=phosphor_leptos::X size="16px" />
                                                                         </button>
                                                                     }
                                                                 })}
@@ -1397,7 +1396,7 @@ pub fn ChartBuilderModal(
                                                 view! { <Spinner class="text-primary w-3.5 h-3.5".to_string() /> }.into_any()
                                             } else {
                                                 view! {
-                                                    <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
+                                                    <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="14px" />
                                                 }.into_any()
                                             }
                                         }}
@@ -1454,7 +1453,7 @@ pub fn ChartBuilderModal(
                                             view! {
                                                 <div class="flex items-center justify-center h-full">
                                                     <div class="text-center px-4">
-                                                        <Icon icon=icondata_lu::LuChartBar width="48" height="48" attr:class="text-muted-foreground/30 mx-auto mb-3" />
+                                                        <Icon icon=phosphor_leptos::CHART_BAR size="48px" attr:class="text-muted-foreground/30 mx-auto mb-3" />
                                                         <p class="text-sm text-muted-foreground mb-1">"No preview available"</p>
                                                         <p class="text-xs text-muted-foreground">"Run your SQL query first, then click the refresh button to see a preview."</p>
                                                     </div>
@@ -1643,7 +1642,7 @@ fn ChartCopilot(
             context_content=chart_yaml
             context_label="Chart Content"
             placeholder="Ask about your chart..."
-            empty_icon=Arc::new(|| view! { <Icon icon=icondata_lu::LuSparkles width="48" height="48" /> }.into_any())
+            empty_icon=Arc::new(|| view! { <Icon icon=phosphor_leptos::SPARKLE size="48px" /> }.into_any())
             empty_title="Ask me anything about your chart!"
             empty_description="I can help you change chart types, adjust styling, or fix configuration issues."
             custom_ws_events=vec!["chart_update".to_string()]

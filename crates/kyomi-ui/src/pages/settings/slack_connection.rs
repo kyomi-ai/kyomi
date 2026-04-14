@@ -158,7 +158,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                     view! {
                         <div class="flex items-start gap-3 p-4 bg-muted/50 rounded-lg">
                             <span class="h-5 w-5 text-warning-foreground mt-0.5">
-                                <leptos_icons::Icon icon=icondata_lu::LuTriangleAlert width="20" height="20"/>
+                                <phosphor_leptos::Icon icon=phosphor_leptos::WARNING size="20px"/>
                             </span>
                             <div>
                                 <p class="text-sm text-foreground font-medium">"Slack not installed"</p>
@@ -186,7 +186,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                             </p>
                                             <div class="space-y-2">
                                                 <Button on:click=move |_| { let _ = connect_action.dispatch(()); }>
-                                                    <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                                                    <phosphor_leptos::Icon icon=phosphor_leptos::ARROW_SQUARE_OUT size="16px"/>
                                                     "Connect with Slack"
                                                 </Button>
                                                 <p class="text-xs text-muted-foreground">
@@ -222,7 +222,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                         <div class="space-y-2">
                                             <Label>
                                                 <span class="flex items-center gap-2">
-                                                    <leptos_icons::Icon icon=icondata_lu::LuMessageSquare width="16" height="16"/>
+                                                    <phosphor_leptos::Icon icon=phosphor_leptos::CHAT size="16px"/>
                                                     "Default Watch Channel"
                                                 </span>
                                             </Label>
@@ -245,7 +245,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                         view! {
                                                             <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
                                                                 <span class="text-warning-foreground mt-0.5 shrink-0">
-                                                                    <leptos_icons::Icon icon=icondata_lu::LuTriangleAlert width="16" height="16"/>
+                                                                    <phosphor_leptos::Icon icon=phosphor_leptos::WARNING size="16px"/>
                                                                 </span>
                                                                 <span>
                                                                     "Invite the Kyomi app to a Slack channel first. Then refresh this page to see available channels."
@@ -314,7 +314,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                     } else {
                                                         view! {
                                                             <span class="flex items-center gap-2">
-                                                                <leptos_icons::Icon icon=icondata_lu::LuUnplug width="16" height="16"/>
+                                                                <phosphor_leptos::Icon icon=phosphor_leptos::PLUGS size="16px"/>
                                                                 "Disconnect"
                                                             </span>
                                                         }.into_any()

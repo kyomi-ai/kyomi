@@ -8,7 +8,7 @@
 //! web component layout.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use send_wrapper::SendWrapper;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -32,7 +32,7 @@ const CHART_TYPES: &[(&str, &str)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Icons — chart-type SVGs (kept inline; action icons use icondata_lu)
+// Icons — chart-type SVGs (kept inline; action icons use phosphor-leptos)
 // ---------------------------------------------------------------------------
 
 mod icons {
@@ -210,7 +210,7 @@ fn ChartTypeSelector(
                 on:click=move |_| set_open.update(|v| *v = !*v)
             >
                 {icons::chart_type_icon(&current.get_value())}
-                <Icon icon=icondata_lu::LuChevronDown width="12" height="12" />
+                <Icon icon=phosphor_leptos::CARET_DOWN size="12px" />
             </button>
 
             <Show when=move || open.get()>
@@ -502,7 +502,7 @@ pub fn ChartHeaderBar(
                             title="Refresh"
                             on:click=move |_| on_ref.run(())
                         >
-                            <Icon icon=icondata_lu::LuRefreshCw width="16" height="16" />
+                            <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px" />
                         </button>
                     }
                 })}
@@ -516,7 +516,7 @@ pub fn ChartHeaderBar(
                             title="Save to Dashboard"
                             on:click=move |_| cb.run(())
                         >
-                            <Icon icon=icondata_lu::LuGrid2x2Plus width="16" height="16" />
+                            <Icon icon=phosphor_leptos::PLUS_SQUARE size="16px" />
                         </button>
                     }
                 })}
@@ -530,7 +530,7 @@ pub fn ChartHeaderBar(
                             title="Ask about this chart"
                             on:click=move |_| cb.run(())
                         >
-                            <Icon icon=icondata_lu::LuMessagesSquare width="16" height="16" />
+                            <Icon icon=phosphor_leptos::CHATS size="16px" />
                         </button>
                     }
                 })}
@@ -544,7 +544,7 @@ pub fn ChartHeaderBar(
                             title="Chart Info"
                             on:click=move |_| cb.run(())
                         >
-                            <Icon icon=icondata_lu::LuInfo width="16" height="16" />
+                            <Icon icon=phosphor_leptos::INFO size="16px" />
                         </button>
                     }
                 })}
@@ -558,7 +558,7 @@ pub fn ChartHeaderBar(
                             title="Edit Chart"
                             on:click=move |_| cb.run(())
                         >
-                            <Icon icon=icondata_lu::LuPencil width="16" height="16" />
+                            <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px" />
                         </button>
                     }
                 })}
@@ -574,7 +574,7 @@ pub fn ChartHeaderBar(
                                 title="Actions"
                                 on:click=move |_| set_menu_open.update(|v| *v = !*v)
                             >
-                                <Icon icon=icondata_lu::LuEllipsisVertical width="16" height="16" />
+                                <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL size="16px" />
                             </button>
 
                             <Show when=move || menu_open.get()>

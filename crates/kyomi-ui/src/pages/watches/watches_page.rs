@@ -13,7 +13,7 @@
 //! - Execution log modal for viewing watch run history
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
 use crate::components::toast::{toast_error, toast_success};
@@ -161,9 +161,9 @@ fn WatchCard(
                     <div class="flex-1 min-w-0">
                         <CardTitle class="text-base truncate flex items-center gap-2".to_string()>
                             {if watch_mode == "report" {
-                                view! { <Icon icon=icondata_lu::LuChartBar attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
+                                view! { <Icon icon=phosphor_leptos::CHART_BAR attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
                             } else {
-                                view! { <Icon icon=icondata_lu::LuBell attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
+                                view! { <Icon icon=phosphor_leptos::BELL attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
                             }}
                             {watch_name}
                         </CardTitle>
@@ -183,7 +183,7 @@ fn WatchCard(
             <CardContent class="space-y-3".to_string()>
                 // Schedule
                 <div class="flex items-center text-sm text-muted-foreground">
-                    <Icon icon=icondata_lu::LuClock attr:class="h-4 w-4 mr-2" />
+                    <Icon icon=phosphor_leptos::CLOCK attr:class="h-4 w-4 mr-2" />
                     {cron_desc.description}
                 </div>
 
@@ -194,13 +194,13 @@ fn WatchCard(
                         view! {
                             <StatusBadge variant=variant class="gap-1">
                                 {if status == "success" || status == "no_alert" {
-                                    view! { <Icon icon=icondata_lu::LuCircleCheck attr:class="h-3 w-3" /> }.into_any()
+                                    view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-3 w-3" /> }.into_any()
                                 } else if status == "error" {
-                                    view! { <Icon icon=icondata_lu::LuCircleX attr:class="h-3 w-3" /> }.into_any()
+                                    view! { <Icon icon=phosphor_leptos::X_CIRCLE attr:class="h-3 w-3" /> }.into_any()
                                 } else if status == "running" {
-                                    view! { <Icon icon=icondata_lu::LuLoader attr:class="h-3 w-3 animate-spin" /> }.into_any()
+                                    view! { <Icon icon=phosphor_leptos::CIRCLE_NOTCH attr:class="h-3 w-3 animate-spin" /> }.into_any()
                                 } else {
-                                    view! { <Icon icon=icondata_lu::LuCircleCheck attr:class="h-3 w-3" /> }.into_any()
+                                    view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-3 w-3" /> }.into_any()
                                 }}
                                 {label}
                             </StatusBadge>
@@ -233,7 +233,7 @@ fn WatchCard(
                         disabled=MaybeProp::derive(move || Some(run_pending.get()))
                         aria_label="Run now"
                     >
-                        <Icon icon=icondata_lu::LuPlay attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::PLAY attr:class="h-4 w-4" />
                     </Button>
                     {has_last_run.then(|| {
                         let w = watch_for_log.clone();
@@ -244,7 +244,7 @@ fn WatchCard(
                                 on:click=move |_| on_view_log.run(w.clone())
                                 aria_label="View execution log"
                             >
-                                <Icon icon=icondata_lu::LuFileText attr:class="h-4 w-4" />
+                                <Icon icon=phosphor_leptos::FILE_TEXT attr:class="h-4 w-4" />
                             </Button>
                         }
                     })}
@@ -258,7 +258,7 @@ fn WatchCard(
                         disabled=MaybeProp::derive(move || Some(!ai_enabled))
                         aria_label=if !ai_enabled { "AI features not available".to_string() } else { "Edit with AI".to_string() }
                     >
-                        <Icon icon=icondata_lu::LuSparkles attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::SPARKLE attr:class="h-4 w-4" />
                     </Button>
                     <Button
                         variant=ButtonVariant::GhostMuted
@@ -269,7 +269,7 @@ fn WatchCard(
                         }
                         aria_label="Edit watch"
                     >
-                        <Icon icon=icondata_lu::LuSettings attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::GEAR attr:class="h-4 w-4" />
                     </Button>
                     <Button
                         variant=ButtonVariant::GhostDestructive
@@ -280,7 +280,7 @@ fn WatchCard(
                         }
                         aria_label="Delete watch"
                     >
-                        <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4" />
                     </Button>
                 </div>
             </CardContent>
@@ -560,7 +560,7 @@ pub fn WatchesPage() -> impl IntoView {
                             <Card class="max-w-lg".to_string()>
                                 <CardHeader class="text-center".to_string()>
                                     <div class="mx-auto mb-4 h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center">
-                                        <Icon icon=icondata_lu::LuEye attr:class="h-8 w-8 text-primary" />
+                                        <Icon icon=phosphor_leptos::EYE attr:class="h-8 w-8 text-primary" />
                                     </div>
                                     <CardTitle class="text-xl".to_string()>"Proactive Data Monitoring"</CardTitle>
                                     <p class="text-base text-muted-foreground">
@@ -570,15 +570,15 @@ pub fn WatchesPage() -> impl IntoView {
                                 <CardContent class="space-y-4".to_string()>
                                     <ul class="space-y-3 text-sm text-muted-foreground">
                                         <li class="flex items-start gap-2">
-                                            <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
+                                            <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
                                             <span>"Monitor data with plain English instructions"</span>
                                         </li>
                                         <li class="flex items-start gap-2">
-                                            <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
+                                            <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
                                             <span>"Get alerts when metrics change or anomalies occur"</span>
                                         </li>
                                         <li class="flex items-start gap-2">
-                                            <Icon icon=icondata_lu::LuCircleCheck attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
+                                            <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-5 w-5 text-success-foreground mt-0.5 shrink-0" />
                                             <span>"Schedule checks hourly, daily, or custom intervals"</span>
                                         </li>
                                     </ul>
@@ -616,7 +616,7 @@ pub fn WatchesPage() -> impl IntoView {
                                     else { "AI features are not available".to_string() }
                                 } else { "Create Watch".to_string() }
                             >
-                                <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4" />
+                                <Icon icon=phosphor_leptos::PLUS attr:class="h-4 w-4" />
                                 <span class="hidden sm:inline">"Create Watch"</span>
                             </Button>
                         </div>
@@ -633,7 +633,7 @@ pub fn WatchesPage() -> impl IntoView {
                                     }
                                 }
                             >
-                                <Icon icon=icondata_lu::LuBell attr:class="h-4 w-4" />
+                                <Icon icon=phosphor_leptos::BELL attr:class="h-4 w-4" />
                                 "Alerts"
                             </button>
                             <button
@@ -646,7 +646,7 @@ pub fn WatchesPage() -> impl IntoView {
                                     }
                                 }
                             >
-                                <Icon icon=icondata_lu::LuEye attr:class="h-4 w-4" />
+                                <Icon icon=phosphor_leptos::EYE attr:class="h-4 w-4" />
                                 "Watches"
                             </button>
                         </div>
@@ -656,7 +656,7 @@ pub fn WatchesPage() -> impl IntoView {
                             view! {
                                 <div class="px-6 pt-4">
                                     <Alert variant=AlertVariant::Warning>
-                                        <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4" />
+                                        <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                                         <AlertDescription>
                                             "Your AI budget is exhausted for this billing period. Existing watches will not run until your budget resets. "
                                             <a href="/settings/billing" class="underline transition-colors hover:text-foreground">"Upgrade your plan"</a>
@@ -682,7 +682,7 @@ pub fn WatchesPage() -> impl IntoView {
                                             match result {
                                                 Err(e) => view! {
                                                     <Alert variant=AlertVariant::Error>
-                                                        <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4" />
+                                                        <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                                                         <AlertDescription>
                                                             {format!("Failed to load watches: {e}")}
                                                         </AlertDescription>
@@ -696,7 +696,7 @@ pub fn WatchesPage() -> impl IntoView {
                                                     };
                                                     view! {
                                                         <EmptyState
-                                                            icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuEye attr:class="h-12 w-12" /> }.into_any())
+                                                            icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::EYE attr:class="h-12 w-12" /> }.into_any())
                                                             title="No watches yet"
                                                             description=desc.to_string()
                                                             action=std::sync::Arc::new(move || view! {
@@ -708,7 +708,7 @@ pub fn WatchesPage() -> impl IntoView {
                                                                     }
                                                                     disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
                                                                 >
-                                                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4" />
+                                                                    <Icon icon=phosphor_leptos::PLUS attr:class="h-4 w-4" />
                                                                     "Create Watch"
                                                                 </Button>
                                                             }.into_any())

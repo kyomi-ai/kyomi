@@ -6,8 +6,7 @@
 //! implementation. Bug fixes here fix both pages.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Button, ButtonLink, ButtonSize, ButtonVariant, Card, CardContent, CardFooter, CardHeader,
     CardTitle, Skeleton,
@@ -224,7 +223,7 @@ fn DocumentCard(
                                     class="flex-shrink-0"
                                     on:click=move |_| cb.run(dashboard_for_add.clone())
                                 >
-                                    <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                    <Icon icon=phosphor_leptos::PLUS size="14px" />
                                 </Button>
                             })
                         } else {
@@ -242,7 +241,7 @@ fn DocumentCard(
                                     class="flex-shrink-0"
                                     on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
                                 >
-                                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" attr:class="text-destructive" />
+                                    <Icon icon=phosphor_leptos::TRASH size="14px" attr:class="text-destructive" />
                                 </Button>
                             }
                         }
@@ -305,7 +304,7 @@ fn DocumentCard(
                                                 ));
                                             }
                                         >
-                                            <Icon icon=icondata_lu::LuX width="12" height="12" />
+                                            <Icon icon=phosphor_leptos::X size="12px" />
                                         </button>
                                     })
                                 } else {
@@ -327,11 +326,11 @@ fn DocumentCard(
                 // Metadata: time + view count
                 <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-auto">
                     <div class="flex items-center gap-1">
-                        <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                        <Icon icon=phosphor_leptos::CLOCK size="14px" />
                         <span class="whitespace-nowrap">"Updated " {relative_time}</span>
                     </div>
                     <div class="flex items-center gap-1">
-                        <Icon icon=icondata_lu::LuEye width="14" height="14" />
+                        <Icon icon=phosphor_leptos::EYE size="14px" />
                         <span class="whitespace-nowrap">{view_count}</span>
                     </div>
                 </div>
@@ -340,11 +339,11 @@ fn DocumentCard(
             <CardFooter>
                 <div class="flex gap-2 w-full">
                     <ButtonLink href=view_href_footer variant=ButtonVariant::Default class="w-full flex-1">
-                        <Icon icon=icondata_lu::LuEye width="14" height="14" />
+                        <Icon icon=phosphor_leptos::EYE size="14px" />
                         "View"
                     </ButtonLink>
                     <ButtonLink href=edit_href variant=ButtonVariant::Outline class="w-full flex-1">
-                        <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                        <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                         "Edit"
                     </ButtonLink>
                 </div>

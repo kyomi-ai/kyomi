@@ -10,7 +10,7 @@
 //! - Mobile: slide-in panel with backdrop overlay
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -445,7 +445,7 @@ pub fn HistoryPanel(
                 // Header
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
-                        <Icon icon=icondata_lu::LuClock attr:class="w-5 h-5 text-primary" />
+                        <Icon icon=phosphor_leptos::CLOCK attr:class="w-5 h-5 text-primary" />
                         <span class="font-medium text-foreground">"Version History"</span>
                     </div>
                     <Button
@@ -454,7 +454,7 @@ pub fn HistoryPanel(
                         aria_label="Close history"
                         on:click=move |_| on_close.run(())
                     >
-                        <Icon icon=icondata_lu::LuX width="20" height="20" />
+                        <Icon icon=phosphor_leptos::X size="20px" />
                     </Button>
                 </div>
 
@@ -540,7 +540,7 @@ pub fn HistoryPanel(
                                                 }.into_any(),
                                                 Ok(result) if result.versions.is_empty() => view! {
                                                     <EmptyState
-                                                        icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuClock attr:class="w-12 h-12" /> }.into_any())
+                                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CLOCK attr:class="w-12 h-12" /> }.into_any())
                                                         title="No version history yet"
                                                         description="Versions are created when you save changes"
                                                         class="p-4 border-0"
@@ -670,7 +670,7 @@ pub fn HistoryPanel(
                                                                                             disabled=is_diff_loading
                                                                                             on:click=move |_| handle_view_diff_clone(prev_ver, cv_ver)
                                                                                         >
-                                                                                            <Icon icon=icondata_lu::LuFileDown width="16" height="16" />
+                                                                                            <Icon icon=phosphor_leptos::FILE_ARROW_DOWN size="16px" />
                                                                                         </Button>
                                                                                     </Tooltip>
                                                                                 </div>
@@ -760,7 +760,7 @@ pub fn HistoryPanel(
                                                                                         disabled=is_diff_loading
                                                                                         on:click=move |_| handle_view_diff_clone(pv, ver_num)
                                                                                     >
-                                                                                        <Icon icon=icondata_lu::LuFileDown width="16" height="16" />
+                                                                                        <Icon icon=phosphor_leptos::FILE_ARROW_DOWN size="16px" />
                                                                                     </Button>
                                                                                 </Tooltip>
                                                                             })}
@@ -775,7 +775,7 @@ pub fn HistoryPanel(
                                                                                         disabled=is_diff_loading
                                                                                         on:click=move |_| handle_view_diff_clone2(ver_num, cv)
                                                                                     >
-                                                                                        <Icon icon=icondata_lu::LuFileUp width="16" height="16" />
+                                                                                        <Icon icon=phosphor_leptos::FILE_ARROW_UP size="16px" />
                                                                                     </Button>
                                                                                 </Tooltip>
                                                                             })}
@@ -792,7 +792,7 @@ pub fn HistoryPanel(
                                                                                     {move || if is_restoring.get() && confirm_version.get_untracked().is_none() {
                                                                                         view! { <Spinner class="text-primary" /> }.into_any()
                                                                                     } else {
-                                                                                        view! { <Icon icon=icondata_lu::LuUndo2 width="16" height="16" /> }.into_any()
+                                                                                        view! { <Icon icon=phosphor_leptos::ARROW_U_UP_LEFT size="16px" /> }.into_any()
                                                                                     }}
                                                                                 </Button>
                                                                             </Tooltip>

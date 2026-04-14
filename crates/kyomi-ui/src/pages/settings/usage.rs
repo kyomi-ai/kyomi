@@ -12,8 +12,7 @@
 
 use leptos::prelude::*;
 
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Card, CardContent, CardDescription, CardHeader,
     CardTitle, Skeleton,
@@ -256,7 +255,7 @@ fn WorkspaceUsageCard(
         <Card>
             <CardHeader>
                 <CardTitle class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuSparkles width="20" height="20"/>
+                    <Icon icon=phosphor_leptos::SPARKLE size="20px"/>
                     "Workspace AI Usage"
                 </CardTitle>
                 <CardDescription>"AI credit consumption across the workspace."</CardDescription>
@@ -283,7 +282,7 @@ fn WorkspaceUsageCard(
                     // Bundle balance row
                     <div class="flex items-center justify-between pt-3 border-t border-border">
                         <div class="flex items-center gap-2">
-                            <Icon icon=icondata_lu::LuPackage width="16" height="16" attr:class="text-muted-foreground"/>
+                            <Icon icon=phosphor_leptos::PACKAGE size="16px" attr:class="text-muted-foreground"/>
                             <div>
                                 <div class="text-sm font-medium text-foreground">
                                     "Token Bundle Balance"
@@ -423,7 +422,7 @@ fn AnalyticsEventsCard(
         <Card>
             <CardHeader>
                 <CardTitle class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuActivity width="20" height="20"/>
+                    <Icon icon=phosphor_leptos::PULSE size="20px"/>
                     "Analytics Events"
                 </CardTitle>
                 <CardDescription>"Event usage against your monthly quota and bundle reserve."</CardDescription>
@@ -461,7 +460,7 @@ fn AnalyticsEventsCard(
                     // Bundle reserve row
                     <div class="flex items-center justify-between pt-3 border-t border-border">
                         <div class="flex items-center gap-2">
-                            <Icon icon=icondata_lu::LuPackage width="16" height="16" attr:class="text-muted-foreground"/>
+                            <Icon icon=phosphor_leptos::PACKAGE size="16px" attr:class="text-muted-foreground"/>
                             <div>
                                 <div class="text-sm font-medium text-foreground">
                                     "Bundle Reserve"

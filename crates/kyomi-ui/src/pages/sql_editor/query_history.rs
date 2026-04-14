@@ -15,8 +15,7 @@ use leptos::prelude::*;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, ButtonVariant, Checkbox, ConfirmDialog};
 use crate::pages::sql_editor::types::QueryHistoryEntry;
 use crate::server_fns::sql_editor::{
@@ -391,7 +390,7 @@ pub fn QueryHistory(
                                                             handle_delete(entry_id_delete.clone());
                                                         }
                                                     >
-                                                        <Icon icon=icondata_lu::LuTrash2 attr:class="w-3 h-3" />
+                                                        <Icon icon=phosphor_leptos::TRASH attr:class="w-3 h-3" />
                                                     </Button>
                                                 </div>
                                             </div>

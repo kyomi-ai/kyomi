@@ -9,8 +9,7 @@
 //! CSS classes are copied verbatim from the React source.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use super::thinking::{ThinkingEvent, TokenUsage};
 use super::tool_schema_renderer;
 
@@ -47,14 +46,14 @@ impl ThinkingVariant {
 /// Matches React's `getEventIcon()` semantics with proper Lucide icons.
 fn get_event_icon(event_type: &str) -> AnyView {
     match event_type {
-        "agent_start" => view! { <Icon icon=icondata_lu::LuBot width="14" height="14"/> }.into_any(),
-        "agent_thought" => view! { <Icon icon=icondata_lu::LuMessageCircle width="14" height="14"/> }.into_any(),
-        "tool_execution_start" => view! { <Icon icon=icondata_lu::LuWrench width="14" height="14"/> }.into_any(),
-        "tool_execution_end" => view! { <Icon icon=icondata_lu::LuCircleCheck width="14" height="14"/> }.into_any(),
-        "agent_decision" => view! { <Icon icon=icondata_lu::LuTarget width="14" height="14"/> }.into_any(),
-        "agent_complete" => view! { <Icon icon=icondata_lu::LuFlag width="14" height="14"/> }.into_any(),
-        "error" => view! { <Icon icon=icondata_lu::LuTriangleAlert width="14" height="14"/> }.into_any(),
-        _ => view! { <Icon icon=icondata_lu::LuFileText width="14" height="14"/> }.into_any(),
+        "agent_start" => view! { <Icon icon=phosphor_leptos::ROBOT size="14px"/> }.into_any(),
+        "agent_thought" => view! { <Icon icon=phosphor_leptos::CHAT_CIRCLE size="14px"/> }.into_any(),
+        "tool_execution_start" => view! { <Icon icon=phosphor_leptos::WRENCH size="14px"/> }.into_any(),
+        "tool_execution_end" => view! { <Icon icon=phosphor_leptos::CHECK_CIRCLE size="14px"/> }.into_any(),
+        "agent_decision" => view! { <Icon icon=phosphor_leptos::TARGET size="14px"/> }.into_any(),
+        "agent_complete" => view! { <Icon icon=phosphor_leptos::FLAG size="14px"/> }.into_any(),
+        "error" => view! { <Icon icon=phosphor_leptos::WARNING size="14px"/> }.into_any(),
+        _ => view! { <Icon icon=phosphor_leptos::FILE_TEXT size="14px"/> }.into_any(),
     }
 }
 
@@ -305,13 +304,12 @@ pub fn AgentThinking(
                         }}
                     </span>
                     <Icon
-                        icon=icondata_lu::LuChevronDown
+                        icon=phosphor_leptos::CARET_DOWN
                         attr:class=move || format!(
                             "w-3.5 h-3.5 text-muted-foreground transition-transform {}",
                             if is_expanded.get() { "rotate-180" } else { "" }
                         )
-                        width="14"
-                        height="14"
+                        size="14px"
                     />
                 </div>
             </div>

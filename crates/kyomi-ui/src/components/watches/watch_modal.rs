@@ -12,8 +12,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::chat::CopilotChat;
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
@@ -487,7 +486,7 @@ pub fn WatchModal(
                                         on:click=move |_| set_mode.set("alert".to_string())
                                     >
                                         <div class="flex items-center gap-2 mb-1">
-                                            <Icon icon=icondata_lu::LuBell attr:class="h-5 w-5" />
+                                            <Icon icon=phosphor_leptos::BELL attr:class="h-5 w-5" />
                                             <span class=move || {
                                                 if mode.get() == "alert" {
                                                     "font-medium text-primary"
@@ -516,7 +515,7 @@ pub fn WatchModal(
                                         on:click=move |_| set_mode.set("report".to_string())
                                     >
                                         <div class="flex items-center gap-2 mb-1">
-                                            <Icon icon=icondata_lu::LuChartBar attr:class="h-5 w-5" />
+                                            <Icon icon=phosphor_leptos::CHART_BAR attr:class="h-5 w-5" />
                                             <span class=move || {
                                                 if mode.get() == "report" {
                                                     "font-medium text-primary"
@@ -574,7 +573,7 @@ pub fn WatchModal(
                             <div class="space-y-3">
                                 <Label>
                                     <span class="flex items-center gap-2">
-                                        <Icon icon=icondata_lu::LuCode attr:class="h-4 w-4"/>
+                                        <Icon icon=phosphor_leptos::CODE attr:class="h-4 w-4"/>
                                         "Reference Queries"
                                     </span>
                                 </Label>
@@ -631,7 +630,7 @@ pub fn WatchModal(
                                                                     set_editing_query_idx.set(None);
                                                                 }
                                                             >
-                                                                <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4 text-destructive"/>
+                                                                <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 text-destructive"/>
                                                             </button>
                                                         </div>
 
@@ -701,7 +700,7 @@ pub fn WatchModal(
                                                 let datasource = query.datasource.clone();
                                                 view! {
                                                     <div class="flex items-start gap-3 p-3 rounded-lg border border-border bg-muted/30 hover:bg-muted/50 transition-colors group">
-                                                        <Icon icon=icondata_lu::LuCode attr:class="h-4 w-4 text-muted-foreground mt-0.5 shrink-0"/>
+                                                        <Icon icon=phosphor_leptos::CODE attr:class="h-4 w-4 text-muted-foreground mt-0.5 shrink-0"/>
                                                         <div class="flex-1 min-w-0">
                                                             <p class="font-medium text-sm text-foreground break-words">{comment}</p>
                                                             <p class="text-xs text-muted-foreground font-mono mt-1 truncate">{sql}</p>
@@ -719,7 +718,7 @@ pub fn WatchModal(
                                                             class=format!("{BTN_BASE} {BTN_GHOST} h-8 w-8 shrink-0 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity")
                                                             on:click=move |_| set_editing_query_idx.set(Some(idx))
                                                         >
-                                                            <Icon icon=icondata_lu::LuPencil attr:class="h-4 w-4" />
+                                                            <Icon icon=phosphor_leptos::PENCIL_SIMPLE attr:class="h-4 w-4" />
                                                         </button>
                                                     </div>
                                                 }.into_any()
@@ -748,7 +747,7 @@ pub fn WatchModal(
                                         });
                                     }
                                 >
-                                    <Icon icon=icondata_lu::LuPlus attr:class="h-4 w-4 mr-1"/>
+                                    <Icon icon=phosphor_leptos::PLUS attr:class="h-4 w-4 mr-1"/>
                                     "Add Query"
                                 </button>
                             </div>
@@ -772,7 +771,7 @@ pub fn WatchModal(
                                 <div class="flex items-center justify-between">
                                     <Label html_for="alert-emails-toggle">
                                         <span class="flex items-center gap-2">
-                                            <Icon icon=icondata_lu::LuMail attr:class="h-4 w-4"/>
+                                            <Icon icon=phosphor_leptos::ENVELOPE attr:class="h-4 w-4"/>
                                             "Email Notifications"
                                         </span>
                                     </Label>
@@ -907,7 +906,7 @@ fn WatchCopilot(
 
     let empty_icon_fn: Arc<dyn Fn() -> AnyView + Send + Sync> = Arc::new(move || {
         view! {
-            <Icon icon=icondata_lu::LuEye attr:class="w-10 h-10 text-muted-foreground/50" />
+            <Icon icon=phosphor_leptos::EYE attr:class="w-10 h-10 text-muted-foreground/50" />
         }
         .into_any()
     });
@@ -981,7 +980,7 @@ fn SlackNotificationsSection(
         <div class="space-y-2">
             <Label>
                 <span class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuMessageSquare attr:class="h-4 w-4"/>
+                    <Icon icon=phosphor_leptos::CHAT attr:class="h-4 w-4"/>
                     "Slack Notifications"
                 </span>
             </Label>
@@ -1000,7 +999,7 @@ fn SlackNotificationsSection(
                     Some(ref status) if !status.workspace_connected => view! {
                         // Slack app not installed in workspace
                         <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                            <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                            <Icon icon=phosphor_leptos::WARNING attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
                             <span>
                                 "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
                             </span>
@@ -1012,7 +1011,7 @@ fn SlackNotificationsSection(
                         view! {
                             // User not connected to Slack
                             <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                                <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                                <Icon icon=phosphor_leptos::WARNING attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
                                 <span>
                                     {format!("Connect your Slack account in Profile Settings to send {label} to Slack.")}
                                 </span>
@@ -1033,7 +1032,7 @@ fn SlackNotificationsSection(
 
                             Some(ref ch) if ch.is_empty() => view! {
                                 <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                                    <Icon icon=phosphor_leptos::WARNING attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
                                     <span>
                                         "Invite the Kyomi app to a Slack channel first. Then refresh this page to see available channels."
                                     </span>
@@ -1106,12 +1105,12 @@ fn SlackNotificationsSection(
         <div class="space-y-2">
             <Label>
                 <span class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuMessageSquare attr:class="h-4 w-4"/>
+                    <Icon icon=phosphor_leptos::CHAT attr:class="h-4 w-4"/>
                     "Slack Notifications"
                 </span>
             </Label>
             <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                <Icon icon=icondata_lu::LuTriangleAlert attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
+                <Icon icon=phosphor_leptos::WARNING attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
                 <span>
                     "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
                 </span>

@@ -9,8 +9,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
 use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
@@ -212,7 +211,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                         aria_label=MaybeProp::from(Some("Manage Collections".to_string()))
                         on:click=move |_| set_collections_open.update(|v| *v = !*v)
                     >
-                        <Icon icon=icondata_lu::LuLayers width="16" height="16" />
+                        <Icon icon=phosphor_leptos::STACK size="16px" />
                         <span class="hidden sm:inline">"Collections"</span>
                     </ToggleButton>
 
@@ -226,7 +225,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                             when=move || !creating.get()
                             fallback=|| view! { <Spinner class="text-primary-foreground" /> }
                         >
-                            <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                            <Icon icon=phosphor_leptos::PLUS size="14px" />
                         </Show>
                         <span class="hidden sm:inline whitespace-nowrap">"Create Dashboard"</span>
                     </Button>
@@ -427,7 +426,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 #[component]
 fn DashboardChartIcon() -> impl IntoView {
     view! {
-        <Icon icon=icondata_lu::LuFileChartColumn attr:class="w-12 h-12" />
+        <Icon icon=phosphor_leptos::FILE_TEXT attr:class="w-12 h-12" />
     }
 }
 
@@ -466,7 +465,7 @@ fn DashboardsEmptyState(
                         description="Get started by creating your first markdown dashboard with embedded charts"
                         action=Arc::new(move || view! {
                             <Button on:click=move |ev| on_create.run(ev)>
-                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                <Icon icon=phosphor_leptos::PLUS size="14px" />
                                 "Create Your First Dashboard"
                             </Button>
                         }.into_any())
@@ -522,7 +521,7 @@ fn AddToCollectionModal(
                                     on:click=move |_| on_close.run(())
                                     aria_label="Close"
                                 >
-                                    <Icon icon=icondata_lu::LuX width="18" height="18" />
+                                    <Icon icon=phosphor_leptos::X size="18px" />
                                 </Button>
                             </div>
 
@@ -579,14 +578,14 @@ fn AddToCollectionModal(
                                                         {if is_public {
                                                             view! {
                                                                 <div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs bg-success/10 text-success-foreground">
-                                                                    <Icon icon=icondata_lu::LuGlobe width="12" height="12" />
+                                                                    <Icon icon=phosphor_leptos::GLOBE size="12px" />
                                                                     "Public"
                                                                 </div>
                                                             }.into_any()
                                                         } else {
                                                             view! {
                                                                 <div class="flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs bg-muted text-muted-foreground">
-                                                                    <Icon icon=icondata_lu::LuLock width="12" height="12" />
+                                                                    <Icon icon=phosphor_leptos::LOCK size="12px" />
                                                                     "Private"
                                                                 </div>
                                                             }.into_any()
@@ -597,7 +596,7 @@ fn AddToCollectionModal(
                                                     })}
                                                 </div>
                                                 <div class="text-muted-foreground">
-                                                    <Icon icon=icondata_lu::LuChevronRight width="20" height="20" />
+                                                    <Icon icon=phosphor_leptos::CARET_RIGHT size="20px" />
                                                 </div>
                                             </button>
                                         }

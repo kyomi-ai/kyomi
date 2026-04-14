@@ -13,7 +13,7 @@
 //! Mirrors `apps/frontend/src/pages/PersonalSetupWizard.jsx`.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use leptos_router::hooks::use_navigate;
 
 use crate::components::{
@@ -87,7 +87,7 @@ fn ConnectDataStep() -> impl IntoView {
                     <div class="border border-border rounded-lg p-5">
                         <div class="flex items-start gap-4">
                             <Icon
-                                icon=icondata_lu::LuDatabase
+                                icon=phosphor_leptos::DATABASE
                                 attr:class="mt-0.5 text-muted-foreground flex-shrink-0"
                             />
                             <div class="flex-1">
@@ -106,7 +106,7 @@ fn ConnectDataStep() -> impl IntoView {
                     <div class="border border-border rounded-lg p-5">
                         <div class="flex items-start gap-4">
                             <Icon
-                                icon=icondata_lu::LuDatabase
+                                icon=phosphor_leptos::DATABASE
                                 attr:class="mt-0.5 text-muted-foreground flex-shrink-0"
                             />
                             <div class="flex-1">
@@ -223,7 +223,7 @@ fn ConnectAiToolStep() -> impl IntoView {
                     <div class="space-y-3 pt-2">
                         <Button class="w-full" on:click=nav_dashboards>
                             "I've Connected"
-                            <Icon icon=icondata_lu::LuArrowRight attr:class="ml-2"/>
+                            <Icon icon=phosphor_leptos::ARROW_RIGHT attr:class="ml-2"/>
                         </Button>
                         <p class="text-sm text-center">
                             <button
@@ -298,7 +298,7 @@ fn cursor_tab(mcp_url: &str) -> impl IntoView {
                     rel="noopener noreferrer"
                     class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground h-9 px-4 py-2"
                 >
-                    <Icon icon=icondata_lu::LuExternalLink/>
+                    <Icon icon=phosphor_leptos::ARROW_SQUARE_OUT/>
                     "Connect with Cursor"
                 </a>
             </div>
@@ -359,9 +359,9 @@ fn CodeBlock(text: String) -> impl IntoView {
             >
                 {move || {
                     if copied.get() {
-                        view! { <Icon icon=icondata_lu::LuCopyCheck/> }.into_any()
+                        view! { <Icon icon=phosphor_leptos::CLIPBOARD_TEXT/> }.into_any()
                     } else {
-                        view! { <Icon icon=icondata_lu::LuCopy/> }.into_any()
+                        view! { <Icon icon=phosphor_leptos::COPY/> }.into_any()
                     }
                 }}
             </button>

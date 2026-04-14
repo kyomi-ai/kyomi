@@ -15,8 +15,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
@@ -175,7 +174,7 @@ fn AlertDropdownMenu(
                 on:click=move |_| set_is_open.update(|v| *v = !*v)
                 disabled=action_pending
             >
-                <Icon icon=icondata_lu::LuEllipsisVertical attr:class="h-4 w-4" />
+                <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL attr:class="h-4 w-4" />
             </button>
 
             // Dropdown content
@@ -187,7 +186,7 @@ fn AlertDropdownMenu(
                             class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground sm:hidden"
                             on:click=handle_continue_chat
                         >
-                            <Icon icon=icondata_lu::LuMessagesSquare attr:class="h-4 w-4 mr-2" />
+                            <Icon icon=phosphor_leptos::CHATS attr:class="h-4 w-4 mr-2" />
                             "Continue in Chat"
                         </button>
 
@@ -197,7 +196,7 @@ fn AlertDropdownMenu(
                                 class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
                                 on:click=handle_mark_unread
                             >
-                                <Icon icon=icondata_lu::LuMailOpen attr:class="h-4 w-4 mr-2" />
+                                <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 mr-2" />
                                 "Mark as unread"
                             </button>
                         })}
@@ -209,7 +208,7 @@ fn AlertDropdownMenu(
                                     class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
                                     on:click=handle_restore
                                 >
-                                    <Icon icon=icondata_lu::LuUndo2 attr:class="h-4 w-4 mr-2" />
+                                    <Icon icon=phosphor_leptos::ARROW_U_UP_LEFT attr:class="h-4 w-4 mr-2" />
                                     "Restore"
                                 </button>
                             }.into_any()
@@ -219,7 +218,7 @@ fn AlertDropdownMenu(
                                     class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-secondary hover:text-accent-foreground"
                                     on:click=handle_delete
                                 >
-                                    <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4 mr-2" />
+                                    <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 mr-2" />
                                     "Delete"
                                 </button>
                             }.into_any()
@@ -560,7 +559,7 @@ pub fn AlertsHistory(
                     Some(Err(e)) => {
                         return view! {
                             <div class="rounded-lg border border-error-border bg-error text-error-foreground p-4 flex items-center gap-2">
-                                <Icon icon=icondata_lu::LuCircleAlert attr:class="h-4 w-4" />
+                                <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                                 <span>{format!("Failed to load alerts: {e}")}</span>
                             </div>
                         }.into_any();
@@ -651,7 +650,7 @@ pub fn AlertsHistory(
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_mark_read
                                         >
-                                            <Icon icon=icondata_lu::LuMailOpen attr:class="h-4 w-4 sm:mr-1.5" />
+                                            <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 sm:mr-1.5" />
                                             <span class="hidden sm:inline">"Mark Read"</span>
                                         </Button>
                                         <Button
@@ -660,7 +659,7 @@ pub fn AlertsHistory(
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_mark_unread
                                         >
-                                            <Icon icon=icondata_lu::LuMail attr:class="h-4 w-4 sm:mr-1.5" />
+                                            <Icon icon=phosphor_leptos::ENVELOPE attr:class="h-4 w-4 sm:mr-1.5" />
                                             <span class="hidden sm:inline">"Mark Unread"</span>
                                         </Button>
                                         <Button
@@ -670,7 +669,7 @@ pub fn AlertsHistory(
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_delete
                                         >
-                                            <Icon icon=icondata_lu::LuTrash2 attr:class="h-4 w-4 sm:mr-1.5" />
+                                            <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 sm:mr-1.5" />
                                             <span class="hidden sm:inline">"Delete"</span>
                                         </Button>
                                     </div>
@@ -680,7 +679,7 @@ pub fn AlertsHistory(
                                         class="ml-auto"
                                         on:click=handle_clear_selection
                                     >
-                                        <Icon icon=icondata_lu::LuX attr:class="h-4 w-4 sm:mr-1.5" />
+                                        <Icon icon=phosphor_leptos::X attr:class="h-4 w-4 sm:mr-1.5" />
                                         <span class="hidden sm:inline">"Cancel"</span>
                                     </Button>
                                 }.into_any()
@@ -729,7 +728,7 @@ pub fn AlertsHistory(
                             view! {
                                 <div class="flex flex-col items-center justify-center py-12 text-center">
                                     <div class="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
-                                        <Icon icon=icondata_lu::LuBell attr:class="h-8 w-8 text-muted-foreground" />
+                                        <Icon icon=phosphor_leptos::BELL attr:class="h-8 w-8 text-muted-foreground" />
                                     </div>
                                     <h3 class="text-lg font-medium text-foreground mb-2">"No alerts yet"</h3>
                                     <p class="text-muted-foreground max-w-md">
@@ -818,13 +817,13 @@ pub fn AlertsHistory(
                                                                     "h-5 w-5 shrink-0 hidden sm:block {}",
                                                                     if is_unread { "text-primary" } else { "text-muted-foreground" }
                                                                 );
-                                                                view! { <Icon icon=icondata_lu::LuChartBar attr:class=icon_class /> }.into_any()
+                                                                view! { <Icon icon=phosphor_leptos::CHART_BAR attr:class=icon_class /> }.into_any()
                                                             } else {
                                                                 let icon_class = format!(
                                                                     "h-5 w-5 shrink-0 hidden sm:block {}",
                                                                     if is_unread { "text-primary" } else { "text-muted-foreground" }
                                                                 );
-                                                                view! { <Icon icon=icondata_lu::LuBell attr:class=icon_class /> }.into_any()
+                                                                view! { <Icon icon=phosphor_leptos::BELL attr:class=icon_class /> }.into_any()
                                                             }}
                                                             <div class="min-w-0 flex-1">
                                                                 <div class="flex items-center gap-2">
@@ -848,7 +847,7 @@ pub fn AlertsHistory(
                                                                 <div class="flex items-center gap-2 text-xs text-muted-foreground mt-0.5 min-w-0">
                                                                     <span class="truncate">{watch_name}</span>
                                                                     <span class="shrink-0">{"\u{2022}"}</span>
-                                                                    <Icon icon=icondata_lu::LuClock attr:class="h-3 w-3 shrink-0" />
+                                                                    <Icon icon=phosphor_leptos::CLOCK attr:class="h-3 w-3 shrink-0" />
                                                                     <span class="shrink-0">{started_at}</span>
                                                                 </div>
                                                             </div>
@@ -856,9 +855,9 @@ pub fn AlertsHistory(
                                                         // Expand chevron
                                                         {move || {
                                                             if expanded_alerts.get().contains(&alert_id) {
-                                                                view! { <Icon icon=icondata_lu::LuChevronUp attr:class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
+                                                                view! { <Icon icon=phosphor_leptos::CARET_UP attr:class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
                                                             } else {
-                                                                view! { <Icon icon=icondata_lu::LuChevronDown attr:class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
+                                                                view! { <Icon icon=phosphor_leptos::CARET_DOWN attr:class="h-5 w-5 text-muted-foreground shrink-0 ml-1" /> }.into_any()
                                                             }
                                                         }}
                                                     </button>
@@ -890,7 +889,7 @@ pub fn AlertsHistory(
                                                                 if continue_chat_alert_id.get() == Some(alert_id) {
                                                                     view! { <Spinner /> }.into_any()
                                                                 } else {
-                                                                    view! { <Icon icon=icondata_lu::LuMessagesSquare attr:class="h-4 w-4" /> }.into_any()
+                                                                    view! { <Icon icon=phosphor_leptos::CHATS attr:class="h-4 w-4" /> }.into_any()
                                                                 }
                                                             }}
                                                         </button>

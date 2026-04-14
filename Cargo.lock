@@ -5083,21 +5083,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "icondata_core"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c97be924215abd5e630d84e95a47c710138a6559b4c55039f4f33aa897fa859"
-
-[[package]]
-name = "icondata_lu"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f25663a6cc5371e9e33c98bab870f4aa2fd68c88853f1467c8fccfaf112782b1"
-dependencies = [
- "icondata_core",
-]
-
-[[package]]
 name = "icu_collections"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6149,8 +6134,6 @@ dependencies = [
  "futures-util",
  "gloo-timers",
  "hmac",
- "icondata_core",
- "icondata_lu",
  "js-sys",
  "kode-leptos",
  "kyomi-agent",
@@ -6164,9 +6147,9 @@ dependencies = [
  "kyomi-slack",
  "leptos",
  "leptos_axum",
- "leptos_icons",
  "leptos_meta",
  "leptos_router",
+ "phosphor-leptos",
  "pulldown-cmark",
  "regex",
  "reqwest 0.12.28",
@@ -6311,16 +6294,6 @@ dependencies = [
  "serde",
  "syn 2.0.117",
  "walkdir",
-]
-
-[[package]]
-name = "leptos_icons"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "274959df1a852fc431b03f27d9cd3129fb0f8cca9c8d383e4d668f62543cbec9"
-dependencies = [
- "icondata_core",
- "leptos",
 ]
 
 [[package]]
@@ -7856,6 +7829,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher 1.0.2",
+]
+
+[[package]]
+name = "phosphor-leptos"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c65763c7e36d6af027a0b96604ffbae96e904a0dc3b7d3cefae1b43902a694cb"
+dependencies = [
+ "leptos",
 ]
 
 [[package]]

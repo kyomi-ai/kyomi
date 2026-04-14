@@ -14,8 +14,7 @@
 //! - Tip alert when only one passkey is registered
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
     CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, INPUT_CLASS,
@@ -579,7 +578,7 @@ pub fn PasskeyManager() -> impl IntoView {
                         title="Refresh passkeys"
                     >
                         <span class=move || if loading.get() { "animate-spin" } else { "" }>
-                            <Icon icon=icondata_lu::LuRefreshCw width="16" height="16"/>
+                            <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px"/>
                         </span>
                     </button>
                 </div>
@@ -625,7 +624,7 @@ pub fn PasskeyManager() -> impl IntoView {
                                 view! {
                                     <EmptyState
                                         icon=std::sync::Arc::new(|| view! {
-                                            <Icon icon=icondata_lu::LuKeyRound width="48" height="48"/>
+                                            <Icon icon=phosphor_leptos::KEY size="48px"/>
                                         }.into_any())
                                         title="No passkeys registered yet"
                                         description="Add a passkey for passwordless sign-in"
@@ -633,7 +632,7 @@ pub fn PasskeyManager() -> impl IntoView {
                                             <Show when=move || is_supported.get()>
                                                 <Button on:click=move |_| add_modal_open.set(true)>
                                                     <span class="mr-2">
-                                                        <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
+                                                        <Icon icon=phosphor_leptos::PLUS size="16px"/>
                                                     </span>
                                                     "Add Your First Passkey"
                                                 </Button>
@@ -705,7 +704,7 @@ pub fn PasskeyManager() -> impl IntoView {
                     <div class="flex justify-start">
                         <Button on:click=move |_| add_modal_open.set(true)>
                             <span class="mr-2">
-                                <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
+                                <Icon icon=phosphor_leptos::PLUS size="16px"/>
                             </span>
                             "Add Passkey"
                         </Button>
@@ -908,13 +907,13 @@ fn PasskeyRow(
                         <span class="h-5 w-5 text-muted-foreground">
                             {match icon_kind {
                                 DeviceIconKind::Smartphone => view! {
-                                    <Icon icon=icondata_lu::LuSmartphone width="20" height="20"/>
+                                    <Icon icon=phosphor_leptos::DEVICE_MOBILE size="20px"/>
                                 }.into_any(),
                                 DeviceIconKind::Monitor => view! {
-                                    <Icon icon=icondata_lu::LuMonitor width="20" height="20"/>
+                                    <Icon icon=phosphor_leptos::MONITOR size="20px"/>
                                 }.into_any(),
                                 DeviceIconKind::Key => view! {
-                                    <Icon icon=icondata_lu::LuKeyRound width="20" height="20"/>
+                                    <Icon icon=phosphor_leptos::KEY size="20px"/>
                                 }.into_any(),
                             }}
                         </span>
@@ -947,7 +946,7 @@ fn PasskeyRow(
                         on:click=move |_| on_rename.run(())
                     >
                         <span title="Rename passkey">
-                            <Icon icon=icondata_lu::LuPencil width="16" height="16"/>
+                            <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px"/>
                         </span>
                     </Button>
 
@@ -958,7 +957,7 @@ fn PasskeyRow(
                             on:click=move |_| on_delete.run(())
                             title="Delete passkey"
                         >
-                            <Icon icon=icondata_lu::LuTrash2 width="16" height="16"/>
+                            <Icon icon=phosphor_leptos::TRASH size="16px"/>
                         </button>
                     </Show>
                 </div>

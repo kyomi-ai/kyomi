@@ -16,8 +16,7 @@
 //! truth after every save.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Button, ButtonVariant, Card, CardContent, Label, Skeleton, INPUT_CLASS,
 };
@@ -238,12 +237,12 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
     let (container_class, icon) = if is_byok {
         (
             "flex items-start gap-3 rounded-md border border-accent/40 bg-accent-light p-4",
-            icondata_lu::LuKeyRound,
+            phosphor_leptos::KEY,
         )
     } else {
         (
             "flex items-start gap-3 rounded-md border border-border bg-surface-alt p-4",
-            icondata_lu::LuSparkles,
+            phosphor_leptos::SPARKLE,
         )
     };
 
@@ -257,7 +256,7 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
         );
         return view! {
             <div class=container_class>
-                <Icon icon=icon width="18" height="18"/>
+                <Icon icon=icon size="18px"/>
                 <div class="flex-1 text-sm text-foreground">
                     {text}
                 </div>
@@ -276,7 +275,7 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
 
     view! {
         <div class=container_class>
-            <Icon icon=icon width="18" height="18"/>
+            <Icon icon=icon size="18px"/>
             <div class="flex-1 text-sm text-foreground">
                 {prefix}
                 {balance_clause}
@@ -372,7 +371,7 @@ fn ModeCard(
         >
             <Show when=move || selected.get()>
                 <div class="absolute top-3 right-3 text-accent">
-                    <Icon icon=icondata_lu::LuCheck width="18" height="18"/>
+                    <Icon icon=phosphor_leptos::CHECK size="18px"/>
                 </div>
             </Show>
             <div class="font-semibold text-foreground pr-6">{title}</div>
@@ -711,13 +710,13 @@ fn ByokPanel(
                         {move || match test_result.get() {
                             Some(Ok(msg)) => view! {
                                 <div class="flex items-center gap-2 text-sm text-success-foreground">
-                                    <Icon icon=icondata_lu::LuCheck width="16" height="16"/>
+                                    <Icon icon=phosphor_leptos::CHECK size="16px"/>
                                     <span>{msg}</span>
                                 </div>
                             }.into_any(),
                             Some(Err(msg)) => view! {
                                 <div class="flex items-center gap-2 text-sm text-error-foreground">
-                                    <Icon icon=icondata_lu::LuCircleX width="16" height="16"/>
+                                    <Icon icon=phosphor_leptos::X_CIRCLE size="16px"/>
                                     <span>{msg}</span>
                                 </div>
                             }.into_any(),

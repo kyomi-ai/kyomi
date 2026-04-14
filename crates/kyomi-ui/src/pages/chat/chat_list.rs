@@ -19,8 +19,7 @@
 
 use leptos::prelude::*;
 
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, SearchInput, Skeleton};
 use crate::server_fns::chat::{
@@ -496,7 +495,7 @@ pub fn ChatsListPage() -> impl IntoView {
 
                 // New Chat Button
                 <ButtonLink href="/chat" size=ButtonSize::Sm>
-                    <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                    <Icon icon=phosphor_leptos::PLUS size="14px" />
                     "New Chat"
                 </ButtonLink>
             </div>
@@ -530,7 +529,7 @@ pub fn ChatsListPage() -> impl IntoView {
                         aria_label=MaybeProp::derive(move || Some(if show_pinned_only.get() { "Show all chats".to_string() } else { "Show only pinned chats".to_string() }))
                         on:click=move |_| set_show_pinned_only.update(|v| *v = !*v)
                     >
-                        <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="16" height="16" />
+                        <Icon icon=phosphor_leptos::STAR attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } size="16px" />
                     </ToggleButton>
                 </div>
 
@@ -581,7 +580,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             disabled=move || is_bulk_deleting.get()
                             class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-error-foreground bg-error/10 hover:bg-error/20 rounded-lg transition-colors disabled:opacity-50"
                         >
-                            <Icon icon=icondata_lu::LuTrash2 width="16" height="16" />
+                            <Icon icon=phosphor_leptos::TRASH size="16px" />
                             {move || if is_bulk_deleting.get() { "Deleting..." } else { "Delete" }}
                         </button>
                         <button
@@ -624,7 +623,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             return if searching {
                                 view! {
                                     <EmptyState
-                                        icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS size="48px" /> }.into_any())
                                         title="No chats found"
                                         description="Try a different search term"
                                     />
@@ -632,12 +631,12 @@ pub fn ChatsListPage() -> impl IntoView {
                             } else {
                                 view! {
                                     <EmptyState
-                                        icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS size="48px" /> }.into_any())
                                         title="No chats yet"
                                         description="Start a new conversation to get started"
                                         action=std::sync::Arc::new(|| view! {
                                             <ButtonLink href="/chat">
-                                                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::PLUS size="14px" />
                                                 "Start New Chat"
                                             </ButtonLink>
                                         }.into_any())
@@ -653,7 +652,7 @@ pub fn ChatsListPage() -> impl IntoView {
                         if filtered.is_empty() {
                             return view! {
                                 <EmptyState
-                                    icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuMessagesSquare width="48" height="48" /> }.into_any())
+                                    icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS size="48px" /> }.into_any())
                                     title="No conversations found"
                                     description="Try adjusting your filters or start a new chat"
                                 />
@@ -793,7 +792,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                                                     handle_delete(sid.clone());
                                                                 }
                                                             >
-                                                                <Icon icon=icondata_lu::LuTrash2 width="14" height="14" attr:class="text-destructive" />
+                                                                <Icon icon=phosphor_leptos::TRASH size="14px" attr:class="text-destructive" />
                                                             </Button>
                                                         })
                                                     } else {

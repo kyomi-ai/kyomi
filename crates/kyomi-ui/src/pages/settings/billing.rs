@@ -15,8 +15,7 @@
 //! - Checkout redirect handling (checks URL params for ?checkout=success)
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
     CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Label, Modal, ModalSize,
@@ -626,7 +625,7 @@ fn BillingContent(
                                     disabled=checkout_loading.get_untracked()
                                     on:click=move |_| { handle_manage_billing.dispatch(()); }
                                 >
-                                    <Icon icon=icondata_lu::LuCreditCard width="16" height="16" attr:class="mr-2"/>
+                                    <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
                                     "Manage Billing"
                                 </Button>
                             })}
@@ -754,7 +753,7 @@ fn BillingContent(
                                         disabled=checkout_loading.get_untracked()
                                         on:click=move |_| { handle_manage_billing.dispatch(()); }
                                     >
-                                        <Icon icon=icondata_lu::LuCreditCard width="16" height="16" attr:class="mr-2"/>
+                                        <Icon icon=phosphor_leptos::CREDIT_CARD size="16px" attr:class="mr-2"/>
                                         "Add Payment Method"
                                     </Button>
                                 </div>
@@ -911,7 +910,7 @@ fn SeatCapCard(
         <Card>
             <CardHeader>
                 <CardTitle class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuUsers width="20" height="20"/>
+                    <Icon icon=phosphor_leptos::USERS size="20px"/>
                     "Seat Cap"
                 </CardTitle>
                 <CardDescription>
@@ -1010,7 +1009,7 @@ fn SeatCapCard(
                                     size=ButtonSize::Sm
                                     on:click=move |_| set_editing.set(true)
                                 >
-                                    <Icon icon=icondata_lu::LuPencil width="14" height="14" attr:class="mr-2"/>
+                                    <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" attr:class="mr-2"/>
                                     "Change cap"
                                 </Button>
                             </div>
@@ -1047,7 +1046,7 @@ fn AiCreditsCard(
         <Card>
             <CardHeader>
                 <CardTitle class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuSparkles width="20" height="20"/>
+                    <Icon icon=phosphor_leptos::SPARKLE size="20px"/>
                     "AI Credits"
                 </CardTitle>
                 <CardDescription>
@@ -1149,7 +1148,7 @@ fn AnalyticsCard(
         <Card>
             <CardHeader>
                 <CardTitle class="flex items-center gap-2">
-                    <Icon icon=icondata_lu::LuChartBar width="20" height="20"/>
+                    <Icon icon=phosphor_leptos::CHART_BAR size="20px"/>
                     "Analytics"
                 </CardTitle>
                 <CardDescription>
@@ -1320,9 +1319,9 @@ fn InvoicesSection(
                                                                                     rel="noopener noreferrer"
                                                                                     class="inline-flex items-center gap-1 text-primary hover:text-primary/80 transition-colors"
                                                                                 >
-                                                                                    <Icon icon=icondata_lu::LuFileText width="16" height="16"/>
+                                                                                    <Icon icon=phosphor_leptos::FILE_TEXT size="16px"/>
                                                                                     <span>"PDF"</span>
-                                                                                    <Icon icon=icondata_lu::LuExternalLink width="12" height="12"/>
+                                                                                    <Icon icon=phosphor_leptos::ARROW_SQUARE_OUT size="12px"/>
                                                                                 </a>
                                                                             })}
                                                                         </td>

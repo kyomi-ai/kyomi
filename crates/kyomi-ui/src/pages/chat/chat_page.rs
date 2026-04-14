@@ -36,7 +36,7 @@
 //! - Empty states: no datasources, personal mode without LLM (Phase 12)
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use leptos_router::components::Outlet;
 use leptos_router::hooks::{use_location, use_navigate};
 
@@ -1362,7 +1362,7 @@ pub fn ChatPage() -> impl IntoView {
                     <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
                         <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                             <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                <Icon icon=icondata_lu::LuMessageSquare attr:class="text-primary" width="32" height="32" />
+                                <Icon icon=phosphor_leptos::CHAT attr:class="text-primary" size="32px" />
                             </div>
                             <h2 class="text-xl font-semibold text-foreground mb-3">
                                 "Chat requires an AI provider"
@@ -1387,7 +1387,7 @@ pub fn ChatPage() -> impl IntoView {
                         <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
                             <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
                                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                    <Icon icon=icondata_lu::LuDatabase attr:class="text-primary" width="32" height="32" />
+                                    <Icon icon=phosphor_leptos::DATABASE attr:class="text-primary" size="32px" />
                                 </div>
                                 <h2 class="text-xl font-semibold text-foreground mb-3">
                                     "Connect a data source to start chatting"
@@ -1417,7 +1417,7 @@ pub fn ChatPage() -> impl IntoView {
                                             class="flex-shrink-0 text-muted-foreground hover:text-foreground"
                                             aria_label="Back to chats"
                                         >
-                                            <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+                                            <Icon icon=phosphor_leptos::CARET_LEFT size="18px" />
                                         </ButtonLink>
                                         <Show
                                             when=move || current_session_id.get().is_some()
@@ -1504,7 +1504,7 @@ pub fn ChatPage() -> impl IntoView {
                                                                 disabled=true
                                                                 aria_label="Slack channel conversations are always shared with your team"
                                                             >
-                                                                <Icon icon=icondata_lu::LuLock width="14" height="14" />
+                                                                <Icon icon=phosphor_leptos::LOCK size="14px" />
                                                                 <span class="hidden sm:inline">"Make Private"</span>
                                                             </Button>
                                                         }.into_any()
@@ -1516,7 +1516,7 @@ pub fn ChatPage() -> impl IntoView {
                                                                 aria_label="Make this conversation private"
                                                                 on:click=handle_unshare
                                                             >
-                                                                <Icon icon=icondata_lu::LuLock width="14" height="14" />
+                                                                <Icon icon=phosphor_leptos::LOCK size="14px" />
                                                                 <span class="hidden sm:inline">"Make Private"</span>
                                                             </Button>
                                                         }.into_any()
@@ -1529,7 +1529,7 @@ pub fn ChatPage() -> impl IntoView {
                                                             aria_label="Share this conversation with your workspace"
                                                             on:click=handle_share
                                                         >
-                                                            <Icon icon=icondata_lu::LuShare2 width="14" height="14" />
+                                                            <Icon icon=phosphor_leptos::SHARE_NETWORK size="14px" />
                                                             <span class="hidden sm:inline">"Share"</span>
                                                         </Button>
                                                     }.into_any()
@@ -1546,7 +1546,7 @@ pub fn ChatPage() -> impl IntoView {
                                                 aria_label=MaybeProp::derive(move || Some(if show_pinned_only.get() { "Show all messages".to_string() } else { "Show only pinned messages".to_string() }))
                                                 on:click=move |_| set_show_pinned_only.update(|v| *v = !*v)
                                             >
-                                                <Icon icon=icondata_lu::LuStar attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::STAR attr:class=move || if show_pinned_only.get() { "fill-current" } else { "" } size="14px" />
                                                 <span>{move || if show_pinned_only.get() { "Pinned Only" } else { "Pinned" }}</span>
                                             </ToggleButton>
                                         </Show>

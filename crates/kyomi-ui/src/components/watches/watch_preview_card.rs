@@ -11,7 +11,7 @@
 //!    just renders the preview and fires the callback on click.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use serde::{Deserialize, Serialize};
 
 use crate::components::{
@@ -201,7 +201,7 @@ pub fn WatchPreviewCard(
                 view! {
                     <Badge variant=BadgeVariant::Warning class="text-xs gap-1">
                         // Bell icon (Lucide)
-                        <Icon icon=icondata_lu::LuBell attr:class="h-3 w-3"/>
+                        <Icon icon=phosphor_leptos::BELL attr:class="h-3 w-3"/>
                         "Alert"
                     </Badge>
                 }.into_any()
@@ -268,7 +268,7 @@ pub fn WatchPreviewCard(
                 <div class="flex items-center justify-between pb-2">
                     <div class="flex items-center gap-2">
                         // Eye icon (Lucide)
-                        <Icon icon=icondata_lu::LuEye attr:class="h-4 w-4 text-primary"/>
+                        <Icon icon=phosphor_leptos::EYE attr:class="h-4 w-4 text-primary"/>
                         <CardTitle class="text-base">"Watch Preview"</CardTitle>
                     </div>
                     <div class="flex items-center gap-2">
@@ -297,7 +297,7 @@ pub fn WatchPreviewCard(
 
                 // Schedule
                 <div class="flex items-center gap-2 text-sm">
-                    <Icon icon=icondata_lu::LuClock attr:class="h-4 w-4 text-muted-foreground"/>
+                    <Icon icon=phosphor_leptos::CLOCK attr:class="h-4 w-4 text-muted-foreground"/>
                     <span>{schedule_desc}</span>
                 </div>
 
@@ -333,12 +333,12 @@ pub fn WatchPreviewCard(
                             } else if created.get() {
                                 view! {
                                     // CheckCircle icon (Lucide)
-                                    <Icon icon=icondata_lu::LuCircleCheck attr:class="h-4 w-4 mr-2"/>
+                                    <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-4 w-4 mr-2"/>
                                     "Accepted"
                                 }.into_any()
                             } else {
                                 view! {
-                                    <Icon icon=icondata_lu::LuCircleCheck attr:class="h-4 w-4 mr-2"/>
+                                    <Icon icon=phosphor_leptos::CHECK_CIRCLE attr:class="h-4 w-4 mr-2"/>
                                     "Accept"
                                 }.into_any()
                             }

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, ButtonVariant, Spinner};
 
 /// Passkey sign-in button — wraps the design-system `<Button>` with loading/icon.
@@ -36,7 +35,7 @@ pub fn PasskeySignInButton(
                     }.into_any()
                 } else {
                     view! {
-                        <Icon icon=icondata_lu::LuKeyRound width="20" height="20"/>
+                        <Icon icon=phosphor_leptos::KEY size="20px"/>
                         <span>"Sign in with Passkey"</span>
                     }.into_any()
                 }

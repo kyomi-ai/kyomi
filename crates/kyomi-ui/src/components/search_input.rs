@@ -5,8 +5,7 @@
 //! Used on list pages (chats, dashboards) for consistent search UX.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 /// Reusable search input with leading search icon and trailing clear button.
 ///
 /// Matches the pattern used in chats and dashboards list pages.
@@ -36,7 +35,7 @@ pub fn SearchInput(
                 when=is_searching
                 fallback=|| view! {
                     <span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                        <Icon icon=icondata_lu::LuSearch width="16" height="16" />
+                        <Icon icon=phosphor_leptos::MAGNIFYING_GLASS size="16px" />
                     </span>
                 }
             >
@@ -62,7 +61,7 @@ pub fn SearchInput(
                     aria-label="Clear search"
                     on:click=move |_| on_input.run(String::new())
                 >
-                    <Icon icon=icondata_lu::LuX width="16" height="16" />
+                    <Icon icon=phosphor_leptos::X size="16px" />
                 </button>
             </Show>
         </div>

@@ -4,8 +4,7 @@
 //! ChartML YAML source, matching React's ChartInfoModal component exactly.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::modal::{Modal, ModalSize};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -126,13 +125,13 @@ pub fn ChartInfoModal(
                                     {move || if sql_copied.get() {
                                         view! {
                                             <span class="block h-4 w-4 text-success-foreground">
-                                                <Icon icon=icondata_lu::LuCheck width="16" height="16" />
+                                                <Icon icon=phosphor_leptos::CHECK size="16px" />
                                             </span>
                                         }.into_any()
                                     } else {
                                         view! {
                                             <span class="block h-4 w-4 text-muted-foreground">
-                                                <Icon icon=icondata_lu::LuCopy width="16" height="16" />
+                                                <Icon icon=phosphor_leptos::COPY size="16px" />
                                             </span>
                                         }.into_any()
                                     }}
@@ -160,13 +159,13 @@ pub fn ChartInfoModal(
                             {move || if copied.get() {
                                 view! {
                                     <span class="block h-4 w-4 text-success-foreground">
-                                        <Icon icon=icondata_lu::LuCheck width="16" height="16" />
+                                        <Icon icon=phosphor_leptos::CHECK size="16px" />
                                     </span>
                                 }.into_any()
                             } else {
                                 view! {
                                     <span class="block h-4 w-4 text-muted-foreground">
-                                        <Icon icon=icondata_lu::LuCopy width="16" height="16" />
+                                        <Icon icon=phosphor_leptos::COPY size="16px" />
                                     </span>
                                 }.into_any()
                             }}

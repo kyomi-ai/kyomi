@@ -13,8 +13,7 @@ use leptos::prelude::*;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, Label, Modal, ModalSize,
     Switch, INPUT_CLASS,
@@ -197,7 +196,7 @@ fn CollectionRow(
                         on_edit.run(coll_for_edit.clone());
                     }
                 >
-                    <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                    <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                 </Button>
                 <Button
                     variant=ButtonVariant::Ghost
@@ -209,7 +208,7 @@ fn CollectionRow(
                         on_delete.run(coll_for_delete.clone());
                     }
                 >
-                    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
+                    <Icon icon=phosphor_leptos::TRASH size="14px" />
                 </Button>
             </div>
         </div>
@@ -254,7 +253,7 @@ fn CollectionList(
                 class=all_btn_class
                 on:click=move |_| on_all_click.run(())
             >
-                <Icon icon=icondata_lu::LuLayoutDashboard width="18" height="18" />
+                <Icon icon=phosphor_leptos::SQUARES_FOUR size="18px" />
                 <span class="flex-1">{format!("All {type_name_plural}")}</span>
                 <span class="text-sm text-muted-foreground">{move || dashboard_count.get()}</span>
             </button>
@@ -269,7 +268,7 @@ fn CollectionList(
                             Some(view! {
                                 // React: `px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2`
                                 <div class="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                                    <Icon icon=icondata_lu::LuGlobe width="12" height="12" />
+                                    <Icon icon=phosphor_leptos::GLOBE size="12px" />
                                     "Public Collections"
                                 </div>
                                 {public_collections.into_iter().map(|c| {
@@ -293,7 +292,7 @@ fn CollectionList(
                             Some(view! {
                                 // React: `px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2 mt-2`
                                 <div class="px-4 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2 mt-2">
-                                    <Icon icon=icondata_lu::LuLock width="12" height="12" />
+                                    <Icon icon=phosphor_leptos::LOCK size="12px" />
                                     "Private Collections"
                                 </div>
                                 {private_collections.into_iter().map(|c| {
@@ -337,13 +336,13 @@ fn SidebarHeader(
                 aria_label="Close"
                 on:click=move |_| on_close.run(())
             >
-                <Icon icon=icondata_lu::LuX width="20" height="20" />
+                <Icon icon=phosphor_leptos::X size="20px" />
             </Button>
         </div>
 
         <div class="flex-shrink-0 p-4 border-b border-border">
             <Button class="w-full" on:click=move |_| on_new.run(())>
-                <Icon icon=icondata_lu::LuPlus width="14" height="14" />
+                <Icon icon=phosphor_leptos::PLUS size="14px" />
                 "New Collection"
             </Button>
         </div>

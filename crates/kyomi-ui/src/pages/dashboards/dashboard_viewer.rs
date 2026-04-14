@@ -25,7 +25,7 @@ use crate::components::dashboard::{
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 use crate::parser::parse_markdown_chartml;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
@@ -709,7 +709,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     // Left: back button + editable title
                                     <div class="flex items-center gap-4 flex-1 min-w-0 overflow-hidden">
                                         <ButtonLink href=list_href().to_string() variant=ButtonVariant::Ghost size=ButtonSize::Icon class="flex-shrink-0 text-muted-foreground hover:text-foreground" aria_label=back_aria().to_string()>
-                                            <Icon icon=icondata_lu::LuChevronLeft width="18" height="18" />
+                                            <Icon icon=phosphor_leptos::CARET_LEFT size="18px" />
                                         </ButtonLink>
 
                                         <InlineEditableTitle
@@ -722,7 +722,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     <div class="flex items-center gap-1 @6xl:gap-2 flex-shrink-0">
                                         // Refresh All
                                         <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Refresh all charts" on:click=on_refresh_all>
-                                            <Icon icon=icondata_lu::LuRefreshCw width="14" height="14" />
+                                            <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="14px" />
                                             <span class="hidden @6xl:inline whitespace-nowrap">"Refresh All"</span>
                                         </Button>
 
@@ -732,7 +732,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             view! {
                                                 <div class="hidden @3xl:flex">
                                                     <Button variant=ButtonVariant::Secondary size=ButtonSize::Sm aria_label="Download PDF" disabled=Signal::derive(move || is_exporting.get()) on:click=on_download>
-                                                        <Icon icon=icondata_lu::LuDownload width="14" height="14" />
+                                                        <Icon icon=phosphor_leptos::DOWNLOAD_SIMPLE size="14px" />
                                                         <span class="hidden @6xl:inline whitespace-nowrap">
                                                             {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
                                                         </span>
@@ -749,7 +749,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                 aria_label="Toggle version history"
                                                 on:click=move |_| set_history_open.update(|o| *o = !*o)
                                             >
-                                                <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::CLOCK size="14px" />
                                                 <span class="hidden @6xl:inline whitespace-nowrap">"History"</span>
                                             </ToggleButton>
                                         </div>
@@ -763,7 +763,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                 disabled=Signal::derive(move || setting_user_default.get())
                                                 on:click=toggle_user_default
                                             >
-                                                <Icon icon=icondata_lu::LuStar width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::STAR size="14px" />
                                                 <span class="hidden @6xl:inline whitespace-nowrap">
                                                     {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
                                                 </span>
@@ -781,7 +781,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         disabled=Signal::derive(move || setting_ws_default.get())
                                                         on:click=toggle_ws_default
                                                     >
-                                                        <Icon icon=icondata_lu::LuHouse width="14" height="14" />
+                                                        <Icon icon=phosphor_leptos::HOUSE size="14px" />
                                                         <span class="hidden @6xl:inline whitespace-nowrap">
                                                             {move || if is_workspace_default.get() { "Workspace Default" } else { "Set Workspace Default" }}
                                                         </span>
@@ -793,7 +793,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         // ─── Mobile overflow menu ───────
                                         <div class="relative flex @3xl:hidden">
                                             <Button variant=ButtonVariant::Secondary size=ButtonSize::Icon aria_label="More actions" on:click=move |_| set_overflow_open.update(|o| *o = !*o)>
-                                                <Icon icon=icondata_lu::LuEllipsisVertical width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL size="14px" />
                                             </Button>
 
                                             {move || overflow_open.get().then(|| {
@@ -811,7 +811,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                     disabled=move || is_exporting.get()
                                                                     on:click=move |ev| { set_overflow_open.set(false); on_download_pdf_m(ev); }
                                                                 >
-                                                                    <Icon icon=icondata_lu::LuDownload width="14" height="14" />
+                                                                    <Icon icon=phosphor_leptos::DOWNLOAD_SIMPLE size="14px" />
                                                                     {move || if is_exporting.get() { "Exporting..." } else { "Download PDF" }}
                                                                 </button>
                                                             }
@@ -822,7 +822,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                             class="menu-item"
                                                             on:click=move |_| { set_overflow_open.set(false); set_history_open.update(|o| *o = !*o); }
                                                         >
-                                                            <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                                                            <Icon icon=phosphor_leptos::CLOCK size="14px" />
                                                             {move || if history_open.get() { "Close History" } else { "Version History" }}
                                                         </button>
 
@@ -834,7 +834,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                             disabled=move || setting_user_default.get()
                                                             on:click=toggle_user_m
                                                         >
-                                                            <Icon icon=icondata_lu::LuStar width="14" height="14" />
+                                                            <Icon icon=phosphor_leptos::STAR size="14px" />
                                                             {move || if is_user_default.get() { "Remove My Default" } else { "Set as My Default" }}
                                                         </button>
 
@@ -847,7 +847,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                     disabled=move || setting_ws_default.get()
                                                                     on:click=toggle_ws_m
                                                                 >
-                                                                    <Icon icon=icondata_lu::LuHouse width="14" height="14" />
+                                                                    <Icon icon=phosphor_leptos::HOUSE size="14px" />
                                                                     {move || if is_workspace_default.get() { "Remove Workspace Default" } else { "Set Workspace Default" }}
                                                                 </button>
                                                             }
@@ -859,7 +859,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                                         // Edit Dashboard — always visible (primary action)
                                         <ButtonLink href=edit_href size=ButtonSize::Sm>
-                                            <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                                            <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                                             <span class="hidden @6xl:inline whitespace-nowrap">{edit_label()}</span>
                                         </ButtonLink>
                                     </div>
@@ -904,7 +904,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                         view! {
                                                             <div class="w-full text-center py-16">
                                                                 <div class="w-24 h-24 mx-auto text-muted-foreground mb-6 flex items-center justify-center">
-                                                                    <Icon icon=icondata_lu::LuFileText width="64" height="64" />
+                                                                    <Icon icon=phosphor_leptos::FILE_TEXT size="64px" />
                                                                 </div>
                                                                 <h3 class="text-xl font-semibold text-foreground mb-2">
                                                                     {empty_title()}
@@ -913,7 +913,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                     {empty_hint()}
                                                                 </p>
                                                                 <ButtonLink href=edit_href_empty.clone()>
-                                                                    <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                                                                    <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                                                                     {edit_label()}
                                                                 </ButtonLink>
                                                             </div>
@@ -974,11 +974,11 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                     <div class="flex items-center justify-between text-xs text-muted-foreground">
                                         <div class="flex items-center gap-4">
                                             <div class="flex items-center gap-1">
-                                                <Icon icon=icondata_lu::LuClock width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::CLOCK size="14px" />
                                                 "Created " {created_date}
                                             </div>
                                             <div class="flex items-center gap-1">
-                                                <Icon icon=icondata_lu::LuPencil width="14" height="14" />
+                                                <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                                                 "Last updated " {updated_date}
                                             </div>
                                         </div>

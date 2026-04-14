@@ -7,8 +7,7 @@
 //! submitted state regardless of backend response to prevent email enumeration.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
     ButtonVariant, Label, Spinner, INPUT_CLASS,
@@ -117,10 +116,10 @@ fn FormView(
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
                     {match kind {
                         RecoveryKind::Account => view! {
-                            <Icon icon=icondata_lu::LuLockKeyhole attr:class="w-8 h-8 text-primary"/>
+                            <Icon icon=phosphor_leptos::LOCK_KEY attr:class="w-8 h-8 text-primary"/>
                         }.into_any(),
                         RecoveryKind::Passkey => view! {
-                            <Icon icon=icondata_lu::LuKeyRound attr:class="w-8 h-8 text-primary"/>
+                            <Icon icon=phosphor_leptos::KEY attr:class="w-8 h-8 text-primary"/>
                         }.into_any(),
                     }}
                 </div>
@@ -193,7 +192,7 @@ fn SubmittedView(
         <div class="space-y-4">
             <div class="text-center">
                 <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                    <Icon icon=icondata_lu::LuMail attr:class="w-8 h-8 text-primary"/>
+                    <Icon icon=phosphor_leptos::ENVELOPE attr:class="w-8 h-8 text-primary"/>
                 </div>
             </div>
             <p class="text-sm text-center text-muted-foreground">

@@ -11,8 +11,7 @@
 //! - Uses Card, Button, Alert, Label, INPUT_CLASS
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonVariant, Card, CardContent,
     CardDescription, CardHeader, CardTitle, Label, Skeleton, StatusBadge, StatusBadgeVariant,
@@ -215,7 +214,7 @@ pub fn TwoFactorAuth() -> impl IntoView {
                                             attr:disabled=move || setup_loading.get()
                                             on:click=handle_setup
                                         >
-                                            <Icon icon=icondata_lu::LuShield width="16" height="16"/>
+                                            <Icon icon=phosphor_leptos::SHIELD size="16px"/>
                                             <span>
                                                 {move || if setup_loading.get() { "Setting up..." } else { "Setup 2FA" }}
                                             </span>
@@ -290,10 +289,10 @@ pub fn TwoFactorAuth() -> impl IntoView {
                                                 <Show
                                                     when=move || copied.get()
                                                     fallback=|| view! {
-                                                        <Icon icon=icondata_lu::LuCopy width="16" height="16"/>
+                                                        <Icon icon=phosphor_leptos::COPY size="16px"/>
                                                     }
                                                 >
-                                                    <Icon icon=icondata_lu::LuCheck width="16" height="16"/>
+                                                    <Icon icon=phosphor_leptos::CHECK size="16px"/>
                                                 </Show>
                                             </button>
                                         </div>

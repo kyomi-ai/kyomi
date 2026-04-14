@@ -11,7 +11,7 @@
 //! - Mobile: slide-in panel with backdrop overlay
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
+use phosphor_leptos::Icon;
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -193,14 +193,14 @@ pub fn CopilotSidebar(
                 // React: `flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0`
                 <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
                     <div class="flex items-center gap-2">
-                        <Icon icon=icondata_lu::LuSparkles width="20" height="20" attr:class="text-primary" />
+                        <Icon icon=phosphor_leptos::SPARKLE size="20px" attr:class="text-primary" />
                         <span class="font-medium text-foreground">"Dashboard Copilot"</span>
                     </div>
                     <Button variant=ButtonVariant::GhostMuted size=ButtonSize::Icon
                         aria_label="Close copilot".to_string()
                         on:click=move |_| handle_close_clone()
                     >
-                        <Icon icon=icondata_lu::LuX width="20" height="20" />
+                        <Icon icon=phosphor_leptos::X size="20px" />
                     </Button>
                 </div>
 
@@ -211,7 +211,7 @@ pub fn CopilotSidebar(
                     context_label="Dashboard Content"
                     active=Signal::derive(move || open.get())
                     placeholder="Ask about your dashboard..."
-                    empty_icon=std::sync::Arc::new(|| view! { <Icon icon=icondata_lu::LuSparkles width="48" height="48" /> }.into_any())
+                    empty_icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::SPARKLE size="48px" /> }.into_any())
                     empty_title="Ask me anything about your dashboard!"
                     empty_description="I can help you improve charts, suggest changes, or make edits directly."
                     custom_ws_events=vec!["dashboard_update".to_string()]

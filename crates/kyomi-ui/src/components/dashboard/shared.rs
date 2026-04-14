@@ -140,14 +140,14 @@ pub(crate) fn dashboard_icon(class: &str) -> impl IntoView {
     }
 }
 
-/// Checkmark circle icon — Lucide `LuCircleCheck`, sized via the caller's
-/// span class. Per DESIGN.md §Icons, all icons come from the Lucide set
-/// via `icondata_lu::*`; no inline SVG in components.
+/// Checkmark circle icon — Phosphor `CHECK_CIRCLE`, sized via the caller's
+/// span class. Per DESIGN.md §Icons, all icons come from the Phosphor set
+/// via `phosphor_leptos::*`; no inline SVG in components.
 pub(crate) fn check_circle_icon(class: &str) -> impl IntoView {
     let class = class.to_string();
     view! {
         <span class=class>
-            <leptos_icons::Icon icon=icondata_lu::LuCircleCheck width="100%" height="100%" />
+            <phosphor_leptos::Icon icon=phosphor_leptos::CHECK_CIRCLE size="100%" />
         </span>
     }
 }

@@ -15,8 +15,7 @@
 //! or the component is unmounted.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 /// Classes kept for backward compatibility with code that uses raw `<select>` elements
 /// with `SELECT_CLASS` and `CHEVRON_STYLE` directly.
 pub const SELECT_CLASS: &str = "flex h-9 w-full items-center justify-between whitespace-nowrap rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm ring-offset-background focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 appearance-none cursor-pointer";
@@ -165,7 +164,7 @@ pub fn StyledSelect(
                 aria-haspopup="listbox"
             >
                 <span class="line-clamp-1">{move || display_label.get()}</span>
-                <Icon icon=icondata_lu::LuChevronDown attr:class=CHEVRON_CLASS/>
+                <Icon icon=phosphor_leptos::CARET_DOWN attr:class=CHEVRON_CLASS/>
             </button>
 
             // Dropdown content
@@ -196,7 +195,7 @@ pub fn StyledSelect(
                                         move || {
                                             (selected.get() == val_check).then(|| {
                                                 view! {
-                                                    <Icon icon=icondata_lu::LuCheck attr:class="h-4 w-4"/>
+                                                    <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
                                                 }
                                             })
                                         }
@@ -351,7 +350,7 @@ pub fn DynSelect(
                         "line-clamp-1"
                     }
                 }>{move || display_label.get()}</span>
-                <Icon icon=icondata_lu::LuChevronDown attr:class=CHEVRON_CLASS/>
+                <Icon icon=phosphor_leptos::CARET_DOWN attr:class=CHEVRON_CLASS/>
             </button>
 
             {move || {
@@ -378,7 +377,7 @@ pub fn DynSelect(
                                     {move || {
                                         (value.get() == val_for_icon).then(|| {
                                             view! {
-                                                <Icon icon=icondata_lu::LuCheck attr:class="h-4 w-4"/>
+                                                <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
                                             }
                                         })
                                     }}

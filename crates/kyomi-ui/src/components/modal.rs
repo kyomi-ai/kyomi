@@ -31,8 +31,7 @@
 
 use leptos::ev;
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 /// Modal size variants.
 ///
 /// React: `sizeClasses = { sm: 'max-w-sm', md: 'max-w-md', lg: 'max-w-4xl', xl: 'max-w-6xl', full: 'max-w-[95vw]' }`
@@ -149,7 +148,7 @@ pub fn Modal(
                             on:click=move |_| on_close.run(())
                             aria-label="Close"
                         >
-                            <Icon icon=icondata_lu::LuX width="24" height="24" />
+                            <Icon icon=phosphor_leptos::X size="24px" />
                         </button>
                     </div>
 

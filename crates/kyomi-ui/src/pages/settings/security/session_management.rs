@@ -15,8 +15,7 @@
 //! - Uses Card, Button, Badge, ConfirmDialog
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonVariant,
     Card, CardContent, CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState,
@@ -276,7 +275,7 @@ pub fn SessionManagement() -> impl IntoView {
                         title="Refresh sessions"
                     >
                         <span class=move || if loading.get() { "animate-spin" } else { "" }>
-                            <Icon icon=icondata_lu::LuRefreshCw width="16" height="16"/>
+                            <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px"/>
                         </span>
                     </button>
                 </div>
@@ -469,11 +468,11 @@ fn SessionRow(
                 <div class="flex items-center">
                     <div class="flex-shrink-0">
                         {if is_oauth {
-                            view! { <span class="text-muted-foreground"><Icon icon=icondata_lu::LuPlug width="20" height="20"/></span> }.into_any()
+                            view! { <span class="text-muted-foreground"><Icon icon=phosphor_leptos::PLUG size="20px"/></span> }.into_any()
                         } else if is_mobile {
-                            view! { <span class="text-muted-foreground"><Icon icon=icondata_lu::LuSmartphone width="20" height="20"/></span> }.into_any()
+                            view! { <span class="text-muted-foreground"><Icon icon=phosphor_leptos::DEVICE_MOBILE size="20px"/></span> }.into_any()
                         } else {
-                            view! { <span class="text-muted-foreground"><Icon icon=icondata_lu::LuMonitor width="20" height="20"/></span> }.into_any()
+                            view! { <span class="text-muted-foreground"><Icon icon=phosphor_leptos::MONITOR size="20px"/></span> }.into_any()
                         }}
                     </div>
                     <div class="ml-3">
@@ -529,7 +528,7 @@ fn SessionRow(
                                     <span class="animate-spin h-4 w-4 border-2 border-current border-t-transparent rounded-full"/>
                                 }
                             >
-                                <span class="text-muted-foreground transition-colors hover:text-destructive"><Icon icon=icondata_lu::LuX width="16" height="16"/></span>
+                                <span class="text-muted-foreground transition-colors hover:text-destructive"><Icon icon=phosphor_leptos::X size="16px"/></span>
                             </Show>
                         </button>
                     }

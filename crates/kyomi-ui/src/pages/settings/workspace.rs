@@ -173,7 +173,7 @@ fn KnowledgeGraphCard() -> impl IntoView {
                             view! {
                                 <span class="inline-flex items-center gap-2">
                                     <span class="inline-flex">
-                                        <leptos_icons::Icon icon=icondata_lu::LuRefreshCw width="16" height="16"/>
+                                        <phosphor_leptos::Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px"/>
                                     </span>
                                     "Rebuild Graph"
                                 </span>
@@ -347,7 +347,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                                                     view! {
                                                         <span class="inline-flex items-center gap-2">
                                                             <span class="inline-flex">
-                                                                <leptos_icons::Icon icon=icondata_lu::LuUnplug width="16" height="16"/>
+                                                                <phosphor_leptos::Icon icon=phosphor_leptos::PLUGS size="16px"/>
                                                             </span>
                                                             "Remove Integration"
                                                         </span>
@@ -368,7 +368,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                                         <Button on:click=handle_install>
                                             <span class="inline-flex items-center gap-2">
                                                 <span class="inline-flex">
-                                                    <leptos_icons::Icon icon=icondata_lu::LuExternalLink width="16" height="16"/>
+                                                    <phosphor_leptos::Icon icon=phosphor_leptos::ARROW_SQUARE_OUT size="16px"/>
                                                 </span>
                                                 "Add Kyomi to Slack"
                                             </span>

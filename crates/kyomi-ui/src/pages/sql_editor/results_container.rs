@@ -12,8 +12,7 @@
 //! size change re-executes the query via `execute_sql_query()`.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use super::state::SqlEditorState;
 use super::tab_bar::TabBar;
 use super::results_table::ResultsTable;
@@ -304,7 +303,7 @@ pub fn ResultsContainer(
                 view! {
                     <div class="flex-1 flex items-center justify-center text-muted-foreground">
                         <div class="text-center">
-                            <Icon icon=icondata_lu::LuFileText attr:class="w-16 h-16 mx-auto mb-4 text-muted-foreground/50" />
+                            <Icon icon=phosphor_leptos::FILE_TEXT attr:class="w-16 h-16 mx-auto mb-4 text-muted-foreground/50" />
                             <p class="text-sm">"No active result tab"</p>
                         </div>
                     </div>
@@ -400,7 +399,7 @@ pub fn ResultsContainer(
                         }.into_any()
                     } else {
                         view! {
-                            <Icon icon=icondata_lu::LuChartBar attr:class="w-3.5 h-3.5" />
+                            <Icon icon=phosphor_leptos::CHART_BAR attr:class="w-3.5 h-3.5" />
                             <span>"Create Chart"</span>
                         }.into_any()
                     }}
@@ -594,7 +593,7 @@ fn ResultsError(
             <div class="flex-1 flex items-center justify-center p-6">
                 <div class="text-center max-w-lg">
                     // Info circle icon
-                    <Icon icon=icondata_lu::LuInfo attr:class="w-12 h-12 mx-auto mb-4 text-muted-foreground/60" />
+                    <Icon icon=phosphor_leptos::INFO attr:class="w-12 h-12 mx-auto mb-4 text-muted-foreground/60" />
 
                     <h3 class="text-sm font-semibold text-foreground mb-2">
                         "Results No Longer Available"
@@ -627,7 +626,7 @@ fn ResultsError(
             <div class="flex-1 flex items-center justify-center p-6">
                 <div class="text-center max-w-lg">
                     // Warning triangle icon
-                    <Icon icon=icondata_lu::LuTriangleAlert attr:class="w-12 h-12 mx-auto mb-4 text-error-foreground/60" />
+                    <Icon icon=phosphor_leptos::WARNING attr:class="w-12 h-12 mx-auto mb-4 text-error-foreground/60" />
 
                     <p class="text-sm text-error-foreground mb-4 font-mono whitespace-pre-wrap break-words">
                         {message}

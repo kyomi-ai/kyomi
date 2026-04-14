@@ -6,8 +6,7 @@
 //! `apps/frontend/src/components/settings/DatasourceModal.jsx`.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
     Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, Switch,
@@ -193,7 +192,7 @@ fn DatasourcesContent(
                     on:click=move |_| set_modal_datasource_id.set(Some(None))
                 >
                     <span class="h-4 w-4 inline-flex items-center justify-center">
-                        <Icon icon=icondata_lu::LuPlus/>
+                        <Icon icon=phosphor_leptos::PLUS/>
                     </span>
                     "Add Datasource"
                 </Button>
@@ -207,14 +206,14 @@ fn DatasourcesContent(
                         fallback=move || view! {
                             <EmptyState
                                 icon=std::sync::Arc::new(|| view! {
-                                    <Icon icon=icondata_lu::LuDatabase width="48" height="48"/>
+                                    <Icon icon=phosphor_leptos::DATABASE size="48px"/>
                                 }.into_any())
                                 title="No datasources configured"
                                 description="Connect a data source to start querying your data"
                                 action=std::sync::Arc::new(move || view! {
                                     <Button on:click=move |_| set_modal_datasource_id.set(Some(None))>
                                         <span class="h-4 w-4 inline-flex items-center justify-center">
-                                            <Icon icon=icondata_lu::LuPlus/>
+                                            <Icon icon=phosphor_leptos::PLUS/>
                                         </span>
                                         "Add Datasource"
                                     </Button>
@@ -343,7 +342,7 @@ fn DatasourceRow(
             // Left side: name, type badge, status badges
             <div class="flex items-center gap-3 min-w-0">
                 <span class="h-6 w-6 shrink-0 text-muted-foreground inline-flex items-center justify-center">
-                    <Icon icon=icondata_lu::LuDatabase/>
+                    <Icon icon=phosphor_leptos::DATABASE/>
                 </span>
                 <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-1.5 sm:gap-2">
@@ -363,7 +362,7 @@ fn DatasourceRow(
                         })}
                         {show_catalog_warning.then(|| view! {
                             <span class="h-4 w-4 text-warning-foreground inline-flex items-center justify-center" title="Catalog needs attention">
-                                <Icon icon=icondata_lu::LuTriangleAlert/>
+                                <Icon icon=phosphor_leptos::WARNING/>
                             </span>
                         })}
                     </div>
@@ -397,7 +396,7 @@ fn DatasourceRow(
                     on:click=on_settings_click
                 >
                     <span class="h-4 w-4 sm:mr-1 inline-flex items-center justify-center">
-                        <Icon icon=icondata_lu::LuSettings/>
+                        <Icon icon=phosphor_leptos::GEAR/>
                     </span>
                     <span class="hidden sm:inline">"Settings"</span>
                 </Button>
@@ -408,7 +407,7 @@ fn DatasourceRow(
                     on:click=on_delete_click
                 >
                     <span class="h-4 w-4 text-error-foreground inline-flex items-center justify-center">
-                        <Icon icon=icondata_lu::LuTrash2/>
+                        <Icon icon=phosphor_leptos::TRASH/>
                     </span>
                 </button>
             </div>
@@ -1232,7 +1231,7 @@ pub fn DatasourceModal(
                                                 <label class="block text-sm font-medium mb-1 text-muted-foreground">"Type"</label>
                                                 <div class="flex items-center gap-2">
                                                     <span class="h-4 w-4 inline-flex items-center justify-center">
-                                                        <Icon icon=icondata_lu::LuDatabase/>
+                                                        <Icon icon=phosphor_leptos::DATABASE/>
                                                     </span>
                                                     <span class="text-sm">
                                                         {move || {
@@ -1261,7 +1260,7 @@ pub fn DatasourceModal(
                                         <div class="flex items-center justify-between p-3 border border-border rounded-lg bg-muted/30">
                                             <div class="flex items-center gap-3">
                                                 <span class="h-5 w-5 inline-flex items-center justify-center text-muted-foreground">
-                                                    <Icon icon=icondata_lu::LuDatabase/>
+                                                    <Icon icon=phosphor_leptos::DATABASE/>
                                                 </span>
                                                 <div>
                                                     <p class="text-sm font-medium">"Acme Analytics (Sample)"</p>
@@ -1446,7 +1445,7 @@ pub fn DatasourceModal(
                                                     on:click=move |_| do_test_and_discover()
                                                 >
                                                     <span class="h-4 w-4 inline-flex items-center justify-center">
-                                                        <Icon icon=icondata_lu::LuPlug/>
+                                                        <Icon icon=phosphor_leptos::PLUG/>
                                                     </span>
                                                     {move || if testing.get() { "Discovering..." } else { "Test & Discover" }}
                                                 </button>
@@ -1454,14 +1453,14 @@ pub fn DatasourceModal(
                                                     if r.success {
                                                         view! {
                                                             <div class="flex items-center gap-2 text-sm text-success-foreground">
-                                                                <Icon icon=icondata_lu::LuCheck attr:class="h-4 w-4"/>
+                                                                <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4"/>
                                                                 "Connected"
                                                             </div>
                                                         }.into_any()
                                                     } else {
                                                         view! {
                                                             <div class="flex items-center gap-2 text-sm text-error-foreground">
-                                                                <Icon icon=icondata_lu::LuX attr:class="h-4 w-4"/>
+                                                                <Icon icon=phosphor_leptos::X attr:class="h-4 w-4"/>
                                                                 "Failed"
                                                             </div>
                                                         }.into_any()
@@ -1524,7 +1523,7 @@ pub fn DatasourceModal(
                                     </div>
                                     <div class="p-4 border border-border rounded-lg bg-muted/30">
                                         <div class="flex items-center gap-2">
-                                            <Icon icon=icondata_lu::LuCheck attr:class="h-5 w-5 text-success-foreground"/>
+                                            <Icon icon=phosphor_leptos::CHECK attr:class="h-5 w-5 text-success-foreground"/>
                                             <span class="text-sm font-medium">"Connection verified"</span>
                                         </div>
                                         <p class="text-xs text-muted-foreground mt-1">
@@ -1620,7 +1619,7 @@ fn BigQueryAuthModeSection(
                         rel="noopener noreferrer"
                         class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
                     >
-                        <Icon icon=icondata_lu::LuLink attr:class="h-4 w-4"/>
+                        <Icon icon=phosphor_leptos::LINK attr:class="h-4 w-4"/>
                         "Connect Google Account"
                     </a>
                     <p class="text-xs text-muted-foreground">
@@ -1701,7 +1700,7 @@ fn BigQueryAuthModeSection(
                                     rel="noopener noreferrer"
                                     class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
                                 >
-                                    <Icon icon=icondata_lu::LuLink attr:class="h-4 w-4"/>
+                                    <Icon icon=phosphor_leptos::LINK attr:class="h-4 w-4"/>
                                     "Connect BigQuery"
                                 </a>
                             }
@@ -1740,7 +1739,7 @@ fn BigQueryAuthModeSection(
                         (!email.is_empty()).then(move || view! {
                             <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
                                 <div class="flex items-center gap-2">
-                                    <Icon icon=icondata_lu::LuCheck attr:class="h-4 w-4 text-success-foreground"/>
+                                    <Icon icon=phosphor_leptos::CHECK attr:class="h-4 w-4 text-success-foreground"/>
                                     <span class="text-sm text-foreground">
                                         {format!("Service Account: {email}")}
                                     </span>
@@ -2297,7 +2296,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
 
                     <Show when=move || cfg_shared_credentials.get()>
                         <div class="flex items-center gap-2 p-3 bg-muted/50 rounded-lg">
-                            <Icon icon=icondata_lu::LuLock attr:class="h-4 w-4 text-muted-foreground"/>
+                            <Icon icon=phosphor_leptos::LOCK attr:class="h-4 w-4 text-muted-foreground"/>
                             <span class="text-sm text-muted-foreground">
                                 "Shared credentials — all users connect with the same account"
                             </span>

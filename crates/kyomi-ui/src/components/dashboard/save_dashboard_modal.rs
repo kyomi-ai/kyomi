@@ -14,8 +14,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::alert::{Alert, AlertVariant};
 use crate::components::empty_state::EmptyState;
 use crate::components::input::INPUT_CLASS;
@@ -39,7 +38,7 @@ fn plus_icon(class: &str) -> impl IntoView {
     let class = class.to_string();
     view! {
         <span class=class>
-            <Icon icon=icondata_lu::LuPlus width="100%" height="100%" />
+            <Icon icon=phosphor_leptos::PLUS size="100%" />
         </span>
     }
 }

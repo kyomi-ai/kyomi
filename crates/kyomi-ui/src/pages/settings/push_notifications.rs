@@ -217,7 +217,7 @@ pub fn PushNotificationsCard() -> impl IntoView {
             <CardHeader>
                 <CardTitle>
                     <span class="flex items-center gap-2">
-                        <leptos_icons::Icon icon=icondata_lu::LuBell width="20" height="20"/>
+                        <phosphor_leptos::Icon icon=phosphor_leptos::BELL size="20px"/>
                         "Push Notifications"
                     </span>
                 </CardTitle>
@@ -322,14 +322,14 @@ pub fn PushNotificationsCard() -> impl IntoView {
                                                 } else if is_subscribed.get() {
                                                     view! {
                                                         <span class="flex items-center gap-2">
-                                                            <leptos_icons::Icon icon=icondata_lu::LuBellOff width="16" height="16"/>
+                                                            <phosphor_leptos::Icon icon=phosphor_leptos::BELL_SLASH size="16px"/>
                                                             "Disable"
                                                         </span>
                                                     }.into_any()
                                                 } else {
                                                     view! {
                                                         <span class="flex items-center gap-2">
-                                                            <leptos_icons::Icon icon=icondata_lu::LuBell width="16" height="16"/>
+                                                            <phosphor_leptos::Icon icon=phosphor_leptos::BELL size="16px"/>
                                                             "Enable"
                                                         </span>
                                                     }.into_any()
@@ -363,7 +363,7 @@ pub fn PushNotificationsCard() -> impl IntoView {
                                                         <div class="flex items-center justify-between p-3 bg-muted/50 rounded-lg">
                                                             <div class="flex items-center gap-3">
                                                                 <span class="text-muted-foreground">
-                                                                    <leptos_icons::Icon icon=icondata_lu::LuSmartphone width="16" height="16"/>
+                                                                    <phosphor_leptos::Icon icon=phosphor_leptos::DEVICE_MOBILE size="16px"/>
                                                                 </span>
                                                                 <div>
                                                                     <p class="text-sm text-foreground">
@@ -381,7 +381,7 @@ pub fn PushNotificationsCard() -> impl IntoView {
                                                                 on:click=move |_| delete_subscription(delete_id.clone())
                                                             >
                                                                 <span class="text-muted-foreground">
-                                                                    <leptos_icons::Icon icon=icondata_lu::LuTrash2 width="16" height="16"/>
+                                                                    <phosphor_leptos::Icon icon=phosphor_leptos::TRASH size="16px"/>
                                                                 </span>
                                                             </Button>
                                                         </div>

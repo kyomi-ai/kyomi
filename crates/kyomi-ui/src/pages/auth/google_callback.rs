@@ -8,8 +8,7 @@
 //! Auto-processes the callback on mount. No user interaction needed for the happy path.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant};
 use crate::pages::auth::auth_layout::AuthLayout;
 
@@ -200,9 +199,8 @@ pub fn GoogleCallbackPage() -> impl IntoView {
                         if status.get() == CallbackStatus::Error {
                             view! {
                                 <Icon
-                                    icon=icondata_lu::LuCircleX
-                                    width="48"
-                                    height="48"
+                                    icon=phosphor_leptos::X_CIRCLE
+                                    size="48px"
                                     attr:class="text-error-foreground"
                                 />
                             }

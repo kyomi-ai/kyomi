@@ -144,14 +144,30 @@ Charts are typeset like figures in a research paper, not drawn like dashboard wi
 
 ## Icons
 
-- **System:** Lucide Icons (https://lucide.dev)
-- **Style:** Stroke icons, not filled. Geometric, clean, consistent.
-- **Sizes:** 18px for navigation, 16px for inline/alerts, 14px for buttons, 12px for badges
-- **Stroke:** 1.75px for nav/inline, 2px for standalone
-- **Caps/Joins:** `stroke-linecap: round`, `stroke-linejoin: round`
+- **System:** Phosphor Icons (https://phosphoricons.com)
+- **Why Phosphor over Lucide:** Phosphor's filled geometry pairs with Instrument Serif's editorial warmth and with Kyomi's filled amber starburst logo — stroke-only icon sets feel visually disconnected from the brand mark. Phosphor also ships six weights, which lets the active-nav state change at the *shape* level (not just color).
+- **Sizes:** 20px for navigation, 16px for inline/alerts/settings tabs, 14px for buttons, 12px for badges
 - **Color:** `currentColor` (inherits from parent text color, adapts to theme automatically)
-- **Leptos:** Use `icondata_lu::*` crate (Lucide icon data for Leptos)
+- **Leptos crate:** `phosphor-leptos` — exports `Icon`, `IconWeight`, and a `SCREAMING_SNAKE_CASE` const per icon (e.g. `phosphor_leptos::CHART_BAR`).
+
+### Weight convention (locked 2026-04-15)
+
+Every `<Icon>` callsite picks a weight per surface. The table below is authoritative — deviations require explicit design approval.
+
+| Surface | Inactive | Active / Selected | Rationale |
+|---|---|---|---|
+| **Sidebar nav** | `Light` | `Fill` | Shape-level state change + amber color — unmistakable active row |
+| **Settings tab strip** | `Light` | `Fill` | Same pattern as sidebar nav for consistency |
+| **Theme picker buttons** | `Light` | `Fill` | Selected theme becomes solid glyph |
+| **Primary buttons** | `Regular` | — | Default assertive CTA weight |
+| **Form / input / utility** | `Light` | — | Recedes, doesn't compete with content |
+| **Small icon-in-pill** (e.g. new-chat plus, copy-check) | `Bold` | — | At 12–14px, Bold is the legible stroke weight |
+| **Empty states / brand illustrations** | `Duotone` @ 64px+ | — | Two-tone amber wash — use for onboarding, empty states, hero moments |
+
+- **`Icon` active state:** use a `Memo<IconWeight>` derived from the active-state signal, pass via `weight=memo`. Never hard-code the weight on active rows.
+- **Size:** single `size="18px"` prop (not separate `width`/`height`).
 - **No emojis.** Never use Unicode emojis as icons in the UI.
+- **No icon mixing.** All icons in the app must come from `phosphor_leptos::*`. If Phosphor is missing an icon you need, flag it in review — do not reach for a different icon library.
 
 ## Spacing
 

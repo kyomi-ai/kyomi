@@ -9,8 +9,7 @@
 //! (lines 564-628). CSS classes are copied verbatim from the React source.
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::alert::{Alert, AlertDescription, AlertVariant};
 use crate::components::checkbox::Checkbox;
 
@@ -258,7 +257,7 @@ pub fn ChatInput(
                         }
                     }
                 >
-                    <Icon icon=icondata_lu::LuSend width="16" height="16" />
+                    <Icon icon=phosphor_leptos::PAPER_PLANE_TILT size="16px" />
                 </button>
                 // Stop button
                 <button
@@ -269,7 +268,7 @@ pub fn ChatInput(
                     aria-label="Stop generating"
                     title=move || if can_cancel.get() { "Stop generating" } else { "Waiting for response..." }
                 >
-                    <Icon icon=icondata_lu::LuSquare width="16" height="16" />
+                    <Icon icon=phosphor_leptos::SQUARE size="16px" />
                     <span class="text-sm font-medium">"Stop"</span>
                 </button>
             </div>

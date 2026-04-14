@@ -14,8 +14,7 @@
 //! - Auto-generates datasource slug from site name
 
 use leptos::prelude::*;
-use leptos_icons::Icon;
-
+use phosphor_leptos::Icon;
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Card, CardContent, CardDescription,
     CardHeader, CardTitle, ConfirmDialog, Label, Skeleton, INPUT_CLASS,
@@ -331,7 +330,7 @@ fn AnalyticsContent(
                 <Show when=move || !show_form.get() && editing_site_id.get().is_none()>
                     <Button on:click=handle_show_form>
                         <span class="flex items-center gap-2">
-                            <Icon icon=icondata_lu::LuPlus width="16" height="16"/>
+                            <Icon icon=phosphor_leptos::PLUS size="16px"/>
                             "Add Site"
                         </span>
                     </Button>
@@ -432,7 +431,7 @@ fn AnalyticsContent(
                     <CardContent>
                         <div class="py-12 text-center">
                             <span class="flex justify-center mb-3 text-muted-foreground">
-                                <Icon icon=icondata_lu::LuGlobe width="40" height="40"/>
+                                <Icon icon=phosphor_leptos::GLOBE size="40px"/>
                             </span>
                             <p class="text-muted-foreground">
                                 "No analytics sites yet. Add one to start tracking visitor data."
@@ -582,7 +581,7 @@ fn SiteCard(
         view! {
             <p class="text-xs text-muted-foreground flex items-center gap-1">
                 <span class="inline-flex">
-                    <Icon icon=icondata_lu::LuDatabase width="12" height="12"/>
+                    <Icon icon=phosphor_leptos::DATABASE size="12px"/>
                 </span>
                 "Datasource: "
                 <span class="font-mono">{slug}</span>
@@ -598,7 +597,7 @@ fn SiteCard(
                         <CardTitle>
                             <span class="flex items-center gap-2">
                                 <span class="text-muted-foreground">
-                                    <Icon icon=icondata_lu::LuGlobe width="16" height="16"/>
+                                    <Icon icon=phosphor_leptos::GLOBE size="16px"/>
                                 </span>
                                 {site_name}
                             </span>
@@ -611,12 +610,12 @@ fn SiteCard(
                     <div class="flex items-center gap-1">
                         <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm on:click=on_edit>
                             <span class="text-muted-foreground">
-                                <Icon icon=icondata_lu::LuPencil width="16" height="16"/>
+                                <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px"/>
                             </span>
                         </Button>
                         <Button variant=ButtonVariant::Ghost size=ButtonSize::Sm on:click=on_delete>
                             <span class="text-muted-foreground">
-                                <Icon icon=icondata_lu::LuTrash2 width="16" height="16"/>
+                                <Icon icon=phosphor_leptos::TRASH size="16px"/>
                             </span>
                         </Button>
                     </div>
@@ -626,7 +625,7 @@ fn SiteCard(
                 <div class="space-y-3">
                     <div class="flex items-center gap-2 text-sm text-muted-foreground">
                         <span class="inline-flex">
-                            <Icon icon=icondata_lu::LuCode width="16" height="16"/>
+                            <Icon icon=phosphor_leptos::CODE size="16px"/>
                         </span>
                         <span>"Tracking snippet"</span>
                     </div>
@@ -696,9 +695,9 @@ fn CopyButton(text: String) -> impl IntoView {
         >
             {move || {
                 if copied.get() {
-                    view! { <Icon icon=icondata_lu::LuCopyCheck width="16" height="16"/> }.into_any()
+                    view! { <Icon icon=phosphor_leptos::CLIPBOARD_TEXT size="16px"/> }.into_any()
                 } else {
-                    view! { <Icon icon=icondata_lu::LuCopy width="16" height="16"/> }.into_any()
+                    view! { <Icon icon=phosphor_leptos::COPY size="16px"/> }.into_any()
                 }
             }}
         </button>
