@@ -152,20 +152,26 @@ Charts are typeset like figures in a research paper, not drawn like dashboard wi
 
 ### Weight convention (locked 2026-04-15)
 
-Every `<Icon>` callsite picks a weight per surface. The table below is authoritative — deviations require explicit design approval.
+**`Regular` is the default weight for every `<Icon>` callsite.** Phosphor Regular is already meaningfully lighter than Lucide's 2px stroke was, so on a quiet surface — search inputs, form fields, list-row icons, utility buttons without adjacent dense text — Regular recedes correctly on its own. Do not mass-convert utility icons to `Light`; judge per surface.
 
-| Surface | Inactive | Active / Selected | Rationale |
-|---|---|---|---|
-| **Sidebar nav** | `Light` | `Fill` | Shape-level state change + amber color — unmistakable active row |
-| **Settings tab strip** | `Light` | `Fill` | Same pattern as sidebar nav for consistency |
-| **Theme picker buttons** | `Light` | `Fill` | Selected theme becomes solid glyph |
-| **Primary buttons** | `Regular` | — | Default assertive CTA weight |
-| **Form / input / utility** | `Light` | — | Recedes, doesn't compete with content |
-| **Small icon-in-pill** (e.g. new-chat plus, copy-check) | `Bold` | — | At 12–14px, Bold is the legible stroke weight |
-| **Empty states / brand illustrations** | `Duotone` @ 64px+ | — | Two-tone amber wash — use for onboarding, empty states, hero moments |
+Specific surfaces that use a deviation from `Regular`:
 
-- **`Icon` active state:** use a `Memo<IconWeight>` derived from the active-state signal, pass via `weight=memo`. Never hard-code the weight on active rows.
-- **Size:** single `size="18px"` prop (not separate `width`/`height`).
+| Surface | Weight | Rationale |
+|---|---|---|
+| **Sidebar nav** | `Light` → `Fill` | Active row becomes a solid glyph — shape-level state change, not just color. This is the load-bearing reason Kyomi is on Phosphor at all. |
+| **Sidebar chrome** (collapse toggle) | `Light` | Quieter than nav items; shouldn't compete with nav or brand mark |
+| **Settings tab strip** | `Light` → `Fill` | Same pattern as sidebar nav for consistency |
+| **Theme picker buttons** | `Light` → `Fill` | Selected theme becomes solid glyph |
+| **User dropdown menu items** (Settings, Help, Logout) | `Light` | Menu items are text-primary with icons as quiet leading glyphs |
+| **Settings card-header accent icons** (e.g. MCP Connection's PLUG) | `Light` | Decorative framing, not an action — shouldn't feel clickable |
+| **Inline external-link glyph** (e.g. `ARROW_SQUARE_OUT` next to linked text) | `Light` | Annotates the link, doesn't assert |
+| **Copy-to-clipboard resting state** (`COPY`) | `Light` | Quiet utility action; Regular would compete with the content being copied |
+| **Copy-to-clipboard confirmation flash** (`CHECK` after click) | `Bold` | Transient feedback moment — momentarily emphatic, then reverts |
+| **Small icon-in-pill** (12–14px, e.g. new-chat plus) | `Bold` | At that size, Regular loses legibility on a colored pill background |
+| **Empty states / brand illustrations** (64px+) | `Duotone` | Two-tone amber wash — use for onboarding, empty states, hero moments |
+
+- **`Icon` active state**: use a `Memo<IconWeight>` derived from the active-state signal, pass via `weight=memo`. Never hard-code the weight on active rows.
+- **Size:** single `size="20px"` prop (not separate `width`/`height`).
 - **No emojis.** Never use Unicode emojis as icons in the UI.
 - **No icon mixing.** All icons in the app must come from `phosphor_leptos::*`. If Phosphor is missing an icon you need, flag it in review — do not reach for a different icon library.
 
