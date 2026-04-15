@@ -108,6 +108,12 @@ pub struct BillingResult {
 /// Billing is owner-only because the owner is the single spending authority
 /// for the workspace. Admins can invite users (consuming seats), but only the
 /// owner can change subscription plan, buy bundles, or adjust the seat cap.
+///
+/// Sets the HTTP response status to 403 Forbidden via `ResponseOptions` on
+/// the reject path so tower_http and the browser don't classify owner-only
+/// rejection as a 5xx server error. Mirrors the 401 pattern in
+/// `extract_auth` — permission failures are client errors, not server
+/// errors.
 #[cfg(feature = "ssr")]
 fn require_workspace_owner(
     auth: &kyomi_auth::middleware::AuthUser,
@@ -115,6 +121,8 @@ fn require_workspace_owner(
     if auth.workspace.is_owner {
         Ok(())
     } else {
+        leptos::prelude::expect_context::<leptos_axum::ResponseOptions>()
+            .set_status(axum::http::StatusCode::FORBIDDEN);
         Err(ServerFnError::new("Workspace owner access required"))
     }
 }
