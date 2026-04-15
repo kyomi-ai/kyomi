@@ -254,6 +254,14 @@ html {
   padding: 16px;
 }
 
+/* Table chartml extends flush to the card edge — axis-free charts don't
+ * need the 16px breathing room that bar/line/scatter/pie need for tick
+ * labels, so tables get `padding: 0` overriding the default above when
+ * the chart content is a chartml-table. KYO-14. */
+.dashboard-content .my-2:has(.chartml-table) > div:not(:first-child) {
+  padding: 0;
+}
+
 .dashboard-content .my-2 .bg-muted\/50 {
   border-radius: 8px 8px 0 0;
 }
