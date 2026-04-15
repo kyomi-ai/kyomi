@@ -747,9 +747,11 @@ fn CredentialsView(
                         "Create an account"
                     </Button>
                     " · "
+                    // `inline-block py-3 px-2` gives a 44px tall hit area
+                    // (12 + 12 + ~20 line-height) without enlarging the text.
                     <a
                         href="/account/recover"
-                        class="text-primary hover:underline"
+                        class="inline-block py-3 px-2 text-primary hover:underline"
                     >
                         "Can't sign in?"
                     </a>

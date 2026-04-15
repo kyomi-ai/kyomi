@@ -85,10 +85,10 @@ pub fn AuthLayout(
                             <img src="/kyomi_full_logo.svg" alt="Kyomi" class="h-12 mx-auto dark:hidden"/>
                             <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-12 mx-auto hidden dark:block"/>
                         </div>
-                        // Title — page-level, DESIGN.md: 2xl token = 30px = text-3xl, Instrument Serif
-                        <h2 class="text-3xl font-display text-foreground mb-2">
+                        // Title — page-level landmark, DESIGN.md: 2xl token = 30px = text-3xl, Instrument Serif
+                        <h1 class="text-3xl font-display text-foreground mb-2">
                             {title}
-                        </h2>
+                        </h1>
                         // Subtitle — editorial voice: Instrument Serif italic 18px.
                         // Literal #3D3835 per Phase 3 plan spec: pinned warm-stone
                         // tone that stays correct regardless of dark-mode theme
@@ -105,40 +105,44 @@ pub fn AuthLayout(
                     // ── Footer ───────────────────────────────────────────────
                     // React: className="mt-8 pt-6 border-t border-border space-y-3"
                     <div class="mt-8 pt-6 border-t border-border space-y-3">
-                        // React: className="flex justify-center items-center space-x-1 text-sm text-muted-foreground"
-                        <div class="flex justify-center items-center space-x-1 text-sm text-muted-foreground">
+                        // Flex row — no `space-x-*`; each link carries its own
+                        // `py-3 px-2` padding so the hit area reaches the WCAG
+                        // 2.5.5 AAA minimum of 44x44px without changing visible
+                        // text size. `py-3` = 12px top + 12px bottom + ~20px
+                        // line-height on `text-sm` = 44px total.
+                        <div class="flex justify-center items-center text-sm text-muted-foreground">
                             <a
                                 href="https://kyomi.ai/privacy"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                class="hover:text-foreground transition-colors"
+                                class="inline-block py-3 px-2 hover:text-foreground transition-colors"
                             >
                                 "Privacy"
                             </a>
-                            <span>"·"</span>
+                            <span aria-hidden="true">"·"</span>
                             <a
                                 href="https://kyomi.ai/terms"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                class="hover:text-foreground transition-colors"
+                                class="inline-block py-3 px-2 hover:text-foreground transition-colors"
                             >
                                 "Terms"
                             </a>
-                            <span>"·"</span>
+                            <span aria-hidden="true">"·"</span>
                             <a
                                 href="https://kyomi.ai"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                class="hover:text-foreground transition-colors"
+                                class="inline-block py-3 px-2 hover:text-foreground transition-colors"
                             >
                                 "About"
                             </a>
-                            <span>"·"</span>
+                            <span aria-hidden="true">"·"</span>
                             <a
                                 href="https://status.kyomi.ai"
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                class="hover:text-foreground transition-colors"
+                                class="inline-block py-3 px-2 hover:text-foreground transition-colors"
                             >
                                 "Status"
                             </a>
