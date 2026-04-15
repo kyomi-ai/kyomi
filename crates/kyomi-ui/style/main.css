@@ -59,15 +59,15 @@ html {
   --color-info-border: #BFDBFE;
   --color-info-foreground: #2563EB;
 
-  /* Sidebar — always dark navy, uses dark mode palette.
+  /* Sidebar — warm near-black, reuses the --color-foreground ramp.
    * Separate tokens so the sidebar can be re-skinned independently. */
-  --color-sidebar: #0F172A;
+  --color-sidebar: #1C1917;
   --color-sidebar-foreground: #F5F3EF;
-  --color-sidebar-foreground-secondary: #94A3B8;
-  --color-sidebar-foreground-muted: #64748B;
+  --color-sidebar-foreground-secondary: #A8A29E;
+  --color-sidebar-foreground-muted: #78716C;
   --color-sidebar-hover: rgba(255, 255, 255, 0.05);
-  --color-sidebar-active: #1E3A5F;
-  --color-sidebar-border: rgba(255, 255, 255, 0.1);
+  --color-sidebar-active: #2C241E;
+  --color-sidebar-border: rgba(255, 255, 255, 0.08);
 
   --radius: 0.5rem;
   --radius-sm: 0.25rem;  /* 4px — inputs, buttons, chips */
@@ -167,7 +167,7 @@ html {
 
 /* ── Layout: one continuous warm surface ────────────────────────────
  * DESIGN.md: "No visual separation between header and content."
- * The only hard border is between the navy sidebar and content area. */
+ * The only hard border is between the warm-stone sidebar and content area. */
 
 /* Page headers: same bg as content, no bottom border */
 .page-header {
@@ -220,7 +220,7 @@ html {
 /* ── Scrollbars ─────────────────────────────────────────────────────
  * DESIGN.md: thin scrollbars that match their container's background.
  * Light mode: border-color thumb on transparent track.
- * Dark mode: slate thumb on transparent track.
+ * Dark mode: warm stone thumb on transparent track.
  * Sidebar (always dark): light-on-dark regardless of theme. */
 
 * {
@@ -229,10 +229,10 @@ html {
 }
 
 :where(.dark, .dark *) {
-  scrollbar-color: #475569 transparent;
+  scrollbar-color: #3B3530 transparent;
 }
 
-/* Sidebar scrollbar — always dark navy context */
+/* Sidebar scrollbar — always dark warm-stone context */
 .scrollbar-sidebar {
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
@@ -876,22 +876,22 @@ html {
 .dark {
   --color-primary: #d97706;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #1E293B;
-  --color-secondary-foreground: #94A3B8;
+  --color-secondary: #24201E;
+  --color-secondary-foreground: #A8A29E;
   --color-accent: #451A03;
   --color-accent-foreground: #F5F3EF;
   --color-destructive: #ef4444;
   --color-destructive-foreground: #ffffff;
-  --color-muted: #162036;
-  --color-muted-foreground: #94A3B8;
-  --color-background: #0F172A;
+  --color-muted: #1C1917;
+  --color-muted-foreground: #A8A29E;
+  --color-background: #12100F;
   --color-foreground: #F5F3EF;
-  --color-card: #1E293B;
+  --color-card: #24201E;
   --color-card-foreground: #F5F3EF;
-  --color-popover: #1E293B;
+  --color-popover: #2A2623;
   --color-popover-foreground: #F5F3EF;
-  --color-border: #334155;
-  --color-input: #334155;
+  --color-border: #2E2925;
+  --color-input: #2E2925;
   --color-ring: #d97706;
   --color-overlay: rgba(0, 0, 0, 0.7);
 
@@ -904,7 +904,7 @@ html {
   --color-success: #052e16;
   --color-success-border: #16a34a;
   --color-success-foreground: #22c55e;
-  --color-info: #0c1929;
+  --color-info: #101318;
   --color-info-border: #2563eb;
   --color-info-foreground: #3b82f6;
 
@@ -912,12 +912,12 @@ html {
    * `--chartml-bg` is the page background (separator color that disappears
    * into the surface), not a white chart fill. */
   --chartml-text: #F5F3EF;
-  --chartml-text-secondary: #94A3B8;
+  --chartml-text-secondary: #A8A29E;
   --chartml-text-strong: #F5F3EF;
-  --chartml-grid: #334155;
-  --chartml-axis-line: #94A3B8;
-  --chartml-bg: #0F172A;
-  --chartml-annotation: #64748B;
+  --chartml-grid: #2E2925;
+  --chartml-axis-line: #A8A29E;
+  --chartml-bg: #12100F;
+  --chartml-annotation: #78716C;
 }
 
 /* Interactive element defaults */
@@ -942,8 +942,10 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
  * the correct override mechanism (no specificity war needed). */
 
 :root {
-  --navy: #1E3A5F;
-  --navy-deep: #0F172A;
+  /* Warm stone dark-surface tokens — active design tokens (not deprecated).
+   * Used by the sidebar and the .dark mode block. See DESIGN.md §Color. */
+  --warm-dark: #2C241E;
+  --warm-dark-deep: #1C1917;
 
   --kode-bg: var(--color-card);
   --kode-fg: var(--color-foreground);

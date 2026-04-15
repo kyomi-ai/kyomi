@@ -67,7 +67,7 @@ pub fn AiPage() -> impl IntoView {
     });
 
     view! {
-        <div class="p-4 sm:p-6 space-y-6 bg-background">
+        <div class="p-4 sm:p-6 space-y-6">
             // Page header — Instrument Serif, matches DESIGN.md typography.
             <header class="space-y-1">
                 <h1 class="text-3xl font-display text-foreground">"AI"</h1>
@@ -236,12 +236,12 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
 
     let (container_class, icon) = if is_byok {
         (
-            "flex items-start gap-3 rounded-md border border-accent/40 bg-accent-light p-4",
+            "flex items-start gap-3 rounded-md border border-accent/40 bg-accent p-4",
             phosphor_leptos::KEY,
         )
     } else {
         (
-            "flex items-start gap-3 rounded-md border border-border bg-surface-alt p-4",
+            "flex items-start gap-3 rounded-md border border-border bg-muted p-4",
             phosphor_leptos::SPARKLE,
         )
     };
@@ -346,7 +346,7 @@ fn ModeCard(
     let class = move || {
         let base = "relative text-left rounded-md p-4 transition-colors w-full";
         let state = if selected.get() {
-            "border-2 border-accent bg-accent-light/30"
+            "border-2 border-accent bg-accent/30"
         } else {
             "border border-border hover:border-[--color-border-strong]"
         };

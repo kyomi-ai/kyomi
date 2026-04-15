@@ -477,7 +477,7 @@ fn AnalyticsEventsCard(
 
                     // Status messages
                     {drawing_from_reserve.then(|| view! {
-                        <div class="rounded-md bg-accent-light/30 border border-accent/30 px-3 py-2">
+                        <div class="rounded-md bg-accent/30 border border-accent/30 px-3 py-2">
                             <p class="text-xs text-foreground">
                                 <span class="font-medium">"Drawing from bundle reserve: "</span>
                                 {format!("{} events used beyond this month's included quota.", format_number(over_by))}

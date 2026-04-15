@@ -22,7 +22,7 @@ use chartml_core::theme::{BarCornerRadius, GridStyle, TextTransform, Theme, Zero
 ///
 /// `is_dark` only affects palettes that override individual slots for
 /// dark-mode readability. Today only `kyomi` does this (slot 2 navy lifts
-/// to a brighter mid-lightness blue on `#0F172A`). The other palettes are
+/// to a brighter mid-lightness blue on `#12100F`). The other palettes are
 /// mode-independent and ignore the flag.
 ///
 /// Unknown palette names fall back to `kyomi`, which is the new default
@@ -31,7 +31,7 @@ pub fn kyomi_palette(name: &str, is_dark: bool) -> Vec<String> {
     match name {
         // Kyomi signature — amber-anchored editorial warm. Slot 2 is
         // per-mode: #1E3A5F reads strong against the warm light `#FAFAF8`
-        // but disappears against `#0F172A` in dark mode, so we lift it to
+        // but disappears against `#12100F` in dark mode, so we lift it to
         // `#5A87C2` (same ~213° hue family, ~60% lightness) on dark.
         "kyomi" => {
             let slot2 = if is_dark { "#5A87C2" } else { "#1E3A5F" };
@@ -96,13 +96,13 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
     // those separators visually disappear into the surface.
     let (page_bg, text_primary, text_secondary, axis, grid, zero, halo) = if is_dark {
         (
-            "#0F172A", // --color-background (dark)
+            "#12100F", // --color-background (dark) — warm near-black
             "#F5F3EF", // text
-            "#94A3B8", // text-secondary
-            "#94A3B8", // axis line — muted on dark
-            "#334155", // grid — visible but restrained
+            "#A8A29E", // text-secondary — warm stone-400
+            "#A8A29E", // axis line — muted warm on dark
+            "#2E2925", // grid — warm neutral, visible but restrained
             "#F5F3EF", // zero line — emphasized baseline on dark
-            "#0F172A", // dot halo — matches page bg
+            "#12100F", // dot halo — matches page bg
         )
     } else {
         (
@@ -177,8 +177,8 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
     // theme so rendered `<table>`s in chart exports match the chart chrome
     // they sit alongside. The row background uses the page-matched
     // `page_bg` for a transparent-feeling surface, the alternating stripe
-    // and the cell borders both use `grid` (the warm neutral in light mode,
-    // muted slate in dark mode), and cell text uses the primary text color
+    // and the cell borders both use `grid` (warm neutral in both modes —
+    // `#EDE9E0` on light, `#2E2925` on dark), and cell text uses the primary
     // so headers and body read at the same weight as axis labels. Cell
     // padding and font size are CSS string values — kept modest so tables
     // don't dominate a chart figure.
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(
             colors[1], "#5A87C2",
             "slot 2 must lift to mid-lightness blue in dark mode so it doesn't \
-             disappear into the #0F172A page background"
+             disappear into the #12100F page background"
         );
     }
 
@@ -274,10 +274,10 @@ mod tests {
     #[test]
     fn kyomi_theme_dark_mode_page_matched_bg() {
         let t = kyomi_theme(true);
-        assert_eq!(t.bg, "#0F172A");
-        assert_eq!(t.dot_halo_color.as_deref(), Some("#0F172A"));
-        assert_eq!(t.axis_line, "#94A3B8");
-        assert_eq!(t.grid, "#334155");
+        assert_eq!(t.bg, "#12100F");
+        assert_eq!(t.dot_halo_color.as_deref(), Some("#12100F"));
+        assert_eq!(t.axis_line, "#A8A29E");
+        assert_eq!(t.grid, "#2E2925");
         assert_eq!(t.text, "#F5F3EF");
     }
 

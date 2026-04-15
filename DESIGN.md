@@ -69,8 +69,8 @@
 | `--accent` | #D97706 | Primary actions, links, active states, focus rings, brand |
 | `--accent-hover` | #B45309 | Hover state for primary actions |
 | `--accent-light` | #FEF3C7 | Light accent backgrounds, selected states |
-| `--navy` | #1E3A5F | Dark surfaces, sidebar hover/active states |
-| `--navy-deep` | #0F172A | Sidebar background, hero backgrounds |
+| `--warm-dark` | #2C241E | Sidebar active item background, dark surface highlights |
+| `--warm-dark-deep` | #1C1917 | Sidebar background (light & dark mode), chart tooltips |
 
 ### Neutral Palette (Warm Grays)
 
@@ -102,9 +102,9 @@ Each semantic color has background and border variants for alerts:
 
 ### Dark Mode
 
-- **Base:** `--bg: #0F172A` (deep navy), `--surface: #1E293B`, `--surface-alt: #162036`
-- **Borders:** `--border: #334155`, `--border-strong: #475569`
-- **Text:** `--text: #F5F3EF`, `--text-secondary: #94A3B8`, `--text-muted: #64748B`
+- **Base:** `--bg: #12100F` (warm stone), `--surface: #24201E`, `--surface-alt: #2C241E`
+- **Borders:** `--border: #2E2925`, `--border-strong: #3B3530`
+- **Text:** `--text: #F5F3EF`, `--text-secondary: #A8A29E`, `--text-muted: #78716C`
 - **Accent:** Same #D97706 (reduce saturation 15% for very large surfaces only)
 - **Semantic colors:** Use transparent backgrounds (e.g., `rgba(21, 128, 61, 0.12)` for success)
 - **Strategy:** Swap CSS custom properties via `[data-theme="dark"]` selector
@@ -115,12 +115,12 @@ Chart palettes live in `kyomi_palette()` in `crates/kyomi-ui/src/components/dash
 
 | Palette | Persona | Notes |
 |---|---|---|
-| **kyomi** (default) | Editorial warm — amber-led, Kyomi signature | Slot 1 is always `#D97706` amber; slot 2 is per-mode (`#1E3A5F` light / `#5A87C2` dark) so the navy lifts above `#0F172A` in dark mode instead of disappearing |
+| **kyomi** (default) | Editorial warm — amber-led, Kyomi signature | Slot 1 is always `#D97706` amber; slot 2 is per-mode (`#1E3A5F` light / `#5A87C2` dark) so the slate-blue lifts above `#12100F` in dark mode instead of disappearing |
 | **balanced** | Cool-toned professional | Existing default retained for users who picked it explicitly |
 | **vibrant** | High-saturation modern | Unchanged |
 | **accessible** | Maximum luminosity spread, colorblind-validated | Unchanged |
 
-Each palette is 12 colors tuned for perceptual distance in OKLCH space and validated for the three common colorblind deficiencies. The design system accent (`#D97706`) and navy (`#1E3A5F`) are also valid for direct use in 2–3 series visualizations.
+Each palette is 12 colors tuned for perceptual distance in OKLCH space and validated for the three common colorblind deficiencies. The design system accent (`#D97706`) and slate-blue (`#1E3A5F`) are also valid for direct use in 2–3 series visualizations.
 
 ### Chart Chrome — "Editorial Figure" (Variant A)
 
@@ -133,13 +133,13 @@ Charts are typeset like figures in a research paper, not drawn like dashboard wi
 - **Legend:** DM Sans, 11px, weight 500
 
 **Chrome & shape**
-- **Gridlines:** Horizontal only, warm `#EDE9E0` (light) / `#334155` (dark), 1px. No vertical gridlines.
-- **Axis lines:** Editorial baseline — `#1C1917` light / `#94A3B8` dark, 1px
+- **Gridlines:** Horizontal only, warm `#EDE9E0` (light) / `#2E2925` (dark), 1px. No vertical gridlines.
+- **Axis lines:** Editorial baseline — `#1C1917` light / `#A8A29E` dark, 1px
 - **Zero line:** Emphasized — same as axis line color at 1.5px, drawn when data crosses zero
 - **Line weight:** 2px default for all series marks (line paths, area outlines). Inked, not drafted.
 - **Bar corners:** 2px rounded at the **top only** (or the max-value end for horizontal bars / negative bars — sign-aware). Uses `BarCornerRadius::Top(2.0)` from chartml 3.1.0.
 - **Dot markers:** radius 4px, with a 1.5px halo stroke in the page background color so markers read as annotated on top of lines and each other
-- **Chart background:** Transparent — charts sit on the warm `#FAFAF8` page (or `#0F172A` in dark mode). No floating white rectangles.
+- **Chart background:** Transparent — charts sit on the warm `#FAFAF8` page (or `#12100F` in dark mode). No floating white rectangles.
 - **`theme.bg`:** Matches the page background — this is the color used for element separators (dot outlines, pie slice gaps, stacked bar segment borders). It is NOT a chart-fill color; chartml never emits a background rect.
 
 ## Icons
@@ -211,7 +211,7 @@ Specific surfaces that use a deviation from `Regular`:
 - **Approach:** Hybrid. Grid-disciplined for the application, creative-editorial for marketing/landing.
 - **Grid:** 12 columns on desktop (lg+), 1 column on mobile
 - **Max content width:** 1120px for marketing, 860px for dashboard prose, full-width for app shell
-- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, navy-deep (#0F172A) background, navy (#1E3A5F) for hover/active states
+- **Sidebar:** 20rem (300px at 15px root) expanded, 4rem (60px) collapsed, warm-dark-deep (#1C1917) background, warm-dark (#2C241E) for hover/active states
 - **Content area:** Fills remaining width, scrollable, `bg-background` (#FAFAF8)
 
 ### Page Layout Pattern
@@ -544,7 +544,7 @@ All scrollbars use `scrollbar-width: thin` and must match their container's back
 | Context | Thumb | Track | CSS |
 |---------|-------|-------|-----|
 | Light mode (default) | `--color-border` (#E8E5DE) | transparent | Applied globally via `*` selector |
-| Dark mode | `#475569` (slate-600) | transparent | Via `.dark` selector |
+| Dark mode | `#3B3530` (warm stone border-strong) | transparent | Via `.dark` selector |
 | Sidebar (always dark) | `rgba(255,255,255,0.15)` | transparent | `.scrollbar-sidebar` utility class |
 
 **Rules:**
@@ -731,12 +731,12 @@ Charts render as SVG. Font-family is set via CSS on the chart container, overrid
 | Variable | Value | Maps to |
 |----------|-------|---------|
 | `--chartml-text` | `#F5F3EF` | `--text` (dark mode) |
-| `--chartml-text-secondary` | `#94A3B8` | `--text-secondary` (dark mode) |
+| `--chartml-text-secondary` | `#A8A29E` | `--text-secondary` (dark mode) |
 | `--chartml-text-strong` | `#F5F3EF` | `--text` (dark mode) |
-| `--chartml-grid` | `#334155` | `--border` (dark mode) |
-| `--chartml-axis-line` | `#94A3B8` | `--text-secondary` (dark mode) |
-| `--chartml-bg` | `#1E293B` | `--surface` (dark mode) |
-| `--chartml-annotation` | `#64748B` | `--text-muted` (dark mode) |
+| `--chartml-grid` | `#2E2925` | `--border` (dark mode) |
+| `--chartml-axis-line` | `#A8A29E` | `--text-secondary` (dark mode) |
+| `--chartml-bg` | `#12100F` | `--background` (dark mode) |
+| `--chartml-annotation` | `#78716C` | `--text-muted` (dark mode) |
 
 ### Tooltip Styling
 
@@ -744,7 +744,7 @@ Overridden via CSS in `main.css` targeting `.chartml-tooltip`:
 
 ```css
 .chartml-tooltip {
-    background: #0F172A;          /* --navy-deep, 95% opacity */
+    background: #1C1917;          /* --warm-dark-deep, 95% opacity */
     font-family: 'DM Sans', sans-serif;
     border-radius: 6px;
     box-shadow: 0 4px 12px rgba(28, 25, 23, 0.15);
@@ -786,7 +786,7 @@ Charts are wrapped by Kyomi's `ChartHeaderBar` component + content area:
 
 ### Data Palettes
 
-Use palettes from `chartPalettes.js`. Default: `balanced`. The design system accent (#D97706) and navy (#1E3A5F) are valid for 2-3 series charts but should not be the default palette (they're too on-brand for data where neutrality matters).
+Use palettes from `chartPalettes.js`. Default: `balanced`. The design system accent (#D97706) and slate-blue (#1E3A5F) are valid for 2-3 series charts but should not be the default palette (they're too on-brand for data where neutrality matters).
 
 ### Implementation Notes
 
@@ -983,7 +983,8 @@ The current PDF template uses cold generic grays. Replace with warm design syste
 | 2026-04-07 | Initial design system created by /design-consultation | Competitive research (Hex, Metabase, Databricks, Mode) + Claude subagent design voice |
 | 2026-04-07 | Instrument Serif for display type | Deliberate departure from category norms. Every competitor uses geometric sans. Serif signals editorial authority, intelligence, depth. |
 | 2026-04-07 | Amber #D97706 as primary accent | Existing brand color. Warm, alive, unique in the BI space where blue dominates. |
-| 2026-04-07 | Deep navy #1E3A5F/#0F172A for dark surfaces | Warmer than pure black, pairs beautifully with amber. Distinctive sidebar. |
+| 2026-04-07 | Deep navy #1E3A5F/#0F172A for dark surfaces | Warmer than pure black, pairs beautifully with amber. Distinctive sidebar. *(superseded 2026-04-14 — see warm stone entry below)* |
+| 2026-04-14 | Warm stone #1C1917/#12100F for dark surfaces + sidebar | Cool-slate navy was visually disconnected from the warm ivory light mode. Shifting to warm stone keeps the palette coherent across modes and strengthens the editorial voice. Chart slot-2 navy (#1E3A5F/#5A87C2) preserved — it still reads correctly lifted above #12100F. |
 | 2026-04-07 | Warm grays instead of cool grays | Coheres with amber accent and serif typography. Cool grays would fight the warmth. |
 | 2026-04-07 | Lucide icons, no emojis | Consistent stroke-based icon system. Professional. |
 | 2026-04-07 | 4/8/12px border radius (was 6/8/12) | Sharper corners at small scale. More precision. |
@@ -993,5 +994,5 @@ The current PDF template uses cold generic grays. Replace with warm design syste
 | 2026-04-09 | Codified view switcher rules: tabs vs segmented control vs filter pills | Tabs = distinct content panels. Segmented control = mode toggle on same content. Filter pills = subsets of same list. Prevents future misuse. |
 | 2026-04-10 | PDF export design system alignment | PDFs must use the same Instrument Serif / DM Sans / Geist Mono typography and warm color palette as the web UI. Editorial typesetting, not dashboard screenshots. Competitive research showed nobody in BI does this well — product differentiator. |
 | 2026-04-07 | Supersedes docs/DESIGN_SYSTEM.md | New file is comprehensive. Old file preserved as historical reference. |
-| 2026-04-07 | Chart design system: Kyomi overrides, not chartml defaults | chartml stays generic (cool grays, system fonts). Kyomi brands charts via CSS variable overrides in main.css. Warm grays, DM Sans, Geist Mono, navy tooltips. |
+| 2026-04-07 | Chart design system: Kyomi overrides, not chartml defaults | chartml stays generic (cool grays, system fonts). Kyomi brands charts via CSS variable overrides in main.css. Warm grays, DM Sans, Geist Mono, slate-blue tooltips. |
 | 2026-04-09 | Unify knowledge files and dashboards into one document system | Both are markdown documents in collections. The folder-tree UI felt like Windows Explorer, not Kyomi. A type field preserves the user's mental model (separate nav items) while the data model, collections, search, editor, and agent tools are shared. Deletes the file-manager UI entirely. |
