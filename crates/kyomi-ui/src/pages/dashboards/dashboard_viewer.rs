@@ -122,14 +122,16 @@ fn InlineEditableTitle(
                         />
                     }.into_any()
                 } else {
+                    // h1 is the page-level landmark per DESIGN.md §Accessibility
+                    // landmark rules. Click behavior is preserved.
                     view! {
-                        <span
-                            class="text-3xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block"
+                        <h1
+                            class="text-3xl font-display text-foreground truncate cursor-pointer hover:text-primary transition-colors block m-0"
                             on:click=start_editing
                             title="Click to edit title"
                         >
                             {move || value.get()}
-                        </span>
+                        </h1>
                     }.into_any()
                 }
             }}

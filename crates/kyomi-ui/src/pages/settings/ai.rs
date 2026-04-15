@@ -69,8 +69,9 @@ pub fn AiPage() -> impl IntoView {
     view! {
         <div class="p-4 sm:p-6 space-y-6">
             // Page header — Instrument Serif, matches DESIGN.md typography.
+            // h2 (not h1) because SettingsShell already emits the landmark h1.
             <header class="space-y-1">
-                <h1 class="text-3xl font-display text-foreground">"AI"</h1>
+                <h2 class="text-3xl font-display text-foreground">"AI"</h2>
                 <p class="text-sm text-muted-foreground">
                     "Choose how AI is billed for your workspace and which model to use."
                 </p>
