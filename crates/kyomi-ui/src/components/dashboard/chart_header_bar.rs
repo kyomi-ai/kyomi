@@ -32,60 +32,61 @@ const CHART_TYPES: &[(&str, &str)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Icons — chart-type SVGs (kept inline; action icons use phosphor-leptos)
+// Icons — chart-type glyphs (Phosphor for everything with a direct equivalent;
+// `area` is a small hand-rolled SVG because phosphor-leptos 0.8 has no
+// dedicated chart-area glyph. Its paths live in Phosphor's 256×256 viewBox
+// and use the same stroke weight as the Regular-weight line icon so the two
+// read as visually related in the dropdown.)
 // ---------------------------------------------------------------------------
 
 mod icons {
     use leptos::prelude::*;
+    use phosphor_leptos::{Icon, IconWeight};
 
-    /// Return the SVG view for a chart type icon.
+    /// Return the view for a chart type icon.
     pub fn chart_type_icon(chart_type: &str) -> impl IntoView + use<> {
         match chart_type {
             "bar" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z" />
-                </svg>
+                <Icon icon=phosphor_leptos::CHART_BAR weight=IconWeight::Regular size="16px" />
             }.into_any(),
             "line" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 18 9 11.25l4.306 4.306a11.95 11.95 0 0 1 5.814-5.518l2.74-1.22m0 0-5.94-2.281m5.94 2.28-2.28 5.941" />
-                </svg>
+                <Icon icon=phosphor_leptos::CHART_LINE weight=IconWeight::Regular size="16px" />
             }.into_any(),
+            // Hand-rolled area icon — line on top, filled polygon under the
+            // curve. Paths use Phosphor's 256 viewBox + 16px stroke so it
+            // visually matches the other Regular-weight chart icons.
             "area" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 20l4-8 4 4 4-10 4 6v8H3Z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 20l4-8 4 4 4-10 4 6" />
+                <svg width="16" height="16" viewBox="0 0 256 256" fill="currentColor">
+                    // Filled area under the curve (20% opacity)
+                    <path
+                        d="M40,164 L90,104 L160,148 L216,96 L216,200 L40,200 Z"
+                        fill="currentColor"
+                        opacity="0.2"
+                    />
+                    // Axis frame (L-shape: left + bottom) — matches Phosphor CHART_LINE styling
+                    <path
+                        d="M232,208a8,8,0,0,1-8,8H32a8,8,0,0,1-8-8V48a8,8,0,0,1,16,0V200H224A8,8,0,0,1,232,208Z"
+                    />
+                    // Curve on top
+                    <path
+                        d="M34.34,169.66a8,8,0,0,1,0-11.32l50-50a8,8,0,0,1,10.07-.38l61.43,46.07,55.51-51.43a8,8,0,0,1,10.88,11.74l-60,55.6a8,8,0,0,1-10.07.38L90.73,124.3,45.66,169.66A8,8,0,0,1,34.34,169.66Z"
+                    />
                 </svg>
             }.into_any(),
             "scatter" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <circle cx="5" cy="17" r="1.5" /><circle cx="8" cy="10" r="1.5" />
-                    <circle cx="12" cy="14" r="1.5" /><circle cx="14" cy="7" r="1.5" />
-                    <circle cx="17" cy="12" r="1.5" /><circle cx="20" cy="5" r="1.5" />
-                </svg>
+                <Icon icon=phosphor_leptos::CHART_SCATTER weight=IconWeight::Regular size="16px" />
             }.into_any(),
             "pie" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3a9 9 0 1 0 9 9h-9V3Z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M14 2.05A9 9 0 0 1 21.95 10H14V2.05Z" />
-                </svg>
+                <Icon icon=phosphor_leptos::CHART_PIE weight=IconWeight::Regular size="16px" />
             }.into_any(),
             "doughnut" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3a9 9 0 1 0 9 9h-9V3Z" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M14 2.05A9 9 0 0 1 21.95 10H14V2.05Z" />
-                    <circle cx="12" cy="12" r="4" fill="var(--chartml-bg, #f4f4f5)" stroke="currentColor" stroke-width="1.5" />
-                </svg>
+                <Icon icon=phosphor_leptos::CHART_DONUT weight=IconWeight::Regular size="16px" />
             }.into_any(),
             "table" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 0 1-1.125-1.125M3.375 19.5h7.5c.621 0 1.125-.504 1.125-1.125m-9.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-7.5A1.125 1.125 0 0 1 12 18.375m9.75-12.75c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125m19.5 0v1.5c0 .621-.504 1.125-1.125 1.125M2.25 5.625v1.5c0 .621.504 1.125 1.125 1.125m0 0h17.25m-17.25 0h7.5c.621 0 1.125.504 1.125 1.125M3.375 8.25c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m17.25-3.75h-7.5c-.621 0-1.125.504-1.125 1.125m8.625-1.125c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25 0h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125M12 10.875v-1.5m0 1.5c0 .621-.504 1.125-1.125 1.125M12 10.875c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125M10.875 12h-7.5m8.625 0h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125M20.625 12c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25 0h7.5m-7.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125M12 13.875v-1.5m0 1.5c0 .621-.504 1.125-1.125 1.125M12 13.875c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125M10.875 15h-7.5" />
-                </svg>
+                <Icon icon=phosphor_leptos::TABLE weight=IconWeight::Regular size="16px" />
             }.into_any(),
             "metric" => view! {
-                <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 8.25h15m-16.5 7.5h15m-1.8-13.5-3.9 19.5m-2.1-19.5-3.9 19.5" />
-                </svg>
+                <Icon icon=phosphor_leptos::GAUGE weight=IconWeight::Regular size="16px" />
             }.into_any(),
             _ => view! { <span /> }.into_any(),
         }
