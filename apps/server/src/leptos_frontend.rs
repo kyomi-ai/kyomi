@@ -142,7 +142,7 @@ pub async fn serve(headers: HeaderMap, uri: axum::http::Uri) -> Response {
     // Public routes (auth pages, trial, welcome, unsubscribe, onboarding) pass through.
     let is_public = matches!(
         path,
-        "login" | "try" | "welcome" | "unsubscribe" | "onboarding" | "setup"
+        "login" | "welcome" | "unsubscribe" | "onboarding" | "setup"
         | "billing/return"
     ) || path.starts_with("signup/")
         || path.starts_with("auth/")

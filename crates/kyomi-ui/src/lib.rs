@@ -227,11 +227,6 @@ pub fn register_server_functions() {
     register_explicit::<GetLastExecution>();
     register_explicit::<GetThinkingEvents>();
 
-    use server_fns::trial::*;
-    register_explicit::<CreateTrialSession>();
-    register_explicit::<SendTrialMessage>();
-    register_explicit::<ExecuteTrialQuery>();
-
     use server_fns::onboarding::*;
     register_explicit::<AcceptTerms>();
     register_explicit::<GetOnboardingState>();

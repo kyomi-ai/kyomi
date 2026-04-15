@@ -134,7 +134,6 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .nest("/api/v1/chat/copilot", routes::copilot::routes())
         .nest("/api/v1/sql", routes::sql_history::routes())
         .nest("/api/v1/bigquery", routes::bigquery::routes())
-        .nest("/api/v1/trial", routes::trial_chat::router())
         .nest("/api/v1/watches", routes::watches::routes())
         .nest("/api/v1/billing", routes::billing::routes())
         .nest("/api/v1/integrations", routes::integrations::routes())

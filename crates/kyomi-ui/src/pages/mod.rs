@@ -15,7 +15,6 @@ pub mod onboarding;
 pub mod settings;
 pub mod setup;
 pub mod sql_editor;
-pub mod trial;
 pub mod unsubscribe;
 pub mod watches;
 pub mod welcome;

@@ -37,7 +37,6 @@ pub mod sidebar;
 pub mod slack;
 pub mod sql_editor;
 pub mod team;
-pub mod trial;
 pub mod unsubscribe;
 pub mod usage;
 pub mod watches;

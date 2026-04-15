@@ -38,7 +38,6 @@ use crate::pages::settings::team::TeamPage;
 use crate::pages::settings::usage::UsagePage;
 use crate::pages::settings::workspace::WorkspacePage;
 use crate::pages::setup::personal_setup::PersonalSetupPage;
-use crate::pages::trial::TrialChatPage;
 use crate::pages::unsubscribe::UnsubscribePage;
 use crate::pages::watches::WatchesPage;
 use crate::pages::welcome::WelcomePage;
@@ -97,7 +96,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/auth/google/link-callback") view=|| view! { <NotImplementedPage name="Google Account Link"/> }/>
                     <Route path=path!("/auth/oauth/:provider/callback") view=|| view! { <NotImplementedPage name="OAuth Callback"/> }/>
                     // Public pages — NO layout, NO auth
-                    <Route path=path!("/try") view=TrialChatPage/>
+                    // `/try` (trial chat) was removed; redirect external links to /login.
+                    <Route path=path!("/try") view=|| view! { <Redirect path="/login"/> }/>
                     <Route path=path!("/welcome") view=WelcomePage/>
                     <Route path=path!("/unsubscribe") view=UnsubscribePage/>
                     <Route path=path!("/billing/return") view=BillingReturnPage/>

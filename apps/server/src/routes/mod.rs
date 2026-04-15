@@ -27,7 +27,6 @@ pub mod learnings;
 pub mod sql_history;
 pub mod subscribe;
 pub mod system_config;
-pub mod trial_chat;
 pub mod usage;
 pub mod users;
 pub mod billing;
