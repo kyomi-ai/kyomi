@@ -18,6 +18,7 @@ use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, Label, Modal, ModalSize,
     Switch, INPUT_CLASS,
 };
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::collections::{
     create_collection, delete_collection, list_collections, update_collection, CollectionItem,
 };
@@ -652,21 +653,25 @@ pub fn CollectionsSidebar(
     #[cfg(not(feature = "hydrate"))]
     let _ = set_sidebar_width;
 
-    // Collection data — filtered by doc_type when provided
+    // Collection data — filtered by doc_type. Backed by the Layout-level
+    // QueryCache so the same `(name, doc_type)` key is shared with the host
+    // page (DashboardsList / KnowledgePage), eliminating duplicate fetches.
+    let query_cache = expect_context::<QueryCache>();
     let doc_type_filter = doc_type.clone();
-    let collections_resource = Resource::new(
-        move || open.get(), // refetch when sidebar opens
+    let collections_resource = use_query(
+        "collections",
         {
             let dt = doc_type_filter.clone();
-            move |_| list_collections(dt.clone())
+            move || dt.clone()
         },
+        |dt: Option<String>| list_collections(dt),
     );
 
-    // Track a version counter to force refetch
-    let (version, set_version) = signal(0u32);
+    // Mutations (create / update / delete) call into this — the
+    // Layout-level cache fans out to every cached `collections` entry,
+    // regardless of which doc_type variant they hold.
     let refetch_collections = move || {
-        set_version.update(|v| *v += 1);
-        collections_resource.refetch();
+        query_cache.invalidate("collections");
     };
 
     // Modal state
@@ -941,9 +946,6 @@ pub fn CollectionsSidebar(
                 let collections = collections_resource.get()
                     .and_then(|r| r.ok())
                     .unwrap_or_default();
-
-                // Force dependency on version so we re-render on refetch
-                let _ = version.get();
 
                 let modal_editing = editing_collection.get();
                 let show_modal_sig: Signal<bool> = show_modal.into();

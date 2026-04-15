@@ -26,6 +26,7 @@ use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
 };
 use crate::pages::dashboards::CollectionsSidebar;
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::collections::{list_collections, CollectionItem};
 use crate::server_fns::dashboards::DashboardListItem;
 use crate::server_fns::knowledge::{create_knowledge_doc, delete_knowledge_doc, list_knowledge_docs};
@@ -47,13 +48,21 @@ pub fn KnowledgePage() -> impl IntoView {
     let (sort_signal, set_sort_signal) = signal("recent".to_string());
 
     // ── Data fetching ───────────────────────────────────────────────────
-    let knowledge_resource = Resource::new(
+    // Layout-level QueryCache — cached across navigation (KYO-22 Part 2).
+    let query_cache = expect_context::<QueryCache>();
+    let knowledge_resource = use_query(
+        "knowledge",
         move || (query_signal.get(), sort_signal.get()),
-        move |(query, sort)| list_knowledge_docs(query, Some(sort), None),
+        |(q, s): (Option<String>, String)| list_knowledge_docs(q, Some(s), None),
     );
 
-    // Fetch collections for badge display and filtering (scoped to knowledge)
-    let collections_resource = Resource::new(|| (), |_| list_collections(Some("knowledge".to_string())));
+    // Collections list, scoped to knowledge docs. Deps include the doc_type
+    // so this entry stays distinct from the dashboards page's collections.
+    let collections_resource = use_query(
+        "collections",
+        || Some("knowledge".to_string()),
+        |dt: Option<String>| list_collections(dt),
+    );
 
     // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
@@ -67,7 +76,7 @@ pub fn KnowledgePage() -> impl IntoView {
                 if let Err(e) = delete_knowledge_doc(doc_id).await {
                     leptos::logging::error!("Failed to delete knowledge doc: {e}");
                 }
-                knowledge_resource.refetch();
+                query_cache.invalidate("knowledge");
             });
         }
     });
@@ -136,41 +145,9 @@ pub fn KnowledgePage() -> impl IntoView {
             .unwrap_or_default()
     };
 
-    // ── WebSocket subscription: dashboard_update ────────────────────────
-    // Knowledge docs go through the same dashboard_update channel.
-    #[cfg(target_arch = "wasm32")]
-    {
-        use crate::components::chat::websocket_client::WebSocketContext;
-        let ws_ctx = use_context::<WebSocketContext>();
-
-        let ws_ctx_for_effect = ws_ctx.clone();
-        Effect::new(move |_| {
-            let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
-                return;
-            };
-
-            let unsub = ws.subscribe("dashboard_update", move |msg| {
-                let action = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("action"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                match action {
-                    "created" | "deleted" => {
-                        knowledge_resource.refetch();
-                    }
-                    _ => {}
-                }
-            });
-
-            let unsub = send_wrapper::SendWrapper::new(unsub);
-            on_cleanup(move || {
-                unsub.take()();
-            });
-        });
-    }
+    // `dashboard_update` WebSocket subscription lives at the Layout level
+    // (see `QueryCacheWsBridge` in `components/layout.rs`) so list caches
+    // stay fresh across navigation — KYO-9.
 
     view! {
         <div class="flex flex-col h-full bg-background">
@@ -275,8 +252,8 @@ pub fn KnowledgePage() -> impl IntoView {
                     active_collection_id=Signal::derive(move || active_collection_id.get())
                     set_active_collection_id=set_active_collection_id
                     on_collections_changed=Callback::new(move |()| {
-                        collections_resource.refetch();
-                        knowledge_resource.refetch();
+                        query_cache.invalidate("collections");
+                        query_cache.invalidate("knowledge");
                     })
                     doc_type="knowledge".to_string()
                 />

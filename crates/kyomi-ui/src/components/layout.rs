@@ -19,6 +19,9 @@ use leptos_router::NavigateOptions;
 use crate::components::chat::{WebSocketDebugPanel, WebSocketProvider};
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::EmptyState;
+use crate::query_cache::provide_query_cache;
+#[cfg(target_arch = "wasm32")]
+use crate::query_cache::QueryCache;
 use crate::server_fns::context::get_user_context;
 use crate::server_fns::security::logout;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
@@ -75,6 +78,10 @@ pub fn Layout(children: Children) -> impl IntoView {
     // authed session, so this resource survives page changes.
     let user_ctx = LocalResource::new(get_user_context);
     provide_context(user_ctx);
+
+    // Install the list-query cache (KYO-22 Part 2). Lives at the Layout
+    // level so cached list data survives navigation between authed pages.
+    provide_query_cache();
 
     // Auth guard: tracks whether the user has been authenticated.
     // Starts as `false`; set to `true` once `user_info` resolves successfully.
@@ -295,6 +302,10 @@ pub fn Layout(children: Children) -> impl IntoView {
         // before this ever becomes visible.
         <div style=move || if auth_confirmed.get() { "" } else { "display:none" }>
             <WebSocketProvider user_id=ws_user_id.into() workspace_id=ws_workspace_id.into()>
+                // Bridges Layout-level QueryCache to the WS `dashboard_update`
+                // channel so list pages stay fresh without each page owning
+                // its own subscription. See [KYO-9].
+                <QueryCacheWsBridge/>
                 // Dev-only WS debug panel — self-hides unless `localStorage.ws_debug === "1"`.
                 // Kept outside the app shell so it floats over everything.
                 <WebSocketDebugPanel/>
@@ -352,6 +363,78 @@ pub fn Layout(children: Children) -> impl IntoView {
             </WebSocketProvider>
         </div>
     }
+}
+
+/// Bridges the Layout-level [`QueryCache`] to the `dashboard_update`
+/// WebSocket channel.
+///
+/// Hoists the subscription that used to live on every list page (dashboards,
+/// knowledge) up to the Layout, where the cache itself lives. A single
+/// subscription survives navigation, so a dashboard created from the chat
+/// page is already invalidated by the time the user visits the dashboards
+/// list — no more "stale until you visit the page" gap. See [KYO-9].
+///
+/// Rendered as a child of `<WebSocketProvider>` (not directly in `Layout`)
+/// so that `use_context::<WebSocketContext>()` resolves — the provider
+/// installs its context into its own subtree, not its parent's scope.
+#[component]
+fn QueryCacheWsBridge() -> impl IntoView {
+    // The whole effect is WASM-only because `WebSocketContext` is never
+    // installed on SSR/native targets — mirrors the per-page pattern that
+    // this replaces.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::components::chat::websocket_client::WebSocketContext;
+        use crate::server_fns::context::UserContext;
+
+        let query_cache = expect_context::<QueryCache>();
+        let user_ctx =
+            expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+        let ws_ctx = use_context::<WebSocketContext>();
+
+        Effect::new(move |_| {
+            let Some(ws) = ws_ctx.as_ref().cloned() else {
+                return;
+            };
+
+            let dashboard_unsub = ws.subscribe("dashboard_update", move |msg| {
+                let action = msg
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("action"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                match action {
+                    "created" | "deleted" => {
+                        // Knowledge docs share the `dashboard_update`
+                        // channel, so both caches invalidate together.
+                        query_cache.invalidate("dashboards");
+                        query_cache.invalidate("knowledge");
+                    }
+                    _ => {}
+                }
+            });
+
+            // Workspace membership / settings changes must refresh the
+            // Layout-level `user_ctx` resource so the sidebar, workspace
+            // switcher, and any consumer of `UserContext` see the new
+            // state without a full page reload. No action filter — any
+            // `workspace_update` should refetch.
+            let workspace_unsub = ws.subscribe("workspace_update", move |_msg| {
+                user_ctx.refetch();
+            });
+
+            let dashboard_unsub = send_wrapper::SendWrapper::new(dashboard_unsub);
+            let workspace_unsub = send_wrapper::SendWrapper::new(workspace_unsub);
+            on_cleanup(move || {
+                dashboard_unsub.take()();
+                workspace_unsub.take()();
+            });
+        });
+    }
+
+    view! { <></> }
 }
 
 /// Navigation sidebar matching React `Sidebar.jsx`.

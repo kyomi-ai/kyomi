@@ -21,6 +21,7 @@ use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
     Switch,
 };
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::watches::{
     bulk_delete_alerts, bulk_mark_alerts_read, bulk_mark_alerts_unread, continue_alert_in_chat,
     delete_alert, get_alerts, list_watches, mark_alert_read, mark_alert_unread, restore_alert,
@@ -45,11 +46,10 @@ fn AlertDropdownMenu(
     is_unread: bool,
     /// Alert execution ID.
     alert_id: i32,
-    /// Signal to trigger a data refetch after mutations.
-    refetch_trigger: RwSignal<u32>,
     /// Callback to handle "Continue in Chat" with the session_id.
     on_continue_chat: Callback<String>,
 ) -> impl IntoView {
+    let query_cache = expect_context::<QueryCache>();
     let (is_open, set_is_open) = signal(false);
     let container_ref = NodeRef::<leptos::html::Div>::new();
 
@@ -140,7 +140,7 @@ fn AlertDropdownMenu(
             if let Err(e) = mark_alert_unread(alert_id).await {
                 leptos::logging::error!("Failed to mark unread: {e}");
             }
-            refetch_trigger.update(|v| *v += 1);
+            query_cache.invalidate("alerts");
         });
     };
 
@@ -151,7 +151,7 @@ fn AlertDropdownMenu(
             if let Err(e) = delete_alert(alert_id).await {
                 leptos::logging::error!("Failed to delete alert: {e}");
             }
-            refetch_trigger.update(|v| *v += 1);
+            query_cache.invalidate("alerts");
         });
     };
 
@@ -162,7 +162,7 @@ fn AlertDropdownMenu(
             if let Err(e) = restore_alert(alert_id).await {
                 leptos::logging::error!("Failed to restore alert: {e}");
             }
-            refetch_trigger.update(|v| *v += 1);
+            query_cache.invalidate("alerts");
         });
     };
 
@@ -331,25 +331,25 @@ pub fn AlertsHistory(
     let selected_alerts = RwSignal::new(HashSet::<i32>::new());
     let (bulk_action_pending, set_bulk_action_pending) = signal(false);
 
-    // Trigger for refetching data after mutations.
-    let refetch_trigger = RwSignal::new(0u32);
-
     // ── Resources ────────────────────────────────────────────────────────
+    // Backed by the Layout-level QueryCache so both `watches` and `alerts`
+    // entries are reused across navigation instead of re-fetching on mount
+    // (KYO-22 Part 2). Mutations call `query_cache.invalidate` — the old
+    // `refetch_trigger` counter is gone.
+    let query_cache = expect_context::<QueryCache>();
 
-    // Fetch watches for filter dropdown
-    let watches_resource = Resource::new(|| (), move |_| async move { list_watches().await });
+    // Fetch watches for filter dropdown — shared with WatchesPage.
+    let watches_resource = use_query(
+        "watches",
+        || (),
+        |_: ()| list_watches(),
+    );
 
-    // Fetch alerts history (reactive to filter/page changes + refetch trigger)
-    let alerts_resource = Resource::new(
-        move || {
-            (
-                selected_watch_id.get(),
-                page.get(),
-                show_deleted.get(),
-                refetch_trigger.get(),
-            )
-        },
-        move |(watch_id, current_page, include_deleted, _trigger)| async move {
+    // Fetch alerts history, reactive to filter/page state.
+    let alerts_resource = use_query(
+        "alerts",
+        move || (selected_watch_id.get(), page.get(), show_deleted.get()),
+        |(watch_id, current_page, include_deleted): (String, i64, bool)| async move {
             let wid = if watch_id.is_empty() {
                 None
             } else {
@@ -376,7 +376,6 @@ pub fn AlertsHistory(
     // ── Auto-expand alert if expanded_alert_id is provided ──────────────
     if let Some(target_id) = expanded_alert_id {
         Effect::new(move || {
-            let _ = refetch_trigger.get(); // re-run when data changes
             if let Some(Ok(page)) = alerts_resource.get() { let alerts = &page.alerts;
                 let mut new_set = HashSet::new();
                 new_set.insert(target_id);
@@ -386,10 +385,9 @@ pub fn AlertsHistory(
                 if let Some(alert) = alerts.iter().find(|a| a.id == target_id)
                     && alert.read_at.is_none() && alert.deleted_at.is_none()
                 {
-                    let trigger = refetch_trigger;
                     leptos::task::spawn_local(async move {
                         let _ = mark_alert_read(target_id).await;
-                        trigger.update(|v| *v += 1);
+                        query_cache.invalidate("alerts");
                     });
                 }
             }
@@ -408,10 +406,9 @@ pub fn AlertsHistory(
                     if let Some(alert) = alerts.iter().find(|a| a.id == alert_id)
                         && alert.read_at.is_none() && alert.deleted_at.is_none()
                     {
-                        let trigger = refetch_trigger;
                         leptos::task::spawn_local(async move {
                             let _ = mark_alert_read(alert_id).await;
-                            trigger.update(|v| *v += 1);
+                            query_cache.invalidate("alerts");
                         });
                     }
                 }
@@ -459,7 +456,7 @@ pub fn AlertsHistory(
             }
             selected_alerts.set(HashSet::new());
             set_bulk_action_pending.set(false);
-            refetch_trigger.update(|v| *v += 1);
+            query_cache.invalidate("alerts");
         });
     };
 
@@ -475,7 +472,7 @@ pub fn AlertsHistory(
             }
             selected_alerts.set(HashSet::new());
             set_bulk_action_pending.set(false);
-            refetch_trigger.update(|v| *v += 1);
+            query_cache.invalidate("alerts");
         });
     };
 
@@ -511,7 +508,7 @@ pub fn AlertsHistory(
             }
             selected_alerts.set(HashSet::new());
             set_bulk_action_pending.set(false);
-            refetch_trigger.update(|v| *v += 1);
+            query_cache.invalidate("alerts");
         });
     };
 
@@ -899,7 +896,6 @@ pub fn AlertsHistory(
                                                             is_deleted=is_deleted
                                                             is_unread=is_unread
                                                             alert_id=alert_id
-                                                            refetch_trigger=refetch_trigger
                                                             on_continue_chat=on_continue_chat
                                                         />
                                                     </div>

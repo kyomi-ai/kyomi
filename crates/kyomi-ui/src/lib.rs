@@ -12,6 +12,7 @@ pub mod components;
 pub mod datasource;
 pub mod pages;
 pub mod parser;
+pub mod query_cache;
 pub mod server_fns;
 pub mod types;
 pub mod utils;

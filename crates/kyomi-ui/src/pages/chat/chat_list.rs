@@ -35,6 +35,7 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, SearchInput, Skeleton};
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::chat::{
     bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
 };
@@ -134,10 +135,14 @@ pub fn ChatsListPage() -> impl IntoView {
     let (pending_delete, set_pending_delete) = signal(Option::<PendingDelete>::None);
 
     // ── Load sessions function ───────────────────────────────────────────
-    // We use a Resource for the initial load, then manage state reactively.
-    let sessions_resource = Resource::new(
+    // Backed by the Layout-level QueryCache — cached across navigation with
+    // stale-while-revalidate (KYO-22 Part 2). The deps `(pinned_only,)` are
+    // stringified into the cache key.
+    let query_cache = expect_context::<QueryCache>();
+    let sessions_resource = use_query(
+        "chat_sessions",
         move || show_pinned_only.get(),
-        list_chat_sessions,
+        |pinned: bool| list_chat_sessions(pinned),
     );
 
     // Sync resource results into the sessions signal
@@ -171,7 +176,7 @@ pub fn ChatsListPage() -> impl IntoView {
             if value.trim().is_empty() {
                 // No search — refetch full list
                 set_is_searching.set(false);
-                sessions_resource.refetch();
+                query_cache.invalidate("chat_sessions");
                 return;
             }
 
@@ -211,7 +216,7 @@ pub fn ChatsListPage() -> impl IntoView {
             let value = search_input.get();
             if value.trim().is_empty() {
                 set_is_searching.set(false);
-                sessions_resource.refetch();
+                query_cache.invalidate("chat_sessions");
             }
             // On SSR, search happens on next page load — no async calls
         });

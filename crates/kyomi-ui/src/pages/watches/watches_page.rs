@@ -23,6 +23,7 @@ use crate::components::{
     CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Spinner,
     StatusBadge, StatusBadgeVariant, Switch,
 };
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::{
     delete_watch, get_watch_execution, get_watch_executions, list_watches, run_watch_now,
@@ -364,12 +365,11 @@ pub fn WatchesPage() -> impl IntoView {
     let (running, set_running) = signal(false);
 
     // ── Data fetching ────────────────────────────────────────────────────
-    let (refetch_counter, set_refetch_counter) = signal(0u32);
-
-    let watches_resource = Resource::new(
-        move || refetch_counter.get(),
-        |_| list_watches(),
-    );
+    // Layout-level QueryCache — cached across navigation (KYO-22 Part 2).
+    // Mutations (toggle/delete/run/create) call `query_cache.invalidate`
+    // instead of bumping a refetch counter.
+    let query_cache = expect_context::<QueryCache>();
+    let watches_resource = use_query("watches", || (), |_: ()| list_watches());
 
     // Executions list resource (for execution log modal).
     let executions_resource = Resource::new(
@@ -414,7 +414,7 @@ pub fn WatchesPage() -> impl IntoView {
         set_toggling.set(true);
         leptos::task::spawn_local(async move {
             match toggle_watch(watch_id).await {
-                Ok(()) => set_refetch_counter.update(|c| *c += 1),
+                Ok(()) => query_cache.invalidate("watches"),
                 Err(e) => toast_error(format!("Failed to toggle watch: {e}")),
             }
             set_toggling.set(false);
@@ -427,7 +427,7 @@ pub fn WatchesPage() -> impl IntoView {
             match run_watch_now(watch_id).await {
                 Ok(()) => {
                     toast_success("Watch execution started");
-                    set_refetch_counter.update(|c| *c += 1);
+                    query_cache.invalidate("watches");
                 }
                 Err(e) => toast_error(format!("Failed to run watch: {e}")),
             }
@@ -467,7 +467,7 @@ pub fn WatchesPage() -> impl IntoView {
                 match delete_watch(watch_id).await {
                     Ok(()) => {
                         toast_success("Watch deleted");
-                        set_refetch_counter.update(|c| *c += 1);
+                        query_cache.invalidate("watches");
                     }
                     Err(e) => toast_error(format!("Failed to delete watch: {e}")),
                 }
@@ -488,7 +488,7 @@ pub fn WatchesPage() -> impl IntoView {
     });
 
     let on_watch_saved = Callback::new(move |()| {
-        set_refetch_counter.update(|c| *c += 1);
+        query_cache.invalidate("watches");
     });
 
     // Execution log callbacks.

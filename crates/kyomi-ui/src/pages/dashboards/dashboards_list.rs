@@ -37,6 +37,7 @@ use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
 };
 use super::collections_sidebar::CollectionsSidebar;
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::collections::{
     list_collections, remove_dashboard_from_collection, CollectionItem,
 };
@@ -61,13 +62,23 @@ pub fn DashboardsListPage() -> impl IntoView {
     let (sort_signal, set_sort_signal) = signal("recent".to_string());
 
     // ── Data fetching ───────────────────────────────────────────────────
-    let dashboards_resource = Resource::new(
+    // Backed by the Layout-level QueryCache: cached across navigation with
+    // stale-while-revalidate. Dependencies (`search text, sort`) key the
+    // cache so each filter combination has its own entry.
+    let query_cache = expect_context::<QueryCache>();
+    let dashboards_resource = use_query(
+        "dashboards",
         move || (query_signal.get(), sort_signal.get()),
-        move |(query, sort)| list_dashboards(query, Some(sort), None),
+        |(q, s): (Option<String>, String)| list_dashboards(q, Some(s), None),
     );
 
-    // Fetch collections for badge display and filtering (scoped to dashboards)
-    let collections_resource = Resource::new(|| (), |_| list_collections(Some("dashboard".to_string())));
+    // Collections list, scoped to dashboards. Deps hold the doc_type so
+    // each scope (dashboard / knowledge / all) has its own cache entry.
+    let collections_resource = use_query(
+        "collections",
+        || Some("dashboard".to_string()),
+        |dt: Option<String>| list_collections(dt),
+    );
 
     // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
@@ -81,7 +92,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 if let Err(e) = delete_dashboard(dashboard_id).await {
                     leptos::logging::error!("Failed to delete dashboard: {e}");
                 }
-                dashboards_resource.refetch();
+                query_cache.invalidate("dashboards");
             });
         }
     });
@@ -109,7 +120,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 {
                     leptos::logging::error!("Failed to remove from collection: {e}");
                 }
-                collections_resource.refetch();
+                query_cache.invalidate("collections");
             });
         }
     });
@@ -178,40 +189,9 @@ pub fn DashboardsListPage() -> impl IntoView {
             .unwrap_or_default()
     };
 
-    // ── WebSocket subscription: dashboard_update ────────────────────────
-    #[cfg(target_arch = "wasm32")]
-    {
-        use crate::components::chat::websocket_client::WebSocketContext;
-        let ws_ctx = use_context::<WebSocketContext>();
-
-        let ws_ctx_for_effect = ws_ctx.clone();
-        Effect::new(move |_| {
-            let Some(ws) = ws_ctx_for_effect.as_ref().cloned() else {
-                return;
-            };
-
-            let unsub = ws.subscribe("dashboard_update", move |msg| {
-                let action = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("action"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                match action {
-                    "created" | "deleted" => {
-                        dashboards_resource.refetch();
-                    }
-                    _ => {}
-                }
-            });
-
-            let unsub = send_wrapper::SendWrapper::new(unsub);
-            on_cleanup(move || {
-                unsub.take()();
-            });
-        });
-    }
+    // `dashboard_update` WebSocket subscription lives at the Layout level
+    // (see `QueryCacheWsBridge` in `components/layout.rs`) so list caches
+    // stay fresh across navigation — KYO-9.
 
     view! {
         <div class="flex flex-col h-full bg-background">
@@ -389,8 +369,8 @@ pub fn DashboardsListPage() -> impl IntoView {
                     active_collection_id=Signal::derive(move || active_collection_id.get())
                     set_active_collection_id=set_active_collection_id
                     on_collections_changed=Callback::new(move |()| {
-                        collections_resource.refetch();
-                        dashboards_resource.refetch();
+                        query_cache.invalidate("collections");
+                        query_cache.invalidate("dashboards");
                     })
                     doc_type="dashboard".to_string()
                 />
@@ -433,7 +413,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 })
                 on_added=Callback::new(move |()| {
                     set_add_to_collection_dashboard.set(None);
-                    collections_resource.refetch();
+                    query_cache.invalidate("collections");
                 })
             />
         </div>
