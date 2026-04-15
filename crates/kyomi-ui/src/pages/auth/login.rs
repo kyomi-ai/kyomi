@@ -739,6 +739,10 @@ fn CredentialsView(
                     <Button
                         variant=ButtonVariant::Link
                         size=ButtonSize::Sm
+                        // 44px min-height floor for the tertiary link — scoped
+                        // locally rather than on ButtonSize::Sm globally, since
+                        // dense desktop toolbars also use Sm and would regress.
+                        class="min-h-[44px]".to_string()
                         on:click=move |_| {
                             set_view_state.set(LoginView::Signup);
                             set_error.set(None);
@@ -995,6 +999,9 @@ fn SignupView(
                     <Button
                         variant=ButtonVariant::Link
                         size=ButtonSize::Sm
+                        // 44px min-height floor — scoped locally, mirrors
+                        // the "Create an account" link on the Credentials view.
+                        class="min-h-[44px]".to_string()
                         on:click=move |_| {
                             set_view_state.set(LoginView::Credentials);
                             set_error.set(None);
