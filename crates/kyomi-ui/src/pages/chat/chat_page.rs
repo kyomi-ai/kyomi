@@ -1403,9 +1403,23 @@ pub fn ChatPage() -> impl IntoView {
             >
                 <div class="flex flex-col h-full bg-background overflow-x-hidden" style="flex-direction: column;">
                     <div class="flex-1 flex flex-col overflow-hidden">
-                        // Phase 9 — Chat Header (only shown when messages exist)
-                        // Matches React: Chat.jsx lines 1467-1613
-                        <Show when=move || !messages.get().is_empty()>
+                        // Phase 9 — Chat Header
+                        // When messages exist: inline editable title + badges + actions
+                        //   (matches React: Chat.jsx lines 1467-1613)
+                        // When empty: simple page-header with "New conversation" title,
+                        //   matching the Instrument Serif title used by every other list
+                        //   page (Dashboards, Chats, Knowledge, Watches) for visual
+                        //   consistency across the top bar.
+                        <Show
+                            when=move || !messages.get().is_empty()
+                            fallback=move || view! {
+                                <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 z-20 flex items-center justify-between">
+                                    <h1 class="text-3xl font-display text-foreground">
+                                        "New conversation"
+                                    </h1>
+                                </div>
+                            }
+                        >
                             <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 z-20 flex items-center justify-between gap-4">
                                     // Left side: back button + title + badges
                                     <div class="flex items-center gap-2 min-w-0 flex-1 overflow-hidden">

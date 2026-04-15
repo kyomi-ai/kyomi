@@ -24,6 +24,22 @@ use crate::server_fns::auth::{
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Login subtitle rotation — editorial voice on the sign-in screen.
+// Picked once per mount (see `subtitle_idx` below) so the value is stable
+// across the reactive subtitle signal.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LOGIN_SUBTITLES: &[&str] = &[
+    "Your data is where you left it.",
+    "Back to the numbers.",
+    "Let's see what changed.",
+    "Numbers missed you.",
+    "New data. Same warehouse.",
+    "Everything you left running.",
+    "The queries are ready.",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // View state machine
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -148,12 +164,29 @@ pub fn LoginPage() -> impl IntoView {
         }
     });
 
+    // Pick a login subtitle once per mount. Seed = minute-rounded wall-clock
+    // time, so a refresh-within-a-minute stays stable (no flicker on reload)
+    // but a new visit a minute later rotates to a fresh line. Stored in a
+    // `StoredValue` so the reactive subtitle signal reads the same index
+    // on every tick.
+    let subtitle_idx: StoredValue<usize> = StoredValue::new({
+        #[cfg(target_arch = "wasm32")]
+        {
+            let minutes = (js_sys::Date::now() / 60_000.0) as usize;
+            minutes % LOGIN_SUBTITLES.len()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            0usize
+        }
+    });
+
     let subtitle = Signal::derive(move || {
         match view_state.get() {
             LoginView::Signup | LoginView::CheckEmail { .. } => {
                 "Get started with Kyomi".to_string()
             }
-            _ => "Sign in to your account to continue".to_string(),
+            _ => LOGIN_SUBTITLES[subtitle_idx.get_value()].to_string(),
         }
     });
 

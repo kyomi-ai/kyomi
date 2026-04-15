@@ -7,10 +7,10 @@
 //! - Lists all active, accessible datasources from `list_datasources()`
 //! - Shows datasource name + type
 //! - Persists selected datasource slug to localStorage
-//! - Empty state: "No datasources available" with link to settings
+//! - Empty state is handled at the page level (`mod.rs` banner); this
+//!   component simply renders nothing when no datasources are accessible.
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
 use crate::components::{DynSelect, Spinner};
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
@@ -130,18 +130,9 @@ pub fn DatasourceSelector() -> impl IntoView {
             </div>
         </Show>
 
-        <Show when=move || !is_loading.get() && !has_error.get() && accessible_datasources.get().is_empty()>
-            <div class="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
-                <span>"No datasources available."</span>
-                <a
-                    href="/settings"
-                    class="inline-flex items-center gap-1 text-primary hover:underline"
-                >
-                    <Icon icon=phosphor_leptos::GEAR size="12px" />
-                    <span>"Connect in Settings"</span>
-                </a>
-            </div>
-        </Show>
+        // Empty-state helper removed — the SQL Editor page-level banner
+        // ("No datasource selected. Connect a datasource in Settings...") is
+        // the single source of truth for the empty state (see `mod.rs`).
 
         <Show when=move || !is_loading.get() && !has_error.get() && !accessible_datasources.get().is_empty()>
             <div class="w-[140px] sm:w-[240px]">

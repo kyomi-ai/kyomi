@@ -5,7 +5,7 @@
 //! Ported from `apps/frontend/src/pages/WatchesPage.jsx` (667 lines).
 //!
 //! Features:
-//! - Header with "Kyomi Watch" title and "Create Watch" button
+//! - Header with "Watches" title and "Create Watch" button
 //! - Two tabs: Alerts (inbox) and Watches (config)
 //! - Alerts tab shows `AlertsHistory` component
 //! - Watches tab shows watch cards with toggle, run, edit, delete actions
@@ -554,7 +554,7 @@ pub fn WatchesPage() -> impl IntoView {
                 return view! {
                     <div class="h-full flex flex-col bg-background">
                         <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
-                            <h1 class="text-3xl font-display text-foreground">"Kyomi Watch"</h1>
+                            <h1 class="text-3xl font-display text-foreground">"Watches"</h1>
                         </div>
                         <div class="flex-1 flex items-center justify-center p-6">
                             <Card class="max-w-lg".to_string()>
@@ -587,7 +587,7 @@ pub fn WatchesPage() -> impl IntoView {
                                             "Upgrade to Pro"
                                         </ButtonLink>
                                         <p class="text-xs text-center text-muted-foreground mt-2">
-                                            "Kyomi Watch is available on Pro and Team plans"
+                                            "Watches are available on Pro and Team plans"
                                         </p>
                                     </div>
                                 </CardContent>
@@ -606,7 +606,7 @@ pub fn WatchesPage() -> impl IntoView {
                     <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
                         // Row 1: Header
                         <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
-                            <h1 class="text-3xl font-display text-foreground">"Kyomi Watch"</h1>
+                            <h1 class="text-3xl font-display text-foreground">"Watches"</h1>
                             <Button
                                 size=ButtonSize::Sm
                                 on:click=handle_create_watch

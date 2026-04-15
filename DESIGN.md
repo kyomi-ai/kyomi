@@ -570,7 +570,7 @@ All scrollbars use `scrollbar-width: thin` and must match their container's back
 ## Accessibility
 
 - **Focus states:** All interactive elements MUST have `focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring` (ring color = amber)
-- **Disabled states:** `disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none`
+- **Disabled states:** `disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none` — except `ButtonVariant::Default` (primary) which uses `disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100` so disabled primaries read as neutral gray rather than a faded amber that looks like "low-priority but active"
 - **Modal backdrop:** 50% black (`bg-black/50`), no blur. Industry standard.
 - **Color contrast:** All text/background combinations must meet WCAG AA (4.5:1 for normal text, 3:1 for large text)
 - **Reduced motion:** Respected globally via `prefers-reduced-motion` media query

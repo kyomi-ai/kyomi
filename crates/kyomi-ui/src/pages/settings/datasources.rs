@@ -188,14 +188,19 @@ fn DatasourcesContent(
                         "Manage database connections"
                     </p>
                 </div>
-                <Button
-                    on:click=move |_| set_modal_datasource_id.set(Some(None))
-                >
-                    <span class="h-4 w-4 inline-flex items-center justify-center">
-                        <Icon icon=phosphor_leptos::PLUS/>
-                    </span>
-                    "Add Datasource"
-                </Button>
+                // Header CTA — only shown when at least one datasource exists.
+                // Empty state renders its own prominent CTA below (see `EmptyState`),
+                // so double-showing the button creates a duplicate "Add Datasource" CTA.
+                <Show when=move || !datasources.get().is_empty()>
+                    <Button
+                        on:click=move |_| set_modal_datasource_id.set(Some(None))
+                    >
+                        <span class="h-4 w-4 inline-flex items-center justify-center">
+                            <Icon icon=phosphor_leptos::PLUS/>
+                        </span>
+                        "Add Datasource"
+                    </Button>
+                </Show>
             </div>
 
             // Datasources List
