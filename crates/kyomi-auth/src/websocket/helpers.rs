@@ -4,8 +4,6 @@
 //!
 //! One function per message type — constructs `WebSocketMessage` with the correct
 //! `MessageType` and data payload, then calls `send_to_user` or `broadcast_to_workspace`.
-//! Trial session functions (`send_trial_chat_stream`, `send_trial_chat_complete`) publish
-//! directly via Redis pub/sub when configured; they are no-ops in single-instance mode.
 
 use kyomi_core::{MessageType, WebSocketMessage};
 
@@ -81,124 +79,6 @@ pub async fn send_chat_complete(params: ChatCompleteParams<'_>) {
         .with_data(data);
 
     manager.send_to_user(user_id, msg).await;
-}
-
-// ---------------------------------------------------------------------------
-// Trial chat streaming (publishes to ws:trial:{session_id} channel)
-// ---------------------------------------------------------------------------
-
-/// Build the Redis pub/sub channel name for a trial session.
-///
-/// Used by both the WebSocket helpers and the thinking tracker to route
-/// messages to anonymous trial users.
-pub fn trial_channel(session_id: &str) -> String {
-    format!("ws:trial:{session_id}")
-}
-
-/// Send a chat_stream chunk to a trial session via Redis pub/sub.
-///
-/// Trial users are not authenticated and don't have a `user_id`-based
-/// WebSocket subscription. Instead, the frontend subscribes to the
-/// `ws:trial:{session_id}` Redis channel.
-pub async fn send_trial_chat_stream(
-    manager: &WebSocketManager,
-    session_id: &str,
-    message_id: &str,
-    content: &str,
-    context_type: Option<&str>,
-) {
-    let mut data = serde_json::json!({
-        "content": content,
-    });
-    if let Some(ct) = context_type {
-        data["context_type"] = serde_json::Value::String(ct.to_string());
-    }
-
-    let msg = WebSocketMessage::new(MessageType::ChatStream)
-        .with_session(session_id)
-        .with_message_id(message_id)
-        .with_data(data);
-
-    // Trial channels require Redis pub/sub — no-op in single-instance mode.
-    let mut redis_pool = match manager.redis_pool() {
-        Some(p) => p,
-        None => {
-            tracing::warn!("Trial chat WebSocket delivery skipped — Redis not configured (single-instance mode)");
-            return;
-        }
-    };
-
-    let channel = trial_channel(session_id);
-    let json = match serde_json::to_string(&msg) {
-        Ok(j) => j,
-        Err(e) => {
-            tracing::error!("Failed to serialize trial WS message: {e}");
-            return;
-        }
-    };
-
-    if let Err(e) = redis::cmd("PUBLISH")
-        .arg(&channel)
-        .arg(&json)
-        .query_async::<i64>(&mut redis_pool)
-        .await
-    {
-        tracing::warn!(error = %e, channel = %channel, "Failed to publish trial chat stream");
-    }
-}
-
-/// Send a chat_complete message to a trial session via Redis pub/sub.
-pub async fn send_trial_chat_complete(
-    manager: &WebSocketManager,
-    session_id: &str,
-    message_id: &str,
-    full_content: &str,
-    model: &str,
-    usage_stats: Option<serde_json::Value>,
-    context_type: Option<&str>,
-) {
-    let mut data = serde_json::json!({
-        "full_content": full_content,
-        "model": model,
-    });
-    if let Some(stats) = usage_stats {
-        data["usage_stats"] = stats;
-    }
-    if let Some(ct) = context_type {
-        data["context_type"] = serde_json::Value::String(ct.to_string());
-    }
-
-    let msg = WebSocketMessage::new(MessageType::ChatComplete)
-        .with_session(session_id)
-        .with_message_id(message_id)
-        .with_data(data);
-
-    // Trial channels require Redis pub/sub — no-op in single-instance mode.
-    let mut redis_pool = match manager.redis_pool() {
-        Some(p) => p,
-        None => {
-            tracing::warn!("Trial chat WebSocket delivery skipped — Redis not configured (single-instance mode)");
-            return;
-        }
-    };
-
-    let channel = trial_channel(session_id);
-    let json = match serde_json::to_string(&msg) {
-        Ok(j) => j,
-        Err(e) => {
-            tracing::error!("Failed to serialize trial WS message: {e}");
-            return;
-        }
-    };
-
-    if let Err(e) = redis::cmd("PUBLISH")
-        .arg(&channel)
-        .arg(&json)
-        .query_async::<i64>(&mut redis_pool)
-        .await
-    {
-        tracing::warn!(error = %e, channel = %channel, "Failed to publish trial chat complete");
-    }
 }
 
 // ---------------------------------------------------------------------------

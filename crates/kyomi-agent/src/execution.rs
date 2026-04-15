@@ -50,10 +50,10 @@ use crate::agent::{AgentConfig, CustomAgent};
 use crate::anthropic::{AUDIT_MODEL, DEFAULT_MODEL};
 use crate::prompt;
 use crate::provider::{
-    create_provider, create_provider_from_workspace, resolve_provider_config, ProviderKind,
+    create_provider_from_workspace, resolve_provider_config, ProviderKind,
 };
 use crate::thinking::AgentThinkingTracker;
-use crate::tools::{create_default_registry, ToolContext, ToolFilter, TRIAL_CHAT_TOOLS};
+use crate::tools::{create_default_registry, ToolContext, ToolFilter};
 
 // ---------------------------------------------------------------------------
 // Configuration and result types
@@ -82,7 +82,6 @@ pub struct AgentExecutionConfig {
     pub assistant_message_id: Option<String>,
     /// Optional conversation history for multi-turn conversations.
     /// Each entry is a (role, content) pair where role is "user" or "assistant".
-    /// Used by trial chat to pass prior messages (max 10).
     pub conversation_history: Option<Vec<(String, String)>>,
     /// Display name for event attribution (e.g., WebSocket dashboard updates).
     /// Populated by the caller from the authenticated user record.
@@ -195,26 +194,8 @@ pub async fn execute_agent_chat(
         system_prompt.push_str(&learnings_section);
     }
 
-    // 3. Create LLM provider via factory.
-    //
-    // Trial chat is unauthenticated and uses a synthetic `"trial-workspace"`
-    // ID that does not exist in the DB — it must stay on the legacy global
-    // path that reads server-side Kyomi keys from env vars. Every real
-    // workspace goes through the BYOK-aware factory.
-    let is_trial_context = config.context_type == "trial_chat";
-    let (client, provider_kind, is_byok) = if is_trial_context {
-        let mut provider_config = resolve_provider_config(app_config)?;
-        if let Some(ref model) = config.model_name {
-            provider_config.model = Some(model.clone());
-        } else if provider_config.model.is_none()
-            && provider_config.provider == ProviderKind::Anthropic
-        {
-            provider_config.model = Some(DEFAULT_MODEL.to_string());
-        }
-        let provider_kind = provider_config.provider;
-        let client = create_provider(provider_config)?;
-        (client, provider_kind, false)
-    } else {
+    // 3. Create LLM provider via the BYOK-aware factory.
+    let (client, provider_kind, is_byok) = {
         let mut ws_config =
             kyomi_auth::workspace_ai_config::load(db, &config.workspace_id)
                 .await
@@ -269,7 +250,6 @@ pub async fn execute_agent_chat(
     // Tool filtering mirrors the Python backend:
     //   - chat / slack:     exclude copilot-only + MCP-only (default)
     //   - copilot variants: exclude MCP-only, include copilot tools
-    //   - trial_chat:       restricted subset via include_only
     //   - kyomi_watch:      data-query-only subset via include_only
     //
     // If tools_subset is explicitly provided it takes precedence.
@@ -290,12 +270,6 @@ pub async fn execute_agent_chat(
                     include_only: None,
                 }
             }
-            // Trial chat: restricted tool subset.
-            "trial_chat" => ToolFilter {
-                exclude_copilot_only: false,
-                exclude_mcp_only: false,
-                include_only: Some(TRIAL_CHAT_TOOLS.iter().map(|s| s.to_string()).collect()),
-            },
             // Chat, Slack, and everything else: exclude copilot + MCP tools.
             _ => ToolFilter {
                 exclude_copilot_only: true,
@@ -316,8 +290,6 @@ pub async fn execute_agent_chat(
     let registry = Arc::new(create_default_registry());
 
     // 6. Create tool context.
-    let is_trial = config.context_type == "trial_chat";
-
     let tool_context = ToolContext {
         db: db.clone(),
         kv: kv.clone(),
@@ -327,7 +299,6 @@ pub async fn execute_agent_chat(
         embedding: embedding.clone(),
         ws_manager: ws_manager.clone(),
         config: app_config.clone(),
-        is_trial,
         session_id: Some(config.session_id.clone()),
         supports_mcp_apps: false, // Chat/watch execution — not MCP
         workspace_roles: vec![], // Chat/watch — no admin checks needed
@@ -348,7 +319,7 @@ pub async fn execute_agent_chat(
         .messages
         .push(crate::types::Message::system(&system_prompt));
 
-    // 7b. Inject conversation history (for trial chat multi-turn support).
+    // 7b. Inject conversation history for multi-turn conversations.
     // History messages go between the system prompt and the new user message.
     if let Some(ref history) = config.conversation_history {
         for (role, content) in history.iter().take(10) {
@@ -362,18 +333,11 @@ pub async fn execute_agent_chat(
     }
 
     // 8. Create adapter.
-    //    Trial chat passes None for session_id to skip PostgreSQL persistence
-    //    (trial sessions are Redis-only, no chat_sessions/chat_messages rows).
-    let adapter_session_id = if is_trial {
-        None
-    } else {
-        Some(config.session_id.clone())
-    };
     let mut adapter = ChatAgentAdapter::new(
         agent,
         config.user_id.clone(),
         config.workspace_id.clone(),
-        adapter_session_id,
+        Some(config.session_id.clone()),
         config.component.clone(),
         db.clone(),
         encryption_key.clone(),
@@ -467,7 +431,7 @@ pub async fn execute_agent_chat(
         (events, Some(usage), inp, out, cost)
     };
 
-    // 14b. Log usage to api_usage_log for billing (skip trial users).
+    // 14b. Log usage to api_usage_log for billing.
     // Apply 10% markup to cover payment processing fees.
     //
     // BYOK (workspace-owned keys): the workspace pays the provider directly,
@@ -477,7 +441,7 @@ pub async fn execute_agent_chat(
     // against `ai_credits_used_usd`. Writing 0 keeps the single source of
     // truth for billing consistent without a parallel BYOK-only code path.
     const AI_COST_MULTIPLIER: f64 = 1.1;
-    if !config.user_id.starts_with("trial_") && (input_tokens > 0 || output_tokens > 0) {
+    if input_tokens > 0 || output_tokens > 0 {
         let total_tokens = (input_tokens + output_tokens) as i32;
         // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
         //       `provider_cost_usd = total_cost` so we keep observability into
@@ -517,8 +481,7 @@ pub async fn execute_agent_chat(
     // 15. Attach metadata to the assistant message (model, thinking events, token usage).
     //     The message content was already saved by persist_after_chat();
     //     we only update the extra_metadata column here.
-    //     Trial chat does not persist to PostgreSQL — skip the DB update.
-    if !is_trial {
+    {
         let metadata = serde_json::json!({
             "model": model_name,
             "thinking_events": thinking_events,
@@ -542,8 +505,7 @@ pub async fn execute_agent_chat(
 
     // 16. Record conversation in PostgreSQL (fire-and-forget).
     //     Creates rows in `conversation_discussed` for injected entities.
-    //     Skipped for trial chat (no knowledge context).
-    if !is_trial {
+    {
         let session_id_clone = config.session_id.clone();
         let user_id_clone = config.user_id.clone();
         let workspace_id_clone = config.workspace_id.clone();
@@ -606,9 +568,6 @@ const STREAM_CHUNK_DELAY_MS: u64 = 20;
 /// Sends the response in 50-character chunks via `chat_stream` messages,
 /// then sends a `chat_complete` message with the full response.
 ///
-/// If `trial_session_id` is provided, publishes to the `ws:trial:{session_id}`
-/// Redis channel instead of `ws:user:{user_id}` (trial users are anonymous).
-///
 /// If the session is shared, broadcasts to all workspace members.
 #[allow(clippy::too_many_arguments)]
 pub async fn deliver_response(
@@ -622,7 +581,6 @@ pub async fn deliver_response(
     context_type: &str,
     workspace_id: Option<&str>,
     workspace_user_ids: Option<&[String]>,
-    trial_session_id: Option<&str>,
 ) {
     // Stream response in chunks.
     let chars: Vec<char> = response.chars().collect();
@@ -632,41 +590,29 @@ pub async fn deliver_response(
         let end = (offset + STREAM_CHUNK_SIZE).min(chars.len());
         let chunk: String = chars[offset..end].iter().collect();
 
-        if let Some(trial_sid) = trial_session_id {
-            // Trial mode: publish to ws:trial:{session_id} channel
-            ws_helpers::send_trial_chat_stream(
-                ws_manager,
-                trial_sid,
-                message_id,
-                &chunk,
-                Some(context_type),
-            )
-            .await;
-        } else {
-            ws_helpers::send_chat_stream(
-                ws_manager,
-                user_id,
-                session_id,
-                message_id,
-                &chunk,
-                Some(context_type),
-            )
-            .await;
+        ws_helpers::send_chat_stream(
+            ws_manager,
+            user_id,
+            session_id,
+            message_id,
+            &chunk,
+            Some(context_type),
+        )
+        .await;
 
-            // Broadcast to shared conversation members if applicable.
-            if let Some(ws_user_ids) = workspace_user_ids {
-                for uid in ws_user_ids {
-                    if uid != user_id {
-                        ws_helpers::send_chat_stream(
-                            ws_manager,
-                            uid,
-                            session_id,
-                            message_id,
-                            &chunk,
-                            Some(context_type),
-                        )
-                        .await;
-                    }
+        // Broadcast to shared conversation members if applicable.
+        if let Some(ws_user_ids) = workspace_user_ids {
+            for uid in ws_user_ids {
+                if uid != user_id {
+                    ws_helpers::send_chat_stream(
+                        ws_manager,
+                        uid,
+                        session_id,
+                        message_id,
+                        &chunk,
+                        Some(context_type),
+                    )
+                    .await;
                 }
             }
         }
@@ -676,44 +622,31 @@ pub async fn deliver_response(
     }
 
     // Send complete message.
-    if let Some(trial_sid) = trial_session_id {
-        ws_helpers::send_trial_chat_complete(
-            ws_manager,
-            trial_sid,
-            message_id,
-            response,
-            model,
-            usage,
-            Some(context_type),
-        )
-        .await;
-    } else {
-        ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
+    ws_helpers::send_chat_complete(ws_helpers::ChatCompleteParams {
+        manager: ws_manager,
+        user_id,
+        session_id,
+        message_id,
+        full_content: response,
+        model,
+        usage_stats: usage.clone(),
+        context_type: Some(context_type),
+    })
+    .await;
+
+    // Broadcast completion to shared conversation members.
+    if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
+        ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
             manager: ws_manager,
-            user_id,
+            workspace_id: wid,
             session_id,
             message_id,
             full_content: response,
             model,
-            usage_stats: usage.clone(),
-            context_type: Some(context_type),
+            usage_stats: usage,
+            exclude_user_id: Some(user_id),
         })
         .await;
-
-        // Broadcast completion to shared conversation members.
-        if let (Some(wid), Some(_ws_user_ids)) = (workspace_id, workspace_user_ids) {
-            ws_helpers::broadcast_chat_complete(ws_helpers::BroadcastChatCompleteParams {
-                manager: ws_manager,
-                workspace_id: wid,
-                session_id,
-                message_id,
-                full_content: response,
-                model,
-                usage_stats: usage,
-                exclude_user_id: Some(user_id),
-            })
-            .await;
-        }
     }
 }
 

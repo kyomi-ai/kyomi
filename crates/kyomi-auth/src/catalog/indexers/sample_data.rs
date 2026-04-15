@@ -24,16 +24,10 @@ use crate::catalog::types::{CatalogIndexResult, ColumnEntry};
 
 /// Sentinel workspace ID for shared sample data.
 ///
-/// NOTE (dormant): This sentinel is only still referenced by the anonymous
-/// trial-mode agent tool paths in `kyomi_agent::tools::catalog`. Trial mode
-/// is currently unused and the sentinel is typically empty — `index_sample_data`
-/// is only called from the legacy `POST /api/v1/datasources/sample` REST route
-/// in `apps/server/src/routes/datasources.rs`, which nothing in the UI invokes
-/// anymore. When trial mode is resurrected, decide whether to add a startup
-/// bootstrap hook that pre-populates the sentinel, or migrate trial to a
-/// per-workspace example so the sentinel pattern can be retired entirely.
-///
-/// See also `kyomi_agent::tools::catalog` — search for `ctx.is_trial`.
+/// NOTE (dormant): `index_sample_data` is only called from the legacy
+/// `POST /api/v1/datasources/sample` REST route in
+/// `apps/server/src/routes/datasources.rs`, which nothing in the UI invokes
+/// anymore. The sentinel is typically empty on a fresh install.
 pub const SAMPLE_DATA_WORKSPACE_ID: &str = "sample-data-workspace";
 
 /// Sentinel datasource config ID for sample data (not a real datasource config row).

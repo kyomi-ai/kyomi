@@ -72,17 +72,6 @@ pub const WATCH_TOOLS: &[&str] = &[
     "read_knowledge_file",
 ];
 
-/// Tools available to trial chat users (restricted read-only + visualization).
-/// Matches Python `trial_chat.py` trial_tools list.
-pub const TRIAL_CHAT_TOOLS: &[&str] = &[
-    "list_datasources",
-    "search_knowledge",
-    "get_table_info",
-    "query_datasource",
-    "validate_sql",
-    "get_chartml_spec",
-];
-
 // ---------------------------------------------------------------------------
 // QueryContext — lightweight subset for datasource query execution
 // ---------------------------------------------------------------------------
@@ -134,8 +123,6 @@ pub struct ToolContext {
     pub ws_manager: kyomi_auth::websocket::WebSocketManager,
     /// Application configuration.
     pub config: Arc<kyomi_core::Config>,
-    /// Whether the user is on a trial (limits certain tool behavior).
-    pub is_trial: bool,
     /// Active chat session ID (if running inside a chat session).
     pub session_id: Option<String>,
     /// Whether the MCP client supports MCP Apps (structuredContent).
@@ -145,7 +132,7 @@ pub struct ToolContext {
     /// Workspace roles for the current user (for admin-gated tools).
     pub workspace_roles: Vec<WorkspaceRole>,
     /// Connect registry for routing queries through Kyomi Connect instances.
-    /// `None` when Connect is not available (e.g., trial mode).
+    /// `None` when Connect is not available.
     pub connect_registry: Option<kyomi_datasource_server::ConnectRegistry>,
     /// Messaging platform registry for alert delivery and platform interactions.
     pub platforms: Arc<kyomi_core::platform::PlatformRegistry>,
@@ -1255,28 +1242,6 @@ mod contract_tests {
                 "Watch filter should include '{tool_name}'"
             );
         }
-    }
-
-    #[test]
-    fn trial_filter_includes_only_read_and_viz_tools() {
-        let registry = all_tools();
-        let filter = ToolFilter {
-            include_only: Some(TRIAL_CHAT_TOOLS.iter().map(|s| s.to_string()).collect()),
-            ..Default::default()
-        };
-        let tools = registry.get_tools(&filter);
-        let names: HashSet<&str> = tools.iter().map(|t| t.name()).collect();
-
-        assert_eq!(tools.len(), TRIAL_CHAT_TOOLS.len());
-        for tool_name in TRIAL_CHAT_TOOLS {
-            assert!(
-                names.contains(tool_name),
-                "Trial filter should include '{tool_name}'"
-            );
-        }
-        // Trial should NOT have mutation tools
-        assert!(!names.contains("create_watch"));
-        assert!(!names.contains("create_dashboard"));
     }
 
     // -- Schema serialization -------------------------------------------------

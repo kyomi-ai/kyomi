@@ -282,7 +282,6 @@ pub async fn send_copilot_message(
                     &spawn_context_type,
                     None,
                     None,
-                    None,
                 )
                 .await;
             }

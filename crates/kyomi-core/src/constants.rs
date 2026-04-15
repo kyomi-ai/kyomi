@@ -241,9 +241,6 @@ pub struct RedisKeyPrefixes {
     pub pending_signup: String,
     pub pending_terms: String,
     pub totp_setup: String,
-    pub trial_session: String,
-    pub trial_count: String,
-    pub trial_ratelimit: String,
     pub webauthn_challenge: String,
     pub recovery_session: String,
     pub rate_limit_ip: String,
@@ -257,7 +254,6 @@ pub struct RedisTtls {
     pub totp_setup: u64,
     pub webauthn_challenge: u64,
     pub recovery_session: u64,
-    pub trial_session: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -266,7 +262,6 @@ pub struct RateLimitConstants {
     pub register: RateLimitConfig,
     pub refresh: RateLimitConfig,
     pub api_call: RateLimitConfig,
-    pub trial_chat: RateLimitConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]

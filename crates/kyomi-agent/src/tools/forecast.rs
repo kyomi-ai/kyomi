@@ -142,15 +142,6 @@ impl AgentTool for ForecastDataTool {
             })
         });
 
-        // Trial mode: return a simplified response
-        if ctx.is_trial {
-            return Ok(serde_json::json!({
-                "error": "Forecast is not available in trial mode. \
-                          Connect your own datasource to use forecasting."
-            })
-            .to_string());
-        }
-
         // Resolve datasource
         let ds = kyomi_auth::datasource_service::resolve_datasource(
             &ctx.db,

@@ -759,7 +759,6 @@ fn build_tool_context(
         embedding: state.embedding.clone(),
         ws_manager: state.ws_manager.clone(),
         config: state.config.clone(),
-        is_trial: false, // MCP is always paid tier
         session_id: None, // MCP calls are not in a chat session
         supports_mcp_apps,
         workspace_roles: user.workspace.workspace_roles.clone(),

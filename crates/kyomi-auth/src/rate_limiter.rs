@@ -40,7 +40,6 @@ pub async fn check_rate_limit(
         "signup" => &constants.rate_limits.register,
         "refresh" => &constants.rate_limits.refresh,
         "api_call" => &constants.rate_limits.api_call,
-        "trial_chat" => &constants.rate_limits.trial_chat,
         // Passkey recovery is a credential-recovery flow — treat like login.
         "passkey_recovery" => &constants.rate_limits.login,
         _ => {

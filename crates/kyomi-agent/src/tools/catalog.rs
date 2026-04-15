@@ -80,59 +80,6 @@ impl AgentTool for GetTableInfoTool {
                 )
             })?;
 
-        let is_pg = ctx.db.is_postgres();
-        let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
-        let full_name_expr = kyomi_core::sql_compat::full_table_name_expr_prefixed(is_pg, "dtc");
-
-        // In trial mode, query the sample-data sentinel workspace directly.
-        //
-        // NOTE (dormant): Trial mode is currently unused. The sentinel
-        // (SAMPLE_DATA_WORKSPACE_ID) is populated only when the legacy
-        // `POST /api/v1/datasources/sample` REST route is invoked — nothing
-        // in the UI calls it anymore (the UI onboarding flow writes samples
-        // into the user's own workspace instead). On a fresh install the
-        // sentinel is empty and this path returns "not found" for every
-        // table. When resurrecting trial mode, revisit the whole pattern:
-        //   a) add a startup bootstrap hook that runs
-        //      SampleDataIndexer::index_sample_data on first boot, OR
-        //   b) migrate trial to a designated per-workspace example like the
-        //      UI onboarding path so there's only one write/read pattern.
-        if ctx.is_trial {
-            let sample_ws_id =
-                kyomi_auth::catalog::indexers::sample_data::SAMPLE_DATA_WORKSPACE_ID;
-            let sql = format!(
-                "SELECT dtc.table_metadata \
-                 FROM datasource_table_cache dtc \
-                 WHERE dtc.workspace_id = $1 \
-                   AND dtc.is_archived = {bool_false} \
-                   AND {full_name_expr} = $2"
-            );
-            let cached: Option<TableMetadataRow> = kyomi_core::db_fetch_optional!(
-                ctx.db, TableMetadataRow,
-                &sql,
-                sample_ws_id,
-                table_name
-            )?;
-
-            let table_metadata = if let Some(row) = cached {
-                row.table_metadata
-            } else {
-                return Ok(serde_json::json!({
-                    "error": format!(
-                        "Table '{}' not found in catalog cache for datasource '{}'.",
-                        table_name, datasource_slug
-                    )
-                })
-                .to_string());
-            };
-
-            return Ok(format_table_info_response(
-                table_name,
-                datasource_slug,
-                &table_metadata,
-            ));
-        }
-
         // Resolve datasource and check if it's a sample datasource
         let ds = kyomi_auth::datasource_service::resolve_datasource(
             &ctx.db,
@@ -152,6 +99,9 @@ impl AgentTool for GetTableInfoTool {
         // here; they now index into the user's workspace via the generic
         // per-workspace indexer, so `datasource_config_id` works for every
         // datasource type.
+        let is_pg = ctx.db.is_postgres();
+        let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
+        let full_name_expr = kyomi_core::sql_compat::full_table_name_expr_prefixed(is_pg, "dtc");
         let ds_sql = format!(
             "SELECT dtc.table_metadata \
              FROM datasource_table_cache dtc \

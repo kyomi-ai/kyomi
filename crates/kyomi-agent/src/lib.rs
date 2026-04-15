@@ -60,8 +60,7 @@ pub use execution::{
 };
 pub use thinking::{AgentThinkingTracker, ThinkingEvent, ThinkingEventType};
 pub use tools::{
-    create_default_registry, AgentTool, ToolContext, ToolFilter, ToolRegistry, TRIAL_CHAT_TOOLS,
-    WATCH_TOOLS,
+    create_default_registry, AgentTool, ToolContext, ToolFilter, ToolRegistry, WATCH_TOOLS,
 };
 pub use provider::{
     create_provider, create_provider_from_workspace, resolve_provider_config, LLMProvider,

@@ -738,7 +738,6 @@ pub async fn send_chat_message(
                     &context_type,
                     None,
                     None,
-                    None, // trial_session_id: not a trial chat
                 )
                 .await;
 

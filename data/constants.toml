@@ -52,9 +52,6 @@ oauth_state = "oauth:{provider}:state:{state}"
 pending_signup = "auth:pending_signup:{token}"
 pending_terms = "auth:pending_terms:{token}"
 totp_setup = "auth:totp_setup:{user_id}"
-trial_session = "trial:session:{ip}"
-trial_count = "trial:count:{session_token}"
-trial_ratelimit = "trial:ratelimit:{ip}"
 webauthn_challenge = "auth:webauthn_challenge:{challenge_id}"
 recovery_session = "auth:recovery_session:{session_id}"
 rate_limit_ip = "ratelimit:ip:{ip}:{endpoint}"
@@ -66,7 +63,6 @@ pending_signup = 3600
 totp_setup = 600
 webauthn_challenge = 300
 recovery_session = 900
-trial_session = 86400
 
 [rate_limits.login]
 ip_capacity = 10
@@ -96,12 +92,6 @@ user_capacity = 500
 user_refill_interval = 1          # 1 token every 1s
 window_seconds = 60
 
-[rate_limits.trial_chat]
-ip_capacity = 10
-ip_refill_interval = 86400        # 1 token every 86400s (1/day)
-user_capacity = 5
-user_refill_interval = 0          # 0 = no refill (hard limit)
-window_seconds = 86400
 
 [workspace.roles]
 admin = "workspace_admin"

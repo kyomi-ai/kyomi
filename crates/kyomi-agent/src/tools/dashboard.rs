@@ -333,10 +333,9 @@ impl AgentTool for CreateDashboardTool {
             .to_string());
         }
 
-        // Validate SQL in ChartML blocks before saving (skip for trial mode).
-        if !ctx.is_trial
-            && let Some(sql_errors) =
-                super::query_utils::validate_chartml_sql(&ctx.query_context(), content).await
+        // Validate SQL in ChartML blocks before saving.
+        if let Some(sql_errors) =
+            super::query_utils::validate_chartml_sql(&ctx.query_context(), content).await
         {
             return Ok(serde_json::json!({
                 "success": false,
@@ -494,9 +493,8 @@ impl AgentTool for ModifyDashboardTool {
             .to_string());
         }
 
-        // Validate SQL in ChartML blocks before saving (skip for trial mode).
-        if !ctx.is_trial
-            && let Some(c) = content
+        // Validate SQL in ChartML blocks before saving.
+        if let Some(c) = content
             && let Some(sql_errors) =
                 super::query_utils::validate_chartml_sql(&ctx.query_context(), c).await
         {

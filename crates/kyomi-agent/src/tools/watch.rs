@@ -149,9 +149,7 @@ impl AgentTool for CreateWatchTool {
         let queries = args.get("queries").cloned();
 
         // Validate each reference query's SQL via dry-run before saving.
-        if !ctx.is_trial
-            && let Some(serde_json::Value::Array(ref query_list)) = queries
-        {
+        if let Some(serde_json::Value::Array(ref query_list)) = queries {
             let query_ctx = ctx.query_context();
             let mut validation_errors: Vec<serde_json::Value> = Vec::new();
 

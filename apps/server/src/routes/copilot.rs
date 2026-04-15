@@ -346,7 +346,6 @@ async fn send_copilot_message(
                     &spawn_context_type,
                     None,
                     None,
-                    None, // trial_session_id: not a trial chat
                 )
                 .await;
             }

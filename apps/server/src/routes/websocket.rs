@@ -2,17 +2,14 @@
 
 //! WebSocket endpoints for real-time communication.
 //!
-//! Two endpoints:
+//! One endpoint:
 //! - `GET /ws/{user_id}` — Authenticated WebSocket for logged-in users
-//! - `GET /ws/trial/{session_id}` — Trial WebSocket for anonymous sessions
 //!
 //! Wire-compatible with the Python backend's WebSocket protocol.
 
 use axum::{
     extract::{ws, Path, Query, State},
-    http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -24,7 +21,7 @@ use crate::state::AppState;
 /// Query parameters for WebSocket authentication.
 #[derive(Debug, Deserialize)]
 pub struct WsAuthParams {
-    /// JWT or trial token for authentication.
+    /// JWT access token for authentication.
     token: Option<String>,
 }
 
@@ -296,175 +293,6 @@ async fn handle_client_message(
     }
 }
 
-// ---------------------------------------------------------------------------
-// GET /ws/trial/{session_id} — Trial WebSocket
-// ---------------------------------------------------------------------------
-
-/// Trial WebSocket upgrade handler.
-///
-/// For anonymous trial users. Validates HMAC-signed trial token, then
-/// subscribes to Redis pub/sub channel `ws:trial:{session_id}` and forwards
-/// messages to the WebSocket client.
-///
-/// Returns 503 before upgrading if `REDIS_URL` is not configured — trial
-/// chat requires Redis for pub/sub message delivery.
-pub async fn ws_trial_handler(
-    ws: ws::WebSocketUpgrade,
-    State(state): State<AppState>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
-    Path(session_id): Path<String>,
-    Query(params): Query<WsAuthParams>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    // Trial WebSocket requires Redis for pub/sub — reject before upgrading if absent.
-    let Some(redis_url) = state.config.redis_url.clone() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": "Trial chat requires Redis (not configured)" })),
-        )
-            .into_response();
-    };
-
-    ws.max_message_size(MAX_MESSAGE_SIZE)
-        .on_upgrade(move |socket| {
-            handle_trial_ws(socket, state, session_id, params, headers, peer, redis_url)
-        })
-}
-
-async fn handle_trial_ws(
-    socket: ws::WebSocket,
-    state: AppState,
-    session_id: String,
-    params: WsAuthParams,
-    headers: HeaderMap,
-    peer: std::net::SocketAddr,
-    redis_url: String,
-) {
-    // --- Token validation ---
-    let token = match params.token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            close_with_code(socket, CLOSE_AUTH_REQUIRED, "Missing access token").await;
-            return;
-        }
-    };
-
-    let client_ip = extract_client_ip_with_peer(&headers, peer);
-
-    if let Err(e) = validate_trial_ws_token(&state.config.jwt_secret, &token, &client_ip) {
-        tracing::warn!("Trial WS invalid token from {client_ip}: {e}");
-        close_with_code(socket, CLOSE_AUTH_REQUIRED, "Invalid token").await;
-        return;
-    }
-
-    let session_prefix = session_id[..8.min(session_id.len())].to_string();
-    tracing::info!("Trial WS connected: session={session_prefix}..., ip={client_ip}");
-
-    // --- Split socket ---
-    let (mut ws_sender, mut ws_receiver) = socket.split();
-
-    // Send connected confirmation
-    let connected_msg = serde_json::json!({
-        "type": "connected",
-        "session_id": session_id,
-        "message": "Connected to trial thinking events"
-    });
-    if ws_sender
-        .send(ws::Message::text(connected_msg.to_string()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    // --- Subscribe to Redis channel ---
-    let redis_channel = format!("ws:trial:{session_id}");
-
-    let client = match redis::Client::open(redis_url.as_str()) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Trial WS Redis client creation failed: {e}");
-            let _ = ws_sender.close().await;
-            return;
-        }
-    };
-
-    let mut pubsub = match client.get_async_pubsub().await {
-        Ok(ps) => ps,
-        Err(e) => {
-            tracing::error!("Trial WS Redis SUBSCRIBE connection failed: {e}");
-            let _ = ws_sender.close().await;
-            return;
-        }
-    };
-
-    if let Err(e) = pubsub.subscribe(&redis_channel).await {
-        tracing::error!("Trial WS Redis SUBSCRIBE to {redis_channel} failed: {e}");
-        let _ = ws_sender.close().await;
-        return;
-    }
-
-    // Spawn a task to bridge Redis pub/sub messages to the WebSocket sender,
-    // with periodic pings to keep the connection alive through Cloudflare (100s).
-    let redis_task = {
-        let mut stream = pubsub.into_on_message();
-        tokio::spawn(async move {
-            let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(45));
-            ping_interval.tick().await; // consume immediate first tick
-
-            loop {
-                tokio::select! {
-                    msg = stream.next() => {
-                        match msg {
-                            Some(msg) => {
-                                let payload: String = match msg.get_payload() {
-                                    Ok(p) => p,
-                                    Err(e) => {
-                                        tracing::warn!("Trial WS bad Redis payload: {e}");
-                                        continue;
-                                    }
-                                };
-                                if ws_sender.send(ws::Message::text(payload)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            None => break, // stream ended
-                        }
-                    }
-                    _ = ping_interval.tick() => {
-                        if ws_sender.send(ws::Message::Ping(vec![].into())).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            let _ = ws_sender.close().await;
-        })
-    };
-
-    // Handle client messages (ping/pong keepalive, close)
-    let recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = ws_receiver.next().await {
-            match msg {
-                ws::Message::Text(ref text) if text.as_str() == "ping" => {
-                    // Application-level ping from trial client
-                    tracing::trace!("Trial WS application ping from session {session_id}");
-                }
-                ws::Message::Close(_) => break,
-                _ => {} // Axum handles WS-level ping/pong automatically
-            }
-        }
-    });
-
-    // Wait for either side to finish
-    tokio::select! {
-        _ = redis_task => {}
-        _ = recv_task => {}
-    }
-
-    tracing::info!("Trial WS disconnected: session={session_prefix}...");
-}
-
 // ===========================================================================
 // Helpers
 // ===========================================================================
@@ -477,62 +305,6 @@ async fn close_with_code(socket: ws::WebSocket, code: u16, reason: &str) {
         reason: reason.to_string().into(),
     };
     let _ = sender.send(ws::Message::Close(Some(close_frame))).await;
-}
-
-/// Extract client IP with peer socket address fallback (for trial WebSocket).
-///
-/// Delegates to the shared [`crate::helpers::extract_client_ip`] which uses the
-/// same header priority as `trial_chat.rs` — ensuring consistent HMAC IP binding
-/// between HTTP endpoints and WebSocket connections.
-fn extract_client_ip_with_peer(headers: &HeaderMap, peer: std::net::SocketAddr) -> String {
-    crate::helpers::extract_client_ip(headers, Some(peer))
-}
-
-/// Validate a trial access token (HMAC-SHA256 signed, IP-bound, time-limited).
-///
-/// Wire format: `{session_token}:{expires_at}:{signature_32hex}`
-/// HMAC payload: `{session_token}:{ip}:{expires_at}` — IP is baked into
-/// the signature but not present in the wire token (matches Python backend).
-fn validate_trial_ws_token(
-    secret: &str,
-    token: &str,
-    expected_ip: &str,
-) -> Result<String, String> {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
-    type HmacSha256 = Hmac<Sha256>;
-
-    // Split into session_token:expiry:signature (3 colon-separated parts).
-    let parts: Vec<&str> = token.splitn(3, ':').collect();
-    if parts.len() != 3 {
-        return Err("Invalid token format".into());
-    }
-
-    let session_token = parts[0];
-    let expires_at_str = parts[1];
-    let provided_sig = parts[2];
-
-    // Reconstruct HMAC payload: session_token:ip:expiry (IP included for binding).
-    let payload = format!("{session_token}:{expected_ip}:{expires_at_str}");
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(payload.as_bytes());
-    let result = mac.finalize().into_bytes();
-    // Truncate to 32 hex chars to match Python's hexdigest()[:32].
-    let expected_sig: String = result.iter().take(16).map(|b| format!("{b:02x}")).collect();
-
-    if provided_sig != expected_sig {
-        return Err("Invalid token signature".into());
-    }
-
-    let expires_at: i64 = expires_at_str.parse().map_err(|_| "Invalid expiry")?;
-    let now = chrono::Utc::now().timestamp();
-    if now > expires_at {
-        return Err("Token expired".into());
-    }
-
-    Ok(session_token.to_string())
 }
 
 #[cfg(test)]
@@ -581,71 +353,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn trial_token_validation_rejects_bad_signature() {
-        // Wire format: session:expiry:signature
-        let result = validate_trial_ws_token("secret", "session:9999999999:badsig", "127.0.0.1");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn trial_token_validation_rejects_expired() {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        let secret = "test-secret";
-        let expiry = "1000000000"; // expired long ago
-        // HMAC payload includes IP: session_token:ip:expiry
-        let hmac_payload = format!("session123:127.0.0.1:{expiry}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(hmac_payload.as_bytes());
-        let sig: String = mac.finalize().into_bytes().iter().take(16).map(|b| format!("{b:02x}")).collect();
-        // Wire format: session_token:expiry:signature (no IP)
-        let token = format!("session123:{expiry}:{sig}");
-
-        let result = validate_trial_ws_token(secret, &token, "127.0.0.1");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("expired"));
-    }
-
-    #[test]
-    fn trial_token_validation_rejects_ip_mismatch() {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        let secret = "test-secret";
-        let expires = chrono::Utc::now().timestamp() + 3600;
-        // HMAC payload uses the ORIGINAL IP (10.0.0.1)
-        let hmac_payload = format!("session123:10.0.0.1:{expires}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(hmac_payload.as_bytes());
-        let sig: String = mac.finalize().into_bytes().iter().take(16).map(|b| format!("{b:02x}")).collect();
-        // Wire format has no IP
-        let token = format!("session123:{expires}:{sig}");
-
-        // Validate with DIFFERENT IP — signature won't match
-        let result = validate_trial_ws_token(secret, &token, "192.168.1.1");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("signature"));
-    }
-
-    #[test]
-    fn trial_token_validation_accepts_valid() {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-
-        let secret = "test-secret";
-        let expires = chrono::Utc::now().timestamp() + 3600;
-        // HMAC payload: session_token:ip:expiry
-        let hmac_payload = format!("session-abc:127.0.0.1:{expires}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(hmac_payload.as_bytes());
-        let sig: String = mac.finalize().into_bytes().iter().take(16).map(|b| format!("{b:02x}")).collect();
-        // Wire format: session_token:expiry:signature
-        let token = format!("session-abc:{expires}:{sig}");
-
-        let result = validate_trial_ws_token(secret, &token, "127.0.0.1");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "session-abc");
-    }
 }

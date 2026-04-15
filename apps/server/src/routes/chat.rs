@@ -174,7 +174,7 @@ struct SendMessageRequest {
     /// User's local time in ISO format (e.g., "2025-01-15T10:30:00+11:00").
     #[serde(default)]
     current_time_user_tz: Option<String>,
-    /// Context type (e.g., "chat", "trial_chat", "copilot").
+    /// Context type (e.g., "chat", "copilot").
     #[serde(default)]
     context_type: Option<String>,
 }
@@ -741,7 +741,6 @@ async fn send_message(
                     &context_type,
                     None,
                     None,
-                    None, // trial_session_id: not a trial chat
                 )
                 .await;
             }

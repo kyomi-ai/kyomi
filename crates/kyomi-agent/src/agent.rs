@@ -590,12 +590,6 @@ impl CustomAgent {
             return Some(yaml_errors);
         }
 
-        // Trial mode: skip SQL dry-run (datasources are not in PostgreSQL,
-        // /trial/query handles execution directly via sample ClickHouse).
-        if self.tool_context.is_trial {
-            return None;
-        }
-
         // Step 2: SQL dry-run via shared utility (same code path as dashboard tools).
         crate::tools::query_utils::validate_chartml_sql(
             &self.tool_context.query_context(),
