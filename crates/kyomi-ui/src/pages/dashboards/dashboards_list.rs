@@ -5,6 +5,28 @@
 //! Uses `DocumentCardGrid`, `SearchSortBar`, and `CollectionsSidebar` for
 //! the reusable UI, adding only dashboard-specific logic: create action,
 //! empty state text, WebSocket subscription, and collection management.
+//!
+//! ## Unified list-page filter skeleton (F-010)
+//!
+//! Dashboards, Knowledge, and Chats all share the same list-page filter
+//! skeleton:
+//!
+//! 1. Page header (`page-header h-16 px-4 md:px-6`) with title +
+//!    primary action button.
+//! 2. Toolbar row inside `bg-background px-4 md:px-6 pb-3 flex-shrink-0`
+//!    containing a full-width `<SearchInput class="flex-1" />` plus an
+//!    optional sort `StyledSelect` (Dashboards/Knowledge) or pinned-toggle
+//!    (Chats).
+//! 3. Optional chip row using identical button classes:
+//!    `px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground`
+//!    (active) /
+//!    `px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-secondary text-foreground border border-border hover:bg-secondary/80`
+//!    (inactive).
+//!
+//! Dashboards uses *dynamic* collection chips (from the user's collections),
+//! Chats uses *static* scope chips (All / Mine / Shared / Slack), and
+//! Knowledge omits chips entirely (no scope dimension applies in the
+//! single-user knowledge model).
 
 use std::sync::Arc;
 

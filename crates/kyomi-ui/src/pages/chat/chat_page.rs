@@ -48,7 +48,8 @@ use crate::components::chat::{
 };
 use crate::components::dashboard::{ChartInfoModal, SaveDashboardModal};
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
-use crate::components::{ConfirmDialog, Skeleton};
+use crate::components::{ConfirmDialog, EmptyState, Skeleton};
+use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use crate::server_fns::chat::get_chart_context;
 use crate::server_fns::chat::{
@@ -1383,19 +1384,21 @@ pub fn ChatPage() -> impl IntoView {
                 when=move || !no_datasources()
                 fallback=move || {
                     // Phase 12.1 — No datasources empty state
+                    // Uses the shared EmptyState component to stay structurally
+                    // identical to /dashboards and /knowledge.
                     view! {
-                        <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
-                            <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
-                                <div class="text-muted-foreground mx-auto mb-6 flex items-center justify-center">
-                                    <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px" />
-                                </div>
-                                <h2 class="text-xl font-semibold text-foreground mb-3">
-                                    "Connect a data source to start chatting"
-                                </h2>
-                                <p class="text-muted-foreground mb-6">
-                                    "Kyomi needs access to your data warehouse to answer questions about your data."
-                                </p>
-                                <ButtonLink href="/settings/datasources">"Connect Data Source"</ButtonLink>
+                        <div class="flex flex-col h-full bg-background overflow-y-auto">
+                            <div class="p-4 md:p-6 w-full">
+                                <EmptyState
+                                    icon=Arc::new(|| view! {
+                                        <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px" />
+                                    }.into_any())
+                                    title="Ask a question to get started."
+                                    description="Connect a warehouse and Kyomi will turn natural-language questions into charts you can save to a dashboard."
+                                    action=Arc::new(|| view! {
+                                        <ButtonLink href="/settings/datasources">"Connect Data Source"</ButtonLink>
+                                    }.into_any())
+                                />
                             </div>
                         </div>
                     }

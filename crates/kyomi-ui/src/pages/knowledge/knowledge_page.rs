@@ -8,6 +8,14 @@
 //!
 //! Knowledge documents use `DocType::Knowledge` and are stored in the same
 //! `dashboards` table. Clicking a card navigates to `/dashboard/{id}/edit`.
+//!
+//! ## Unified list-page filter skeleton (F-010)
+//!
+//! Shares the page-header + `SearchSortBar` skeleton with `dashboards_list.rs`
+//! and `chat_list.rs`. Knowledge intentionally omits the chip row — there is
+//! no scope dimension (e.g. All / Mine / Shared) that applies to the
+//! single-user knowledge model. See `dashboards_list.rs` for the full
+//! skeleton documentation.
 
 use std::sync::Arc;
 

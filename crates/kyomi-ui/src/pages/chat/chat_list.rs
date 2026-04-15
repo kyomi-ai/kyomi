@@ -16,6 +16,19 @@
 //! - Bulk selection with select-all and bulk delete bar
 //! - Real-time WebSocket updates via `shared_conversation_activity`
 //! - Custom `sessions-deleted` DOM event dispatch/subscription
+//!
+//! ## Unified list-page filter skeleton (F-010)
+//!
+//! Shares the page-header + toolbar skeleton with `dashboards_list.rs` and
+//! `knowledge_page.rs`. The toolbar wrapper class
+//! (`bg-background px-4 md:px-6 py-3 flex-shrink-0`), full-width
+//! `<SearchInput class="flex-1" />`, and chip class strings (`FilterButton`
+//! at the bottom of this file) are byte-identical to the dashboards
+//! collection-chip implementation. Chats intentionally omits the sort
+//! dropdown — chats are always ordered by recency and a sort control would
+//! add no real choice. Pinned-toggle takes the slot the sort dropdown
+//! occupies on the other two pages. See `dashboards_list.rs` for the full
+//! skeleton documentation.
 
 use leptos::prelude::*;
 

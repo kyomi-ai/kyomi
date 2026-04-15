@@ -593,6 +593,20 @@ All scrollbars use `scrollbar-width: thin` and must match their container's back
 - **Color contrast:** All text/background combinations must meet WCAG AA (4.5:1 for normal text, 3:1 for large text)
 - **Reduced motion:** Respected globally via `prefers-reduced-motion` media query
 
+## Active / selected state conventions
+
+Different UI roles use different visual treatments to communicate different kinds of selection.
+
+| Role | Treatment | Example |
+|---|---|---|
+| **Persistent navigation** | background fill + amber foreground | Sidebar nav items |
+| **Filter / categorical toggle** | solid amber fill, white text | Scope chips on list pages (Dashboards, Chats) — currently inlined as `button` elements |
+| **Tab strip** | amber underline, neutral text | Settings tabs, Watches tabs |
+
+The rationale: nav items are *where you are*, filters are *what you chose*, tabs
+are *what you're viewing*. Three different questions, three different answers.
+Using the same visual for all three would flatten the semantic distinction.
+
 ## Component Patterns
 
 Components follow the shadcn/ui pattern. Shared components live in `crates/kyomi-ui/src/components/`.
