@@ -24,6 +24,7 @@ pub mod label;
 pub mod layout;
 pub mod modal;
 pub mod navigation_progress;
+pub mod popover;
 pub mod search_input;
 pub mod select;
 pub mod skeleton;

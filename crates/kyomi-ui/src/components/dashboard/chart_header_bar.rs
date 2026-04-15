@@ -9,11 +9,6 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-use send_wrapper::SendWrapper;
-use std::cell::RefCell;
-use std::rc::Rc;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -113,18 +108,6 @@ fn format_relative_time(timestamp_ms: f64) -> String {
     format!("{days}d ago")
 }
 
-/// Set a timeout via web_sys. Returns the timeout ID for cancellation.
-fn set_timeout(ms: i32, f: impl FnOnce() + 'static) -> i32 {
-    let cb = Closure::once_into_js(f);
-    web_sys::window()
-        .unwrap()
-        .set_timeout_with_callback_and_timeout_and_arguments_0(
-            cb.unchecked_ref(),
-            ms,
-        )
-        .unwrap_or(0)
-}
-
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -136,76 +119,14 @@ fn ChartTypeSelector(
     on_select: Callback<String>,
 ) -> impl IntoView {
     let (open, set_open) = signal(false);
-    let menu_ref = NodeRef::<leptos::html::Div>::new();
+    let trigger_ref = NodeRef::<leptos::html::Div>::new();
     let current = StoredValue::new(current_type);
 
-    // Close on Escape / click-outside — listeners added when open, removed when closed or disposed.
-    // SendWrapper is safe: WASM is single-threaded, these closures never cross threads.
-    type KeyHandler = SendWrapper<Rc<RefCell<Option<(Closure<dyn Fn(web_sys::KeyboardEvent)>, web_sys::Window)>>>>;
-    type ClickHandler = SendWrapper<Rc<RefCell<Option<(Closure<dyn Fn(web_sys::MouseEvent)>, web_sys::Window)>>>>;
-    let esc_handler: KeyHandler = SendWrapper::new(Rc::new(RefCell::new(None)));
-    let click_handler: ClickHandler = SendWrapper::new(Rc::new(RefCell::new(None)));
-    let click_timeout: SendWrapper<Rc<RefCell<Option<i32>>>> = SendWrapper::new(Rc::new(RefCell::new(None)));
-
-    let remove_esc = {
-        let h = esc_handler.clone();
-        move || { if let Some((cb, win)) = h.borrow_mut().take() {
-            let _ = win.remove_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
-        }}
-    };
-    let remove_click = {
-        let h = click_handler.clone();
-        let t = click_timeout.clone();
-        move || {
-            if let Some(tid) = t.borrow_mut().take() {
-                web_sys::window().unwrap().clear_timeout_with_handle(tid);
-            }
-            if let Some((cb, win)) = h.borrow_mut().take() {
-                let _ = win.remove_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-            }
-        }
-    };
-
-    let remove_esc_e = remove_esc.clone();
-    let remove_click_e = remove_click.clone();
-    let esc_h = esc_handler.clone();
-    let click_h = click_handler.clone();
-    let click_t = click_timeout.clone();
-    Effect::new(move || {
-        if !open.get() { remove_esc_e(); remove_click_e(); return; }
-        let window = web_sys::window().unwrap();
-
-        remove_esc_e();
-        let esc_cb = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-            if e.key() == "Escape" { set_open.set(false); }
-        });
-        let _ = window.add_event_listener_with_callback("keydown", esc_cb.as_ref().unchecked_ref());
-        *esc_h.borrow_mut() = Some((esc_cb, window.clone()));
-
-        remove_click_e();
-        let click_h2 = click_h.clone();
-        let win2 = window.clone();
-        let tid = set_timeout(0, move || {
-            let click_cb = Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
-                if let Some(menu) = menu_ref.get()
-                    && let Some(t) = e.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
-                    && !menu.contains(Some(&t))
-                {
-                    set_open.set(false);
-                }
-            });
-            let _ = win2.add_event_listener_with_callback("click", click_cb.as_ref().unchecked_ref());
-            *click_h2.borrow_mut() = Some((click_cb, win2));
-        });
-        *click_t.borrow_mut() = Some(tid);
-    });
-
-    on_cleanup(move || { remove_esc(); remove_click(); });
-
-    // Icon-only type selector button — no text label, just icon + chevron
-
+    // Icon-only type selector button — no text label, just icon + chevron.
+    // Wrapped in a <div> that carries the trigger ref so Popover can measure
+    // its bounding rect for positioning + outside-click detection.
     view! {
-        <div class="relative" node_ref=menu_ref>
+        <div node_ref=trigger_ref>
             <button
                 class="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 on:click=move |_| set_open.update(|v| *v = !*v)
@@ -214,32 +135,36 @@ fn ChartTypeSelector(
                 <Icon icon=phosphor_leptos::CARET_DOWN size="12px" />
             </button>
 
-            <Show when=move || open.get()>
-                <div class="absolute left-0 top-full mt-1 w-40 bg-popover border border-border rounded-md shadow-lg z-50 py-1">
-                    {CHART_TYPES.iter().map(|(t, label)| {
-                        let chart_type = t.to_string();
-                        let ct_for_click = chart_type.clone();
-                        let ct_for_class = chart_type.clone();
-                        let is_active = current.get_value() == chart_type;
-                        view! {
-                            <button
-                                class=if is_active {
-                                    "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-foreground bg-accent"
-                                } else {
-                                    "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-popover-foreground transition-colors hover:bg-secondary"
-                                }
-                                on:click=move |_| {
-                                    on_select.run(ct_for_click.clone());
-                                    set_open.set(false);
-                                }
-                            >
-                                {icons::chart_type_icon(&ct_for_class)}
-                                <span>{*label}</span>
-                            </button>
-                        }
-                    }).collect_view()}
-                </div>
-            </Show>
+            <crate::components::popover::Popover
+                trigger_ref=trigger_ref
+                open=Signal::derive(move || open.get())
+                on_close=Callback::new(move |()| set_open.set(false))
+                placement=crate::components::popover::Placement::BOTTOM_START
+                class="w-40 bg-popover border border-border rounded-md shadow-lg py-1 overflow-y-auto"
+            >
+                {CHART_TYPES.iter().map(|(t, label)| {
+                    let chart_type = t.to_string();
+                    let ct_for_click = chart_type.clone();
+                    let ct_for_class = chart_type.clone();
+                    let is_active = current.get_value() == chart_type;
+                    view! {
+                        <button
+                            class=if is_active {
+                                "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-foreground bg-accent"
+                            } else {
+                                "w-full flex items-center gap-2 px-3 py-1.5 text-sm text-popover-foreground transition-colors hover:bg-secondary"
+                            }
+                            on:click=move |_| {
+                                on_select.run(ct_for_click.clone());
+                                set_open.set(false);
+                            }
+                        >
+                            {icons::chart_type_icon(&ct_for_class)}
+                            <span>{*label}</span>
+                        </button>
+                    }
+                }).collect_view()}
+            </crate::components::popover::Popover>
         </div>
     }
 }
@@ -332,7 +257,7 @@ pub fn ChartHeaderBar(
     before: Option<Children>,
 ) -> impl IntoView {
     let (menu_open, set_menu_open) = signal(false);
-    let menu_ref = NodeRef::<leptos::html::Div>::new();
+    let menu_trigger_ref = NodeRef::<leptos::html::Div>::new();
 
     // Store optional values for use in closures
     let ct = StoredValue::new(chart_type.clone());
@@ -343,70 +268,9 @@ pub fn ChartHeaderBar(
     let show_orientation_chip = chart_type.as_deref() == Some("bar") && show_type_selector;
     let show_mode_chip = matches!(chart_type.as_deref(), Some("bar") | Some("area")) && show_type_selector;
 
-    // Overflow menu only for Delete (Edit is a direct icon button now)
+    // Overflow menu only for Delete (Edit is a direct icon button now).
+    // Escape + click-outside handling lives inside <Popover>.
     let has_menu_items = show_delete;
-
-    // Close menu on Escape / click-outside
-    type MKeyHandler = SendWrapper<Rc<RefCell<Option<(Closure<dyn Fn(web_sys::KeyboardEvent)>, web_sys::Window)>>>>;
-    type MClickHandler = SendWrapper<Rc<RefCell<Option<(Closure<dyn Fn(web_sys::MouseEvent)>, web_sys::Window)>>>>;
-    let menu_esc_handler: MKeyHandler = SendWrapper::new(Rc::new(RefCell::new(None)));
-    let menu_click_handler: MClickHandler = SendWrapper::new(Rc::new(RefCell::new(None)));
-
-    let remove_menu_esc = {
-        let h = menu_esc_handler.clone();
-        move || { if let Some((cb, win)) = h.borrow_mut().take() {
-            let _ = win.remove_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
-        }}
-    };
-    let menu_click_timeout: SendWrapper<Rc<RefCell<Option<i32>>>> = SendWrapper::new(Rc::new(RefCell::new(None)));
-    let remove_menu_click = {
-        let h = menu_click_handler.clone();
-        let t = menu_click_timeout.clone();
-        move || {
-            if let Some(tid) = t.borrow_mut().take() {
-                web_sys::window().unwrap().clear_timeout_with_handle(tid);
-            }
-            if let Some((cb, win)) = h.borrow_mut().take() {
-                let _ = win.remove_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-            }
-        }
-    };
-
-    let remove_menu_esc_e = remove_menu_esc.clone();
-    let remove_menu_click_e = remove_menu_click.clone();
-    let menu_esc_h = menu_esc_handler.clone();
-    let menu_click_h = menu_click_handler.clone();
-    let menu_click_t = menu_click_timeout.clone();
-    Effect::new(move || {
-        if !menu_open.get() { remove_menu_esc_e(); remove_menu_click_e(); return; }
-        let window = web_sys::window().unwrap();
-
-        remove_menu_esc_e();
-        let esc_cb = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-            if e.key() == "Escape" { set_menu_open.set(false); }
-        });
-        let _ = window.add_event_listener_with_callback("keydown", esc_cb.as_ref().unchecked_ref());
-        *menu_esc_h.borrow_mut() = Some((esc_cb, window.clone()));
-
-        remove_menu_click_e();
-        let click_h2 = menu_click_h.clone();
-        let win2 = window.clone();
-        let tid = set_timeout(0, move || {
-            let click_cb = Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |e: web_sys::MouseEvent| {
-                if let Some(menu) = menu_ref.get()
-                    && let Some(t) = e.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok())
-                    && !menu.contains(Some(&t))
-                {
-                    set_menu_open.set(false);
-                }
-            });
-            let _ = win2.add_event_listener_with_callback("click", click_cb.as_ref().unchecked_ref());
-            *click_h2.borrow_mut() = Some((click_cb, win2));
-        });
-        *menu_click_t.borrow_mut() = Some(tid);
-    });
-
-    on_cleanup(move || { remove_menu_esc(); remove_menu_click(); });
 
     view! {
         <div class="flex items-center justify-between px-4 py-1 bg-secondary border-b border-border">
@@ -569,7 +433,7 @@ pub fn ChartHeaderBar(
                     let delete_cb = StoredValue::new(on_delete);
 
                     view! {
-                        <div class="relative" node_ref=menu_ref>
+                        <div node_ref=menu_trigger_ref>
                             <button
                                 class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                 title="Actions"
@@ -578,19 +442,23 @@ pub fn ChartHeaderBar(
                                 <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL size="16px" />
                             </button>
 
-                            <Show when=move || menu_open.get()>
-                                <div class="absolute right-0 top-full mt-1 w-48 bg-popover border border-border rounded-md shadow-lg z-50 py-1">
-                                    {show_delete.then(|| {
-                                        let cb = delete_cb.get_value();
-                                        cb.map(|cb| view! {
-                                            <button
-                                                class="w-full text-left px-3 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
-                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
-                                            >"Delete"</button>
-                                        })
-                                    })}
-                                </div>
-                            </Show>
+                            <crate::components::popover::Popover
+                                trigger_ref=menu_trigger_ref
+                                open=Signal::derive(move || menu_open.get())
+                                on_close=Callback::new(move |()| set_menu_open.set(false))
+                                placement=crate::components::popover::Placement::BOTTOM_END
+                                class="w-48 bg-popover border border-border rounded-md shadow-lg py-1 overflow-y-auto"
+                            >
+                                {show_delete.then(|| {
+                                    let cb = delete_cb.get_value();
+                                    cb.map(|cb| view! {
+                                        <button
+                                            class="w-full text-left px-3 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
+                                            on:click=move |_| { cb.run(()); set_menu_open.set(false); }
+                                        >"Delete"</button>
+                                    })
+                                })}
+                            </crate::components::popover::Popover>
                         </div>
                     }
                 })}
