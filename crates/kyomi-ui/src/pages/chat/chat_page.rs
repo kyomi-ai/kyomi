@@ -57,7 +57,7 @@ use crate::server_fns::chat::{
     toggle_message_pin, unshare_session, update_message_content, update_session_title,
     ChatMessageItem, SessionDetail,
 };
-use crate::server_fns::context::get_user_context;
+use crate::server_fns::context::UserContext;
 
 // ─── Greetings ──────────────────────────────────────────────────────────────
 
@@ -224,9 +224,12 @@ pub fn ChatPage() -> impl IntoView {
     });
 
     // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
-    // Uses LocalResource to avoid "reading resource outside Suspense" warnings —
-    // this resource is read in Signal::derive closures which run outside Suspense.
-    let user_ctx_resource = LocalResource::new(get_user_context);
+    // Provided by the parent Layout as a LocalResource — one fetch per session,
+    // no skeleton flash on navigation into /chat. LocalResource is required
+    // here because the resource is read in Signal::derive closures which run
+    // outside Suspense.
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // Derive the user's display name from the user context resource.
     // Uses the user's name if available, falls back to email prefix, then "there".

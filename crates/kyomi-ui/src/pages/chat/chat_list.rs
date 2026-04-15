@@ -38,7 +38,7 @@ use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState
 use crate::server_fns::chat::{
     bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
 };
-use crate::server_fns::context::get_user_context;
+use crate::server_fns::context::UserContext;
 
 use super::format_relative_time;
 
@@ -104,7 +104,9 @@ enum ChatFilter {
 #[component]
 pub fn ChatsListPage() -> impl IntoView {
     // ── User context (for ownership checks + multi_user_enabled) ─────────
-    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+    // Provided by the parent Layout.
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // ── Sessions state ───────────────────────────────────────────────────
     let (sessions, set_sessions) = signal(Vec::<ChatSessionItem>::new());

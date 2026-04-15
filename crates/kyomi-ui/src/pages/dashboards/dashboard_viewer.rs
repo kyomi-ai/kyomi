@@ -33,7 +33,7 @@ use crate::server_fns::dashboards::{
     get_dashboard, get_user_default_dashboard, get_workspace_default_dashboard,
     set_user_default_dashboard, set_workspace_default_dashboard, update_dashboard,
 };
-use crate::server_fns::context::get_user_context;
+use crate::server_fns::context::UserContext;
 
 // ─── Relative time formatting ───────────────────────────────────────────────
 
@@ -172,7 +172,9 @@ pub fn DashboardViewerPage() -> impl IntoView {
     let pdf_fallback_name = move || if is_knowledge.get() { "Document.pdf" } else { "Dashboard.pdf" };
 
     // ── User context (roles, capabilities) ──────────────────────────────
-    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+    // Provided by the parent Layout.
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // ── Fetch dashboard detail ──────────────────────────────────────────
     let dashboard_resource = Resource::new(

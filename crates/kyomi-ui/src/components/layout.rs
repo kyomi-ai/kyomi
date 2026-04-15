@@ -19,6 +19,7 @@ use leptos_router::NavigateOptions;
 use crate::components::chat::{WebSocketDebugPanel, WebSocketProvider};
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::EmptyState;
+use crate::server_fns::context::get_user_context;
 use crate::server_fns::security::logout;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 use crate::server_fns::watches::get_unread_alerts_count;
@@ -65,6 +66,15 @@ pub fn Layout(children: Children) -> impl IntoView {
         let _retry = auth_retry.get(); // track the trigger signal
         get_sidebar_user()
     });
+
+    // Fetch the full UserContext once at the Layout level and provide it via
+    // Leptos context. Pages read this with `expect_context` instead of each
+    // creating their own resource — which eliminates the `get_user_context`
+    // network request (and the accompanying skeleton flash) on every
+    // navigation. The Layout is a parent route and mounts once for the whole
+    // authed session, so this resource survives page changes.
+    let user_ctx = LocalResource::new(get_user_context);
+    provide_context(user_ctx);
 
     // Auth guard: tracks whether the user has been authenticated.
     // Starts as `false`; set to `true` once `user_info` resolves successfully.

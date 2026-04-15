@@ -22,7 +22,7 @@ use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::components::Outlet;
 use leptos_router::hooks::use_location;
 
-use crate::server_fns::context::{get_user_context, UserContext};
+use crate::server_fns::context::UserContext;
 
 /// Settings tab definition.
 struct SettingsTab {
@@ -100,16 +100,16 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
 
 /// Settings shell component — wraps settings tab content.
 ///
-/// Fetches `UserContext` once via server function and provides it to all child
-/// components via Leptos context. Settings tabs read it with
+/// Reads the shared `UserContext` resource from the parent `Layout` via
+/// `expect_context`. Settings tabs continue to read it with
 /// `expect_context::<LocalResource<Result<UserContext, ServerFnError>>>()`.
 #[component]
 pub fn SettingsShell() -> impl IntoView {
-    // Fetch user context once — all settings tabs share this resource.
-    // Uses LocalResource to avoid SSR running without auth cookies
-    // (SameSite=Strict blocks cookies on cross-site redirects from Stripe/Google).
-    let user_ctx = LocalResource::new(get_user_context);
-    provide_context(user_ctx);
+    // The user context resource is provided by the parent Layout — one fetch
+    // per session, shared across every authed page. Settings tabs continue to
+    // read it via `expect_context`, so this shell just re-exposes the parent
+    // resource (no-op from the tabs' perspective) without refetching.
+    let user_ctx = expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // Reactive pathname from the Leptos router — updates when the URL changes.
     let location = use_location();

@@ -33,7 +33,7 @@ use crate::components::dashboard::{
     MarkdownRenderer, markdown_renderer::kyomi_palette,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
-use crate::server_fns::context::get_user_context;
+use crate::server_fns::context::UserContext;
 use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
 
 // ─── Editor mode ─────────────────────────────────────────────────────────────
@@ -233,7 +233,9 @@ fn DashboardEditorInner(
     let (copilot_open, set_copilot_open) = signal(false);
 
     // ── User context (for chart palette) ────────────────────────────────
-    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+    // Provided by the parent Layout.
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
     let chart_palette = Memo::new(move |_| {
         user_ctx_resource
             .get()

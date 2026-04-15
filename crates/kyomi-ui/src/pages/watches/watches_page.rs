@@ -23,7 +23,7 @@ use crate::components::{
     CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Spinner,
     StatusBadge, StatusBadgeVariant, Switch,
 };
-use crate::server_fns::context::get_user_context;
+use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::{
     delete_watch, get_watch_execution, get_watch_executions, list_watches, run_watch_now,
     toggle_watch,
@@ -305,7 +305,9 @@ pub fn WatchesPage() -> impl IntoView {
     });
 
     // ── User context & capabilities ─────────────────────────────────────
-    let user_ctx_resource = Resource::new(|| (), |_| get_user_context());
+    // Provided by the parent Layout — one fetch per session.
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     let has_watch_capability = Memo::new(move |_| {
         user_ctx_resource
