@@ -302,11 +302,18 @@ fn try_parse_watch_response(json_str: &str) -> Option<ContentSegment> {
 
 /// Convert a markdown string to HTML using pulldown-cmark with GFM extensions.
 fn markdown_to_html(markdown: &str) -> String {
-    use pulldown_cmark::Options;
+    use pulldown_cmark::{CowStr, Event, Options};
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS;
-    let parser = pulldown_cmark::Parser::new_ext(markdown, options);
+    // Replace horizontal rules with a centered asterism — an editorial
+    // typographic ornament rendered in Instrument Serif (font-display) at
+    // a muted color. See DESIGN.md "Typographic Marks".
+    const ASTERISM_HTML: &str = "<div class=\"my-10 text-center text-[color:var(--color-muted-foreground)] text-xl font-display\">\u{2042}</div>";
+    let parser = pulldown_cmark::Parser::new_ext(markdown, options).map(|event| match event {
+        Event::Rule => Event::Html(CowStr::Borrowed(ASTERISM_HTML)),
+        other => other,
+    });
     let mut html_output = String::new();
     pulldown_cmark::html::push_html(&mut html_output, parser);
     // Add loading="lazy" to all images for performance

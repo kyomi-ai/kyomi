@@ -175,6 +175,24 @@ Specific surfaces that use a deviation from `Regular`:
 - **No emojis.** Never use Unicode emojis as icons in the UI.
 - **No icon mixing.** All icons in the app must come from `phosphor_leptos::*`. If Phosphor is missing an icon you need, flag it in review — do not reach for a different icon library.
 
+## Typographic Marks
+
+Editorial ornament inside the app. These are characters, not icons — they
+require no assets and inherit color/size from their parent.
+
+| Mark | Character | Usage |
+|---|---|---|
+| Asterism | ⁂ | Section divider in long-form content (knowledge docs, dashboards) — replaces <hr> |
+| Section sign | § | Marginalia prefix on section headers inside settings and config pages |
+| Dagger | † | Footnote/explanation marker in tooltips and figure captions |
+| Pilcrow | ¶ | Reserved — not currently in use |
+
+**Rules:**
+- All typographic marks use Instrument Serif (inherits from `font-display`).
+- Marks are muted by default (`--color-muted-foreground`), not amber.
+- Never animate them.
+- Never stack them (no `§§`, no `⁂ ⁂ ⁂`).
+
 ## Spacing
 
 - **Base unit:** 4px
