@@ -32,7 +32,7 @@
 
 use leptos::prelude::*;
 
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, SearchInput, Skeleton};
 use crate::server_fns::chat::{
@@ -636,7 +636,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             return if searching {
                                 view! {
                                     <EmptyState
-                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS size="48px" /> }.into_any())
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS weight=IconWeight::Duotone size="64px" /> }.into_any())
                                         title="No chats found"
                                         description="Try a different search term"
                                     />
@@ -644,7 +644,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             } else {
                                 view! {
                                     <EmptyState
-                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS size="48px" /> }.into_any())
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS weight=IconWeight::Duotone size="64px" /> }.into_any())
                                         title="No chats yet"
                                         description="Start a new conversation to get started"
                                         action=std::sync::Arc::new(|| view! {
@@ -665,7 +665,7 @@ pub fn ChatsListPage() -> impl IntoView {
                         if filtered.is_empty() {
                             return view! {
                                 <EmptyState
-                                    icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS size="48px" /> }.into_any())
+                                    icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CHATS weight=IconWeight::Duotone size="64px" /> }.into_any())
                                     title="No conversations found"
                                     description="Try adjusting your filters or start a new chat"
                                 />
