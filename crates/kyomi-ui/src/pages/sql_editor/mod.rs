@@ -313,17 +313,28 @@ pub fn SqlEditorPage() -> impl IntoView {
     view! {
         <div class="flex flex-col h-full bg-background @container">
             // ── Header ───────────────────────────────────────────────────
-            <div class="page-header h-16 px-4 md:px-6 flex-shrink-0 flex items-center justify-between">
-                // Left: title + datasource selector
-                <div class="flex items-center gap-4 min-w-0">
-                    <h1 class="text-3xl font-display text-foreground shrink-0">
+            // Responsive via container queries (DESIGN.md §Responsive Toolbar
+            // Pattern) — the outer `@container` wraps the content area, so
+            // breakpoints fire at content width rather than viewport width.
+            // Narrow: stacks vertically — title row + selector/catalog row.
+            // Wide (@3xl+): single h-16 row with title + selector on the left,
+            // catalog button on the right with its full label.
+            <div class="page-header px-4 @3xl:px-6 @3xl:h-16 py-3 @3xl:py-0 flex-shrink-0 flex flex-col @3xl:flex-row @3xl:items-center @3xl:justify-between gap-3 @3xl:gap-0">
+                // Left cluster: title + datasource selector (single h1
+                // landmark, truncates rather than duplicates if the cluster
+                // gets tight).
+                <div class="flex items-center gap-3 @3xl:gap-4 min-w-0">
+                    <h1 class="text-3xl font-display text-foreground shrink-0 truncate">
                         "SQL Editor"
                     </h1>
-                    <DatasourceSelector/>
+                    <div class="flex-1 @3xl:flex-initial min-w-0">
+                        <DatasourceSelector/>
+                    </div>
                 </div>
 
-                // Right: sidebar toggle
-                <div class="flex items-center gap-2">
+                // Catalog toggle — label hidden at narrow widths so the
+                // button stays compact, shown again at @3xl+ widths.
+                <div class="flex items-center gap-2 self-start @3xl:self-auto">
                     <ToggleButton
                         variant=Signal::derive(move || if sidebar_open.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
                         size=ButtonSize::Sm
@@ -331,19 +342,22 @@ pub fn SqlEditorPage() -> impl IntoView {
                         on:click=toggle_sidebar
                     >
                         <Icon icon=phosphor_leptos::DATABASE size="16px" />
-                        <span class="hidden sm:inline whitespace-nowrap">"Catalog"</span>
+                        <span class="hidden @3xl:inline whitespace-nowrap">"Catalog"</span>
                     </ToggleButton>
                 </div>
             </div>
 
             // ── "No datasource" banner ────────────────────────────────────
+            // Prose-style wrapping: a single <p> with an inline icon + link.
+            // On narrow viewports the text wraps naturally instead of
+            // producing an awkward multi-column flex row.
             <Show when=move || !has_datasource.get()>
-                <div class="px-4 md:px-6 py-2 bg-warning/10 border-b border-warning/30 flex items-center gap-2 text-sm text-warning-foreground flex-shrink-0">
-                    <Icon icon=phosphor_leptos::WARNING attr:class="flex-shrink-0" size="16px" />
-                    <span>"No datasource selected. "</span>
+                <p class="px-4 @3xl:px-6 py-2 bg-warning/10 border-b border-warning/30 text-sm text-warning-foreground flex-shrink-0">
+                    <Icon icon=phosphor_leptos::WARNING attr:class="inline-block align-text-bottom mr-1.5 flex-shrink-0" size="16px" />
+                    "No datasource selected. "
                     <a href="/settings" class="text-primary hover:underline font-medium">"Connect a datasource in Settings"</a>
-                    <span>" to start querying."</span>
-                </div>
+                    " to start querying."
+                </p>
             </Show>
 
             // ── Content area: editor + results (left) | sidebar (right) ──
