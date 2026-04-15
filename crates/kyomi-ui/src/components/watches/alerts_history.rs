@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
@@ -727,8 +727,8 @@ pub fn AlertsHistory(
                         {if alerts.is_empty() {
                             view! {
                                 <div class="flex flex-col items-center justify-center py-12 text-center">
-                                    <div class="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
-                                        <Icon icon=phosphor_leptos::BELL attr:class="h-8 w-8 text-muted-foreground" />
+                                    <div class="mb-4 text-muted-foreground">
+                                        <Icon icon=phosphor_leptos::BELL_RINGING weight=IconWeight::Duotone size="64px" />
                                     </div>
                                     <h3 class="text-lg font-medium text-foreground mb-2">"No alerts yet"</h3>
                                     <p class="text-muted-foreground max-w-md">

@@ -6,7 +6,7 @@
 //! `apps/frontend/src/components/settings/DatasourceModal.jsx`.
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
     Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, Switch,
@@ -211,7 +211,7 @@ fn DatasourcesContent(
                         fallback=move || view! {
                             <EmptyState
                                 icon=std::sync::Arc::new(|| view! {
-                                    <Icon icon=phosphor_leptos::DATABASE size="48px"/>
+                                    <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px"/>
                                 }.into_any())
                                 title="No datasources configured"
                                 description="Connect a data source to start querying your data"

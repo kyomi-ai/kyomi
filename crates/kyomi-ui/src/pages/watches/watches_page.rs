@@ -13,7 +13,7 @@
 //! - Execution log modal for viewing watch run history
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
 use crate::components::toast::{toast_error, toast_success};
@@ -696,7 +696,7 @@ pub fn WatchesPage() -> impl IntoView {
                                                     };
                                                     view! {
                                                         <EmptyState
-                                                            icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::EYE attr:class="h-12 w-12" /> }.into_any())
+                                                            icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::EYE weight=IconWeight::Duotone size="64px" /> }.into_any())
                                                             title="No watches yet"
                                                             description=desc.to_string()
                                                             action=std::sync::Arc::new(move || view! {

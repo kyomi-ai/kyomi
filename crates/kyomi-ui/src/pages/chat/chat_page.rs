@@ -36,7 +36,7 @@
 //! - Empty states: no datasources, personal mode without LLM (Phase 12)
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::components::Outlet;
 use leptos_router::hooks::{use_location, use_navigate};
 
@@ -1361,8 +1361,8 @@ pub fn ChatPage() -> impl IntoView {
                 view! {
                     <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
                         <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
-                            <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                <Icon icon=phosphor_leptos::CHAT attr:class="text-primary" size="32px" />
+                            <div class="text-muted-foreground mx-auto mb-6 flex items-center justify-center">
+                                <Icon icon=phosphor_leptos::CHAT_CIRCLE_TEXT weight=IconWeight::Duotone size="64px" />
                             </div>
                             <h2 class="text-xl font-semibold text-foreground mb-3">
                                 "Chat requires an AI provider"
@@ -1386,8 +1386,8 @@ pub fn ChatPage() -> impl IntoView {
                     view! {
                         <div class="flex flex-col items-center justify-center h-full w-full p-8 bg-background">
                             <div class="max-w-md w-full bg-card border border-border rounded-lg p-8 shadow text-center">
-                                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 mx-auto mb-6">
-                                    <Icon icon=phosphor_leptos::DATABASE attr:class="text-primary" size="32px" />
+                                <div class="text-muted-foreground mx-auto mb-6 flex items-center justify-center">
+                                    <Icon icon=phosphor_leptos::DATABASE weight=IconWeight::Duotone size="64px" />
                                 </div>
                                 <h2 class="text-xl font-semibold text-foreground mb-3">
                                     "Connect a data source to start chatting"

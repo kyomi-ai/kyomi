@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
 use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
@@ -299,7 +299,7 @@ pub fn KnowledgePage() -> impl IntoView {
 #[component]
 fn KnowledgeIcon() -> impl IntoView {
     view! {
-        <Icon icon=phosphor_leptos::BOOK_OPEN attr:class="w-12 h-12" />
+        <Icon icon=phosphor_leptos::BOOK_OPEN weight=IconWeight::Duotone size="64px" />
     }
 }
 
