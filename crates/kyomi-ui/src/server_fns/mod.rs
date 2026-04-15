@@ -150,12 +150,30 @@ impl CancelRegistry {
 }
 
 /// Extract the authenticated user from the Axum request.
+///
+/// Returns an `Err` when no auth is present AND sets the HTTP response
+/// status to 401 Unauthorized via `ResponseOptions`. Without the status
+/// override the default `ServerFnError::ServerError` serializes as a
+/// 500 Internal Server Error, which triggers `tower_http::trace`'s
+/// on-failure classification and spams both server logs and the browser
+/// console with spurious 5xx entries on every unauthenticated page load
+/// (e.g. anonymous visits to `/login`). Auth failure is a client error,
+/// not a server error — 401 is the correct classification.
 #[cfg(feature = "ssr")]
 pub(crate) async fn extract_auth() -> Result<kyomi_auth::middleware::AuthUser, leptos::prelude::ServerFnError> {
     let ctx = extract_context()?;
-    leptos_axum::extract_with_state::<kyomi_auth::middleware::AuthUser, _>(&ctx.auth_state)
-        .await
-        .map_err(|e| leptos::prelude::ServerFnError::new(format!("Authentication required: {e}")))
+    match leptos_axum::extract_with_state::<kyomi_auth::middleware::AuthUser, _>(&ctx.auth_state).await {
+        Ok(auth) => Ok(auth),
+        Err(e) => {
+            // Flag the response as 401 so tower_http and the browser don't
+            // classify this as a 5xx server error. Every server fn invocation
+            // has a ResponseOptions in context; matches the pattern used in
+            // auth.rs / security.rs / onboarding.rs.
+            leptos::prelude::expect_context::<leptos_axum::ResponseOptions>()
+                .set_status(axum::http::StatusCode::UNAUTHORIZED);
+            Err(leptos::prelude::ServerFnError::new(format!("Authentication required: {e}")))
+        }
+    }
 }
 
 /// Extract the server context (db, config, auth_state) from Leptos context.
