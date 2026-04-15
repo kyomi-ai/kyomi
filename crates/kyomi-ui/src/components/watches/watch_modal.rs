@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::chat::CopilotChat;
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
@@ -906,7 +906,7 @@ fn WatchCopilot(
 
     let empty_icon_fn: Arc<dyn Fn() -> AnyView + Send + Sync> = Arc::new(move || {
         view! {
-            <Icon icon=phosphor_leptos::EYE attr:class="w-10 h-10 text-muted-foreground/50" />
+            <Icon icon=phosphor_leptos::EYE weight=IconWeight::Duotone size="64px" />
         }
         .into_any()
     });

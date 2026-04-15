@@ -11,7 +11,7 @@
 //! - Mobile: slide-in panel with backdrop overlay
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -211,7 +211,7 @@ pub fn CopilotSidebar(
                     context_label="Dashboard Content"
                     active=Signal::derive(move || open.get())
                     placeholder="Ask about your dashboard..."
-                    empty_icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::SPARKLE size="48px" /> }.into_any())
+                    empty_icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::SPARKLE weight=IconWeight::Duotone size="64px" /> }.into_any())
                     empty_title="Ask me anything about your dashboard!"
                     empty_description="I can help you improve charts, suggest changes, or make edits directly."
                     custom_ws_events=vec!["dashboard_update".to_string()]

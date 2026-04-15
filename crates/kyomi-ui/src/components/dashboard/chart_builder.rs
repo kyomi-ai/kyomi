@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::chat::CopilotChat;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
@@ -1642,7 +1642,7 @@ fn ChartCopilot(
             context_content=chart_yaml
             context_label="Chart Content"
             placeholder="Ask about your chart..."
-            empty_icon=Arc::new(|| view! { <Icon icon=phosphor_leptos::SPARKLE size="48px" /> }.into_any())
+            empty_icon=Arc::new(|| view! { <Icon icon=phosphor_leptos::SPARKLE weight=IconWeight::Duotone size="64px" /> }.into_any())
             empty_title="Ask me anything about your chart!"
             empty_description="I can help you change chart types, adjust styling, or fix configuration issues."
             custom_ws_events=vec!["chart_update".to_string()]
