@@ -175,16 +175,18 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
     //
     // Derived from the same editorial palette used for the rest of the
     // theme so rendered `<table>`s in chart exports match the chart chrome
-    // they sit alongside. The row background uses the page-matched
-    // `page_bg` for a transparent-feeling surface, the alternating stripe
-    // and the cell borders both use `grid` (warm neutral in both modes —
-    // `#EDE9E0` on light, `#2E2925` on dark), and cell text uses the primary
-    // so headers and body read at the same weight as axis labels. Cell
-    // padding and font size are CSS string values — kept modest so tables
-    // don't dominate a chart figure.
+    // they sit alongside. The row background is literally `transparent`
+    // so the table inherits whatever surface it sits on (warm page in
+    // dashboards, card surface in the editor, modal bg, etc.) — matches
+    // DESIGN.md §Chart Chrome "charts sit on the warm page, no floating
+    // white rectangles". The alternating stripe uses `grid` (warm neutral
+    // in both modes — `#EDE9E0` on light, `#2E2925` on dark) so zebra
+    // striping still reads. Header gets the same warm neutral so it lifts
+    // a touch from the transparent body. Cell text uses the primary so
+    // headers and body read at the same weight as axis labels.
     t.table_header_bg = grid.into();
     t.table_header_text = text_primary.into();
-    t.table_row_bg = page_bg.into();
+    t.table_row_bg = "transparent".into();
     t.table_row_bg_alt = grid.into();
     t.table_border = grid.into();
     t.table_text = text_primary.into();
