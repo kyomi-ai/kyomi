@@ -7,7 +7,6 @@
 //! Right panel: centered content slot with title, subtitle, footer.
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
 
 /// Shared layout for all authentication pages.
 ///
@@ -32,36 +31,18 @@ pub fn AuthLayout(
         // Outer container — theme-aware, respects user's localStorage preference
         <div class="min-h-screen bg-background flex">
 
-            // ── Left side — Heroic nameplate (Option B2) ────────────────────
-            // Warm-stone dark panel with huge amber "KYOMI" masthead.
-            // Hidden below 1024px (lg breakpoint) — the form fills the whole
-            // viewport on mobile and tablets per the Phase 3 responsive spec.
-            // Decorative nameplate is `aria-hidden` so screen readers skip it;
-            // the small top-left mark remains in the reading order as the
-            // branded "masthead" for the page.
-            <div class="hidden lg:flex lg:w-1/2 relative overflow-hidden auth-brand-panel">
-                // Top-left marginalia — small brand mark with Phosphor SPARKLE.
-                // 18px Instrument Serif, 0.16em tracking.
-                <div class="absolute top-10 left-12 z-10 flex items-center gap-2 text-[18px] font-display text-[color:rgba(245,243,239,0.85)]" style="letter-spacing:0.16em;">
-                    <span aria-hidden="true" class="text-primary inline-flex">
-                        <Icon icon=phosphor_leptos::SPARKLE size="18px" />
-                    </span>
-                    <span>"KYOMI"</span>
-                </div>
-
-                // Centered heroic wordmark — decorative, aria-hidden.
-                // 180px on desktop, scales down between lg (1024px) and xl (1280px).
-                <div
-                    class="relative z-0 flex-1 flex items-center justify-center select-none"
-                    aria-hidden="true"
-                >
-                    <span
-                        class="font-display text-primary leading-none text-[130px] xl:text-[180px]"
-                        style="letter-spacing:0.01em;"
-                    >
-                        "KYOMI"
-                    </span>
-                </div>
+            // ── Left side — Full Kyomi logo on warm-stone panel ─────────────
+            // Hidden below 1024px (lg breakpoint); form fills the whole
+            // viewport on mobile and tablets. Decorative — `aria-hidden`.
+            <div
+                class="hidden lg:flex lg:w-1/2 relative overflow-hidden auth-brand-panel items-center justify-center"
+                aria-hidden="true"
+            >
+                <img
+                    src="/kyomi_full_logo_white.svg"
+                    alt=""
+                    class="h-48 xl:h-56 w-auto select-none"
+                />
 
                 // Bottom marginalia — "DATA INTELLIGENCE" / "EST · 2025".
                 // Geist Mono 10px small caps, 0.18em tracking, 30% opacity.
