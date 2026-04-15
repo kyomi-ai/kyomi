@@ -50,6 +50,34 @@ Lint suppressions (`#[allow(...)]` in .rs files, `= "allow"` in Cargo.toml) are 
 
 Workspace lints are enforced in `Cargo.toml [workspace.lints]` at `deny` level. The pre-commit hook and CI independently verify no new suppressions are added.
 
+## Linear Ticket References in PRs
+
+When a PR closes Linear tickets, reference them so the Linear GitHub integration
+auto-links the PR to each issue and moves them to Done on merge.
+
+**Rules:**
+
+1. **Branch name** — use the Linear-suggested format `jason/kyo-NN-short-slug` (copy
+   it from the ticket's "Copy git branch name" button). One ticket per branch is the
+   happy path; the integration auto-links as soon as the branch is pushed. For
+   multi-ticket batched PRs, use the *primary* ticket in the branch name.
+2. **PR body** — add each ticket on its own line at the top, not comma-separated:
+
+   ```
+   Closes KYO-19
+   Closes KYO-20
+   Closes KYO-21
+   ```
+
+   Linear's parser is more reliable with one-per-line than with comma-separated
+   references. Comma-separated works *sometimes* but tends to attach the PR to
+   only the first ID.
+3. **Commit message** — the same `Closes KYO-NN` lines go in the commit body so
+   squash-merge preserves the references. One per line, not comma-separated.
+4. **Manual fallback** — if the auto-link didn't attach the PR to every ticket
+   after merge, move the missing ones to Done via the Linear API and link the PR
+   as an attachment. Don't leave them in Backlog when the work is live.
+
 ## Design System
 
 Always read `DESIGN.md` before making any visual or UI decisions. All font choices, colors, spacing, icons, and aesthetic direction are defined there. Do not deviate without explicit user approval. In QA mode, flag any code that doesn't match DESIGN.md. This file supersedes `docs/DESIGN_SYSTEM.md`.
