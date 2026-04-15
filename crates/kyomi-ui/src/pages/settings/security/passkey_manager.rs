@@ -14,7 +14,7 @@
 //! - Tip alert when only one passkey is registered
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,
     CardDescription, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, INPUT_CLASS,
@@ -624,7 +624,7 @@ pub fn PasskeyManager() -> impl IntoView {
                                 view! {
                                     <EmptyState
                                         icon=std::sync::Arc::new(|| view! {
-                                            <Icon icon=phosphor_leptos::KEY size="48px"/>
+                                            <Icon icon=phosphor_leptos::KEY weight=IconWeight::Duotone size="64px"/>
                                         }.into_any())
                                         title="No passkeys registered yet"
                                         description="Add a passkey for passwordless sign-in"

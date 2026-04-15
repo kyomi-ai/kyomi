@@ -10,7 +10,7 @@
 //! - Mobile: slide-in panel with backdrop overlay
 
 use leptos::prelude::*;
-use phosphor_leptos::Icon;
+use phosphor_leptos::{Icon, IconWeight};
 #[cfg(feature = "hydrate")]
 use wasm_bindgen::prelude::*;
 
@@ -540,7 +540,7 @@ pub fn HistoryPanel(
                                                 }.into_any(),
                                                 Ok(result) if result.versions.is_empty() => view! {
                                                     <EmptyState
-                                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CLOCK attr:class="w-12 h-12" /> }.into_any())
+                                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::CLOCK weight=IconWeight::Duotone size="64px" /> }.into_any())
                                                         title="No version history yet"
                                                         description="Versions are created when you save changes"
                                                         class="p-4 border-0"
