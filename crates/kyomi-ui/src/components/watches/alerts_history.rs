@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::dashboard::MarkdownRenderer;
+use crate::components::popover::{Placement, Popover};
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
     Switch,
@@ -35,9 +36,11 @@ const ALERTS_PER_PAGE: i64 = 20;
 
 // ─── Dropdown Menu ──────────────────────────────────────────────────────────
 
-/// Simple dropdown menu for per-alert actions.
+/// Per-alert action menu rendered via portal-based `Popover`.
 ///
-/// Opens on click, closes on click-outside or item selection.
+/// Uses `Popover` to escape `overflow: hidden` on alert card containers.
+/// Opens on click, closes on click-outside (handled by Popover) or item
+/// selection.
 #[component]
 fn AlertDropdownMenu(
     /// Whether this alert is deleted.
@@ -51,68 +54,7 @@ fn AlertDropdownMenu(
 ) -> impl IntoView {
     let query_cache = expect_context::<QueryCache>();
     let (is_open, set_is_open) = signal(false);
-    let container_ref = NodeRef::<leptos::html::Div>::new();
-
-    // Click-outside detection
-    #[cfg(target_arch = "wasm32")]
-    {
-        use send_wrapper::SendWrapper;
-        use wasm_bindgen::prelude::*;
-
-        let cleanup: StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>> =
-            StoredValue::new(None);
-
-        Effect::new(move |_| {
-            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
-                teardown.take()();
-            }
-
-            if is_open.get() {
-                let window = web_sys::window().expect("window");
-                let container_el = container_ref.get();
-
-                let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |ev: web_sys::Event| {
-                    if let Some(target) = ev.target() {
-                        let target_node: web_sys::Node = target.unchecked_into();
-                        if let Some(ref el) = container_el {
-                            let html_el: &web_sys::HtmlElement = el;
-                            let node: &web_sys::Node = html_el.as_ref();
-                            if !node.contains(Some(&target_node)) {
-                                set_is_open.set(false);
-                            }
-                        } else {
-                            set_is_open.set(false);
-                        }
-                    }
-                });
-
-                let _ = window.add_event_listener_with_callback_and_bool(
-                    "click",
-                    cb.as_ref().unchecked_ref(),
-                    true,
-                );
-
-                let window_clone = window.clone();
-                let cb_ref: js_sys::Function =
-                    cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-                let teardown: Box<dyn FnOnce()> = Box::new(move || {
-                    let _ = window_clone.remove_event_listener_with_callback_and_bool(
-                        "click",
-                        &cb_ref,
-                        true,
-                    );
-                    drop(cb);
-                });
-                cleanup.set_value(Some(SendWrapper::new(teardown)));
-            }
-        });
-
-        on_cleanup(move || {
-            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
-                teardown.take()();
-            }
-        });
-    }
+    let trigger_ref = NodeRef::<leptos::html::Div>::new();
 
     let (action_pending, set_action_pending) = signal(false);
 
@@ -167,8 +109,7 @@ fn AlertDropdownMenu(
     };
 
     view! {
-        <div node_ref=container_ref class="relative">
-            // Trigger button
+        <div node_ref=trigger_ref>
             <button
                 class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 text-foreground hover:bg-secondary hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
                 on:click=move |_| set_is_open.update(|v| *v = !*v)
@@ -176,57 +117,57 @@ fn AlertDropdownMenu(
             >
                 <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL attr:class="h-4 w-4" />
             </button>
-
-            // Dropdown content
-            {move || is_open.get().then(|| {
-                view! {
-                    <div class="absolute right-0 top-full mt-1 z-[1100] min-w-[10rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1">
-                        // Continue in Chat — visible in dropdown on mobile
-                        <button
-                            class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground sm:hidden"
-                            on:click=handle_continue_chat
-                        >
-                            <Icon icon=phosphor_leptos::CHATS attr:class="h-4 w-4 mr-2" />
-                            "Continue in Chat"
-                        </button>
-
-                        // Mark as unread (only for read, non-deleted alerts)
-                        {(!is_unread && !is_deleted).then(|| view! {
-                            <button
-                                class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
-                                on:click=handle_mark_unread
-                            >
-                                <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 mr-2" />
-                                "Mark as unread"
-                            </button>
-                        })}
-
-                        // Delete/Restore
-                        {if is_deleted {
-                            view! {
-                                <button
-                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
-                                    on:click=handle_restore
-                                >
-                                    <Icon icon=phosphor_leptos::ARROW_U_UP_LEFT attr:class="h-4 w-4 mr-2" />
-                                    "Restore"
-                                </button>
-                            }.into_any()
-                        } else {
-                            view! {
-                                <button
-                                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-secondary hover:text-accent-foreground"
-                                    on:click=handle_delete
-                                >
-                                    <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 mr-2" />
-                                    "Delete"
-                                </button>
-                            }.into_any()
-                        }}
-                    </div>
-                }
-            })}
         </div>
+        <Popover
+            trigger_ref=trigger_ref
+            open=Signal::from(is_open)
+            on_close=Callback::new(move |_| set_is_open.set(false))
+            placement=Placement::BOTTOM_END
+            class="min-w-[10rem] rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1"
+        >
+            // Continue in Chat — visible in dropdown on mobile
+            <button
+                class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground sm:hidden"
+                on:click=handle_continue_chat
+            >
+                <Icon icon=phosphor_leptos::CHATS attr:class="h-4 w-4 mr-2" />
+                "Continue in Chat"
+            </button>
+
+            // Mark as unread (only for read, non-deleted alerts)
+            {(!is_unread && !is_deleted).then(|| view! {
+                <button
+                    class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
+                    on:click=handle_mark_unread
+                >
+                    <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 mr-2" />
+                    "Mark as unread"
+                </button>
+            })}
+
+            // Delete/Restore
+            {if is_deleted {
+                view! {
+                    <button
+                        class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground"
+                        on:click=handle_restore
+                    >
+                        <Icon icon=phosphor_leptos::ARROW_U_UP_LEFT attr:class="h-4 w-4 mr-2" />
+                        "Restore"
+                    </button>
+                }.into_any()
+            } else {
+                view! {
+                    <button
+                        class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-secondary hover:text-accent-foreground"
+                        on:click=handle_delete
+                    >
+                        <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 mr-2" />
+                        "Delete"
+                    </button>
+                }.into_any()
+            }}
+        </Popover>
     }
 }
 
