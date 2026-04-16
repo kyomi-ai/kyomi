@@ -513,6 +513,12 @@ html {
   margin: 0 auto;
 }
 
+/* Chat context — bubble constrains width, no additional max-width needed */
+.prose-kyomi-chat {
+  max-width: none;
+  margin: 0;
+}
+
 /* ── Headings ──────────────────────────────────────────────────── */
 
 .prose-kyomi h1,

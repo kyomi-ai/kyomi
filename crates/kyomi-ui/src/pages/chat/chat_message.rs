@@ -247,6 +247,7 @@ pub fn ChatMessage(
                             content=content_signal
                             is_streaming=is_streaming_this_msg
                             on_chart_info=on_show_chart_info
+                            class="prose-kyomi-chat"
                         />
                     </Show>
                 </div>

@@ -242,7 +242,7 @@ pub fn CopilotChat(
                                         let is_streaming_signal = Signal::derive(move || is_streaming_for_md);
 
                                         view! {
-                                            <MarkdownRenderer content=content_signal is_streaming=is_streaming_signal />
+                                            <MarkdownRenderer content=content_signal is_streaming=is_streaming_signal class="prose-kyomi-chat" />
                                         }.into_any()
                                     } else {
                                         // Empty assistant message (thinking in progress)

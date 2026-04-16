@@ -990,8 +990,12 @@ pub fn MarkdownRenderer(
     /// User's chart palette preference (e.g. "kyomi", "balanced", "vibrant", "accessible")
     #[prop(optional, into)]
     chart_palette: Option<String>,
+    /// Additional CSS class(es) to apply to the prose wrapper div
+    #[prop(optional, into)]
+    class: Option<String>,
 ) -> impl IntoView {
     let palette_name = StoredValue::new(chart_palette.unwrap_or_else(|| "kyomi".to_string()));
+    let extra_class = class.unwrap_or_default();
 
     let segments = Memo::new(move |_| {
         let raw = content.get();
@@ -1013,7 +1017,7 @@ pub fn MarkdownRenderer(
     let ask_cb = StoredValue::new(on_ask_about_chart);
 
     view! {
-        <div class="prose-kyomi">
+        <div class=format!("prose-kyomi{}", if extra_class.is_empty() { String::new() } else { format!(" {extra_class}") })>
             <For
                 each=move || {
                     segments.get().into_iter().enumerate().collect::<Vec<_>>()
