@@ -16,7 +16,7 @@ use phosphor_leptos::{Icon, IconWeight};
 use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 
-use crate::components::chat::{WebSocketDebugPanel, WebSocketProvider};
+use crate::components::chat::WebSocketProvider;
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::EmptyState;
 use crate::query_cache::provide_query_cache;
@@ -306,9 +306,6 @@ pub fn Layout(children: Children) -> impl IntoView {
                 // channel so list pages stay fresh without each page owning
                 // its own subscription. See [KYO-9].
                 <QueryCacheWsBridge/>
-                // Dev-only WS debug panel — self-hides unless `localStorage.ws_debug === "1"`.
-                // Kept outside the app shell so it floats over everything.
-                <WebSocketDebugPanel/>
                 <div class="h-screen flex flex-col bg-background">
                     // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
                     <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">

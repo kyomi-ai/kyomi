@@ -11,7 +11,6 @@ pub mod inline_editable_title;
 pub mod thinking;
 pub mod tool_schema_renderer;
 pub mod websocket_client;
-pub mod websocket_debug_panel;
 
 pub use agent_thinking::AgentThinking;
 pub use chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
@@ -23,4 +22,3 @@ pub use thinking::{
     ThinkingEvent, ThinkingManager, ThinkingState, TokenUsage, process_thinking_event,
 };
 pub use websocket_client::{CloseRecord, WebSocketContext, WebSocketProvider, WsDiagnostics};
-pub use websocket_debug_panel::WebSocketDebugPanel;
