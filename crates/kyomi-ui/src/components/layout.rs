@@ -579,8 +579,8 @@ fn Sidebar(
                         </span>
                     </a>
 
-                    <NavItem href="/chats" icon=phosphor_leptos::CHATS label="Chats" collapsed=effective_collapsed/>
-                    <NavItem href="/dashboards" icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed/>
+                    <NavItem href="/chats" icon=phosphor_leptos::CHATS label="Chats" collapsed=effective_collapsed also_matches="/chat/"/>
+                    <NavItem href="/dashboards" icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed also_matches="/dashboard/"/>
                     <NavItem
                         href="/watches"
                         icon=phosphor_leptos::EYE
@@ -812,20 +812,19 @@ fn NavItem(
     /// (expanded) or a dot indicator (collapsed). Mirrors React Sidebar.jsx badge.
     #[prop(optional, into)]
     badge_count: Option<Signal<i64>>,
+    /// Additional path prefix that should also activate this nav item.
+    /// Used when detail routes differ from list routes (e.g. `/dashboards` list
+    /// vs `/dashboard/:id` detail).
+    #[prop(optional)]
+    also_matches: Option<&'static str>,
 ) -> impl IntoView {
     let count = badge_count.unwrap_or_else(|| Signal::derive(|| 0));
     let pathname = leptos_router::hooks::use_location().pathname;
 
-    // Active when the current path starts with this nav item's href.
-    // Special-case "/chat" so it doesn't match "/chats".
     let is_active = Memo::new(move |_| {
         let path = pathname.get();
-        if href == "/chat" {
-            // Exact match only — /chat but not /chats or /chat/xxx
-            path == "/chat"
-        } else {
-            path.starts_with(href)
-        }
+        path.starts_with(href)
+            || also_matches.is_some_and(|prefix| path.starts_with(prefix))
     });
 
     // Phosphor weight convention: Light when inactive, Fill when active.
