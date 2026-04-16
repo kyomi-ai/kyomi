@@ -11,8 +11,11 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
+use crate::components::chat::AgentThinking;
+use crate::components::chat::thinking::ThinkingEvent;
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{Badge, BadgeVariant, Spinner};
+use crate::server_fns::watches::get_thinking_events;
 use crate::types::WatchExecutionItem;
 
 use super::ExecutionSelector;
@@ -206,6 +209,27 @@ pub fn ExecutionLogViewer(
 
     let watch_prompt_clone = watch_prompt.clone();
 
+    // Lazy-fetch thinking events when an execution is selected.
+    // Depends on the selected_execution signal — re-fetches when the user
+    // picks a different execution run.
+    let thinking_events_resource = LocalResource::new(move || {
+        let exec = selected_execution.get();
+        async move {
+            let Some(exec) = exec else {
+                return Vec::<ThinkingEvent>::new();
+            };
+            let Some(watch_id) = exec.watch_id else {
+                return Vec::new();
+            };
+            match get_thinking_events(watch_id, exec.id).await {
+                Ok(json_value) => {
+                    serde_json::from_value::<Vec<ThinkingEvent>>(json_value).unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            }
+        }
+    });
+
     view! {
         <div class="space-y-4">
             // Loading state — exclusive: when loading with no selection, show only spinner
@@ -298,6 +322,22 @@ pub fn ExecutionLogViewer(
                             // Assistant Message - Response
                             <div class="flex flex-col items-start">
                                 <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
+                                    // Agent thinking trace (above the response markdown)
+                                    {move || {
+                                        thinking_events_resource.get().map(|events| {
+                                            let events: Vec<ThinkingEvent> = events.to_vec();
+                                            if events.is_empty() {
+                                                None
+                                            } else {
+                                                Some(view! {
+                                                    <AgentThinking
+                                                        thinking_events=events
+                                                        is_active=false
+                                                    />
+                                                })
+                                            }
+                                        })
+                                    }}
                                     {if let Some(response) = agent_response {
                                         view! {
                                             <MarkdownRenderer
