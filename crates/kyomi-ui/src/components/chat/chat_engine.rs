@@ -293,13 +293,29 @@ impl ChatEngine {
 
         let chat_state_err = self.chat_state.clone();
 
+        // Compute timezone and time context before entering the async closure.
+        let timezone = Some(crate::utils::time::get_user_timezone());
+        let time_context = crate::utils::time::get_time_context();
+        let time_ctx = if time_context.is_empty() {
+            None
+        } else {
+            Some(time_context)
+        };
+
         // For ephemeral mode, send via copilot server function.
         // The context_type for the server call comes from config.context_type,
         // which matches the session creation context_type.
         let ctx_type_for_send = ctx_type.unwrap_or_default();
         leptos::task::spawn_local(async move {
-            if let Err(e) =
-                send_copilot_message(sid, message, ctx_type_for_send, context_prefix).await
+            if let Err(e) = send_copilot_message(
+                sid,
+                message,
+                ctx_type_for_send,
+                context_prefix,
+                timezone,
+                time_ctx,
+            )
+            .await
             {
                 chat_state_err.set_error(&format!("Failed to send: {e}"));
             }

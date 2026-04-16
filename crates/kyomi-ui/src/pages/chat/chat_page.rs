@@ -127,44 +127,7 @@ fn pick_random_index(len: usize) -> usize {
 
 // ─── Time Context ───────────────────────────────────────────────────────────
 
-/// Compute the current time with timezone offset for agent awareness.
-///
-/// Returns a string in `YYYY-MM-DDTHH:MM:SS±HH:MM` format.
-/// Matches React's `getTimeContext()` in ChatInterface.jsx (lines 384-407).
-///
-/// On SSR, returns an empty string (time context is only relevant client-side).
-fn get_time_context() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let now = js_sys::Date::new_0();
-
-        // getTimezoneOffset() returns minutes *west* of UTC (negative = east).
-        // React: `const offsetMinutes = -now.getTimezoneOffset();`
-        let raw_offset = now.get_timezone_offset() as i32; // minutes west of UTC
-        let offset_minutes = -raw_offset; // minutes east of UTC
-
-        let offset_sign = if offset_minutes >= 0 { '+' } else { '-' };
-        let abs_offset = offset_minutes.unsigned_abs();
-        let offset_hours = abs_offset / 60;
-        let offset_mins = abs_offset % 60;
-
-        let year = now.get_full_year();
-        let month = now.get_month() + 1; // JS months are 0-indexed
-        let date = now.get_date();
-        let hours = now.get_hours();
-        let minutes = now.get_minutes();
-        let seconds = now.get_seconds();
-
-        format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
-            year, month, date, hours, minutes, seconds, offset_sign, offset_hours, offset_mins
-        )
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        String::new()
-    }
-}
+use crate::utils::time::get_time_context;
 
 /// Generate a unique user message ID.
 ///

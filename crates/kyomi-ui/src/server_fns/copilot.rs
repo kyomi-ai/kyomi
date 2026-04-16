@@ -84,6 +84,8 @@ pub async fn send_copilot_message(
     message: String,
     context_type: String,
     content: Option<String>,
+    timezone: Option<String>,
+    current_time_user_tz: Option<String>,
 ) -> Result<CopilotResponse, ServerFnError> {
     let auth = super::extract_auth().await?;
     let ctx = super::extract_context()?;
@@ -163,7 +165,7 @@ pub async fn send_copilot_message(
         &session_id,
         "user",
         &user_message,
-        None, None, None, Some(&auth.user_id), None, None, None,
+        None, None, current_time_user_tz.as_deref(), Some(&auth.user_id), None, None, None,
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to store message: {e}")))?;
@@ -201,9 +203,10 @@ pub async fn send_copilot_message(
         .ok_or_else(|| ServerFnError::new("Platform registry not configured"))?
         .clone();
 
+    let user_timezone = timezone.as_deref().unwrap_or("UTC");
     let system_prompt = kyomi_agent::copilot::build_copilot_system_prompt(
         context_type,
-        "UTC", // TODO: pass user timezone from frontend
+        user_timezone,
         auth.name.as_deref(),
     );
 
@@ -220,7 +223,7 @@ pub async fn send_copilot_message(
         context_type: context_type.to_string(),
         workspace_user_ids: None,
         cancel_token: cancel_token.clone(),
-        current_time_user_tz: None,
+        current_time_user_tz: current_time_user_tz.clone(),
         message_source: Some("web".to_string()),
         system_prompt: Some(system_prompt),
         tools_subset: Some(kyomi_agent::copilot::tools_for_context(context_type)),
