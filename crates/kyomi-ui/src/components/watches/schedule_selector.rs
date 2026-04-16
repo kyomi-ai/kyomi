@@ -12,6 +12,28 @@ use phosphor_leptos::Icon;
 use crate::components::{DynSelect, Label, Switch, INPUT_CLASS};
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes, local_hour_to_utc, utc_to_local_hour};
 
+/// Parse a cron field value that may contain commas and/or ranges.
+///
+/// Handles: `"5"` → `[5]`, `"1,3,5"` → `[1,3,5]`, `"1-5"` → `[1,2,3,4,5]`,
+/// `"1-3,5"` → `[1,2,3,5]`. Returns an empty vec if nothing parses.
+fn parse_cron_field(field: &str) -> Vec<u32> {
+    field
+        .split(',')
+        .flat_map(|part| {
+            let part = part.trim();
+            if let Some((start_s, end_s)) = part.split_once('-') {
+                let start: u32 = start_s.trim().parse().ok()?;
+                let end: u32 = end_s.trim().parse().ok()?;
+                Some((start..=end).collect::<Vec<u32>>())
+            } else {
+                let val: u32 = part.parse().ok()?;
+                Some(vec![val])
+            }
+        })
+        .flatten()
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Button CSS constants (from button.rs) for toggle buttons that need
 // reactive variant switching. The Button component takes a non-reactive
@@ -164,12 +186,9 @@ fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
             });
         }
 
-        // Comma-separated hours (multiple hours = hourly mode)
-        if hour_str.contains(',') {
-            let hour_parts: Vec<u32> = hour_str
-                .split(',')
-                .filter_map(|h| h.trim().parse::<u32>().ok())
-                .collect();
+        // Comma-separated or range hours (multiple hours = hourly mode)
+        if hour_str.contains(',') || hour_str.contains('-') {
+            let hour_parts = parse_cron_field(hour_str);
 
             if !hour_parts.is_empty() {
                 let mut local_hours: Vec<u32> = hour_parts
@@ -207,10 +226,7 @@ fn parse_cron_to_selections(cron: &str) -> Option<ParsedCron> {
 
     // Weekly: "N H * * D,D,..."
     if day_of_month_str == "*" && day_of_week_str != "*" {
-        let mut weekdays_list: Vec<u32> = day_of_week_str
-            .split(',')
-            .filter_map(|d| d.parse::<u32>().ok())
-            .collect();
+        let mut weekdays_list = parse_cron_field(day_of_week_str);
         if weekdays_list.is_empty() {
             return None;
         }
@@ -987,5 +1003,44 @@ fn DayOfMonthSelect(
                 on_change=move |v| on_change.run(v)
             />
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cron_field_single() {
+        assert_eq!(parse_cron_field("5"), vec![5]);
+    }
+
+    #[test]
+    fn parse_cron_field_comma_separated() {
+        assert_eq!(parse_cron_field("1,3,5"), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn parse_cron_field_range() {
+        assert_eq!(parse_cron_field("1-5"), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn parse_cron_field_mixed() {
+        assert_eq!(parse_cron_field("1-3,5"), vec![1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn parse_cron_field_empty_on_invalid() {
+        assert!(parse_cron_field("abc").is_empty());
+    }
+
+    #[test]
+    fn default_schedule_is_parseable() {
+        let result = parse_cron_to_selections("0 9 * * 1-5");
+        assert!(result.is_some(), "default schedule 0 9 * * 1-5 must be parseable to UI mode");
+        let p = result.unwrap();
+        assert_eq!(p.schedule_type, "weekly");
+        assert_eq!(p.weekdays, vec![1, 2, 3, 4, 5]);
     }
 }
