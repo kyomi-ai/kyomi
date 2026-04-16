@@ -91,37 +91,34 @@ pub fn HomePage() -> impl IntoView {
     // Show a centered spinner while loading.
     // On error, show a minimal message — this should rarely happen since
     // the auth middleware would have already redirected unauthenticated users.
-    move || {
-        match config_resource.get() {
-            None => {
-                // Still loading
-                view! {
-                    <div class="flex items-center justify-center min-h-[60vh]">
-                        <Spinner class="h-8 w-8 text-muted-foreground" />
-                    </div>
-                }
-                .into_any()
-            }
-            Some(Err(e)) => {
-                // Server error — show message rather than blank screen
-                let msg = format!("Failed to load landing configuration: {e}");
-                view! {
-                    <div class="flex items-center justify-center min-h-[60vh]">
-                        <p class="text-sm text-destructive">{msg}</p>
-                    </div>
-                }
-                .into_any()
-            }
-            Some(Ok(_)) => {
-                // Config loaded — Effect above handles navigation.
-                // Show spinner briefly while the navigation takes effect.
-                view! {
-                    <div class="flex items-center justify-center min-h-[60vh]">
-                        <Spinner class="h-8 w-8 text-muted-foreground" />
-                    </div>
-                }
-                .into_any()
-            }
-        }
+    view! {
+        <Suspense fallback=move || view! {
+            <div class="flex items-center justify-center min-h-[60vh]">
+                <Spinner class="h-8 w-8 text-muted-foreground" />
+            </div>
+        }>
+            {move || {
+                config_resource.get().map(|result| match result {
+                    Err(e) => {
+                        // Server error — show message rather than blank screen
+                        let msg = format!("Failed to load landing configuration: {e}");
+                        view! {
+                            <div class="flex items-center justify-center min-h-[60vh]">
+                                <p class="text-sm text-destructive">{msg}</p>
+                            </div>
+                        }.into_any()
+                    }
+                    Ok(_) => {
+                        // Config loaded — Effect above handles navigation.
+                        // Show spinner briefly while the navigation takes effect.
+                        view! {
+                            <div class="flex items-center justify-center min-h-[60vh]">
+                                <Spinner class="h-8 w-8 text-muted-foreground" />
+                            </div>
+                        }.into_any()
+                    }
+                })
+            }}
+        </Suspense>
     }
 }
