@@ -202,11 +202,11 @@ where
     // render. Critical for the no-flash behaviour: on a cache hit we populate
     // `current` with the existing entry (whose `data` signal already holds
     // the previous fetch result) so the first render shows the grid, not a
-    // skeleton. `deps()` is called here without tracking because we're not
-    // inside a reactive scope at hook-call time — that's fine, the Effect
-    // below subscribes for subsequent deps changes.
+    // skeleton. `untrack(deps)` reads the current dep values without
+    // subscribing — the Effect below handles reactive tracking for
+    // subsequent deps changes.
     let initial_entry =
-        lookup_or_create::<T, D, F, Fut>(&cache, name, deps(), fetcher);
+        lookup_or_create::<T, D, F, Fut>(&cache, name, untrack(&deps), fetcher);
     current.set(Some(initial_entry));
 
     // Watch for deps changes (e.g. search box edits) and swap the active
