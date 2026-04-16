@@ -422,7 +422,7 @@ pub fn WatchModal(
             size=ModalSize::Xl
             footer=footer_view
         >
-            <div class="@container flex flex-col -m-4 sm:-m-6 min-h-[600px]">
+            <div class="@container flex flex-col -m-4 sm:-m-6 max-h-[calc(90vh-8rem)] overflow-hidden">
                 // ── Sub-tab bar (Configure / AI) — hidden at @3xl+ where both panels show side-by-side ─
                 <div class="@3xl:hidden border-b border-border px-4 py-2 bg-muted flex items-center gap-1 flex-shrink-0">
                     <ToggleButton
@@ -853,7 +853,7 @@ pub fn WatchModal(
 
                     // ── AI column ──────────────────────────────────────
                     <div class=move || {
-                        let base = "flex-1 min-h-0 min-w-0 overflow-y-auto flex flex-col";
+                        let base = "flex-1 min-h-0 min-w-0 flex flex-col";
                         if config_tab.get() == "ai" {
                             base.to_string()
                         } else {

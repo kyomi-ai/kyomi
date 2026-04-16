@@ -113,9 +113,7 @@ fn WatchCard(
     on_toggle: Callback<String>,
     /// Run immediately.
     on_run: Callback<String>,
-    /// Edit with AI sidebar.
-    on_edit_ai: Callback<WatchListItem>,
-    /// Quick edit via modal.
+    /// Edit watch via modal.
     on_edit: Callback<WatchListItem>,
     /// Request delete (opens confirm dialog).
     on_delete: Callback<WatchListItem>,
@@ -127,9 +125,6 @@ fn WatchCard(
     /// Whether run mutation is pending.
     #[prop(into)]
     run_pending: Signal<bool>,
-    /// Whether AI features are enabled.
-    #[prop(default = true)]
-    ai_enabled: bool,
 ) -> impl IntoView {
     let watch_id = watch.watch_id.clone();
     let watch_name = watch.name.clone();
@@ -147,7 +142,7 @@ fn WatchCard(
     // Clones for each handler closure.
     let wid_toggle = watch_id.clone();
     let wid_run = watch_id.clone();
-    let watch_for_ai = watch.clone();
+
     let watch_for_edit = watch.clone();
     let watch_for_delete = watch.clone();
     let watch_for_log = watch.clone();
@@ -249,18 +244,6 @@ fn WatchCard(
                             </Button>
                         }
                     })}
-                    <Button
-                        variant=ButtonVariant::GhostMuted
-                        size=ButtonSize::IconSm
-                        on:click={
-                            let w = watch_for_ai.clone();
-                            move |_| on_edit_ai.run(w.clone())
-                        }
-                        disabled=MaybeProp::derive(move || Some(!ai_enabled))
-                        aria_label=if !ai_enabled { "AI features not available".to_string() } else { "Edit with AI".to_string() }
-                    >
-                        <Icon icon=phosphor_leptos::SPARKLE attr:class="h-4 w-4" />
-                    </Button>
                     <Button
                         variant=ButtonVariant::GhostMuted
                         size=ButtonSize::IconSm
@@ -441,11 +424,6 @@ pub fn WatchesPage() -> impl IntoView {
         set_show_watch_modal.set(true);
     });
 
-    let handle_edit_with_ai = Callback::new(move |watch: WatchListItem| {
-        set_modal_watch.set(Some(watch));
-        set_modal_initial_tab.set("ai".to_string());
-        set_show_watch_modal.set(true);
-    });
 
     let handle_request_delete = Callback::new(move |watch: WatchListItem| {
         set_deleting_watch.set(Some(watch));
@@ -725,13 +703,11 @@ pub fn WatchesPage() -> impl IntoView {
                                                                 tz_offset=tz_offset
                                                                 on_toggle=handle_toggle_watch
                                                                 on_run=handle_run_now
-                                                                on_edit_ai=handle_edit_with_ai
                                                                 on_edit=handle_edit_watch
                                                                 on_delete=handle_request_delete
                                                                 on_view_log=handle_view_execution_log
                                                                 toggle_pending=Signal::derive(move || toggling.get())
                                                                 run_pending=Signal::derive(move || running.get())
-                                                                ai_enabled=is_ai_enabled
                                                             />
                                                         }
                                                     }).collect_view();
