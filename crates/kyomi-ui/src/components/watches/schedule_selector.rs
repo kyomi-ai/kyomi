@@ -415,6 +415,7 @@ pub fn ScheduleSelector(
                 weekdays.set(p.weekdays);
                 day_of_month.set(p.day_of_month);
                 selected_hours.set(p.selected_hours);
+                cron_mode.set(false);
             }
         }
     });

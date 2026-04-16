@@ -754,6 +754,7 @@ pub fn WatchModal(
                                                 datasource: None,
                                             });
                                         });
+                                        set_editing_query_idx.set(Some(queries.get().len() - 1));
                                     }
                                 >
                                     <Icon icon=phosphor_leptos::PLUS attr:class="h-4 w-4 mr-1"/>
@@ -852,7 +853,7 @@ pub fn WatchModal(
 
                     // ── AI column ──────────────────────────────────────
                     <div class=move || {
-                        let base = "flex-1 min-h-0 min-w-0 flex flex-col";
+                        let base = "flex-1 min-h-0 min-w-0 overflow-y-auto flex flex-col";
                         if config_tab.get() == "ai" {
                             base.to_string()
                         } else {
