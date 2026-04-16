@@ -71,7 +71,7 @@ Trunk runs tailwindcss as a pre-build hook. Do NOT run tailwindcss manually — 
 
 **CRITICAL: Never pipe trunk build to `tail` or truncate output.** Trunk's post-processing (wasm-bindgen, file copy from `.stage/` to `dist/`) happens after compilation. If the process is interrupted during this stage, `dist/` will contain only `index.html` with no WASM file (the 2.8KB problem). Always let trunk build run to full completion.
 
-**CRITICAL: Never use `--release` for development builds.** Debug WASM builds are fast (~1 min incremental). Release builds take 5+ minutes and require nightly. Use `scripts/dev/rebuild-leptos.sh --release` only for production deploys.
+**CRITICAL: Never use `--release` for development builds.** Debug WASM builds are fast (~1 min incremental). Release builds take 5+ minutes. Use `scripts/dev/rebuild-leptos.sh --release` only for production deploys.
 
 #### Server-side Rust change (routes, server functions, DB)
 
@@ -94,7 +94,7 @@ Only time you need to restart the server.
 ```bash
 # Frontend first (so server doesn't embed stale WASM if you accidentally use release)
 cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
+trunk build --release && gzip -9 -k dist/*_bg.wasm
 
 # Then server
 cd /home/jason/repos/kyomi
@@ -112,7 +112,7 @@ Only for actual deploys to app.kyomi.ai or publishing. Not for development.
 
 ```bash
 cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
+trunk build --release && gzip -9 -k dist/*_bg.wasm
 cd /home/jason/repos/kyomi && cargo build --release -p kyomi-server
 ```
 
@@ -210,7 +210,7 @@ Chartml is a path dependency compiled into the WASM. You need `trunk build` to r
 
 ### "trunk build fails with 'the option Z is only accepted on the nightly compiler'"
 
-Always prefix with `RUSTUP_TOOLCHAIN=nightly`. The `.cargo/config.toml` uses `build-std` which requires nightly.
+This error is outdated — trunk builds now work with the stable toolchain. If you see this, check that `.cargo/config.toml` doesn't have stale `build-std` flags.
 
 ### "The login works on :3000 but not on :8080"
 

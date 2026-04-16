@@ -54,7 +54,7 @@ Debug WASM is too large for Playwright timeouts. Build release WASM first:
 
 ```bash
 cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
+trunk build --release && gzip -9 -k dist/*_bg.wasm
 ```
 
 ### Seed test users (one-time)

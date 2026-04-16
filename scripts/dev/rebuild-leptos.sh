@@ -28,10 +28,8 @@ done
 if [ "$SKIP_TRUNK" = false ]; then
   cd crates/kyomi-ui
   if [ "$RELEASE" = true ]; then
-    echo "==> Step 1/4: trunk build --release (with build-std, slow)"
-    CARGO_UNSTABLE_BUILD_STD="std,panic_abort,core,alloc" \
-    RUSTFLAGS="--cfg=has_std -Zunstable-options -Cpanic=immediate-abort" \
-    RUSTUP_TOOLCHAIN=nightly trunk build --release
+    echo "==> Step 1/4: trunk build --release (slow)"
+    trunk build --release
   else
     echo "==> Step 1/4: trunk build (debug)"
     trunk build

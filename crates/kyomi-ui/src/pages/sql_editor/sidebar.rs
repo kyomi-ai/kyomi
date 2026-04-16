@@ -46,6 +46,8 @@ pub fn SqlEditorSidebar(
     on_column_click: Callback<String>,
     /// Callback when user selects a query from history (query_text, datasource_slug).
     on_query_select: Callback<(String, Option<String>)>,
+    /// Callback when user clicks the info button on a table in the catalog.
+    on_table_info: Callback<String>,
 ) -> impl IntoView {
     let state = SqlEditorState::use_state();
     let is_mobile = use_is_mobile();
@@ -328,6 +330,7 @@ pub fn SqlEditorSidebar(
                                     refresh_trigger=catalog_refresh_trigger
                                     on_table_click=on_table
                                     on_column_click=on_column
+                                    on_table_info=on_table_info
                                 />
                             </div>
                         </div>

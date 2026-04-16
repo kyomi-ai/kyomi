@@ -16,6 +16,7 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
+use crate::components::{Button, ButtonSize, ButtonVariant};
 use crate::pages::sql_editor::types::{CatalogNode, CatalogNodeType};
 use crate::server_fns::sql_editor::get_catalog_tree;
 
@@ -40,7 +41,14 @@ pub fn CatalogTree(
     on_table_click: Callback<String>,
     /// Callback when user clicks a column (receives column name).
     on_column_click: Callback<String>,
+    /// Callback when user clicks the info button on a table (optional).
+    /// When provided, an info icon appears on hover for table rows.
+    #[prop(optional)]
+    on_table_info: Option<Callback<String>>,
 ) -> impl IntoView {
+    // Store the optional callback so it can be threaded through inner components.
+    let stored_table_info = StoredValue::new(on_table_info);
+
     // Track expanded nodes by their full name / ID.
     let (expanded_nodes, set_expanded_nodes) = signal(HashSet::<String>::new());
 
@@ -129,6 +137,7 @@ pub fn CatalogTree(
                                     on_toggle=Callback::new(toggle_node)
                                     on_table_click=on_table_click
                                     on_column_click=on_column_click
+                                    on_table_info=stored_table_info.get_value()
                                 />
                             }.into_any()
                         }
@@ -154,6 +163,8 @@ fn CatalogTreeView(
     on_toggle: Callback<String>,
     on_table_click: Callback<String>,
     on_column_click: Callback<String>,
+    /// When Some, an info button is shown on table rows.
+    on_table_info: Option<Callback<String>>,
 ) -> impl IntoView {
     let tree = StoredValue::new(tree);
 
@@ -196,6 +207,7 @@ fn CatalogTreeView(
                                     on_toggle=on_toggle
                                     on_table_click=on_table_click
                                     on_column_click=on_column_click
+                                    on_table_info=on_table_info
                                 />
                             }
                         })
@@ -221,6 +233,8 @@ fn CatalogNodeView(
     on_toggle: Callback<String>,
     on_table_click: Callback<String>,
     on_column_click: Callback<String>,
+    /// When Some, an info button is shown on table rows.
+    on_table_info: Option<Callback<String>>,
 ) -> impl IntoView {
     let node_id = node
         .full_name
@@ -321,9 +335,24 @@ fn CatalogNodeView(
                     </span>
                 })}
 
-                // TODO: Info button for tables — render when table-detail modal is implemented.
-                // Accept an `on_table_info: Option<Callback<String>>` prop and conditionally
-                // render the info icon button here.
+                // Info button for tables (only when on_table_info callback is provided)
+                {is_table.then_some(on_table_info).flatten().map(|table_info_cb| {
+                    let info_id = node_id.clone();
+                    view! {
+                        <Button
+                            variant=ButtonVariant::GhostMuted
+                            size=ButtonSize::IconXs
+                            class="opacity-0 group-hover:opacity-100 transition-opacity ml-auto flex-shrink-0"
+                            aria_label="Table info"
+                            on:click=move |ev: web_sys::MouseEvent| {
+                                ev.stop_propagation();
+                                table_info_cb.run(info_id.clone());
+                            }
+                        >
+                            <Icon icon=phosphor_leptos::INFO size="14px" />
+                        </Button>
+                    }
+                })}
             </div>
 
             // Children (rendered when expanded)
@@ -345,6 +374,7 @@ fn CatalogNodeView(
                                     on_toggle=on_toggle
                                     on_table_click=on_table_click
                                     on_column_click=on_column_click
+                                    on_table_info=on_table_info
                                 />
                             }
                         })

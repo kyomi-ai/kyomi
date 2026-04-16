@@ -13,6 +13,7 @@ pub mod sidebar;
 pub mod state;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod table_info_modal;
 pub mod types;
 
 // Re-export the most commonly used items for convenience.
@@ -150,6 +151,19 @@ pub fn SqlEditorPage() -> impl IntoView {
             // The DatasourceSelector will auto-resolve the type from the slug.
             ds_selection.slug.set(Some(slug));
         }
+    });
+
+    // ── Table info modal state ──────────────────────────────────────────
+    let (show_table_info, set_show_table_info) = signal(false);
+    let (selected_table_id, set_selected_table_id) = signal(Option::<String>::None);
+
+    let on_table_info = Callback::new(move |table_id: String| {
+        set_selected_table_id.set(Some(table_id));
+        set_show_table_info.set(true);
+    });
+
+    let close_table_info = Callback::new(move |()| {
+        set_show_table_info.set(false);
     });
 
     // ── Restore query from results tab (double-click) ────────────────────
@@ -432,8 +446,17 @@ pub fn SqlEditorPage() -> impl IntoView {
                     on_table_click=on_table_click
                     on_column_click=on_column_click
                     on_query_select=on_query_select
+                    on_table_info=on_table_info
                 />
             </div>
+
+            // ── Table info modal ─────────────────────────────────────────
+            <table_info_modal::TableInfoModal
+                show=show_table_info
+                on_close=close_table_info
+                table_id=Signal::derive(move || selected_table_id.get())
+                datasource_slug=ds_slug_signal
+            />
         </div>
     }
 }

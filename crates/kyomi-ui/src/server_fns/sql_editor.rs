@@ -1786,6 +1786,20 @@ pub async fn refresh_catalog(
 // get_table_info — table metadata from cache
 // ---------------------------------------------------------------------------
 
+/// Typed response for `get_table_info`, including metadata, descriptions,
+/// and cache timestamps.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TableInfoResponse {
+    /// The table_metadata JSON (contains columns array, table_name, etc.)
+    pub table_metadata: serde_json::Value,
+    /// Per-column descriptions map: { "column_name": "description" }
+    pub column_descriptions: Option<serde_json::Value>,
+    /// When the table structure was last refreshed from the datasource
+    pub structure_refreshed_at: Option<String>,
+    /// Fully qualified table ID for display
+    pub table_id: String,
+}
+
 /// Get detailed table metadata (columns, descriptions, etc.) for a
 /// single table from the `datasource_table_cache`.
 ///
@@ -1796,7 +1810,7 @@ pub async fn refresh_catalog(
 pub async fn get_table_info(
     datasource_slug: String,
     table_id: String,
-) -> Result<serde_json::Value, ServerFnError> {
+) -> Result<TableInfoResponse, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
@@ -1897,7 +1911,12 @@ pub async fn get_table_info(
     };
 
     match table {
-        Some(t) => Ok(t.table_metadata),
+        Some(t) => Ok(TableInfoResponse {
+            table_metadata: t.table_metadata,
+            column_descriptions: t.column_descriptions,
+            structure_refreshed_at: t.structure_refreshed_at.map(|dt| dt.to_rfc3339()),
+            table_id: table_id.clone(),
+        }),
         None => Err(ServerFnError::new(format!(
             "Table '{table_id}' not found in catalog"
         ))),
