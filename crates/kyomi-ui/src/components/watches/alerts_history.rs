@@ -159,7 +159,7 @@ fn AlertDropdownMenu(
             } else {
                 view! {
                     <button
-                        class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none text-destructive transition-colors hover:bg-secondary hover:text-accent-foreground"
+                        class="relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 px-2 text-sm outline-none transition-colors hover:bg-destructive/10 [color:var(--color-destructive)]"
                         on:click=handle_delete
                     >
                         <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 mr-2" />
@@ -603,7 +603,7 @@ pub fn AlertsHistory(
                                         <Button
                                             variant=ButtonVariant::Ghost
                                             size=ButtonSize::Sm
-                                            class="text-destructive hover:text-destructive"
+                                            class="[color:var(--color-destructive)] hover:[color:var(--color-destructive)]"
                                             disabled=bulk_action_pending.get()
                                             on:click=handle_bulk_delete
                                         >
