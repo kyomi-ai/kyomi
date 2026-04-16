@@ -35,6 +35,7 @@ pub struct SlackStatus {
 pub struct SlackChannel {
     pub channel_id: String,
     pub channel_name: String,
+    pub is_private: bool,
 }
 
 /// The user's default watch channel setting.
@@ -268,6 +269,7 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
         .map(|ch| SlackChannel {
             channel_id: ch.id,
             channel_name: ch.name,
+            is_private: ch.is_private,
         })
         .collect())
 }

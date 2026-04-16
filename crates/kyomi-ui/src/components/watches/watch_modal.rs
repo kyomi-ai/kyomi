@@ -1058,9 +1058,14 @@ fn SlackNotificationsSection(
                                 let channel_options: Vec<(String, String)> = {
                                     let mut opts = vec![("none".to_string(), "None (no Slack notifications)".to_string())];
                                     for ch in channels {
+                                        let label = if ch.is_private {
+                                            format!("#{} (private)", ch.channel_name)
+                                        } else {
+                                            format!("#{}", ch.channel_name)
+                                        };
                                         opts.push((
                                             ch.channel_id.clone(),
-                                            format!("#{}", ch.channel_name),
+                                            label,
                                         ));
                                     }
                                     opts
