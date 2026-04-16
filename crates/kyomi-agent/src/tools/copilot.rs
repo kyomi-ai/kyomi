@@ -354,18 +354,17 @@ impl AgentTool for UpdateWatchCopilotTool {
 
         // Validate mode if provided.
         if let Some(mode) = args.get("mode").and_then(|v| v.as_str())
-            && mode != "alert"
-            && mode != "report"
+            && let Err(e) = kyomi_auth::watch_service::validate_watch_mode(mode)
         {
-            let error_message = format!(
-                "Invalid mode '{mode}'. Must be 'alert' or 'report'."
-            );
+            let error_message = e.to_string();
             return Ok(serde_json::json!({
                 "success": false,
                 "validation_failed": true,
                 "error_count": 1,
-                "errors": [error_message.clone()],
-                "message": error_message,
+                "errors": [error_message],
+                "message": format!(
+                    "Watch mode validation failed. Fix the mode and try again:\n{error_message}"
+                ),
             })
             .to_string());
         }
