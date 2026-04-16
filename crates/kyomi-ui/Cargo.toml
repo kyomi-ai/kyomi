@@ -85,6 +85,11 @@ web-sys = { version = "0.3", features = [
     "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
     # SQL Editor: crypto.randomUUID() and performance.now()
     "Crypto", "Performance",
+    # Feedback modal: screenshot capture + file upload
+    "MediaDevices", "MediaStream", "MediaStreamTrack",
+    "HtmlCanvasElement", "CanvasRenderingContext2d",
+    "FileReader", "File", "FileList",
+    "HtmlVideoElement", "MediaStreamConstraints",
 ] }
 
 # SendWrapper for non-Send JS values in Leptos reactive closures

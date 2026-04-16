@@ -28,6 +28,9 @@ pub struct FeedbackResponse {
 pub async fn submit_feedback(
     feedback_type: String,
     description: String,
+    include_context: bool,
+    context: String,
+    screenshot: Option<String>,
 ) -> Result<FeedbackResponse, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -56,8 +59,31 @@ pub async fn submit_feedback(
     // Resolve workspace_id from auth context
     let workspace_id = auth.workspace.workspace_id.clone();
 
-    // Build empty context JSON (no screenshot/browser context from the modal)
-    let context_str = "{}";
+    // Build the context JSON blob. If the user opted in and provided a
+    // context string, parse it as JSON. If a screenshot was attached, merge
+    // it into the context object. Uses serde_json for safe manipulation.
+    let mut context_value: serde_json::Value = if include_context {
+        serde_json::from_str(context.trim()).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(ref data) = screenshot {
+        if !data.is_empty() {
+            // Validate size: 2MB limit (matching REST route MAX_SCREENSHOT_BYTES)
+            let estimated_size = data.len() * 3 / 4;
+            if estimated_size <= 2 * 1024 * 1024 {
+                if let Some(obj) = context_value.as_object_mut() {
+                    obj.insert(
+                        "screenshot_base64".to_string(),
+                        serde_json::Value::String(data.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    let context_str = context_value.to_string();
 
     // Insert feedback — same SQL as apps/server/src/routes/feedback.rs
     let is_pg = ctx.db.is_postgres();
@@ -75,7 +101,7 @@ pub async fn submit_feedback(
         workspace_id.as_deref(),
         &feedback_type,
         &description,
-        &false, // include_context — no browser context from modal
+        &include_context,
         &context_str
     )
     .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -84,6 +110,7 @@ pub async fn submit_feedback(
         feedback_id = %feedback_id,
         user = %auth.email,
         feedback_type = %feedback_type,
+        include_context = %include_context,
         "Feedback submitted via server function"
     );
 

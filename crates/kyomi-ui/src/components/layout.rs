@@ -191,6 +191,11 @@ pub fn Layout(children: Children) -> impl IntoView {
         });
     }
 
+    // Initialize feedback context collector (console.error interception).
+    // Must run once at WASM startup before any errors could occur.
+    #[cfg(target_arch = "wasm32")]
+    crate::utils::feedback_context::init();
+
     // Detect mobile on mount + resize
     #[cfg(target_arch = "wasm32")]
     {
@@ -869,7 +874,7 @@ fn Sidebar(
         // standard app theme (Modal component handles bg-background).
         <FeedbackModal
             open=feedback_open
-            on_close=Callback::new(move |()| set_feedback_open.set(false))
+            on_open_change=Callback::new(move |open: bool| set_feedback_open.set(open))
         />
     }
 }
