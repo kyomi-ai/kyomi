@@ -44,6 +44,54 @@ PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
 
 **NEVER run `tailwindcss` manually.** Trunk runs it as a pre-build hook. Running it separately breaks content hashes in `index.html`.
 
+## Browser Testing — Verifying UI Changes
+
+**Use Playwright, not the browse/gstack tool.** The browse tool doesn't work reliably with Leptos inputs and can't load debug WASM (253MB, 8-15s load time).
+
+### Release WASM for Playwright
+
+Debug WASM is too large for Playwright timeouts. Build release WASM first:
+
+```bash
+cd crates/kyomi-ui
+RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
+```
+
+### Seed test users (one-time)
+
+```bash
+python3 scripts/e2e-regression/seed-test-user.py
+# Requires: pip3 install argon2-cffi psycopg2-binary
+```
+
+### Test credentials
+
+| Email | Password | Role |
+|-------|----------|------|
+| `e2e-test@kyomi.dev` | `E2eTestPass123!` | Regular user |
+| `e2e-admin@kyomi.dev` | `E2eAdminPass123!` | Admin user |
+
+### Playwright login flow
+
+```javascript
+const { chromium } = require('playwright');
+const browser = await chromium.launch({ headless: true });
+const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+const page = await ctx.newPage();
+await page.goto('http://localhost:3000/login', { waitUntil: 'networkidle', timeout: 15000 });
+await page.fill('input[type="email"]', 'e2e-test@kyomi.dev', { timeout: 8000 });
+await page.fill('input[type="password"]', 'E2eTestPass123!', { timeout: 8000 });
+await page.click('button[type="submit"]', { timeout: 8000 });
+await page.waitForURL(url => !url.toString().includes('/login'), { timeout: 15000 });
+// Now authenticated — navigate to the affected page
+```
+
+### Playwright rules
+
+- Scripts MUST use `.cjs` extension (repo has `"type": "module"`)
+- Run with: `NODE_PATH=/home/jason/repos/kyomi/node_modules node /path/to/script.cjs`
+- Screenshots: full page, 1920x1080, saved to `/tmp/`
+
 ## Lint Suppression Policy
 
 Lint suppressions (`#[allow(...)]` in .rs files, `= "allow"` in Cargo.toml) are blocked by the pre-commit hook and CI. Fix the underlying lint warning instead of suppressing it.
