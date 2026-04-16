@@ -21,6 +21,8 @@ pub struct SidebarUser {
     pub email: String,
     pub workspace_name: Option<String>,
     pub is_personal_mode: bool,
+    /// Whether the server is running in self-hosted mode.
+    pub is_self_hosted: bool,
     /// Subscription status for the workspace: "trialing", "active", "past_due", "cancelled".
     pub subscription_status: String,
     /// Trial expiration ISO 8601 timestamp. Present when status is "trialing".
@@ -92,6 +94,7 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
         email: auth.email.clone(),
         workspace_name: auth.workspace.workspace_name.clone(),
         is_personal_mode: ctx.config.is_personal(),
+        is_self_hosted: ctx.config.self_hosted,
         subscription_status: auth.workspace.subscription_status.to_string(),
         trial_ends_at,
         theme_preference,

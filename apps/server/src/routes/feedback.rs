@@ -93,6 +93,13 @@ async fn submit_feedback(
     user: AuthUser,
     Json(data): Json<FeedbackRequest>,
 ) -> Result<Json<FeedbackResponse>, kyomi_core::Error> {
+    // Feedback routes to our Linear — disable in self-hosted and personal mode
+    if state.config.self_hosted || state.config.is_personal() {
+        return Err(kyomi_core::Error::NotFound(
+            "Feedback is not available in this deployment mode.".into(),
+        ));
+    }
+
     // Validate feedback type
     if !["bug", "feature", "question"].contains(&data.feedback_type.as_str()) {
         return Err(kyomi_core::Error::BadRequest(
@@ -105,6 +112,24 @@ async fn submit_feedback(
     if description.len() < 10 {
         return Err(kyomi_core::Error::BadRequest(
             "Description must be at least 10 characters.".into(),
+        ));
+    }
+
+    // Rate limit: max 5 feedback submissions per user per hour
+    let is_pg = state.db.is_postgres();
+    let rate_limit_sql = if is_pg {
+        "SELECT COUNT(*) FROM feedback WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'"
+            .to_string()
+    } else {
+        "SELECT COUNT(*) FROM feedback WHERE user_id = $1 AND created_at > datetime('now', '-1 hour')"
+            .to_string()
+    };
+    let recent_count: i64 =
+        kyomi_core::db_fetch_scalar!(&state.db, i64, &rate_limit_sql, &user.user_id)?;
+    if recent_count >= 5 {
+        return Err(kyomi_core::Error::TooManyRequests(
+            "You've submitted too many feedback items recently. Please try again in an hour.".into(),
+            3600,
         ));
     }
 
@@ -144,7 +169,6 @@ async fn submit_feedback(
         .or_else(|| user.workspace.workspace_id.clone());
 
     // Insert feedback
-    let is_pg = state.db.is_postgres();
     let context_str = context.to_string();
     let sql = format!(
         "INSERT INTO feedback \
@@ -179,8 +203,8 @@ async fn submit_feedback(
     let fb_workspace_name = user.workspace.workspace_name.clone();
     let fb_context = context.clone();
     tokio::spawn(async move {
-        // Slack notification
-        if let Err(e) = send_feedback_slack_notification(
+        // 1. Create Linear issue (primary feedback destination)
+        let linear_result = create_linear_issue_from_feedback(
             &notify_state,
             &fb_id,
             &fb_type,
@@ -189,24 +213,60 @@ async fn submit_feedback(
             fb_workspace_name.as_deref(),
             &fb_context,
         )
-        .await
-        {
-            tracing::error!(
-                feedback_id = %fb_id,
-                error = %e,
-                "Failed to send Slack notification for feedback"
-            );
+        .await;
+
+        // 2. Slack notification — slim one-liner if Linear succeeded, full fallback otherwise
+        match &linear_result {
+            Some(result) => {
+                // Slim Slack notification with Linear link
+                if let Err(e) = send_slim_slack_notification(
+                    &notify_state,
+                    &fb_type,
+                    &fb_email,
+                    &result.identifier,
+                    &result.url,
+                )
+                .await
+                {
+                    tracing::error!(
+                        feedback_id = %fb_id,
+                        error = %e,
+                        "Failed to send slim Slack notification"
+                    );
+                }
+            }
+            None => {
+                // Full Slack notification as fallback (Linear not configured or failed)
+                if let Err(e) = send_feedback_slack_notification(
+                    &notify_state,
+                    &fb_id,
+                    &fb_type,
+                    &fb_description,
+                    &fb_email,
+                    fb_workspace_name.as_deref(),
+                    &fb_context,
+                )
+                .await
+                {
+                    tracing::error!(
+                        feedback_id = %fb_id,
+                        error = %e,
+                        "Failed to send Slack notification for feedback"
+                    );
+                }
+
+                // Upload screenshot to Slack if available (only in fallback mode)
+                if let Some(screenshot_b64) = fb_context
+                    .as_object()
+                    .and_then(|obj| obj.get("screenshot_base64"))
+                    .and_then(|v| v.as_str())
+                {
+                    upload_screenshot_to_slack(&notify_state, &fb_id, screenshot_b64).await;
+                }
+            }
         }
 
-        // Upload screenshot to Slack if available
-        if let Some(screenshot_b64) = fb_context.as_object()
-            .and_then(|obj| obj.get("screenshot_base64"))
-            .and_then(|v| v.as_str())
-        {
-            upload_screenshot_to_slack(&notify_state, &fb_id, screenshot_b64).await;
-        }
-
-        // Email notification to support
+        // 3. Email notification to support (always)
         send_feedback_email_notification(
             &notify_state,
             &fb_id,
@@ -234,6 +294,12 @@ async fn list_feedback(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<FeedbackListItem>>, kyomi_core::Error> {
+    if state.config.self_hosted || state.config.is_personal() {
+        return Err(kyomi_core::Error::NotFound(
+            "Feedback is not available in this deployment mode.".into(),
+        ));
+    }
+
     #[derive(sqlx::FromRow)]
     struct FeedbackRow {
         id: String,
@@ -269,7 +335,166 @@ async fn list_feedback(
 }
 
 // ---------------------------------------------------------------------------
-// Background Slack notification
+// Background Linear issue creation
+// ---------------------------------------------------------------------------
+
+/// Create a Linear issue from feedback, returning the result if successful.
+///
+/// Returns `None` if Linear is not configured or if the API call fails.
+/// Failures are logged but never propagate — feedback submission is not
+/// blocked by Linear outages.
+async fn create_linear_issue_from_feedback(
+    state: &AppState,
+    feedback_id: &str,
+    feedback_type: &str,
+    description: &str,
+    user_email: &str,
+    workspace_name: Option<&str>,
+    context: &serde_json::Value,
+) -> Option<crate::services::linear::LinearIssueResult> {
+    let (api_key, team_id) = match (
+        state.config.linear_api_key.as_deref(),
+        state.config.linear_feedback_team_id.as_deref(),
+    ) {
+        (Some(key), Some(team)) => (key, team),
+        _ => {
+            tracing::debug!("Linear not configured, skipping issue creation");
+            return None;
+        }
+    };
+
+    // Decode screenshot bytes if available
+    let screenshot_bytes = context
+        .as_object()
+        .and_then(|obj| obj.get("screenshot_base64"))
+        .and_then(|v| v.as_str())
+        .and_then(|b64| {
+            // Strip data URL prefix if present
+            let data = if let Some((_prefix, d)) = b64.split_once(',') { d } else { b64 };
+            base64_decode(data).ok()
+        });
+
+    let input = crate::services::linear::FeedbackIssueInput {
+        feedback_id: feedback_id.to_string(),
+        feedback_type: feedback_type.to_string(),
+        description: description.to_string(),
+        user_email: user_email.to_string(),
+        workspace_name: workspace_name.map(String::from),
+        page_url: context
+            .as_object()
+            .and_then(|o| o.get("url"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        browser: context
+            .as_object()
+            .and_then(|o| o.get("browser"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        os: context
+            .as_object()
+            .and_then(|o| o.get("os"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        console_errors: context
+            .as_object()
+            .and_then(|o| o.get("console_errors"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        failed_requests: context
+            .as_object()
+            .and_then(|o| o.get("failed_requests"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+    };
+
+    match crate::services::linear::create_feedback_issue(
+        api_key,
+        team_id,
+        &input,
+        screenshot_bytes.as_deref(),
+    )
+    .await
+    {
+        Ok(result) => {
+            tracing::info!(
+                feedback_id = %feedback_id,
+                linear_issue = %result.identifier,
+                "Linear issue created for feedback"
+            );
+            Some(result)
+        }
+        Err(e) => {
+            tracing::error!(
+                feedback_id = %feedback_id,
+                error = %e,
+                "Failed to create Linear issue for feedback"
+            );
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slim Slack notification (with Linear link)
+// ---------------------------------------------------------------------------
+
+/// Send a one-liner Slack notification with a link to the Linear issue.
+///
+/// Used when Linear issue creation succeeded — the full context is on Linear,
+/// so Slack just gets a pointer.
+async fn send_slim_slack_notification(
+    state: &AppState,
+    feedback_type: &str,
+    user_email: &str,
+    linear_identifier: &str,
+    linear_url: &str,
+) -> kyomi_core::Result<()> {
+    let webhook_url = match state.config.slack_feedback_webhook_url.as_deref() {
+        Some(url) if !url.is_empty() => url,
+        _ => {
+            tracing::debug!("SLACK_FEEDBACK_WEBHOOK_URL not configured, skipping notification");
+            return Ok(());
+        }
+    };
+
+    let emoji = match feedback_type {
+        "bug" => ":bug:",
+        "feature" => ":bulb:",
+        "question" => ":question:",
+        _ => ":memo:",
+    };
+
+    let text = format!(
+        "{emoji} New {feedback_type} feedback from {user_email} \u{2014} <{linear_url}|{linear_identifier}>"
+    );
+    let payload = serde_json::json!({ "text": text });
+
+    let http = kyomi_datasource_server::http_client()?;
+    let response = http
+        .post(webhook_url)
+        .json(&payload)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| kyomi_core::Error::Internal(format!("Slack webhook POST failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(kyomi_core::Error::Internal(format!(
+            "Slack webhook returned {status}: {body}"
+        )));
+    }
+
+    tracing::info!("Slim Slack notification sent with Linear link {linear_identifier}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Background Slack notification (full fallback)
 // ---------------------------------------------------------------------------
 
 /// Send a Slack webhook notification for a new feedback submission.

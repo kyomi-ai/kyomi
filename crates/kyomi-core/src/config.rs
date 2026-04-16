@@ -183,6 +183,14 @@ pub struct Config {
     /// Optional — screenshots are skipped if not configured.
     pub slack_feedback_channel_id: Option<String>,
 
+    // ── Linear Feedback ──────────────────────────────────────────────
+    /// Linear API key for creating feedback issues.
+    /// Optional — feedback still stored locally without it, just no Linear issues.
+    pub linear_api_key: Option<String>,
+
+    /// Linear team UUID for feedback issue creation.
+    pub linear_feedback_team_id: Option<String>,
+
     // ── Admin Notifications ──────────────────────────────────────────
     /// Email address for admin notifications (feedback, signups).
     /// Defaults to "support@kyomi.ai".
@@ -365,6 +373,8 @@ impl Config {
             slack_feedback_webhook_url: env::var("SLACK_FEEDBACK_WEBHOOK_URL").ok(),
             slack_bot_token: env::var("SLACK_BOT_TOKEN").ok(),
             slack_feedback_channel_id: env::var("SLACK_FEEDBACK_CHANNEL_ID").ok(),
+            linear_api_key: env::var("LINEAR_API_KEY").ok(),
+            linear_feedback_team_id: env::var("LINEAR_FEEDBACK_TEAM_ID").ok(),
             support_email: env::var("SUPPORT_EMAIL")
                 .unwrap_or_else(|_| "support@kyomi.ai".into()),
             vapid_private_key: env::var("VAPID_PRIVATE_KEY").ok(),
@@ -439,6 +449,8 @@ impl Config {
             slack_feedback_webhook_url: None,
             slack_bot_token: None,
             slack_feedback_channel_id: None,
+            linear_api_key: None,
+            linear_feedback_team_id: None,
             support_email: "support@kyomi.ai".into(),
             vapid_private_key: None,
             vapid_contact: None,

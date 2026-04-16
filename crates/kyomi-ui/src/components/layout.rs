@@ -696,6 +696,7 @@ fn Sidebar(
 
                         let workspace = user.workspace_name.clone().unwrap_or_else(|| "My Workspace".to_string());
                         let is_personal = user.is_personal_mode;
+                        let show_feedback = !user.is_personal_mode && !user.is_self_hosted;
                         let email = user.email.clone();
 
                         view! {
@@ -769,16 +770,22 @@ fn Sidebar(
                                             <Icon icon=phosphor_leptos::BOOK_OPEN weight=IconWeight::Light size="16px"/>
                                             <span>"Help & Docs"</span>
                                         </a>
-                                        <button
-                                            on:click=move |_| {
-                                                set_user_menu_open.set(false);
-                                                set_feedback_open.set(true);
-                                            }
-                                            class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
-                                        >
-                                            <Icon icon=phosphor_leptos::CHAT_CIRCLE_DOTS weight=IconWeight::Light size="16px"/>
-                                            <span>"Send Feedback"</span>
-                                        </button>
+                                        {if show_feedback {
+                                            Some(view! {
+                                                <button
+                                                    on:click=move |_| {
+                                                        set_user_menu_open.set(false);
+                                                        set_feedback_open.set(true);
+                                                    }
+                                                    class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
+                                                >
+                                                    <Icon icon=phosphor_leptos::CHAT_CIRCLE_DOTS weight=IconWeight::Light size="16px"/>
+                                                    <span>"Send Feedback"</span>
+                                                </button>
+                                            })
+                                        } else {
+                                            None
+                                        }}
                                         {if !is_personal {
                                             Some(view! {
                                                 <button
