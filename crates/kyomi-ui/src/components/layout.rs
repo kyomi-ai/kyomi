@@ -18,6 +18,7 @@ use leptos_router::NavigateOptions;
 
 use crate::components::chat::WebSocketProvider;
 use crate::components::empty_state::EmptyStateVariant;
+use crate::components::feedback_modal::FeedbackModal;
 use crate::components::EmptyState;
 use crate::query_cache::provide_query_cache;
 #[cfg(target_arch = "wasm32")]
@@ -452,6 +453,7 @@ fn Sidebar(
     // Uses LocalResource to avoid hydration mismatch — badge is client-only UI.
     let unread_alerts = LocalResource::new(get_unread_alerts_count);
     let (user_menu_open, set_user_menu_open) = signal(false);
+    let (feedback_open, set_feedback_open) = signal(false);
 
     // Active state for "New Chat" — exact match on /chat only (not /chats or /chat/xxx).
     let pathname = leptos_router::hooks::use_location().pathname;
@@ -767,6 +769,16 @@ fn Sidebar(
                                             <Icon icon=phosphor_leptos::BOOK_OPEN weight=IconWeight::Light size="16px"/>
                                             <span>"Help & Docs"</span>
                                         </a>
+                                        <button
+                                            on:click=move |_| {
+                                                set_user_menu_open.set(false);
+                                                set_feedback_open.set(true);
+                                            }
+                                            class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
+                                        >
+                                            <Icon icon=phosphor_leptos::CHAT_CIRCLE_DOTS weight=IconWeight::Light size="16px"/>
+                                            <span>"Send Feedback"</span>
+                                        </button>
                                         {if !is_personal {
                                             Some(view! {
                                                 <button
@@ -791,6 +803,13 @@ fn Sidebar(
                 </Transition>
             </div>
         </div>
+
+        // Feedback modal — rendered outside the sidebar div so it uses the
+        // standard app theme (Modal component handles bg-background).
+        <FeedbackModal
+            open=feedback_open
+            on_close=Callback::new(move |()| set_feedback_open.set(false))
+        />
     }
 }
 

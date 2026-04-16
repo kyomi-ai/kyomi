@@ -25,6 +25,7 @@ pub mod copilot;
 pub mod context;
 pub mod dashboards;
 pub mod datasources;
+pub mod feedback;
 pub mod home;
 pub mod knowledge;
 pub mod onboarding;

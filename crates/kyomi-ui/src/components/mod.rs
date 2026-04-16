@@ -18,6 +18,7 @@ pub mod checkbox;
 pub mod confirm_dialog;
 pub mod dashboard;
 pub mod empty_state;
+pub mod feedback_modal;
 pub mod input;
 pub mod documents;
 pub mod label;
@@ -45,6 +46,7 @@ pub use card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardT
 pub use checkbox::Checkbox;
 pub use confirm_dialog::ConfirmDialog;
 pub use empty_state::{EmptyState, EmptyStateVariant};
+pub use feedback_modal::FeedbackModal;
 pub use input::INPUT_CLASS;
 pub use label::Label;
 pub use layout::Layout;
