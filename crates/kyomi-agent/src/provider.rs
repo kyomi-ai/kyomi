@@ -86,6 +86,20 @@ impl ProviderKind {
             ))),
         }
     }
+
+    /// Returns the cheapest known model for background/low-stakes tasks
+    /// (e.g. title generation, classification).
+    ///
+    /// For standard API endpoints this returns a hardcoded cheap model.
+    /// Callers should NOT use this when the provider has a custom `base_url` —
+    /// we cannot know which models a custom endpoint supports.
+    pub fn cheapest_model(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "claude-haiku-4-5-20251001",
+            Self::OpenAI => "gpt-4.1-mini",
+            Self::Gemini => "gemini-2.0-flash",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +413,13 @@ mod tests {
         assert_eq!(ProviderKind::Anthropic.to_string(), "anthropic");
         assert_eq!(ProviderKind::OpenAI.to_string(), "openai");
         assert_eq!(ProviderKind::Gemini.to_string(), "gemini");
+    }
+
+    #[test]
+    fn cheapest_model_returns_expected_models() {
+        assert_eq!(ProviderKind::Anthropic.cheapest_model(), "claude-haiku-4-5-20251001");
+        assert_eq!(ProviderKind::OpenAI.cheapest_model(), "gpt-4.1-mini");
+        assert_eq!(ProviderKind::Gemini.cheapest_model(), "gemini-2.0-flash");
     }
 
     #[test]

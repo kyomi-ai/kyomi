@@ -47,7 +47,7 @@ pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
       cost_estimate, component, provider_cost_usd) \
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
 use crate::agent::{AgentConfig, CustomAgent};
-use crate::anthropic::{AUDIT_MODEL, DEFAULT_MODEL};
+use crate::anthropic::DEFAULT_MODEL;
 use crate::prompt;
 use crate::provider::{
     create_provider_from_workspace, resolve_provider_config, ProviderKind,
@@ -711,19 +711,12 @@ async fn generate_title_inner(
                          user's first message. Return ONLY the title text, nothing else. \
                          No quotes, no hashes, no prefixes.";
 
-    // Use a cheap/fast model for title generation, routed through the
-    // workspace's configured provider (Kyomi-managed or BYOK).
+    // Use the cheapest available model for title generation per provider.
     //
-    // Design decision: in Kyomi mode we override Anthropic to AUDIT_MODEL
-    // (Haiku) to minimise server-side cost. In BYOK mode we honour whatever
-    // model the workspace configured — overriding a BYOK customer's chosen
-    // model (which might be a specific GPT variant, a Gemini tier, or an
-    // Anthropic tier they explicitly chose) would be a surprising silent
-    // downgrade. If the workspace has no model set, `create_provider_from_workspace`
-    // falls back to the provider's built-in default, and for Anthropic BYOK
-    // with no model we still prefer AUDIT_MODEL to keep title-gen cheap.
-    // TODO: Add per-provider cheapest-model selection for OpenAI/Gemini
-    // (currently uses their default model, which may be more expensive than needed).
+    // - Kyomi-managed: always override to the cheapest model (we control cost).
+    // - BYOK with standard API (no base_url): override to cheapest model.
+    // - BYOK with custom base_url: leave the configured model as-is — we
+    //   cannot know which models a custom endpoint supports.
     let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
         .await
         .map_err(|e| {
@@ -731,23 +724,32 @@ async fn generate_title_inner(
                 "failed to load workspace AI config for title generation ({workspace_id}): {e}"
             ))
         })?;
-    let provider_is_anthropic = matches!(
-        ws_config.provider,
-        kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-            | kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Anthropic
-    );
-    if provider_is_anthropic
-        && matches!(
-            ws_config.provider,
-            kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-        )
+
     {
-        // Kyomi-managed: always force Haiku for title generation.
-        ws_config.model = Some(AUDIT_MODEL.to_string());
-    } else if provider_is_anthropic && ws_config.model.is_none() {
-        // BYOK Anthropic with no explicit model: use Haiku to keep cost low.
-        ws_config.model = Some(AUDIT_MODEL.to_string());
+        use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+
+        let provider_kind = match ws_config.provider {
+            WorkspaceAiProvider::Kyomi => {
+                // Resolve the actual provider kind from server env config.
+                resolve_provider_config(app_config)
+                    .map(|c| c.provider)
+                    .ok()
+            }
+            WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
+            WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
+            WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
+        };
+
+        let is_kyomi_managed = ws_config.provider == WorkspaceAiProvider::Kyomi;
+        let has_custom_base_url = ws_config.base_url.is_some();
+
+        if let Some(kind) = provider_kind
+            && (is_kyomi_managed || !has_custom_base_url)
+        {
+            ws_config.model = Some(kind.cheapest_model().to_string());
+        }
     }
+
     let client = create_provider_from_workspace(&ws_config, app_config)?;
 
     let messages = vec![
