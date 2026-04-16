@@ -19,8 +19,8 @@ use phosphor_leptos::{Icon, IconWeight};
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::popover::{Placement, Popover};
 use crate::components::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, Label, Spinner,
-    Switch,
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, EmptyState, Label,
+    Spinner, Switch,
 };
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::watches::{
@@ -576,49 +576,46 @@ pub fn AlertsHistory(
 
                             {if has_selection {
                                 // Selection active: show count + bulk actions + cancel
+                                // Matches Chats list bulk action bar pattern.
                                 let count = current_selected.len();
                                 view! {
                                     <span class="text-sm font-medium text-foreground whitespace-nowrap">
                                         {format!("{count} selected")}
                                     </span>
-                                    <div class="flex items-center gap-1">
-                                        <Button
-                                            variant=ButtonVariant::Ghost
-                                            size=ButtonSize::Sm
-                                            disabled=bulk_action_pending.get()
-                                            on:click=handle_bulk_mark_read
-                                        >
-                                            <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 sm:mr-1.5" />
-                                            <span class="hidden sm:inline">"Mark Read"</span>
-                                        </Button>
-                                        <Button
-                                            variant=ButtonVariant::Ghost
-                                            size=ButtonSize::Sm
-                                            disabled=bulk_action_pending.get()
-                                            on:click=handle_bulk_mark_unread
-                                        >
-                                            <Icon icon=phosphor_leptos::ENVELOPE attr:class="h-4 w-4 sm:mr-1.5" />
-                                            <span class="hidden sm:inline">"Mark Unread"</span>
-                                        </Button>
-                                        <Button
-                                            variant=ButtonVariant::Ghost
-                                            size=ButtonSize::Sm
-                                            class="[color:var(--color-destructive)] hover:[color:var(--color-destructive)]"
-                                            disabled=bulk_action_pending.get()
-                                            on:click=handle_bulk_delete
-                                        >
-                                            <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 sm:mr-1.5" />
-                                            <span class="hidden sm:inline">"Delete"</span>
-                                        </Button>
-                                    </div>
                                     <Button
                                         variant=ButtonVariant::Ghost
+                                        size=ButtonSize::Sm
+                                        disabled=bulk_action_pending.get()
+                                        on:click=handle_bulk_mark_read
+                                    >
+                                        <Icon icon=phosphor_leptos::ENVELOPE_OPEN attr:class="h-4 w-4 sm:mr-1.5" />
+                                        <span class="hidden sm:inline">"Mark Read"</span>
+                                    </Button>
+                                    <Button
+                                        variant=ButtonVariant::Ghost
+                                        size=ButtonSize::Sm
+                                        disabled=bulk_action_pending.get()
+                                        on:click=handle_bulk_mark_unread
+                                    >
+                                        <Icon icon=phosphor_leptos::ENVELOPE attr:class="h-4 w-4 sm:mr-1.5" />
+                                        <span class="hidden sm:inline">"Mark Unread"</span>
+                                    </Button>
+                                    <Button
+                                        variant=ButtonVariant::GhostDestructive
+                                        size=ButtonSize::Sm
+                                        disabled=bulk_action_pending.get()
+                                        on:click=handle_bulk_delete
+                                    >
+                                        <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 sm:mr-1.5" />
+                                        <span class="hidden sm:inline">"Delete"</span>
+                                    </Button>
+                                    <Button
+                                        variant=ButtonVariant::GhostMuted
                                         size=ButtonSize::Sm
                                         class="ml-auto"
                                         on:click=handle_clear_selection
                                     >
-                                        <Icon icon=phosphor_leptos::X attr:class="h-4 w-4 sm:mr-1.5" />
-                                        <span class="hidden sm:inline">"Cancel"</span>
+                                        "Cancel"
                                     </Button>
                                 }.into_any()
                             } else {
@@ -664,20 +661,17 @@ pub fn AlertsHistory(
                         // Alerts list
                         {if alerts.is_empty() {
                             view! {
-                                <div class="flex flex-col items-center justify-center py-12 text-center">
-                                    <div class="mb-4 text-muted-foreground">
-                                        <Icon icon=phosphor_leptos::BELL_RINGING weight=IconWeight::Duotone size="64px" />
-                                    </div>
-                                    <h3 class="text-lg font-medium text-foreground mb-2">"No alerts yet"</h3>
-                                    <p class="text-muted-foreground max-w-md">
-                                        "When your watches detect something noteworthy, alerts will appear here."
-                                    </p>
-                                </div>
+                                <EmptyState
+                                    icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::BELL_RINGING weight=IconWeight::Duotone size="64px" /> }.into_any())
+                                    title="No alerts yet"
+                                    description="When your watches detect something noteworthy, alerts will appear here."
+                                />
                             }.into_any()
                         } else {
                             let watches_for_cards = watches.clone();
                             view! {
-                                <div class="space-y-3">
+                                <div class="max-w-4xl mx-auto">
+                                <div class="space-y-2">
                                     {alerts.into_iter().map(|alert| {
                                         let alert_id = alert.id;
                                         let is_deleted = alert.deleted_at.is_some();
@@ -706,14 +700,11 @@ pub fn AlertsHistory(
                                         // Agent response for expanded content
                                         let agent_response = alert.agent_response.clone().unwrap_or_default();
 
-                                        // Card classes. `shadow-sm` gives the list items
-                                        // perceptual lift off `bg-background` — without it
-                                        // `bg-card` (#ffffff) on `bg-background` (#FAFAF8)
-                                        // is too subtle to read as "separate surface" in
-                                        // light mode. Matches the lift chat message cards
-                                        // get from their `shadow` class.
+                                        // Card classes — matches chat_list.rs pattern:
+                                        // no shadow by default, hover:shadow-sm for
+                                        // interactive lift.
                                         let card_class = format!(
-                                            "rounded-lg border overflow-hidden shadow-sm {}{}",
+                                            "rounded-lg border overflow-hidden hover:shadow-sm transition-all {}{}",
                                             if is_deleted {
                                                 "opacity-60 border-border bg-muted/30"
                                             } else if is_unread {
@@ -721,7 +712,7 @@ pub fn AlertsHistory(
                                             } else {
                                                 "border-border bg-card"
                                             },
-                                            if is_selected { " ring-2 ring-primary/50" } else { "" }
+                                            if is_selected { " border-primary/50 ring-2 ring-primary/20" } else { "" }
                                         );
 
                                         view! {
@@ -743,8 +734,8 @@ pub fn AlertsHistory(
                                                     // Clickable area to expand
                                                     <button
                                                         class=format!(
-                                                            "flex-1 min-w-0 py-3 pr-2 sm:pr-4 flex items-center justify-between hover:bg-muted/50 transition-colors text-left {}",
-                                                            if is_deleted { "pl-3 sm:pl-4" } else { "pl-2" }
+                                                            "flex-1 min-w-0 p-4 flex items-center justify-between hover:bg-muted/50 transition-colors text-left {}",
+                                                            if !is_deleted { "pl-2" } else { "" }
                                                         )
                                                         on:click=move |_| toggle_expanded(alert_id)
                                                     >
@@ -858,6 +849,7 @@ pub fn AlertsHistory(
                                             </div>
                                         }
                                     }).collect_view()}
+                                </div>
                                 </div>
                             }.into_any()
                         }}

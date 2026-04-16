@@ -651,7 +651,7 @@ pub fn WatchesPage() -> impl IntoView {
                         })}
 
                 // Content
-                <div class="flex-1 overflow-auto p-3 sm:p-6 @container">
+                <div class="flex-1 overflow-auto p-4 md:p-6 @container">
                     {move || {
                         if active_view.get() == "watches" {
                             // Watches list view
