@@ -40,6 +40,7 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
     ("create_watch", "Creating watch"),
     ("preview_watch", "Previewing watch"),
     ("update_watch", "Updating watch"),
+    ("update_watch_draft", "Drafting watch update"),
     ("search_watches", "Searching watches"),
     ("delete_watch", "Deleting watch"),
     ("get_watch_info", "Getting watch details"),

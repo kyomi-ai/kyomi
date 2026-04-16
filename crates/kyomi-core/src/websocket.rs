@@ -29,6 +29,7 @@ pub enum MessageType {
     ChartUpdate,
     WatchAlert,
     WatchStateUpdate,
+    WatchUpdate,
     CredentialStatusChanged,
     CatalogStatusUpdate,
     AiUsageUpdate,

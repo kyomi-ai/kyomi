@@ -422,9 +422,9 @@ pub fn WatchModal(
             size=ModalSize::Xl
             footer=footer_view
         >
-            <div class="flex flex-col -m-4 sm:-m-6 min-h-[600px]">
-                // ── Sub-tab bar (Configure / AI) ───────────────────────
-                <div class="border-b border-border px-4 py-2 bg-muted flex items-center gap-1 flex-shrink-0">
+            <div class="@container flex flex-col -m-4 sm:-m-6 min-h-[600px]">
+                // ── Sub-tab bar (Configure / AI) — hidden at @3xl+ where both panels show side-by-side ─
+                <div class="@3xl:hidden border-b border-border px-4 py-2 bg-muted flex items-center gap-1 flex-shrink-0">
                     <ToggleButton
                         variant=Signal::derive(move || if config_tab.get() == "configure" { ButtonVariant::PillActive } else { ButtonVariant::Pill })
                         size=ButtonSize::Pill
@@ -441,10 +441,19 @@ pub fn WatchModal(
                     </ToggleButton>
                 </div>
 
-                // ── Tab content ────────────────────────────────────────
-                <div class="flex-1 min-h-0 overflow-auto">
-                    // ── Configure tab ──────────────────────────────────
-                    {move || (config_tab.get() == "configure").then(|| view! {
+                // ── Content region ─────────────────────────────────────
+                // Below @3xl: single column, only active tab visible.
+                // At @3xl+: two columns side-by-side so the user sees the AI populate the form live.
+                <div class="flex-1 min-h-0 flex flex-col @3xl:flex-row">
+                    // ── Configure column ───────────────────────────────
+                    <div class=move || {
+                        let base = "flex-1 min-h-0 min-w-0 overflow-y-auto @3xl:border-r @3xl:border-border";
+                        if config_tab.get() == "configure" {
+                            base.to_string()
+                        } else {
+                            format!("{base} hidden @3xl:block")
+                        }
+                    }>
                         <form
                             class="space-y-5 p-4 sm:p-6"
                             on:submit=move |ev: web_sys::SubmitEvent| {
@@ -839,20 +848,25 @@ pub fn WatchModal(
                                 }}
                             </div>
                         </form>
-                    })}
+                    </div>
 
-                    // ── AI tab ─────────────────────────────────────────
-                    {move || (config_tab.get() == "ai").then(|| view! {
-                        <div class="flex-1 min-h-[500px] flex flex-col">
-                            <WatchCopilot
-                                watch_config_json=watch_config_json
-                                is_editing=is_editing
-                                editing_watch_name=editing_watch_name.get_value()
-                                on_watch_update=apply_watch_update
-                                active=Signal::derive(move || open.get())
-                            />
-                        </div>
-                    })}
+                    // ── AI column ──────────────────────────────────────
+                    <div class=move || {
+                        let base = "flex-1 min-h-0 min-w-0 flex flex-col";
+                        if config_tab.get() == "ai" {
+                            base.to_string()
+                        } else {
+                            format!("{base} hidden @3xl:flex")
+                        }
+                    }>
+                        <WatchCopilot
+                            watch_config_json=watch_config_json
+                            is_editing=is_editing
+                            editing_watch_name=editing_watch_name.get_value()
+                            on_watch_update=apply_watch_update
+                            active=Signal::derive(move || open.get())
+                        />
+                    </div>
                 </div>
             </div>
         </Modal>

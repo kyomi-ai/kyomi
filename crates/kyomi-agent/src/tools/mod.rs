@@ -44,7 +44,8 @@ use crate::types::{Tool, ToolAnnotations};
 // ---------------------------------------------------------------------------
 
 /// Tools only available in copilot mode (embedded in dashboards).
-pub const COPILOT_ONLY_TOOLS: &[&str] = &["update_dashboard", "update_chart", "preview_watch"];
+pub const COPILOT_ONLY_TOOLS: &[&str] =
+    &["update_dashboard", "update_chart", "update_watch_draft", "preview_watch"];
 
 /// Tools only exposed via MCP.
 pub const MCP_ONLY_TOOLS: &[&str] = &[
@@ -430,9 +431,15 @@ pub fn create_default_registry() -> ToolRegistry {
     // Forecast tools
     registry.register(Arc::new(forecast::ForecastDataTool));
 
-    // Copilot tools
+    // Copilot tools — draft/broadcast variants used by dashboard, chart, and
+    // watch copilots. Dashboard and chart have no DB-mutating equivalent, so
+    // their copilot tools own the `update_dashboard` / `update_chart` names.
+    // Watch DOES have a DB-mutating `UpdateWatchTool` (registered above) used
+    // by MCP and chat, so the copilot variant uses a distinct name
+    // (`update_watch_draft`) and coexists with it in the registry.
     registry.register(Arc::new(copilot::UpdateDashboardCopilotTool));
     registry.register(Arc::new(copilot::UpdateChartCopilotTool));
+    registry.register(Arc::new(copilot::UpdateWatchCopilotTool));
 
     // MCP-only tools
     registry.register(Arc::new(chart::RenderChartTool));
@@ -670,7 +677,7 @@ mod tests {
         let registry = create_default_registry();
         let filter = ToolFilter::default();
         let tools = registry.get_tools(&filter);
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 35);
 
         // Verify all expected tools are registered
         let expected = [
@@ -696,6 +703,7 @@ mod tests {
             "create_watch",
             "preview_watch",
             "update_watch",
+            "update_watch_draft",
             "search_watches",
             "delete_watch",
             "get_watch_info",
@@ -733,7 +741,11 @@ mod tests {
         // Verify constants exist and have expected values.
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_dashboard"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"update_chart"));
+        assert!(COPILOT_ONLY_TOOLS.contains(&"update_watch_draft"));
         assert!(COPILOT_ONLY_TOOLS.contains(&"preview_watch"));
+        // The real DB-mutating update_watch must NOT be copilot-only — chat
+        // and MCP agents rely on it for actual watch persistence.
+        assert!(!COPILOT_ONLY_TOOLS.contains(&"update_watch"));
         assert!(MCP_ONLY_TOOLS.contains(&"render_chart"));
         assert!(FINAL_TOOL_NAMES.contains(&"write_knowledge_file"));
         assert!(WATCH_TOOLS.contains(&"browse_catalog"));
@@ -778,8 +790,8 @@ mod contract_tests {
         let tools = registry.get_tools(&ToolFilter::default());
         assert_eq!(
             tools.len(),
-            34,
-            "Expected 34 tools, got {}. Names: {:?}",
+            35,
+            "Expected 35 tools, got {}. Names: {:?}",
             tools.len(),
             tools.iter().map(|t| t.name()).collect::<Vec<_>>()
         );
@@ -810,6 +822,7 @@ mod contract_tests {
             "create_watch",
             "preview_watch",
             "update_watch",
+            "update_watch_draft",
             "search_watches",
             "delete_watch",
             "get_watch_info",
@@ -1168,8 +1181,8 @@ mod contract_tests {
             );
         }
 
-        // Chat context should exclude 3 copilot + 5 MCP = 8 tools
-        assert_eq!(tools.len(), 34 - 8);
+        // Chat context should exclude 4 copilot + 5 MCP = 9 tools
+        assert_eq!(tools.len(), 35 - 9);
     }
 
     #[test]
@@ -1196,7 +1209,7 @@ mod contract_tests {
                 "Copilot filter should not include MCP tool '{mcp_name}'"
             );
         }
-        assert_eq!(tools.len(), 34 - 5); // Only MCP excluded
+        assert_eq!(tools.len(), 35 - 5); // Only MCP excluded
     }
 
     #[test]
@@ -1222,7 +1235,21 @@ mod contract_tests {
                 "MCP filter should not include copilot tool '{copilot_name}'"
             );
         }
-        assert_eq!(tools.len(), 34 - 3); // Only copilot excluded
+        assert_eq!(tools.len(), 35 - 4); // Only copilot excluded
+
+        // Regression guard for KYO-15: the real DB-mutating `update_watch`
+        // must stay visible to MCP, and the draft-only copilot variant must
+        // be filtered out. A previous pass keyed the copilot tool as
+        // `update_watch`, which replaced the real tool in the registry and
+        // then got excluded by COPILOT_ONLY_TOOLS — breaking MCP watch writes.
+        assert!(
+            names.contains("update_watch"),
+            "MCP filter must include the real update_watch tool"
+        );
+        assert!(
+            !names.contains("update_watch_draft"),
+            "MCP filter must NOT include the copilot-only update_watch_draft tool"
+        );
     }
 
     #[test]
@@ -1298,7 +1325,7 @@ mod contract_tests {
         let filter = ToolFilter::default();
         let definitions = registry.get_tool_definitions(&filter);
 
-        assert_eq!(definitions.len(), 34);
+        assert_eq!(definitions.len(), 35);
         for def in &definitions {
             assert!(!def.name.is_empty(), "Tool definition has empty name");
             assert!(

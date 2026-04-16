@@ -1625,6 +1625,68 @@ fn render_update_watch(schema: &Value) -> impl IntoView {
     }
 }
 
+fn render_update_watch_draft(schema: &Value) -> impl IntoView {
+    let input = schema.get("input");
+    let output = schema.get("output");
+
+    let has_error = output.is_some_and(|o| {
+        matches!(o, Value::String(_))
+            || (o.is_object()
+                && (has_key(o, "error") || bool_field(o, "success") == Some(false)))
+    });
+    let is_success = output.is_some_and(|o| bool_field(o, "success") == Some(true));
+
+    view! {
+        <div class="space-y-2">
+            {input.map(|inp| {
+                let summary = str_field(inp, "summary").map(String::from);
+                let name = str_field(inp, "name").map(String::from);
+                let schedule = str_field(inp, "schedule").map(describe_cron_local);
+                let mode = str_field(inp, "mode").map(String::from);
+                let prompt = str_field(inp, "prompt").map(String::from);
+                let queries_count = array_field(inp, "queries").map(|q| q.len()).unwrap_or(0);
+
+                view! {
+                    <div>
+                        {section_label("Watch Draft Update:")}
+                        <div class="mt-1 bg-muted p-3 rounded border border-border">
+                            {summary.map(|s| view! { <div class="text-sm text-foreground mb-2">{s}</div> })}
+                            <div class="text-xs space-y-1">
+                                {name.map(|n| info_row("Name", &n))}
+                                {schedule.map(|s| info_row("Schedule", &s))}
+                                {mode.map(|m| info_row("Mode", &m))}
+                                {prompt.map(|p| view! {
+                                    <div class="text-xs">
+                                        <span class="text-muted-foreground">"Prompt: "</span>
+                                        <span class="text-foreground">{p}</span>
+                                    </div>
+                                })}
+                                {(queries_count > 0).then(|| {
+                                    info_row("Reference queries", &queries_count.to_string())
+                                })}
+                            </div>
+                        </div>
+                    </div>
+                }
+            })}
+            {is_success.then(|| {
+                let msg = output
+                    .and_then(|o| str_field(o, "message"))
+                    .unwrap_or("Watch draft updated")
+                    .to_string();
+                success_block(msg)
+            })}
+            {has_error.then(|| {
+                let msg = output.map(|o| {
+                    if let Value::String(s) = o { s.clone() }
+                    else { str_field(o, "error").unwrap_or("Failed to update watch draft").to_string() }
+                }).unwrap_or_default();
+                error_block("Error", msg)
+            })}
+        </div>
+    }
+}
+
 fn render_search_watches(schema: &Value) -> impl IntoView {
     let input = schema.get("input");
     let output = schema.get("output");
@@ -2201,6 +2263,7 @@ pub fn render_tool_schema(schema: Value) -> impl IntoView {
         "create_watch" => render_create_watch(&schema).into_any(),
         "preview_watch" => render_preview_watch(&schema).into_any(),
         "update_watch" => render_update_watch(&schema).into_any(),
+        "update_watch_draft" => render_update_watch_draft(&schema).into_any(),
         "search_watches" => render_search_watches(&schema).into_any(),
         "delete_watch" => render_delete_watch(&schema).into_any(),
         "trigger_watch" => render_trigger_watch(&schema).into_any(),

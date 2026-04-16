@@ -806,62 +806,6 @@ html {
    * padding; breakout blocks fill the full inner width. */
 }
 
-/* ── Scoped opt-out: watch preview card ──────────────────────────
- *
- * `WatchPreviewCardView` in `markdown_renderer.rs` renders a Tailwind-
- * styled UI card that lives INSIDE the `.prose-kyomi` wrapper (because
- * it's part of the MarkdownRenderer output). But its content is UI
- * chrome, not editorial prose — it uses Tailwind utilities like
- * `.text-base`, `.text-xs`, `.font-medium`, `.uppercase`, etc.
- *
- * Without this reset, `.prose-kyomi h3` (Instrument Serif 24px with
- * editorial margins) would win over Tailwind's `.text-base` on the
- * card's "Watch Preview" heading, and `.prose-kyomi p` would add 16px
- * bottom margin to every Tailwind-styled label inside the card.
- *
- * This block re-establishes the isolation the old Tailwind Typography
- * `not-prose` escape hatch used to provide, scoped to the card wrapper. */
-
-.prose-kyomi .watch-preview-card :is(h1, h2, h3, h4, h5, h6) {
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  font-style: inherit;
-  color: inherit;
-  letter-spacing: inherit;
-  line-height: inherit;
-  text-transform: none;
-  margin: 0;
-  padding: 0;
-  border: none;
-}
-
-.prose-kyomi .watch-preview-card :is(p, ul, ol, li, blockquote, pre, table, figure, figcaption) {
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  font-style: inherit;
-  color: inherit;
-  letter-spacing: inherit;
-  line-height: inherit;
-  margin: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  max-width: none;
-}
-
-.prose-kyomi .watch-preview-card :is(a, strong, em, code) {
-  font-family: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  font-style: inherit;
-  color: inherit;
-  text-decoration: inherit;
-  background: transparent;
-  padding: 0;
-}
-
 /* ── Dark mode adjustments ─────────────────────────────────────── */
 
 .dark .prose-kyomi h1 code,
