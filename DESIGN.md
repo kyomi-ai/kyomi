@@ -703,7 +703,7 @@ The primary Kyomi interface. A markdown document rendered with ChartML charts in
 - Left sidebar (20rem, navy) with nav
 - Content area with rendered markdown
 - Dashboard headings in Instrument Serif
-- Body text in DM Sans at 15px, line-height 1.8
+- Body text in DM Sans at 15px, line-height 1.60
 - ChartML charts render in cards with `--surface` background, `--border` border, `--radius-md` corners
 - Chart headers: font-body 14px weight 600, with chartml type label in font-data 12px muted
 - Metric cards in 3-column grid above first chart

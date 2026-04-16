@@ -159,10 +159,10 @@ html {
 .prose h2 { font-size: 1.6rem; }     /* 24px */
 .prose h3 { font-size: 1.333rem; }   /* 20px */
 
-/* Dashboard prose body: 15px, line-height 1.8 per DESIGN.md */
+/* Dashboard prose body: 15px, line-height 1.60 per DESIGN.md */
 .prose {
   font-size: 15px;
-  line-height: 1.8;
+  line-height: 1.60;
 }
 
 /* ── Layout: one continuous warm surface ────────────────────────────
@@ -507,8 +507,8 @@ html {
    * with `margin-left/right: auto` + explicit wider width. */
   color: var(--color-foreground);
   font-family: 'DM Sans', system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.60;
   max-width: 72ch;
   margin: 0 auto;
 }
@@ -585,14 +585,14 @@ html {
 /* ── Paragraphs ────────────────────────────────────────────────── */
 
 .prose-kyomi p {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
 }
 
 /* Opt-in lead paragraph (editorial lede). Users add `class="lead"` to
  * the first <p> after an h1 when they want the larger-lighter treatment. */
 .prose-kyomi p.lead {
   font-size: 20px;
-  line-height: 1.55;
+  line-height: 1.50;
   color: var(--color-muted-foreground);
   max-width: 60ch;
   margin-bottom: 32px;
@@ -625,7 +625,7 @@ html {
 
 .prose-kyomi ul,
 .prose-kyomi ol {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
   padding-left: 24px;
   /* Tailwind v4 preflight resets list-style to `none` on ul/ol by
    * default. Without these, the markers defined by
@@ -643,7 +643,7 @@ html {
 }
 
 .prose-kyomi li {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .prose-kyomi ul > li::marker {
@@ -723,7 +723,7 @@ html {
   overflow-x: auto;
   font-family: 'Geist Mono', ui-monospace, monospace;
   font-size: 13px;
-  line-height: 1.55;
+  line-height: 1.50;
 }
 
 .prose-kyomi pre code {
@@ -937,8 +937,8 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 .wysiwyg-container {
   /* Content shell — matches `.prose-kyomi` container in this file. */
   --kode-content-font-family: 'DM Sans', system-ui, sans-serif;
-  --kode-content-font-size: 16px;
-  --kode-content-line-height: 1.7;
+  --kode-content-font-size: 15px;
+  --kode-content-line-height: 1.60;
   --kode-content-max-width: 72ch;
 
   /* Headings — Instrument Serif, Variant A sizes (h1/h2/h3).
@@ -996,8 +996,8 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   --kode-h6-letter-spacing: 0.08em;
 
   /* Paragraphs */
-  --kode-paragraph-margin: 0 0 16px;
-  --kode-paragraph-line-height: 1.7;
+  --kode-paragraph-margin: 0 0 12px;
+  --kode-paragraph-line-height: 1.60;
 
   /* Inline formatting — strong matches `.prose-kyomi strong` weight 600 */
   --kode-bold-font-weight: 600;
