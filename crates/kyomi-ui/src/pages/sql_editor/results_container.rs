@@ -387,7 +387,7 @@ pub fn ResultsContainer(
             view! {
                 <Button
                     variant=ButtonVariant::Outline
-                    size=ButtonSize::Sm
+                    size=ButtonSize::Xs
                     disabled=MaybeProp::derive(move || Some(generating.get()))
                     aria_label="Create chart from results"
                     on:click=move |_| create_chart.run(())

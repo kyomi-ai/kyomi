@@ -44,6 +44,9 @@ pub enum ButtonSize {
     IconSm,
     /// Extra-small icon-only: 20px square — for inline actions in tabs, chips.
     IconXs,
+    /// Extra-small: same 13px text as Sm but half the vertical padding (py-1).
+    /// Use for action buttons in dense UI like tab bars where Sm is too tall.
+    Xs,
     /// Pill sub-tab size: compact padding, xs font.
     Pill,
 }
@@ -102,6 +105,8 @@ fn size_classes(size: ButtonSize) -> &'static str {
         ButtonSize::IconSm => "h-7 w-7 p-0",
         // Extra-small icon-only: 20px square for inline tab/chip actions
         ButtonSize::IconXs => "h-5 w-5 p-0",
+        // Extra-small: reduced vertical padding, same 13px text as Sm
+        ButtonSize::Xs => "px-3 py-1 text-[13px]",
         // Pill sub-tab: compact padding, xs font, rounded
         ButtonSize::Pill => "px-3 py-1 text-xs rounded",
     }
