@@ -29,7 +29,7 @@ use crate::server_fns::watches::{
     delete_watch, get_watch_execution, get_watch_executions, list_watches, run_watch_now,
     toggle_watch,
 };
-use crate::types::WatchListItem;
+use crate::types::{WatchExecutionItem, WatchListItem};
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes};
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -354,42 +354,46 @@ pub fn WatchesPage() -> impl IntoView {
     let query_cache = expect_context::<QueryCache>();
     let watches_resource = use_query("watches", || (), |_: ()| list_watches());
 
-    // Executions list resource (for execution log modal).
-    let executions_resource = Resource::new(
-        move || {
-            let wid = viewing_watch_id.get();
-            let show = show_execution_log.get();
-            (wid, show)
-        },
-        move |(wid, show)| async move {
-            if let (Some(watch_id), true) = (wid, show) {
-                get_watch_executions(watch_id, None).await
-            } else {
-                Ok(vec![])
-            }
-        },
-    );
-
-    // Selected execution with full trace.
-    let execution_detail_resource = Resource::new(
-        move || {
-            let wid = viewing_watch_id.get();
-            let show = show_execution_log.get();
-            let selected = selected_execution_id.get();
-            (wid, show, selected)
-        },
-        move |(wid, show, selected)| async move {
-            if let (Some(watch_id), true) = (wid, show) {
-                if let Some(eid) = selected {
-                    get_watch_execution(watch_id, eid).await.ok()
-                } else {
-                    None
+    // Executions list — manual signal + effect (Resource::new keeps stale initial
+    // value across refetches in CSR mode, preventing the modal from showing data).
+    let executions_data = RwSignal::new(Option::<Result<Vec<WatchExecutionItem>, ServerFnError>>::None);
+    Effect::new(move |_| {
+        let wid = viewing_watch_id.get();
+        let show = show_execution_log.get();
+        if let (Some(watch_id), true) = (wid, show) {
+            executions_data.set(None);
+            leptos::task::spawn_local(async move {
+                let result = get_watch_executions(watch_id, None).await;
+                if let Ok(ref execs) = result && !execs.is_empty() && selected_execution_id.get_untracked().is_none() {
+                    set_selected_execution_id.set(Some(execs[0].id));
                 }
+                executions_data.set(Some(result));
+            });
+        } else {
+            executions_data.set(None);
+        }
+    });
+
+    // Selected execution detail — same pattern.
+    let execution_detail_data = RwSignal::new(Option::<Option<WatchExecutionItem>>::None);
+    Effect::new(move |_| {
+        let wid = viewing_watch_id.get();
+        let show = show_execution_log.get();
+        let selected = selected_execution_id.get();
+        if let (Some(watch_id), true) = (wid, show) {
+            if let Some(eid) = selected {
+                execution_detail_data.set(None);
+                leptos::task::spawn_local(async move {
+                    let result = get_watch_execution(watch_id, eid).await.ok();
+                    execution_detail_data.set(Some(result));
+                });
             } else {
-                None
+                execution_detail_data.set(Some(None));
             }
-        },
-    );
+        } else {
+            execution_detail_data.set(None);
+        }
+    });
 
     // ── Handlers ─────────────────────────────────────────────────────────
 
@@ -756,26 +760,18 @@ pub fn WatchesPage() -> impl IntoView {
                     let show = show_execution_log.get();
                     let wid = viewing_watch_id.get();
                     (show && wid.is_some()).then(|| {
-                        let watch_id = wid.unwrap();
-                        let execs = executions_resource.get()
+                        let watch_id = wid.clone().unwrap();
+                        let watch_id_for_prompt = watch_id.clone();
+                        let modal_title = watches_resource.get_untracked()
                             .and_then(|r| r.ok())
-                            .unwrap_or_default();
-                        let selected_exec = StoredValue::new(execution_detail_resource.get().flatten());
-                        let is_loading = Signal::derive(move || {
-                            executions_resource.get().is_none()
-                        });
-                        // Find watch name and prompt from watches resource (single lookup).
-                        let (watch_name, watch_prompt) = watches_resource.get()
+                            .and_then(|watches| watches.iter().find(|w| w.watch_id == watch_id).map(|w| w.name.clone()))
+                            .map(|name| format!("Execution History - {name}"))
+                            .unwrap_or_else(|| "Execution History".to_string());
+                        let watch_prompt_val = StoredValue::new(watches_resource.get_untracked()
                             .and_then(|r| r.ok())
-                            .and_then(|watches| {
-                                watches.iter().find(|w| w.watch_id == watch_id)
-                                    .map(|w| (w.name.clone(), w.prompt.clone()))
-                            })
-                            .unwrap_or_default();
+                            .and_then(|watches| watches.iter().find(|w| w.watch_id == watch_id_for_prompt).map(|w| w.prompt.clone()))
+                            .unwrap_or_default());
 
-                        let modal_title = format!("Execution History - {watch_name}");
-                        let execs = StoredValue::new(execs);
-                        let watch_prompt = StoredValue::new(watch_prompt);
                         view! {
                             <Modal
                                 show=Signal::derive(move || show_execution_log.get())
@@ -787,13 +783,25 @@ pub fn WatchesPage() -> impl IntoView {
                                 title=modal_title
                                 size=ModalSize::Xl
                             >
-                                <ExecutionLogViewer
-                                    executions=execs.get_value()
-                                    selected_execution=Signal::derive(move || selected_exec.get_value())
-                                    on_select_execution=on_select_execution
-                                    is_loading=is_loading
-                                    watch_prompt=watch_prompt.get_value()
-                                />
+                                {move || {
+                                    let raw: Option<Result<Vec<WatchExecutionItem>, ServerFnError>> = executions_data.get();
+                                    let is_loading = raw.is_none();
+                                    let execs = raw
+                                        .and_then(|r| r.ok())
+                                        .unwrap_or_default();
+                                    let selected: Option<WatchExecutionItem> = execution_detail_data.get().flatten();
+                                    let selected_stored = StoredValue::new(selected);
+                                    let wp = watch_prompt_val.get_value();
+                                    view! {
+                                        <ExecutionLogViewer
+                                            executions=execs
+                                            selected_execution=Signal::derive(move || selected_stored.get_value())
+                                            on_select_execution=on_select_execution
+                                            is_loading=Signal::derive(move || is_loading)
+                                            watch_prompt=wp
+                                        />
+                                    }
+                                }}
                             </Modal>
                         }
                     })
