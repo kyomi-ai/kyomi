@@ -20,7 +20,7 @@ use crate::components::chat::WebSocketProvider;
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::feedback_modal::FeedbackModal;
 use crate::components::EmptyState;
-use crate::query_cache::provide_query_cache;
+use crate::query_cache::{provide_query_cache, use_query};
 #[cfg(target_arch = "wasm32")]
 use crate::query_cache::QueryCache;
 use crate::server_fns::context::get_user_context;
@@ -423,11 +423,55 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 user_ctx.refetch();
             });
 
+            // ── Recent sessions cache invalidation (KYO-23) ──────────
+            // New chat created — sidebar should show it.
+            let cache_sessions_1 = query_cache;
+            let session_created_unsub = ws.subscribe("session_created", move |_msg| {
+                cache_sessions_1.invalidate("recent_sessions");
+            });
+
+            // Chat title changed — sidebar should reflect the new title.
+            let cache_sessions_2 = query_cache;
+            let title_update_unsub = ws.subscribe("title_update", move |_msg| {
+                cache_sessions_2.invalidate("recent_sessions");
+            });
+
+            // New message in a shared conversation — sidebar list may
+            // reorder by recency.
+            let cache_sessions_3 = query_cache;
+            let shared_activity_unsub = ws.subscribe("shared_conversation_activity", move |_msg| {
+                cache_sessions_3.invalidate("recent_sessions");
+            });
+
+            // ── Unread alerts cache invalidation (KYO-23) ────────────
+            // Alert triggered — badge count should increase.
+            let cache_alerts_1 = query_cache;
+            let watch_alert_unsub = ws.subscribe("watch_alert", move |_msg| {
+                cache_alerts_1.invalidate("unread_alerts");
+            });
+
+            // Watch execution status changed — badge count may change
+            // (e.g. execution completed, alert triggered or cleared).
+            let cache_alerts_2 = query_cache;
+            let watch_state_unsub = ws.subscribe("watch_state_update", move |_msg| {
+                cache_alerts_2.invalidate("unread_alerts");
+            });
+
             let dashboard_unsub = send_wrapper::SendWrapper::new(dashboard_unsub);
             let workspace_unsub = send_wrapper::SendWrapper::new(workspace_unsub);
+            let session_created_unsub = send_wrapper::SendWrapper::new(session_created_unsub);
+            let title_update_unsub = send_wrapper::SendWrapper::new(title_update_unsub);
+            let shared_activity_unsub = send_wrapper::SendWrapper::new(shared_activity_unsub);
+            let watch_alert_unsub = send_wrapper::SendWrapper::new(watch_alert_unsub);
+            let watch_state_unsub = send_wrapper::SendWrapper::new(watch_state_unsub);
             on_cleanup(move || {
                 dashboard_unsub.take()();
                 workspace_unsub.take()();
+                session_created_unsub.take()();
+                title_update_unsub.take()();
+                shared_activity_unsub.take()();
+                watch_alert_unsub.take()();
+                watch_state_unsub.take()();
             });
         });
     }
@@ -446,12 +490,18 @@ fn Sidebar(
     is_mobile: ReadSignal<bool>,
     mobile_open: ReadSignal<bool>,
 ) -> impl IntoView {
-    let sessions = Resource::new(|| (), |_| get_recent_sessions());
+    // Recent sessions — cached at the Layout level via QueryCache (KYO-23).
+    // Stale-while-revalidate: on re-mount the sidebar shows the last-known
+    // list instantly (no skeleton flash) and refreshes in the background.
+    // WS events (session_created, title_update, shared_conversation_activity)
+    // invalidate the cache via QueryCacheWsBridge.
+    let sessions = use_query("recent_sessions", || (), |()| get_recent_sessions());
     let user_info = Resource::new(|| (), |_| get_sidebar_user());
-    // Fetch unread alerts count for the Watches sidebar badge.
-    // Mirrors React's `useQuery(['unread-alerts-count'])` in Sidebar.jsx.
-    // Uses LocalResource to avoid hydration mismatch — badge is client-only UI.
-    let unread_alerts = LocalResource::new(get_unread_alerts_count);
+    // Unread alerts count — cached at the Layout level via QueryCache (KYO-23).
+    // use_query initialises with None and fetches via spawn_local, so it is
+    // safe from hydration mismatch (same guarantee as the old LocalResource).
+    // WS events (watch_alert, watch_state_update) invalidate via QueryCacheWsBridge.
+    let unread_alerts = use_query("unread_alerts", || (), |()| get_unread_alerts_count());
     let (user_menu_open, set_user_menu_open) = signal(false);
     let (feedback_open, set_feedback_open) = signal(false);
 
@@ -478,15 +528,17 @@ fn Sidebar(
     });
 
     // Listen for 'sessions-deleted' custom events to refresh the recent sessions list.
-    // Matches React: Sidebar.jsx lines 171-173
+    // Matches React: Sidebar.jsx lines 171-173.
+    // Uses QueryCache invalidation instead of Resource::refetch (KYO-23).
     #[cfg(target_arch = "wasm32")]
     {
         use send_wrapper::SendWrapper;
         use wasm_bindgen::prelude::*;
 
+        let query_cache = expect_context::<QueryCache>();
         let window = web_sys::window().expect("window");
         let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
-            sessions.refetch();
+            query_cache.invalidate("recent_sessions");
         });
         let _ = window.add_event_listener_with_callback(
             "sessions-deleted",
@@ -610,59 +662,61 @@ fn Sidebar(
                         <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] font-medium">"Recent Chats"</div>
                     </div>
                     <div class="space-y-1 overflow-y-auto scrollbar-sidebar">
-                        <Transition fallback=|| view! {
-                            <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] px-3 py-2 italic">"Loading..."</div>
-                        }>
-                            {move || sessions.get().map(|result| match result {
-                                Ok(sessions) if sessions.is_empty() => view! {
-                                    <EmptyState
-                                        variant=EmptyStateVariant::Sidebar
-                                        title="No chats yet"
-                                        description="Start a conversation to see it here"
-                                        class="py-4 px-2 border-0"
-                                    />
-                                }.into_any(),
-                                Ok(sessions) => {
-                                    let current_path = pathname;
-                                    view! {
-                                        <For
-                                            each=move || sessions.clone()
-                                            key=|s| s.session_id.clone()
-                                            let:session
-                                        >
-                                            {
-                                                let session_href = format!("/chat/{}", session.session_id);
-                                                let session_href_cmp = session_href.clone();
-                                                let title = session.title.clone();
-                                                view! {
-                                                    <a
-                                                        href=session_href
-                                                        class=move || {
-                                                            let active = current_path.get() == session_href_cmp;
-                                                            if active {
-                                                                "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-amber-500 bg-[rgba(217,119,6,0.12)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                                            } else {
-                                                                "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-[var(--color-sidebar-foreground)] hover:bg-[var(--color-sidebar-hover)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                                            }
+                        // sessions is a use_query Signal (not a Resource), so
+                        // Transition/Suspense won't track it. Handle the None
+                        // (loading) state explicitly in the match below.
+                        {move || match sessions.get() {
+                            None => view! {
+                                <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] px-3 py-2 italic">"Loading..."</div>
+                            }.into_any(),
+                            Some(Ok(sessions)) if sessions.is_empty() => view! {
+                                <EmptyState
+                                    variant=EmptyStateVariant::Sidebar
+                                    title="No chats yet"
+                                    description="Start a conversation to see it here"
+                                    class="py-4 px-2 border-0"
+                                />
+                            }.into_any(),
+                            Some(Ok(sessions)) => {
+                                let current_path = pathname;
+                                view! {
+                                    <For
+                                        each=move || sessions.clone()
+                                        key=|s| s.session_id.clone()
+                                        let:session
+                                    >
+                                        {
+                                            let session_href = format!("/chat/{}", session.session_id);
+                                            let session_href_cmp = session_href.clone();
+                                            let title = session.title.clone();
+                                            view! {
+                                                <a
+                                                    href=session_href
+                                                    class=move || {
+                                                        let active = current_path.get() == session_href_cmp;
+                                                        if active {
+                                                            "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-amber-500 bg-[rgba(217,119,6,0.12)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                                        } else {
+                                                            "block px-3 py-2.5 rounded-lg cursor-pointer transition-colors text-sm text-[var(--color-sidebar-foreground)] hover:bg-[var(--color-sidebar-hover)] truncate focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                                         }
-                                                    >
-                                                        {title}
-                                                    </a>
-                                                }
+                                                    }
+                                                >
+                                                    {title}
+                                                </a>
                                             }
-                                        </For>
-                                    }
-                                }.into_any(),
-                                Err(_) => view! {
-                                    <EmptyState
-                                        variant=EmptyStateVariant::Sidebar
-                                        title="No chats yet"
-                                        description="Start a conversation to see it here"
-                                        class="py-4 px-2 border-0"
-                                    />
-                                }.into_any(),
-                            })}
-                        </Transition>
+                                        }
+                                    </For>
+                                }
+                            }.into_any(),
+                            Some(Err(_)) => view! {
+                                <EmptyState
+                                    variant=EmptyStateVariant::Sidebar
+                                    title="No chats yet"
+                                    description="Start a conversation to see it here"
+                                    class="py-4 px-2 border-0"
+                                />
+                            }.into_any(),
+                        }}
                     </div>
                 </div>
             </div>
