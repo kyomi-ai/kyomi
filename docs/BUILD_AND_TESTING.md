@@ -6,6 +6,138 @@ This document exists because we keep making the same mistakes. Read it before ve
 
 ---
 
+## Verification Quickstart
+
+**Every agent verifying a PR runs this checklist top-to-bottom before doing anything else.** Each step is a check. If it passes, move on. If it fails, run the fix command, then re-check.
+
+Do not skip steps. Do not reorder them. Do not substitute the commands.
+
+### 1. Confirm the PR's code is what's checked out
+
+```bash
+gh pr checkout <PR_NUMBER>
+git log -1 --oneline   # should match the PR's head commit
+```
+
+### 2. Sanity-check compilation
+
+```bash
+cargo check --workspace   # ~7-15s incremental
+```
+
+If this fails, the PR is broken. Do not continue — report the compile error in your verification comment.
+
+### 3. Build the WASM release (required for Playwright)
+
+Debug WASM is 253MB and will timeout Playwright. Every verification run needs release WASM.
+
+```bash
+cd crates/kyomi-ui
+RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
+cd /home/jason/repos/kyomi
+```
+
+**Never pipe `trunk build` through `tail` or truncate its output** — post-processing happens after compilation. Interruption leaves `dist/` with a 2.8KB `index.html` and no WASM. Let it finish.
+
+### 4. Build the dev-server binary (only if server-side Rust changed in the PR)
+
+Check the PR diff: does it touch `apps/server/`, `crates/kyomi-auth/`, `crates/kyomi-core/`, `crates/kyomi-datasource/`, `crates/kyomi-agent/`, or any `src/server_fns/`? If yes:
+
+```bash
+cargo build --profile dev-server -p kyomi-server   # ~5-8 min if stale, ~30s incremental
+```
+
+If the PR is frontend-only (`crates/kyomi-ui/src/`, `style/main.css`, path deps like chartml), skip this step — the existing dev-server binary reads `dist/` from disk.
+
+### 5. Start (or restart) the dev server
+
+Only restart if you rebuilt the server binary in step 4. Otherwise keep the running instance.
+
+```bash
+kill $(lsof -ti:3000) 2>/dev/null
+cd /home/jason/repos/kyomi && set -a; source .env; set +a
+PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
+```
+
+**Critical:**
+- Source `.env` to get `DATABASE_URL` (triggers SaaS mode — Postgres + Redis)
+- `FRONTEND_URL=https://dev.kyomi.ai` is required for cookies to work over HTTPS
+- NEVER use `SELF_HOSTED=true`, NEVER use `FRONTEND_URL=http://localhost:3000`
+
+Wait for it to respond:
+
+```bash
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/login | grep -q 200; do sleep 2; done
+```
+
+### 6. Seed test users
+
+```bash
+python3 scripts/e2e-regression/seed-test-user.py
+```
+
+Idempotent — safe to run every time. Creates `e2e-test@kyomi.dev` / `E2eTestPass123!` and `e2e-admin@kyomi.dev` / `E2eAdminPass123!`.
+
+### 7. Provision test data the PR needs
+
+The verifier creates whatever data the feature needs. "No dashboards exist" is never a reason to skip testing — create one.
+
+**Sample datasource** (for catalog, SQL editor, chart features):
+
+```bash
+# Login
+curl -s -c /tmp/e2e-cookies.txt -X POST http://localhost:3000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"e2e-test@kyomi.dev","password":"E2eTestPass123!"}'
+
+# Provision (201 = created, 409 = already exists, both are fine)
+curl -s -b /tmp/e2e-cookies.txt -X POST http://localhost:3000/api/v1/datasources/sample
+
+# Wait ~5s for catalog index before testing catalog-dependent features
+```
+
+Creates "Acme Analytics (Sample)" ClickHouse datasource with 4 tables.
+
+**Other common data needs:**
+- **Dashboards**: create via Playwright flow on `/dashboards` or `POST /api/v1/dashboards` (see route handler for request shape)
+- **Watches / alerts**: create via `POST /api/v1/watches` with the test user's cookies. To trigger an alert, either wait for the cron or call the manual run endpoint
+- **Chat sessions**: create by sending a message — `POST /api/v1/chat/sessions` then `POST /api/v1/chat/sessions/{id}/messages`
+- **Knowledge docs**: `POST /api/v1/knowledge` with markdown body
+
+When in doubt, grep the repo for the route that creates the resource and look at its request struct.
+
+### 8. Run Playwright
+
+Use `.cjs` extension (repo is `"type": "module"`). Set `NODE_PATH=/home/jason/repos/kyomi/node_modules`. Full page screenshots at 1920x1080.
+
+**Login flow that works on the dev-server:**
+
+```javascript
+const { chromium } = require('playwright');
+const browser = await chromium.launch({ headless: true });
+const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+const page = await ctx.newPage();
+
+await page.goto('http://localhost:3000/login');
+await page.waitForTimeout(3000);  // release WASM loads in 2-3s; debug needs 8-15s
+await page.fill('input[type="email"]', 'e2e-test@kyomi.dev');
+await page.fill('input[type="password"]', 'E2eTestPass123!');
+await page.click('button[type="submit"]');
+await page.waitForURL(url => !url.toString().includes('/login'), { timeout: 15000 });
+await page.waitForTimeout(2000);
+// Now authenticated — navigate wherever you need
+```
+
+For page-level verification, prefer `/kyomi-test` which already encapsulates this flow.
+
+### 9. Read the evidence
+
+A screenshot saved but not read is not evidence. Open every screenshot with the Read tool. Interpret it against the acceptance criterion.
+
+---
+
+---
+
 ## Architecture: Three Build Artifacts
 
 The Leptos frontend has **three separate build artifacts** that must all be current for changes to be visible:
