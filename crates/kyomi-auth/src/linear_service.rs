@@ -164,7 +164,7 @@ pub async fn create_feedback_issue(
         "variables": variables,
     });
 
-    let http = kyomi_datasource_server::http_client()
+    let http = crate::http_client()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
     let response = http
@@ -224,7 +224,7 @@ async fn upload_screenshot(
     image_bytes: &[u8],
     filename: &str,
 ) -> Result<String, String> {
-    let http = kyomi_datasource_server::http_client()
+    let http = crate::http_client()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
     // Step 1: Get upload URL from Linear

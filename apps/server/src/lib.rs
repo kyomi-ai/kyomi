@@ -11,7 +11,6 @@ pub mod helpers;
 pub mod leptos_frontend;
 pub mod middleware;
 pub mod routes;
-pub mod services;
 pub mod state;
 
 use std::net::SocketAddr;
