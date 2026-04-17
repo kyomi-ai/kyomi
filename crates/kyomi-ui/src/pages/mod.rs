@@ -10,6 +10,7 @@ pub mod connect_setup;
 pub mod dashboards;
 pub mod home;
 pub mod knowledge;
+pub mod not_found;
 pub mod not_implemented;
 pub mod onboarding;
 pub mod settings;

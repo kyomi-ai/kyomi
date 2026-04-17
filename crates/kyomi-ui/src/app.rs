@@ -25,6 +25,7 @@ use crate::pages::connect_setup::ConnectSetupPage;
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
 use crate::pages::home::HomePage;
 use crate::pages::knowledge::KnowledgePage;
+use crate::pages::not_found::NotFoundPage;
 use crate::pages::not_implemented::NotImplementedPage;
 use crate::pages::onboarding::DatasourceOnboardingPage;
 use crate::pages::settings::ai::AiPage;
@@ -78,7 +79,7 @@ pub fn App() -> impl IntoView {
         <ThemeProvider initial_preference="system">
             <NavigationProgress is_routing />
             <Router set_is_routing>
-                <Routes fallback=|| view! { <p>"Page not found"</p> }>
+                <Routes fallback=|| view! { <Layout><NotFoundPage/></Layout> }>
                     // Auth pages — NO sidebar/layout wrapper
                     <Route path=path!("/login") view=|| view! { <LoginPage/> }/>
                     <Route path=path!("/signup") view=|| view! { <LoginPage signup_mode=true/> }/>
