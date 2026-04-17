@@ -313,7 +313,7 @@ async fn start_server(
 
     let enable_schedulers = config_arc.enable_schedulers;
     let ws_manager = kyomi_auth::websocket::WebSocketManager::new(None, db.clone());
-    let mcp_sessions = kyomi_server::mcp_session_manager::MCPSessionManager::new(kv.clone());
+    let mcp_sessions = kyomi_auth::mcp_session_manager::MCPSessionManager::new(kv.clone());
     let connect_registry = kyomi_datasource_server::ConnectRegistry::new_local();
     let registry = kyomi_core::platform::PlatformRegistry::new();
     let platforms = Arc::new(registry);

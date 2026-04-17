@@ -93,6 +93,12 @@ pub struct ServerContext {
     /// Required by Connect Setup server functions.
     pub connect_token: Option<std::sync::Arc<kyomi_auth::connect_token::ConnectTokenService>>,
 
+    /// MCP Streamable HTTP session manager for billing-tier-driven
+    /// tool capability invalidation. Required by the Leptos billing
+    /// server_fn. `None` disables MCP invalidation on the Leptos path
+    /// (acceptable only when MCP sessions aren't in use, e.g. tests).
+    pub mcp_sessions: Option<kyomi_auth::mcp_session_manager::MCPSessionManager>,
+
     /// Slack HTTP client for Slack Web API calls (channel listing, etc.).
     /// Present only when the `slack` feature is enabled and Slack is configured.
     #[cfg(feature = "slack")]

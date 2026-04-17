@@ -195,7 +195,7 @@ async fn main() {
     };
 
     // MCP session manager — KVPool-backed for multi-replica consistency.
-    let mcp_sessions = kyomi_server::mcp_session_manager::MCPSessionManager::new(kv.clone());
+    let mcp_sessions = kyomi_auth::mcp_session_manager::MCPSessionManager::new(kv.clone());
 
     // Build ConnectTokenService if private key is configured (optional — Connect features)
     let connect_token = match config_arc.connect_jwt_private_key.as_deref() {

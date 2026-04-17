@@ -305,64 +305,24 @@ async fn create_checkout(
 }
 
 /// Modify an existing Stripe subscription (update to current Cloud price).
+///
+/// Delegates to `kyomi_auth::subscription_service::modify_existing_subscription`
+/// so the Leptos server_fn in `crates/kyomi-ui/src/server_fns/billing.rs`
+/// performs the exact same Stripe + DB + MCP invalidation sequence.
 async fn modify_existing_subscription(
     state: &AppState,
     stripe_service: &StripeService,
     workspace: &WorkspaceRow,
     subscription_id: &str,
 ) -> Result<Json<Value>, kyomi_core::Error> {
-    let new_price_id =
-        stripe_config::get_cloud_price_id().ok_or_else(
-            || kyomi_core::Error::BadRequest("STRIPE_CLOUD_MONTHLY not configured".to_string()),
-        )?;
-
-    // Modify the subscription to the Cloud price
-    let sub_data = stripe_service
-        .update_subscription(subscription_id, new_price_id, "cloud", "monthly")
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to modify subscription: {e}");
-            kyomi_core::Error::Internal(format!("Failed to modify subscription: {e}"))
-        })?;
-
-    // Update workspace from Stripe data (source of truth)
-    let period_start_str = sub_data.period_start.map(|dt| dt.to_rfc3339());
-    let period_end_str = sub_data.period_end.map(|dt| dt.to_rfc3339());
-    kyomi_core::db_execute!(
+    kyomi_auth::subscription_service::modify_existing_subscription(
         &state.db,
-        "UPDATE workspaces SET \
-             subscription_tier = $1, \
-             subscription_status = $2, \
-             billing_cycle = $3, \
-             subscription_period_start = $4, \
-             subscription_period_end = $5, \
-             user_limit = $6 \
-         WHERE workspace_id = $7",
-        &sub_data.tier,
-        &sub_data.status,
-        sub_data.billing_cycle.as_deref(),
-        period_start_str.as_deref(),
-        period_end_str.as_deref(),
-        sub_data.user_limit,
-        &workspace.workspace_id
-    )?;
-
-    tracing::info!(
-        workspace_id = %workspace.workspace_id,
-        tier = %sub_data.tier,
-        "Modified existing subscription"
-    );
-
-    // Notify connected SSE clients that tools have changed, then invalidate
-    // all sessions so disconnected clients re-initialize on next request.
-    state
-        .mcp_sessions
-        .notify_tools_changed(&workspace.workspace_id)
-        .await;
-    state
-        .mcp_sessions
-        .invalidate_workspace_sessions(&workspace.workspace_id)
-        .await;
+        stripe_service,
+        &state.mcp_sessions,
+        &workspace.workspace_id,
+        subscription_id,
+    )
+    .await?;
 
     // Return a "checkout" response with redirect back to billing page
     // (matching Python — returns checkout_url pointing to billing page)

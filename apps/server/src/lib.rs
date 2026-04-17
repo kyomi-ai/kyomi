@@ -9,7 +9,6 @@ pub mod connect;
 pub mod health;
 pub mod helpers;
 pub mod leptos_frontend;
-pub mod mcp_session_manager;
 pub mod middleware;
 pub mod routes;
 pub mod services;
@@ -212,6 +211,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 )),
                 platforms: Some(state.platforms.clone()),
                 connect_token: state.connect_token.clone(),
+                mcp_sessions: Some(state.mcp_sessions.clone()),
                 #[cfg(feature = "slack")]
                 slack_client: extras.slack_client,
             };

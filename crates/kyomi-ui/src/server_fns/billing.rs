@@ -393,18 +393,31 @@ pub async fn create_checkout(
     let stripe_service = require_stripe(&ctx.config)?;
     let workspace = load_workspace(&ctx.db, ws_id).await?;
 
-    // If user already has an active subscription, modify it directly
+    // If user already has an active subscription, modify it directly.
+    //
+    // Delegates to the shared service so this path performs the same
+    // Stripe + DB + MCP invalidation sequence as the REST route. Without
+    // this, MCP clients would only see updated tool capabilities after
+    // the Stripe webhook round-trip.
     if let Some(ref sub_id) = workspace.stripe_subscription_id
         && (workspace.subscription_status == "active"
             || workspace.subscription_status == "cancelled")
     {
-        return modify_existing_subscription(
+        kyomi_auth::subscription_service::modify_existing_subscription(
             &ctx.db,
             &stripe_service,
-            sub_id,
+            ctx.mcp_sessions
+                .as_ref()
+                .ok_or_else(|| ServerFnError::new("MCP session manager unavailable"))?,
             ws_id,
+            sub_id,
         )
-        .await;
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+        return Ok(CheckoutOutcome::Modified(
+            "Subscription reactivated successfully".to_string(),
+        ));
     }
 
     // New subscription flow — single Cloud price from env
@@ -453,53 +466,6 @@ pub async fn create_checkout(
         client_secret: result.client_secret,
         session_id: result.session_id,
     }))
-}
-
-/// Modify an existing Stripe subscription (reactivate cancelled plan).
-///
-/// Cloud plan — single tier, so the only meaningful modification is
-/// reactivating a cancelled subscription on the same price.
-#[cfg(feature = "ssr")]
-async fn modify_existing_subscription(
-    db: &kyomi_core::DbPool,
-    stripe_service: &kyomi_auth::stripe_service::StripeService,
-    subscription_id: &str,
-    workspace_id: &str,
-) -> Result<CheckoutOutcome, ServerFnError> {
-    let new_price_id =
-        kyomi_auth::stripe_config::get_cloud_price_id().ok_or_else(
-            || ServerFnError::new("STRIPE_CLOUD_MONTHLY not configured"),
-        )?;
-
-    let sub_data = stripe_service
-        .update_subscription(subscription_id, new_price_id, "cloud", "monthly")
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to modify subscription: {e}")))?;
-
-    // Write Stripe state back to DB immediately (don't wait for webhook)
-    let period_start_str = sub_data.period_start.map(|dt| dt.to_rfc3339());
-    let period_end_str = sub_data.period_end.map(|dt| dt.to_rfc3339());
-    kyomi_core::db_execute!(
-        db,
-        "UPDATE workspaces SET \
-             subscription_tier = $1, \
-             subscription_status = $2, \
-             billing_cycle = $3, \
-             subscription_period_start = $4, \
-             subscription_period_end = $5, \
-             user_limit = $6 \
-         WHERE workspace_id = $7",
-        &sub_data.tier,
-        &sub_data.status,
-        sub_data.billing_cycle.as_deref(),
-        period_start_str.as_deref(),
-        period_end_str.as_deref(),
-        sub_data.user_limit,
-        workspace_id
-    )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    Ok(CheckoutOutcome::Modified("Subscription reactivated successfully".to_string()))
 }
 
 /// Cancel the current subscription at period end.

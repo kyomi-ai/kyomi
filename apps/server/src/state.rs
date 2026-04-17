@@ -4,6 +4,7 @@
 
 use axum::extract::FromRef;
 use kyomi_auth::connect_token::ConnectTokenService;
+use kyomi_auth::mcp_session_manager::MCPSessionManager;
 use kyomi_auth::middleware::AuthState;
 // SlackClient moved to enterprise/kyomi-slack crate (Phase 12).
 use kyomi_auth::stripe_service::StripeService;
@@ -14,7 +15,6 @@ use kyomi_core::platform::PlatformRegistry;
 
 use crate::cancel_registry::CancelRegistry;
 use crate::connect::registry::ConnectRegistry;
-use crate::mcp_session_manager::MCPSessionManager;
 
 /// Application-wide shared state.
 ///

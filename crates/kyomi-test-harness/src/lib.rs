@@ -88,7 +88,7 @@ pub async fn setup_server() -> TestServer {
         ),
         ws_manager,
         stripe: None,
-        mcp_sessions: kyomi_server::mcp_session_manager::MCPSessionManager::new(kv.clone()),
+        mcp_sessions: kyomi_auth::mcp_session_manager::MCPSessionManager::new(kv.clone()),
         cancel_registry: kyomi_server::cancel_registry::CancelRegistry::default(),
         connect_token: None,
         connect_registry: kyomi_server::connect::registry::ConnectRegistry::new_local(),
