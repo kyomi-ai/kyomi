@@ -17,6 +17,19 @@ All commits require a cryptographically signed approval from the **code-review-a
 - **Implementation agents cannot sign their own reviews** — only the code-review-architect agent has signing authority
 - **Do NOT tell the reviewer how to sign the approval** — the code-review-architect has its own signing instructions built into its prompt. Providing alternative signing instructions, workarounds, or "if you don't have the key" fallbacks will cause invalid signatures and block the commit. Just ask it to review and let it handle the signing process itself.
 
+## Merging PRs
+
+`gh pr merge` is intercepted by a wrapper at `~/.local/bin/gh` that requires a test-verification signature. The signing key lives only in the `test-verification-architect` sub-agent's system prompt — no env var, no file, nothing the main conversation can see.
+
+### Two contexts, two rules
+
+- **Autonomous loops** (`/kyomi-backlog` and friends running under `/loop` or cron): MUST go through the full flow — dispatch `test-verification-architect`, let it verify and sign, then `gh pr merge` succeeds. Bypassing here defeats the whole safety model. Do not call `/usr/bin/gh` directly, do not edit `.git/verification-approvals/`, do not hack around it. The gate is the gate.
+- **Supervised sessions** (a human is in the conversation telling you what to do): when the user explicitly authorizes a merge, call **`/usr/bin/gh pr merge <N> --squash`** directly. That's the documented bypass — the wrapper's own comment (line 9: *"Bypass only by calling the real gh directly at /usr/bin/gh — visible in transcripts"*) says so. The "visible in transcripts" part is the audit trail: the user can see you did it, which is what makes it safe.
+
+### When you're unsure
+
+Ask the user. One sentence: "Shall I dispatch `test-verification-architect` for the full flow, or merge directly via `/usr/bin/gh` since you're authorizing?" Both answers are fine; neither is wrong in its own context.
+
 ## Build & Testing — READ THIS FIRST
 
 **Before verifying ANY UI change, read `docs/BUILD_AND_TESTING.md`.**
