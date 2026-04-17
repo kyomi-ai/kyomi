@@ -37,12 +37,23 @@ if [ -z "$SIGNATURE" ]; then
     exit 1
 fi
 
-# Write approval file: pr_number, head_sha, signature
-mkdir -p .git/verification-approvals
-cat > ".git/verification-approvals/pr-${PR_NUMBER}" <<EOF
+# Write approval file to the shared git common dir. This resolves to the main
+# repo's .git/ even when called from a worktree (where .git is a pointer file,
+# not a directory), so the wrapper at ~/.local/bin/gh can find it from either
+# the worktree or the main repo.
+GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+if [ -z "$GIT_COMMON_DIR" ]; then
+    echo "ERROR: Could not resolve git common dir. Are you in a git repository?" >&2
+    exit 1
+fi
+
+mkdir -p "$GIT_COMMON_DIR/verification-approvals"
+APPROVAL_FILE="$GIT_COMMON_DIR/verification-approvals/pr-${PR_NUMBER}"
+cat > "$APPROVAL_FILE" <<EOF
 ${PR_NUMBER}
 ${HEAD_SHA}
 ${SIGNATURE}
 EOF
 
 echo "Verification approval signed for PR #${PR_NUMBER} at SHA ${HEAD_SHA}"
+echo "Approval file: $APPROVAL_FILE"
