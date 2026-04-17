@@ -23,7 +23,7 @@ import uuid
 import psycopg2
 from argon2 import PasswordHasher
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -149,13 +149,14 @@ def seed():
     if cur.fetchone():
         print(f"  ✓ Workspace already exists: {WORKSPACE_NAME}")
     else:
+        trial_ends_at = now + timedelta(days=30)
         cur.execute("""
             INSERT INTO workspaces (
-                workspace_id, name, status, owner_user_id,
-                subscription_tier, subscription_status,
-                created_at, updated_at
-            ) VALUES (%s, %s, 'active', %s, 'pro', 'active', %s, %s)
-        """, (WORKSPACE_ID, WORKSPACE_NAME, owner_user_id, now, now))
+                workspace_id, name, admin_email, owner_user_id, status,
+                subscription_tier, subscription_status, trial_ends_at,
+                user_limit, ai_bundle_balance_usd, created_at, updated_at
+            ) VALUES (%s, NULL, %s, %s, 'trial', 'cloud', 'trialing', %s, NULL, %s, %s, %s)
+        """, (WORKSPACE_ID, owner_user["email"], owner_user_id, trial_ends_at, 5.0, now, now))
         print(f"  ✓ Created workspace: {WORKSPACE_NAME} ({WORKSPACE_ID})")
 
     # Set last_workspace_id on users
