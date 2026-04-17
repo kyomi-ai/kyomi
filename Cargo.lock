@@ -5645,7 +5645,7 @@ dependencies = [
 
 [[package]]
 name = "kode-core"
-version = "0.2.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "ropey",
 ]
@@ -5661,7 +5661,7 @@ dependencies = [
 
 [[package]]
 name = "kode-leptos"
-version = "0.2.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "arborium",
  "arborium-theme",
@@ -5681,7 +5681,7 @@ dependencies = [
 
 [[package]]
 name = "kode-markdown"
-version = "0.2.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",

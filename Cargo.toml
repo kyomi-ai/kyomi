@@ -141,6 +141,9 @@ chartml-chart-table = { path = "/home/jason/repos/chartml/crates/chartml-chart-t
 chartml-datafusion = { path = "/home/jason/repos/chartml/crates/chartml-datafusion" }
 chartml-leptos = { path = "/home/jason/repos/chartml/crates/chartml-leptos" }
 
+# Code editor (kode) — same local-path pattern as chartml above.
+kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
+
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }
 

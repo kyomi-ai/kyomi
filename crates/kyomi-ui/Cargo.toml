@@ -146,8 +146,7 @@ async-trait = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Code editor (WASM-only — uses web-sys DOM APIs)
-# Absolute path: local-dev-only dep; allows worktree builds from any location.
-kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
+kode-leptos = { workspace = true }
 
 # libm: software-implemented math functions for wasm32-unknown-unknown.
 # DataFusion's default math UDFs (acosh/asinh/atanh) emit extern C calls that
