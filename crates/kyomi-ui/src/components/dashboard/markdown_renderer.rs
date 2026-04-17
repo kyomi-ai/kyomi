@@ -42,10 +42,13 @@ enum ContentSegment {
     /// Plain markdown text to be rendered as HTML.
     Markdown(String),
     /// ChartML YAML content extracted from a ```chartml fenced code block.
+    ///
+    /// `yamls` carries ONE fully-serialized YAML spec per chart in the block.
+    /// A single-chart block has `yamls.len() == 1`; a 3-chart YAML-array block
+    /// has `yamls.len() == 3`, with each entry already split into its own spec.
     ChartML {
-        yaml: String,
+        yamls: Vec<String>,
         block_index: usize,
-        array_index: usize,
     },
     /// Non-chartml fenced code block.
     CodeBlock { language: String, code: String },
@@ -113,22 +116,11 @@ fn parse_segments(content: &str) -> Vec<ContentSegment> {
 
                         if language == "chartml" {
                             if !block_content.is_empty() {
-                                // Parse the YAML to check for arrays
-                                let chart_count =
-                                    count_chart_array_items(block_content);
-                                if chart_count > 1 {
-                                    for idx in 0..chart_count {
-                                        segments.push(ContentSegment::ChartML {
-                                            yaml: block_content.to_string(),
-                                            block_index: chartml_block_index,
-                                            array_index: idx,
-                                        });
-                                    }
-                                } else {
+                                let yamls = split_chartml_block(block_content);
+                                if !yamls.is_empty() {
                                     segments.push(ContentSegment::ChartML {
-                                        yaml: block_content.to_string(),
+                                        yamls,
                                         block_index: chartml_block_index,
-                                        array_index: 0,
                                     });
                                 }
                             }
@@ -153,11 +145,13 @@ fn parse_segments(content: &str) -> Vec<ContentSegment> {
                         let block_content = inner.trim();
                         if language == "chartml" {
                             if !block_content.is_empty() {
-                                segments.push(ContentSegment::ChartML {
-                                    yaml: block_content.to_string(),
-                                    block_index: chartml_block_index,
-                                    array_index: 0,
-                                });
+                                let yamls = split_chartml_block(block_content);
+                                if !yamls.is_empty() {
+                                    segments.push(ContentSegment::ChartML {
+                                        yamls,
+                                        block_index: chartml_block_index,
+                                    });
+                                }
                             }
                             // Not incrementing here since we break out
                         } else if !block_content.is_empty() {
@@ -227,21 +221,24 @@ fn find_closing_fence(text: &str) -> Option<usize> {
     None
 }
 
-/// Count how many chart-type items are in a YAML array block.
-fn count_chart_array_items(yaml: &str) -> usize {
-    match serde_yaml::from_str::<serde_json::Value>(yaml) {
-        Ok(serde_json::Value::Array(arr)) => {
-            arr.iter()
-                .filter(|v| {
-                    v.as_object()
-                        .and_then(|o| o.get("type"))
-                        .and_then(|t| t.as_str())
-                        == Some("chart")
-                })
-                .count()
-                .max(1)
+/// Parse a ```chartml``` block. If the YAML top-level value is a Sequence,
+/// return each item re-serialized to its own YAML string. If it's a Mapping
+/// (or fails to parse), return a single-element vec containing the original
+/// block content unchanged.
+fn split_chartml_block(block_content: &str) -> Vec<String> {
+    match serde_yaml::from_str::<serde_json::Value>(block_content) {
+        Ok(serde_json::Value::Array(items)) => {
+            let per_item: Vec<String> = items
+                .iter()
+                .filter_map(|v| serde_yaml::to_string(v).ok())
+                .collect();
+            if per_item.is_empty() {
+                vec![block_content.to_string()]
+            } else {
+                per_item
+            }
         }
-        _ => 1,
+        _ => vec![block_content.to_string()],
     }
 }
 
@@ -332,6 +329,39 @@ pub(crate) fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.get("mode"))
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+/// Extract `layout.colSpan` (or snake_case `col_span`) from a parsed spec,
+/// clamped to 1..=12. Defaults to 12 when missing / invalid.
+fn extract_col_span(spec: &serde_json::Value) -> u8 {
+    let raw = spec
+        .get("layout")
+        .and_then(|l| l.get("colSpan").or_else(|| l.get("col_span")))
+        .and_then(|v| v.as_u64());
+    match raw {
+        Some(n) if (1..=12).contains(&n) => n as u8,
+        _ => 12,
+    }
+}
+
+/// Map colSpan (1..=12) to static Tailwind classes. Mobile = full width,
+/// `md:` breakpoint = specified span. Static strings so Tailwind's content
+/// scanner picks them up.
+fn chart_col_span_class(col_span: u8) -> &'static str {
+    match col_span {
+        1 => "col-span-12 md:col-span-1",
+        2 => "col-span-12 md:col-span-2",
+        3 => "col-span-12 md:col-span-3",
+        4 => "col-span-12 md:col-span-4",
+        5 => "col-span-12 md:col-span-5",
+        6 => "col-span-12 md:col-span-6",
+        7 => "col-span-12 md:col-span-7",
+        8 => "col-span-12 md:col-span-8",
+        9 => "col-span-12 md:col-span-9",
+        10 => "col-span-12 md:col-span-10",
+        11 => "col-span-12 md:col-span-11",
+        _ => "col-span-12", // 12 or anything unexpected
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,7 +870,7 @@ fn ChartBlock(
     let on_ask_stored = StoredValue::new(on_ask_cb);
 
     view! {
-        <div class="my-2">
+        <div>
             // Native Rust ChartHeaderBar — re-renders when type/orientation/mode change
             {move || {
                 let ct = current_chart_type.get();
@@ -1033,25 +1063,44 @@ pub fn MarkdownRenderer(
                                 <CodeBlockView language=language code=code />
                             }.into_any()
                         }
-                        ContentSegment::ChartML { yaml, block_index, array_index } => {
+                        ContentSegment::ChartML { yamls, block_index } => {
                             let edit = edit_cb.get_value();
                             let delete = delete_cb.get_value();
                             let save = save_cb.get_value();
                             let info = info_cb.get_value();
                             let ask = ask_cb.get_value();
+                            let palette_val = palette_name.get_value();
+                            let chart_items = yamls
+                                .into_iter()
+                                .enumerate()
+                                .map(|(array_index, chart_yaml)| {
+                                    let col_span = serde_yaml::from_str::<serde_json::Value>(&chart_yaml)
+                                        .ok()
+                                        .as_ref()
+                                        .map(extract_col_span)
+                                        .unwrap_or(12);
+                                    let col_class = chart_col_span_class(col_span);
+                                    let palette = palette_val.clone();
+                                    view! {
+                                        <div class=col_class>
+                                            <ChartBlock
+                                                yaml=chart_yaml
+                                                block_index=block_index
+                                                array_index=array_index
+                                                parameters=parameters
+                                                on_edit_chart=edit
+                                                on_delete_chart=delete
+                                                on_save_to_dashboard=save
+                                                on_chart_info=info
+                                                on_ask_about_chart=ask
+                                                chart_palette=palette
+                                            />
+                                        </div>
+                                    }
+                                })
+                                .collect_view();
                             view! {
-                                <ChartBlock
-                                    yaml=yaml
-                                    block_index=block_index
-                                    array_index=array_index
-                                    parameters=parameters
-                                    on_edit_chart=edit
-                                    on_delete_chart=delete
-                                    on_save_to_dashboard=save
-                                    on_chart_info=info
-                                    on_ask_about_chart=ask
-                                    chart_palette=palette_name.get_value()
-                                />
+                                <div class="grid grid-cols-12 gap-4 my-2">{chart_items}</div>
                             }.into_any()
                         }
                     }
@@ -1084,9 +1133,13 @@ mod tests {
         let segments = parse_segments(input);
         assert_eq!(segments.len(), 3);
         assert!(matches!(&segments[0], ContentSegment::Markdown(_)));
-        assert!(
-            matches!(&segments[1], ContentSegment::ChartML { yaml, .. } if yaml.contains("type: bar"))
-        );
+        match &segments[1] {
+            ContentSegment::ChartML { yamls, .. } => {
+                assert_eq!(yamls.len(), 1);
+                assert!(yamls[0].contains("type: bar"));
+            }
+            _ => panic!("expected ChartML segment"),
+        }
         assert!(matches!(&segments[2], ContentSegment::Markdown(_)));
     }
 
@@ -1097,13 +1150,21 @@ mod tests {
         let segments = parse_segments(input);
         assert_eq!(segments.len(), 5);
         assert!(matches!(&segments[0], ContentSegment::Markdown(_)));
-        assert!(
-            matches!(&segments[1], ContentSegment::ChartML { yaml, .. } if yaml == "chart1")
-        );
+        match &segments[1] {
+            ContentSegment::ChartML { yamls, .. } => {
+                assert_eq!(yamls.len(), 1);
+                assert_eq!(yamls[0], "chart1");
+            }
+            _ => panic!("expected ChartML segment"),
+        }
         assert!(matches!(&segments[2], ContentSegment::Markdown(_)));
-        assert!(
-            matches!(&segments[3], ContentSegment::ChartML { yaml, .. } if yaml == "chart2")
-        );
+        match &segments[3] {
+            ContentSegment::ChartML { yamls, .. } => {
+                assert_eq!(yamls.len(), 1);
+                assert_eq!(yamls[0], "chart2");
+            }
+            _ => panic!("expected ChartML segment"),
+        }
         assert!(matches!(&segments[4], ContentSegment::Markdown(_)));
     }
 
@@ -1112,9 +1173,13 @@ mod tests {
         let input = "```chartml\nchart_data\n```\nAfter.";
         let segments = parse_segments(input);
         assert_eq!(segments.len(), 2);
-        assert!(
-            matches!(&segments[0], ContentSegment::ChartML { yaml, .. } if yaml == "chart_data")
-        );
+        match &segments[0] {
+            ContentSegment::ChartML { yamls, .. } => {
+                assert_eq!(yamls.len(), 1);
+                assert_eq!(yamls[0], "chart_data");
+            }
+            _ => panic!("expected ChartML segment"),
+        }
         assert!(matches!(&segments[1], ContentSegment::Markdown(_)));
     }
 
@@ -1168,14 +1233,20 @@ mod tests {
     fn test_chartml_block_indices() {
         let input = "```chartml\nfirst\n```\ntext\n```chartml\nsecond\n```";
         let segments = parse_segments(input);
-        assert!(matches!(
-            &segments[0],
-            ContentSegment::ChartML { block_index: 0, array_index: 0, .. }
-        ));
-        assert!(matches!(
-            &segments[2],
-            ContentSegment::ChartML { block_index: 1, array_index: 0, .. }
-        ));
+        match &segments[0] {
+            ContentSegment::ChartML { block_index, yamls } => {
+                assert_eq!(*block_index, 0);
+                assert_eq!(yamls.len(), 1);
+            }
+            _ => panic!("expected ChartML segment at index 0"),
+        }
+        match &segments[2] {
+            ContentSegment::ChartML { block_index, yamls } => {
+                assert_eq!(*block_index, 1);
+                assert_eq!(yamls.len(), 1);
+            }
+            _ => panic!("expected ChartML segment at index 2"),
+        }
     }
 
     #[test]
@@ -1188,10 +1259,13 @@ mod tests {
             &segments[0],
             ContentSegment::CodeBlock { language, .. } if language == "sql"
         ));
-        assert!(matches!(
-            &segments[1],
-            ContentSegment::ChartML { yaml, .. } if yaml.contains("type: chart")
-        ));
+        match &segments[1] {
+            ContentSegment::ChartML { yamls, .. } => {
+                assert_eq!(yamls.len(), 1);
+                assert!(yamls[0].contains("type: chart"));
+            }
+            _ => panic!("expected ChartML segment"),
+        }
         assert!(matches!(
             &segments[2],
             ContentSegment::CodeBlock { language, .. } if language == "python"
@@ -1267,4 +1341,37 @@ mod tests {
         assert_eq!(result, input);
     }
 
+    // -----------------------------------------------------------------------
+    // ChartML array splitting + colSpan extraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_chartml_array_block_splits_per_chart() {
+        let input = "```chartml\n- type: chart\n  version: 1\n  title: A\n- type: chart\n  version: 1\n  title: B\n```";
+        let segments = parse_segments(input);
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            ContentSegment::ChartML { yamls, block_index } => {
+                assert_eq!(*block_index, 0);
+                assert_eq!(yamls.len(), 2);
+                assert!(yamls[0].contains("title: A"));
+                assert!(yamls[1].contains("title: B"));
+                // Each item should contain its own type/version, not be the raw array
+                assert!(!yamls[0].trim_start().starts_with('-'));
+            }
+            _ => panic!("expected ChartML segment"),
+        }
+    }
+
+    #[test]
+    fn test_extract_col_span() {
+        let s: serde_json::Value = serde_json::json!({"layout": {"colSpan": 6}});
+        assert_eq!(extract_col_span(&s), 6);
+        let s2: serde_json::Value = serde_json::json!({"layout": {"col_span": 3}});
+        assert_eq!(extract_col_span(&s2), 3);
+        let s3: serde_json::Value = serde_json::json!({"layout": {"colSpan": 99}});
+        assert_eq!(extract_col_span(&s3), 12); // out of range → default 12
+        let s4: serde_json::Value = serde_json::json!({});
+        assert_eq!(extract_col_span(&s4), 12);
+    }
 }
