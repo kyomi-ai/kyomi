@@ -171,10 +171,11 @@ impl Extension for ChartMLExtension {
             #[cfg(target_arch = "wasm32")]
             if let Some(window) = web_sys::window() {
                 let detail = wasm_bindgen::JsValue::from_str(yaml);
-                if let Ok(event) = web_sys::CustomEvent::new_with_event_init_dict(
-                    event_name,
-                    web_sys::CustomEventInit::new().detail(&detail),
-                ) {
+                let init = web_sys::CustomEventInit::new();
+                init.set_detail(&detail);
+                if let Ok(event) =
+                    web_sys::CustomEvent::new_with_event_init_dict(event_name, &init)
+                {
                     let _ = window.dispatch_event(&event);
                 }
             }

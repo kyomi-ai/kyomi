@@ -15,7 +15,7 @@ use crate::server_fns::dashboards::DashboardListItem;
 // ─── Mobile detection ───────────────────────────────────────────────────────
 
 /// Breakpoint (in CSS pixels) below which the viewport is considered mobile.
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "hydrate")]
 pub(crate) const MOBILE_BREAKPOINT: f64 = 768.0;
 
 /// Returns a reactive signal tracking whether the viewport is mobile-sized.
