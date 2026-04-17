@@ -479,6 +479,7 @@ pub fn SqlCodeEditor(
                         theme=editor_theme
                         on_change=on_change
                         on_ready=on_ready
+                        placeholder=Signal::stored("-- Start typing, or press ⌘K to browse the catalog".to_string())
                     />
                 </div>
 
