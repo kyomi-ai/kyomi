@@ -27,7 +27,7 @@ ENV TRUNK_VERSION=0.21.14 \
     TAILWIND_VERSION=v4.2.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl clang \
+        ca-certificates curl clang brotli gzip \
     && rm -rf /var/lib/apt/lists/*
 
 # wasm target for the Leptos hydrate build.

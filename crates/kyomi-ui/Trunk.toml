@@ -15,3 +15,22 @@ command_arguments = [
     "--output", "style/output.css",
     "--content", "src/**/*.rs",
 ]
+
+# Precompress content-hashed assets (WASM, JS, CSS) at max quality so the
+# server can serve them with Content-Encoding: br (or gzip) without paying
+# the compression cost at request time. Cloudflare and nginx pass origin
+# Content-Encoding through unchanged.
+#
+# Cuts first-load WASM transfer from ~11.3 MB (Cloudflare's on-the-fly gzip)
+# to ~6.2 MB (brotli q=11). See apps/server/src/leptos_frontend.rs for the
+# matching pass-through logic.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = [
+    "-c",
+    # Find every .wasm/.js/.css under dist/ (recursively), then write .br and
+    # .gz alongside. -k keeps the original; -f overwrites stale artifacts
+    # from a previous build. brotli -q 11 is max; gzip -9 likewise.
+    "set -eu; cd \"$TRUNK_STAGING_DIR\"; find . -type f \\( -name '*.wasm' -o -name '*.js' -o -name '*.css' \\) -print0 | xargs -0 -I{} sh -c 'brotli -q 11 -k -f \"$1\" && gzip -9 -k -f \"$1\"' _ {}",
+]

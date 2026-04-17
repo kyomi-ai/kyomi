@@ -93,25 +93,16 @@ pub async fn serve_leptos_shell() -> Response {
 }
 
 /// Serve Leptos static assets (WASM, JS, CSS) from `/leptos/`.
+///
+/// Delegates to [`file_response`] so pre-compressed `.br`/`.gz` variants
+/// and proper cache headers are used for content-hashed assets, matching
+/// the fallback [`serve`] handler.
 pub async fn serve_leptos_asset(
     axum::extract::Path(path): axum::extract::Path<String>,
+    headers: HeaderMap,
 ) -> Response {
     match LeptosAssets::get(&path) {
-        Some(file) => {
-            let mime = mime_from_path(&path);
-            (
-                [
-                    (header::CONTENT_TYPE, mime),
-                    (
-                        header::CACHE_CONTROL,
-                        // Content-hashed filenames — cache forever
-                        HeaderValue::from_static("public, max-age=31536000, immutable"),
-                    ),
-                ],
-                file.data.to_vec(),
-            )
-                .into_response()
-        }
+        Some(file) => file_response(&path, &file, &headers),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -203,32 +194,49 @@ fn file_response(
         // Content-hashed filenames (WASM, JS, CSS from trunk) — cache forever.
         // The hash changes when content changes, so this is safe.
 
-        // Serve pre-compressed version if client supports gzip and a .gz
-        // file exists. Avoids nginx compressing 32 MB WASM on every request.
-        let accepts_gzip = request_headers
+        // Serve pre-compressed versions produced by the trunk post-build hook.
+        // Prefer brotli (~45% smaller than gzip for WASM), fall back to gzip,
+        // then the raw file. Cloudflare and nginx pass origin Content-Encoding
+        // through without re-compressing.
+        let accept_encoding = request_headers
             .get(header::ACCEPT_ENCODING)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("gzip"));
+            .unwrap_or("");
 
-        if accepts_gzip {
-            let gz_path = format!("{path}.gz");
-            if let Some(gz_file) = LeptosAssets::get(&gz_path) {
-                return (
-                    [
-                        (header::CONTENT_TYPE, mime),
-                        (
-                            header::CACHE_CONTROL,
-                            HeaderValue::from_static("public, max-age=31536000, immutable"),
-                        ),
-                        (
-                            header::CONTENT_ENCODING,
-                            HeaderValue::from_static("gzip"),
-                        ),
-                    ],
-                    gz_file.data.to_vec(),
-                )
-                    .into_response();
-            }
+        if accept_encoding.contains("br")
+            && let Some(br_file) = LeptosAssets::get(&format!("{path}.br"))
+        {
+            return (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=31536000, immutable"),
+                    ),
+                    (header::CONTENT_ENCODING, HeaderValue::from_static("br")),
+                    (header::VARY, HeaderValue::from_static("accept-encoding")),
+                ],
+                br_file.data.to_vec(),
+            )
+                .into_response();
+        }
+
+        if accept_encoding.contains("gzip")
+            && let Some(gz_file) = LeptosAssets::get(&format!("{path}.gz"))
+        {
+            return (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=31536000, immutable"),
+                    ),
+                    (header::CONTENT_ENCODING, HeaderValue::from_static("gzip")),
+                    (header::VARY, HeaderValue::from_static("accept-encoding")),
+                ],
+                gz_file.data.to_vec(),
+            )
+                .into_response();
         }
 
         return (
@@ -238,6 +246,7 @@ fn file_response(
                     header::CACHE_CONTROL,
                     HeaderValue::from_static("public, max-age=31536000, immutable"),
                 ),
+                (header::VARY, HeaderValue::from_static("accept-encoding")),
             ],
             file.data.to_vec(),
         )
