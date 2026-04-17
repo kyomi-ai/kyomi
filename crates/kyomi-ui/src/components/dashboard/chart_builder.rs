@@ -1549,7 +1549,7 @@ fn SqlEditorSection(
         view! {
             <div class="min-h-[200px] border border-input rounded-md overflow-hidden" style="height: calc(100vh - 420px);">
                 <CodeEditor
-                    language=Signal::stored(Language::Sql)
+                    language=Signal::stored(Language::new_static("sql"))
                     content=content
                     theme=theme
                     on_change=on_change
@@ -1589,7 +1589,7 @@ fn YamlEditorSection(
         view! {
             <div class="h-full min-h-[400px] border-t border-border overflow-hidden">
                 <CodeEditor
-                    language=Signal::stored(Language::Yaml)
+                    language=Signal::stored(Language::new_static("yaml"))
                     content=content
                     theme=theme
                     on_change=on_change

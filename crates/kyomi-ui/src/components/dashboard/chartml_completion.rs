@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use kode_leptos::{
     CompletionContext, CompletionItem, CompletionKind, CompletionProviderConfig,
-    FenceTracker, Language,
+    FenceTracker,
 };
 
 /// Build a [`CompletionProviderConfig`] for ChartML YAML (pure YAML editors).
@@ -53,7 +53,7 @@ fn provide_markdown_completions(ctx: CompletionContext) -> Vec<CompletionItem> {
         let lang = tracker.process_line(line);
 
         if i == ctx.cursor.line {
-            if lang == Language::Yaml {
+            if lang.name() == "yaml" {
                 cursor_in_yaml = true;
             }
             break;
@@ -61,12 +61,16 @@ fn provide_markdown_completions(ctx: CompletionContext) -> Vec<CompletionItem> {
 
         // Track the most recent fence opening — when we see a Markdown line
         // followed by YAML, the fence content starts on the next line.
-        if lang == Language::Markdown {
-            // If the next line is YAML content, this was the fence opener.
-            // We'll set fence_start when we first see YAML.
-            fence_start = None;
-        } else if lang == Language::Yaml && fence_start.is_none() {
-            fence_start = Some(i);
+        match lang.name() {
+            "markdown" => {
+                // If the next line is YAML content, this was the fence opener.
+                // We'll set fence_start when we first see YAML.
+                fence_start = None;
+            }
+            "yaml" if fence_start.is_none() => {
+                fence_start = Some(i);
+            }
+            _ => {}
         }
     }
 

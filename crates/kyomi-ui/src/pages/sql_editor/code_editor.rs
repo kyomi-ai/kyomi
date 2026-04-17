@@ -5,7 +5,7 @@
 //! React reference: `apps/frontend/src/components/MonacoSQLEditor.jsx` (~406 lines)
 //!
 //! Features:
-//! - kode-leptos `CodeEditor` with `Language::Sql`
+//! - kode-leptos `CodeEditor` with `language="sql"`
 //! - Keyboard shortcut: Cmd/Ctrl+Enter to run query
 //! - Cursor position display (line:column) via `EditorHandle`
 //! - Error markers (squiggly underlines) from dry run results
@@ -474,7 +474,7 @@ pub fn SqlCodeEditor(
                 // Editor area — takes remaining space
                 <div class="flex-1 min-h-0 overflow-hidden">
                     <CodeEditor
-                        language=Signal::stored(Language::Sql)
+                        language=Signal::stored(Language::new_static("sql"))
                         content=content_signal
                         theme=editor_theme
                         on_change=on_change

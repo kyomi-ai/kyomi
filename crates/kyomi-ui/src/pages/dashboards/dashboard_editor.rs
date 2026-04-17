@@ -11,7 +11,7 @@
 //! ├──────────────────────────────┬───────────────────────────────────────────────────┤
 //! │                              │                                  │
 //! │   Kode Editor                │   Live Preview                   │
-//! │   (Language::Markdown)       │   (MarkdownRenderer)             │
+//! │   (language=markdown)        │   (MarkdownRenderer)             │
 //! │                              │                                  │
 //! └──────────────────────────────┴──────────────────────────────────┘
 //! ```
@@ -1049,7 +1049,7 @@ fn DashboardCodeEditor(
 
         view! {
             <CodeEditor
-                language=Signal::stored(Language::Markdown)
+                language=Signal::stored(Language::new_static("markdown"))
                 content=content
                 theme=editor_theme
                 on_change=on_change

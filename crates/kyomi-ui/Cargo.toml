@@ -147,6 +147,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 
 # Code editor (WASM-only — uses web-sys DOM APIs)
 kode-leptos = { workspace = true }
+# Tree-sitter grammars for kode-leptos. Features selected in the workspace
+# Cargo.toml keep only the grammars this app actually uses (sql, yaml,
+# markdown) — cutting ~12 other language tables saves multiple MB of WASM.
+arborium = { workspace = true }
 
 # libm: software-implemented math functions for wasm32-unknown-unknown.
 # DataFusion's default math UDFs (acosh/asinh/atanh) emit extern C calls that

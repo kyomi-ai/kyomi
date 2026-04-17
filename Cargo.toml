@@ -145,7 +145,16 @@ chartml-datafusion = "4"
 chartml-leptos = "4"
 
 # Code editor (kode) — same pattern as chartml above.
-kode-leptos = "0.1"
+kode-leptos = "0.2"
+
+# Syntax grammars for the kode editor. kode-leptos 0.2+ no longer bundles
+# grammars — consumers opt in to what they need via arborium's feature set.
+# We use sql (SQL editor + chart builder), yaml (ChartML editor), and
+# markdown (dashboard docs). Adding more here costs ~1-12 MB of WASM per
+# grammar; SQL alone is ~11 MB.
+arborium = { version = "2.16", default-features = false, features = [
+    "lang-sql", "lang-yaml", "lang-markdown",
+] }
 
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }
