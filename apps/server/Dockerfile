@@ -27,7 +27,7 @@ ENV TRUNK_VERSION=0.21.14 \
     TAILWIND_VERSION=v4.2.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl \
+        ca-certificates curl clang \
     && rm -rf /var/lib/apt/lists/*
 
 # wasm target for the Leptos hydrate build.
@@ -48,6 +48,23 @@ RUN curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WAS
 RUN curl -fsSL -o /usr/local/bin/tailwindcss \
         "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
     && chmod +x /usr/local/bin/tailwindcss
+
+# wasm-opt — pre-seeded at trunk's expected cache path. Trunk 0.21 invokes
+# wasm-opt without `--enable-bulk-memory-opt` / `--enable-nontrapping-float-to-int`,
+# and rejects input WASM that uses those instructions (which rustc + leptos
+# routinely emit). Install binaryen's wasm-opt and wrap it so those flags
+# are always passed through.
+ENV BINARYEN_VERSION=version_123
+RUN curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+        | tar -xz -C /tmp \
+    && mkdir -p "/root/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin" \
+    && mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
+          "/root/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+    && printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
+        "/root/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+        > "/root/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt" \
+    && chmod +x "/root/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt" \
+    && rm -rf "/tmp/binaryen-${BINARYEN_VERSION}"
 
 WORKDIR /build
 
