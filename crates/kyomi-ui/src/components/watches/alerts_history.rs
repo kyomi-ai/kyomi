@@ -642,17 +642,15 @@ pub fn AlertsHistory(
                                     <Badge variant=BadgeVariant::Secondary class="hidden sm:inline-flex">
                                         {format!("{} alert{}", total, if total != 1 { "s" } else { "" })}
                                     </Badge>
-                                    <div class="flex items-center gap-2 ml-auto">
+                                    <div class="ml-auto">
                                         <Switch
                                             checked=Signal::derive(move || show_deleted.get())
                                             on_change=Callback::new(move |checked: bool| {
                                                 show_deleted.set(checked);
                                                 page.set(0);
                                             })
+                                            label="Show deleted"
                                         />
-                                        <Label class="text-sm text-muted-foreground cursor-pointer">
-                                            "Show deleted"
-                                        </Label>
                                     </div>
                                 }.into_any()
                             }}
