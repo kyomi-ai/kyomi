@@ -1,62 +1,29 @@
 # =============================================================================
-# Notify private repo of public repo changes
+# Notify private repo of a tagged release
 # =============================================================================
-# On push to main, dispatches a repository_dispatch event to kyomi-private.
-# The private repo's sync-submodule.yml workflow picks this up, bumps the
-# submodule pointer, and triggers targeted deploy workflows based on which
-# services have changed files.
+# Triggered by pushing a version tag (v*). Dispatches a repository_dispatch
+# event to kyomi-private, which bumps the submodule pointer to the tagged
+# commit and runs deploy-api.yml to build + roll out the production image.
 #
-# Path-to-service mapping (only services whose source lives in this repo):
-#   api:        apps/server/**, crates/**, enterprise/**, Cargo.*,
-#               apps/mcp-chart-app/**, data/**, packages/chart-header/**
-#   frontend:   apps/frontend/**
+# Pushing to main does NOT fire this workflow — main merges are dev-only and
+# do not deploy. See docs/RELEASING.md for the release flow.
 #
-# Services whose source lives exclusively in kyomi-private (chart-renderer,
-# marketing, analytics-collector, k8s infra) are deployed from there and
-# do not need a dispatch from this repo.
+# Only the API is dispatched from this repo. Private-only services
+# (chart-renderer, marketing, analytics-collector, k8s infra) deploy from
+# their own workflows in kyomi-private when their source changes there.
 # =============================================================================
 
 name: Notify Private Repo
 
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Detect changed services
-        id: changes
-        run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD)
-
-          has_match() {
-            local pattern="$1"
-            echo "$CHANGED" | grep -qE "$pattern"
-          }
-
-          API=false
-          FRONTEND=false
-
-          if has_match '^apps/server/|^crates/|^enterprise/|^Cargo\.|^apps/mcp-chart-app/|^data/|^packages/chart-header/|^packages/chartml-core/'; then
-            API=true
-          fi
-
-          if has_match '^apps/frontend/'; then
-            FRONTEND=true
-          fi
-
-          echo "api=$API" >> "$GITHUB_OUTPUT"
-          echo "frontend=$FRONTEND" >> "$GITHUB_OUTPUT"
-
-          echo "Changed services: api=$API frontend=$FRONTEND"
-
       - name: Dispatch to kyomi-private
         uses: peter-evans/repository-dispatch@v3
         with:
@@ -68,7 +35,6 @@ jobs:
               "sha": "${{ github.sha }}",
               "ref": "${{ github.ref }}",
               "services": {
-                "api": ${{ steps.changes.outputs.api }},
-                "frontend": ${{ steps.changes.outputs.frontend }}
+                "api": true
               }
             }
