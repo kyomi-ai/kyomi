@@ -80,7 +80,8 @@ pub fn App() -> impl IntoView {
             <Router set_is_routing>
                 <Routes fallback=|| view! { <p>"Page not found"</p> }>
                     // Auth pages — NO sidebar/layout wrapper
-                    <Route path=path!("/login") view=LoginPage/>
+                    <Route path=path!("/login") view=|| view! { <LoginPage/> }/>
+                    <Route path=path!("/signup") view=|| view! { <LoginPage signup_mode=true/> }/>
                     <Route path=path!("/signup/complete") view=SignupCompletePage/>
                     <Route path=path!("/auth/google/callback") view=GoogleCallbackPage/>
                     <Route path=path!("/account/recover") view=AccountRecoveryPage/>

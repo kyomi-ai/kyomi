@@ -56,9 +56,18 @@ enum LoginView {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-pub fn LoginPage() -> impl IntoView {
+pub fn LoginPage(
+    /// When true, start in signup mode instead of login mode.
+    #[prop(default = false)]
+    signup_mode: bool,
+) -> impl IntoView {
     // ── View state ──────────────────────────────────────────────────────
-    let (view_state, set_view_state) = signal(LoginView::Credentials);
+    let initial_view = if signup_mode {
+        LoginView::Signup
+    } else {
+        LoginView::Credentials
+    };
+    let (view_state, set_view_state) = signal(initial_view);
 
     // ── Credentials view signals ────────────────────────────────────────
     let (email, set_email) = signal(String::new());
