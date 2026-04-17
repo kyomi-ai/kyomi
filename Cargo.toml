@@ -128,21 +128,21 @@ kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 
-# ChartML rendering (chartml)
-# Absolute paths: these path deps are local-dev-only (prod uses crates.io versions via [patch]).
-# Absolute paths let worktrees build from any location without relying on a specific sibling layout.
-chartml-core = { path = "/home/jason/repos/chartml/crates/chartml-core" }
-chartml-render = { path = "/home/jason/repos/chartml/crates/chartml-render" }
-chartml-chart-cartesian = { path = "/home/jason/repos/chartml/crates/chartml-chart-cartesian" }
-chartml-chart-pie = { path = "/home/jason/repos/chartml/crates/chartml-chart-pie" }
-chartml-chart-scatter = { path = "/home/jason/repos/chartml/crates/chartml-chart-scatter" }
-chartml-chart-metric = { path = "/home/jason/repos/chartml/crates/chartml-chart-metric" }
-chartml-chart-table = { path = "/home/jason/repos/chartml/crates/chartml-chart-table" }
-chartml-datafusion = { path = "/home/jason/repos/chartml/crates/chartml-datafusion" }
-chartml-leptos = { path = "/home/jason/repos/chartml/crates/chartml-leptos" }
+# ChartML rendering — consumed from crates.io.
+# For local dev against a sibling checkout, uncomment the [patch.crates-io]
+# block at the bottom of this file.
+chartml-core = "4"
+chartml-render = "4"
+chartml-chart-cartesian = "4"
+chartml-chart-pie = "4"
+chartml-chart-scatter = "4"
+chartml-chart-metric = "4"
+chartml-chart-table = "4"
+chartml-datafusion = "4"
+chartml-leptos = "4"
 
-# Code editor (kode) — same local-path pattern as chartml above.
-kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
+# Code editor (kode) — same pattern as chartml above.
+kode-leptos = "0.1"
 
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }
@@ -225,3 +225,20 @@ debug-assertions = true
 # [patch.crates-io]
 # kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
 # kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
+
+# Uncomment to use a local checkout of chartml and kode for development.
+# The Dockerfile strips everything between BEGIN_LOCAL_DEV_PATCHES and
+# END_LOCAL_DEV_PATCHES before `cargo build`, so prod always uses crates.io.
+# BEGIN_LOCAL_DEV_PATCHES
+# [patch.crates-io]
+# chartml-core = { path = "/home/jason/repos/chartml/crates/chartml-core" }
+# chartml-render = { path = "/home/jason/repos/chartml/crates/chartml-render" }
+# chartml-chart-cartesian = { path = "/home/jason/repos/chartml/crates/chartml-chart-cartesian" }
+# chartml-chart-pie = { path = "/home/jason/repos/chartml/crates/chartml-chart-pie" }
+# chartml-chart-scatter = { path = "/home/jason/repos/chartml/crates/chartml-chart-scatter" }
+# chartml-chart-metric = { path = "/home/jason/repos/chartml/crates/chartml-chart-metric" }
+# chartml-chart-table = { path = "/home/jason/repos/chartml/crates/chartml-chart-table" }
+# chartml-datafusion = { path = "/home/jason/repos/chartml/crates/chartml-datafusion" }
+# chartml-leptos = { path = "/home/jason/repos/chartml/crates/chartml-leptos" }
+# kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
+# END_LOCAL_DEV_PATCHES

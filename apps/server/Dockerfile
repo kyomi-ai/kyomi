@@ -19,6 +19,36 @@
 # ===== Stage 0: Build Rust binary =====
 FROM rust:1-bookworm AS builder
 
+# Tooling versions needed to build the Leptos WASM frontend. Pinned so the
+# image is reproducible — bump these intentionally when upgrading leptos.
+#   wasm-bindgen-cli must match the wasm-bindgen library version in Cargo.lock.
+ENV TRUNK_VERSION=0.21.14 \
+    WASM_BINDGEN_VERSION=0.2.114 \
+    TAILWIND_VERSION=v4.2.2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# wasm target for the Leptos hydrate build.
+RUN rustup target add wasm32-unknown-unknown
+
+# Trunk — bundles the kyomi-ui crate into dist/ (runs the tailwindcss pre_build
+# hook, compiles to wasm32, runs wasm-bindgen, fingerprints assets).
+RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+    | tar -xz -C /usr/local/bin trunk
+
+# wasm-bindgen-cli — must match Cargo.lock's wasm-bindgen library version.
+RUN curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin \
+        "wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" \
+        "wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen-test-runner"
+
+# Standalone tailwindcss binary — referenced by Trunk.toml's pre_build hook.
+RUN curl -fsSL -o /usr/local/bin/tailwindcss \
+        "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64" \
+    && chmod +x /usr/local/bin/tailwindcss
+
 WORKDIR /build
 
 # Copy Cargo workspace and crates
@@ -30,6 +60,11 @@ COPY enterprise/ ./enterprise/
 # Remove desktop from workspace members (not needed for server Docker build)
 RUN sed -i '/"apps\/desktop",/d' Cargo.toml
 
+# Strip the local-dev [patch.crates-io] block — prod uses crates.io versions
+# of chartml-* and kode-leptos. The block is delimited by marker comments in
+# the workspace Cargo.toml.
+RUN sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+
 # Copy files needed for include_str!/include_bytes! paths
 COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
@@ -37,6 +72,14 @@ COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 
 # All SQL queries use runtime string-based sqlx::query() — no compile-time
 # checking, no .sqlx/ cache, and no DATABASE_URL needed at build time.
+
+# Build the Leptos WASM frontend first. rust-embed in apps/server/src/
+# leptos_frontend.rs embeds crates/kyomi-ui/dist/ into the server binary
+# at compile time, so dist/ must be populated before the cargo build below.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cd crates/kyomi-ui && trunk build --release
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

@@ -2,7 +2,11 @@
 **/node_modules
 
 # Rust build artifacts (large)
+target/
 apps/backend-rust/target
+
+# Trunk WASM output — rebuilt inside the Docker image
+crates/kyomi-ui/dist/
 
 # Local dev data
 .data/
