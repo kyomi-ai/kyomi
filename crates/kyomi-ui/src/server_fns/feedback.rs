@@ -68,18 +68,18 @@ pub async fn submit_feedback(
         serde_json::json!({})
     };
 
-    if let Some(ref data) = screenshot {
-        if !data.is_empty() {
-            // Validate size: 2MB limit (matching REST route MAX_SCREENSHOT_BYTES)
-            let estimated_size = data.len() * 3 / 4;
-            if estimated_size <= 2 * 1024 * 1024 {
-                if let Some(obj) = context_value.as_object_mut() {
-                    obj.insert(
-                        "screenshot_base64".to_string(),
-                        serde_json::Value::String(data.clone()),
-                    );
-                }
-            }
+    if let Some(ref data) = screenshot
+        && !data.is_empty()
+    {
+        // Validate size: 2MB limit (matching REST route MAX_SCREENSHOT_BYTES)
+        let estimated_size = data.len() * 3 / 4;
+        if estimated_size <= 2 * 1024 * 1024
+            && let Some(obj) = context_value.as_object_mut()
+        {
+            obj.insert(
+                "screenshot_base64".to_string(),
+                serde_json::Value::String(data.clone()),
+            );
         }
     }
 
@@ -90,7 +90,8 @@ pub async fn submit_feedback(
     let sql = format!(
         "INSERT INTO feedback \
             (id, user_id, workspace_id, type, description, include_context, context, status, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', {})",
+         VALUES ($1, $2, $3, $4, $5, $6, {}, 'new', {})",
+        kyomi_core::sql_compat::cast_to_json(is_pg, "$7"),
         kyomi_core::sql_compat::now(is_pg)
     );
     kyomi_core::db_execute!(

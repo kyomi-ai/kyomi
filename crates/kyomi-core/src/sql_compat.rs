@@ -54,6 +54,16 @@ pub fn cast_to_uuid(is_pg: bool, param: &str) -> String {
     }
 }
 
+/// JSON type cast.
+/// Postgres: `$1::json`, SQLite: `$1` (JSON stored as TEXT)
+pub fn cast_to_json(is_pg: bool, param: &str) -> String {
+    if is_pg {
+        format!("{param}::json")
+    } else {
+        param.to_string()
+    }
+}
+
 /// ILIKE (case-insensitive LIKE).
 /// Postgres: `column ILIKE $1`, SQLite: `column LIKE $1` (SQLite LIKE is case-insensitive for ASCII)
 pub fn ilike(is_pg: bool, column: &str, param: &str) -> String {
@@ -226,6 +236,12 @@ mod tests {
     fn test_cast_to_uuid() {
         assert_eq!(cast_to_uuid(true, "$1"), "$1::uuid");
         assert_eq!(cast_to_uuid(false, "$1"), "$1");
+    }
+
+    #[test]
+    fn test_cast_to_json() {
+        assert_eq!(cast_to_json(true, "$1"), "$1::json");
+        assert_eq!(cast_to_json(false, "$1"), "$1");
     }
 
     #[test]

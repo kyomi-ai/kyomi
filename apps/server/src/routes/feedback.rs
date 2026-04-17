@@ -173,7 +173,8 @@ async fn submit_feedback(
     let sql = format!(
         "INSERT INTO feedback \
             (id, user_id, workspace_id, type, description, include_context, context, status, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', {})",
+         VALUES ($1, $2, $3, $4, $5, $6, {}, 'new', {})",
+        kyomi_core::sql_compat::cast_to_json(is_pg, "$7"),
         kyomi_core::sql_compat::now(is_pg)
     );
     kyomi_core::db_execute!(
