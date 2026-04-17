@@ -146,7 +146,12 @@ async-trait = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Code editor (WASM-only — uses web-sys DOM APIs)
-kode-leptos = { path = "../../../kode/kode-leptos" }
+# Absolute path: local-dev-only dep; allows worktree builds from any location.
+kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
+
+# libm: software-implemented math functions for wasm32-unknown-unknown.
+# DataFusion's default math UDFs (acosh/asinh/atanh) emit extern C calls that
+# the wasm32 target's stdlib can't resolve. See src/wasm_math_shims.rs.
 
 # ChartML parser (YAML parsing + block extraction)
 serde_yaml = { workspace = true }
@@ -169,6 +174,11 @@ futures-util = { workspace = true, optional = true }
 
 # Enterprise crates (optional, behind feature flags)
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
+
+# Pure-Rust libm for wasm32: provides soft impls of acosh/asinh/atanh that
+# `wasm32-unknown-unknown`'s stdlib lowers to extern C calls. See wasm_math_shims.rs.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+libm = "0.2"
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }

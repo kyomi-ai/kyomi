@@ -17,6 +17,9 @@ pub mod server_fns;
 pub mod types;
 pub mod utils;
 
+#[cfg(target_arch = "wasm32")]
+mod wasm_math_shims;
+
 pub use app::App;
 
 /// Register all server functions with the Leptos runtime.

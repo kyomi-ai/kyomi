@@ -10,14 +10,36 @@ This document exists because we keep making the same mistakes. Read it before ve
 
 **Every agent verifying a PR runs this checklist top-to-bottom before doing anything else.** Each step is a check. If it passes, move on. If it fails, run the fix command, then re-check.
 
+Every verifier run happens in its own **git worktree** on a **dedicated port**. This keeps verification isolated from the global `dev.kyomi.ai` instance on `:3000` and lets multiple agents verify different PRs in parallel.
+
+**Your dispatch prompt should name:**
+- `WORKTREE` — absolute path to the worktree (e.g. `/home/jason/repos/kyomi-wt-kyo-123-slug`)
+- `PORT` — the port assigned for this worktree's dev server (3100–3999)
+
+If the orchestrator did not give you a `WORKTREE`/`PORT`, fall back to:
+1. Create the worktree yourself: `git worktree add /home/jason/repos/kyomi-wt-pr-<N> $(gh pr view <N> --json headRefName -q .headRefName)`
+2. Symlink `.env`: `ln -s /home/jason/repos/kyomi/.env <WORKTREE>/.env`
+3. Pick a free port in 3100–3999 (try `3000 + (PR_NUMBER % 900)` first).
+
+Export both so every subsequent command picks them up:
+
+```bash
+export WORKTREE=/home/jason/repos/kyomi-wt-kyo-123-slug
+export PORT=3123
+cd "$WORKTREE"
+```
+
 Do not skip steps. Do not reorder them. Do not substitute the commands.
 
 ### 1. Confirm the PR's code is what's checked out
 
+Inside the worktree:
+
 ```bash
-gh pr checkout <PR_NUMBER>
 git log -1 --oneline   # should match the PR's head commit
 ```
+
+The orchestrator set the worktree to the PR branch. If it doesn't match, run `git fetch origin $(git rev-parse --abbrev-ref HEAD) && git reset --hard @{u}`.
 
 ### 2. Sanity-check compilation
 
@@ -32,51 +54,52 @@ If this fails, the PR is broken. Do not continue — report the compile error in
 Debug WASM is 253MB and will timeout Playwright. Every verification run needs release WASM.
 
 ```bash
-cd crates/kyomi-ui
-RUSTUP_TOOLCHAIN=nightly trunk build --release && gzip -9 -k dist/*_bg.wasm
-cd /home/jason/repos/kyomi
+cd "$WORKTREE/crates/kyomi-ui"
+trunk build --release && gzip -9 -k dist/*_bg.wasm
+cd "$WORKTREE"
 ```
+
+Stable toolchain works — `src/wasm_math_shims.rs` provides the `libm` forwarders that let the linker resolve `acosh`/`asinh`/`atanh` without `build-std` + nightly.
 
 **Never pipe `trunk build` through `tail` or truncate its output** — post-processing happens after compilation. Interruption leaves `dist/` with a 2.8KB `index.html` and no WASM. Let it finish.
 
-### 4. Build the dev-server binary (only if server-side Rust changed in the PR)
+### 4. Build the dev-server binary
 
-Check the PR diff: does it touch `apps/server/`, `crates/kyomi-auth/`, `crates/kyomi-core/`, `crates/kyomi-datasource/`, `crates/kyomi-agent/`, or any `src/server_fns/`? If yes:
+Each worktree has its own `target/`, so the first build in a fresh worktree is a cold build (~15-20 min). Subsequent builds in the same worktree are incremental (~30s).
 
 ```bash
-cargo build --profile dev-server -p kyomi-server   # ~5-8 min if stale, ~30s incremental
+cd "$WORKTREE" && cargo build --profile dev-server -p kyomi-server
 ```
 
-If the PR is frontend-only (`crates/kyomi-ui/src/`, `style/main.css`, path deps like chartml), skip this step — the existing dev-server binary reads `dist/` from disk.
+This is always required for worktree verification — the binary reads `dist/` from disk relative to its working directory, so you need the worktree's own binary pointing at the worktree's own `dist/`.
 
-### 5. Start (or restart) the dev server
-
-Only restart if you rebuilt the server binary in step 4. Otherwise keep the running instance.
+### 5. Start the dev server on the worktree's port
 
 ```bash
-kill $(lsof -ti:3000) 2>/dev/null
-cd /home/jason/repos/kyomi && set -a; source .env; set +a
-PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
+kill $(lsof -ti:$PORT) 2>/dev/null
+cd "$WORKTREE" && set -a; source .env; set +a
+PORT=$PORT FRONTEND_URL=http://localhost:$PORT "$WORKTREE/target/dev-server/kyomi" \
+  > /tmp/kyomi-wt-$PORT.log 2>&1 &
 ```
 
 **Critical:**
-- Source `.env` to get `DATABASE_URL` (triggers SaaS mode — Postgres + Redis)
-- `FRONTEND_URL=https://dev.kyomi.ai` is required for cookies to work over HTTPS
-- NEVER use `SELF_HOSTED=true`, NEVER use `FRONTEND_URL=http://localhost:3000`
+- `source .env` to get `DATABASE_URL` — triggers SaaS mode (Postgres + Redis, same shared DB as `:3000`)
+- `FRONTEND_URL=http://localhost:$PORT` — for worktree-local testing Playwright hits the server directly over HTTP, so cookies don't need the `Secure` flag. The "never use `localhost`" rule applies to the nginx-proxied HTTPS path on `:3000`, **not** here.
+- **Never** start the worktree server on `:3000` — that's reserved for the global `dev.kyomi.ai` instance
 
 Wait for it to respond:
 
 ```bash
-until curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/login | grep -q 200; do sleep 2; done
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:$PORT/login | grep -q 200; do sleep 2; done
 ```
 
 ### 6. Seed test users
 
 ```bash
-python3 scripts/e2e-regression/seed-test-user.py
+python3 /home/jason/repos/kyomi/scripts/e2e-regression/seed-test-user.py
 ```
 
-Idempotent — safe to run every time. Creates `e2e-test@kyomi.dev` / `E2eTestPass123!` and `e2e-admin@kyomi.dev` / `E2eAdminPass123!`.
+Idempotent — safe to run every time. Creates `e2e-test@kyomi.dev` / `E2eTestPass123!` and `e2e-admin@kyomi.dev` / `E2eAdminPass123!`. All worktrees share the same Postgres, so this seeds once for all.
 
 ### 7. Provision test data the PR needs
 
@@ -86,12 +109,12 @@ The verifier creates whatever data the feature needs. "No dashboards exist" is n
 
 ```bash
 # Login
-curl -s -c /tmp/e2e-cookies.txt -X POST http://localhost:3000/api/v1/auth/login \
+curl -s -c /tmp/e2e-cookies-$PORT.txt -X POST http://localhost:$PORT/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"e2e-test@kyomi.dev","password":"E2eTestPass123!"}'
 
 # Provision (201 = created, 409 = already exists, both are fine)
-curl -s -b /tmp/e2e-cookies.txt -X POST http://localhost:3000/api/v1/datasources/sample
+curl -s -b /tmp/e2e-cookies-$PORT.txt -X POST http://localhost:$PORT/api/v1/datasources/sample
 
 # Wait ~5s for catalog index before testing catalog-dependent features
 ```
@@ -110,29 +133,47 @@ When in doubt, grep the repo for the route that creates the resource and look at
 
 Use `.cjs` extension (repo is `"type": "module"`). Set `NODE_PATH=/home/jason/repos/kyomi/node_modules`. Full page screenshots at 1920x1080.
 
-**Login flow that works on the dev-server:**
+**Parameterize the base URL on `$PORT`** — never hardcode `localhost:3000` in verifier scripts.
 
 ```javascript
 const { chromium } = require('playwright');
+const PORT = process.env.PORT || '3000';
+
 const browser = await chromium.launch({ headless: true });
 const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
 const page = await ctx.newPage();
 
-await page.goto('http://localhost:3000/login');
+await page.goto(`http://localhost:${PORT}/login`);
 await page.waitForTimeout(3000);  // release WASM loads in 2-3s; debug needs 8-15s
 await page.fill('input[type="email"]', 'e2e-test@kyomi.dev');
 await page.fill('input[type="password"]', 'E2eTestPass123!');
 await page.click('button[type="submit"]');
 await page.waitForURL(url => !url.toString().includes('/login'), { timeout: 15000 });
 await page.waitForTimeout(2000);
-// Now authenticated — navigate wherever you need
+await page.screenshot({ path: `/tmp/wt-${PORT}-post-login.png`, fullPage: true });
+// Now authenticated — navigate wherever you need and screenshot at each step
+```
+
+Run with the port in the environment:
+
+```bash
+PORT=$PORT NODE_PATH=/home/jason/repos/kyomi/node_modules node /tmp/verify.cjs
 ```
 
 For page-level verification, prefer `/kyomi-test` which already encapsulates this flow.
 
 ### 9. Read the evidence
 
-A screenshot saved but not read is not evidence. Open every screenshot with the Read tool. Interpret it against the acceptance criterion.
+**Screenshots are the verification artifact.** Take at least one screenshot per page the PR affects, at 1920x1080 fullPage. A screenshot saved but not read is not evidence — open every screenshot with the Read tool and interpret it against the acceptance criterion. Paste the screenshot paths into your verification report so the evidence is auditable.
+
+### 10. Tear down on completion
+
+When verification is done (pass or fail):
+
+```bash
+kill $(lsof -ti:$PORT) 2>/dev/null   # stop the worktree server
+# Orchestrator handles `git worktree remove` after PR merge
+```
 
 ---
 
@@ -340,9 +381,13 @@ You're running the `release` binary which embeds WASM at compile time. Switch to
 
 Chartml is a path dependency compiled into the WASM. You need `trunk build` to recompile it. But you do NOT need a server restart if using `dev-server` profile.
 
+### "trunk build fails with 'undefined symbol: acosh / asinh / atanh' on stable"
+
+These symbols come from DataFusion's default math UDF set (`AcoshFunc` etc.) which references Rust's `f{32,64}::{acosh,asinh,atanh}`. The `wasm32-unknown-unknown` target ships no `libm`, so the linker can't resolve them. The fix is already in the repo: `crates/kyomi-ui/src/wasm_math_shims.rs` defines `#[unsafe(no_mangle)]` forwarders that call `libm::{acosh,asinh,...}`. If you see this error, make sure the shim file exists and that `kyomi-ui/Cargo.toml` has `libm = "0.2"` under `[target.'cfg(target_arch = "wasm32")'.dependencies]`.
+
 ### "trunk build fails with 'the option Z is only accepted on the nightly compiler'"
 
-This error is outdated — trunk builds now work with the stable toolchain. If you see this, check that `.cargo/config.toml` doesn't have stale `build-std` flags.
+Outdated — trunk builds work with the stable toolchain thanks to the WASM math shim. If you see this, check that `.cargo/config.toml` doesn't have stale `build-std` flags.
 
 ### "The login works on :3000 but not on :8080"
 

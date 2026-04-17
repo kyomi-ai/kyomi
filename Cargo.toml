@@ -129,15 +129,17 @@ kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 
 # ChartML rendering (chartml)
-chartml-core = { path = "../chartml/crates/chartml-core" }
-chartml-render = { path = "../chartml/crates/chartml-render" }
-chartml-chart-cartesian = { path = "../chartml/crates/chartml-chart-cartesian" }
-chartml-chart-pie = { path = "../chartml/crates/chartml-chart-pie" }
-chartml-chart-scatter = { path = "../chartml/crates/chartml-chart-scatter" }
-chartml-chart-metric = { path = "../chartml/crates/chartml-chart-metric" }
-chartml-chart-table = { path = "../chartml/crates/chartml-chart-table" }
-chartml-datafusion = { path = "../chartml/crates/chartml-datafusion" }
-chartml-leptos = { path = "../chartml/crates/chartml-leptos" }
+# Absolute paths: these path deps are local-dev-only (prod uses crates.io versions via [patch]).
+# Absolute paths let worktrees build from any location without relying on a specific sibling layout.
+chartml-core = { path = "/home/jason/repos/chartml/crates/chartml-core" }
+chartml-render = { path = "/home/jason/repos/chartml/crates/chartml-render" }
+chartml-chart-cartesian = { path = "/home/jason/repos/chartml/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "/home/jason/repos/chartml/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "/home/jason/repos/chartml/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "/home/jason/repos/chartml/crates/chartml-chart-metric" }
+chartml-chart-table = { path = "/home/jason/repos/chartml/crates/chartml-chart-table" }
+chartml-datafusion = { path = "/home/jason/repos/chartml/crates/chartml-datafusion" }
+chartml-leptos = { path = "/home/jason/repos/chartml/crates/chartml-leptos" }
 
 # SQL parser (extract table/column references from agent-generated SQL)
 sqlparser = { version = "0.55", features = ["visitor"] }
