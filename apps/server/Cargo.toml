@@ -68,6 +68,7 @@ tokio-tungstenite = { version = "0.28", default-features = false }
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-auth = { workspace = true }
 kyomi-embed = { workspace = true }
+kyomi-test-harness = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }
 tokio = { workspace = true }

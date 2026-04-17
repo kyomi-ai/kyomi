@@ -22,267 +22,28 @@
 //! - Section 10: Session management (GET SSE, DELETE, missing/invalid session)
 
 use serde_json::{json, Value};
-use std::collections::HashMap;
+
+use kyomi_test_harness::{base_url, cleanup_test_user, AuthContext};
 
 // ===========================================================================
 // Test infrastructure
 // ===========================================================================
 
-struct TestServer {
-    base_url: String,
-    db: Option<kyomi_core::DbPool>,
-    jwt_secret: Option<String>,
-    encryption_key: Option<std::sync::Arc<[u8; 32]>>,
-}
-
-struct AuthContext {
-    base_url: String,
-    access_token: String,
-    user_id: String,
-    workspace_id: String,
-    db: kyomi_core::DbPool,
-    encryption_key: std::sync::Arc<[u8; 32]>,
-    jwt_secret: String,
-}
-
-async fn setup_server() -> TestServer {
-    if let Ok(url) = std::env::var("CONTRACT_TEST_BASE_URL") {
-        return TestServer {
-            base_url: url,
-            db: None,
-            jwt_secret: None,
-            encryption_key: None,
-        };
-    }
-
-    if let Ok(path) = kyomi_core::constants::find_constants_file() {
-        let _ = kyomi_core::constants::load(&path);
-    }
-
-    let config = kyomi_core::Config::test_config();
-    let db = kyomi_core::db::create_pool(&config.database_url)
-        .await
-        .expect("test DB should be running (docker compose up)");
-    let kv: kyomi_core::KVPool = kyomi_core::kv_store::create_kv_store(config.redis_url.as_deref())
-        .await
-        .expect("failed to create KV store");
-
-    let encryption_key = kyomi_auth::encryption::derive_key(&config.encryption_key)
-        .expect("test encryption key should be valid base64url");
-
-    let rp_origin =
-        url::Url::parse(&config.frontend_url).expect("frontend_url must be a valid URL");
-    let webauthn = kyomi_auth::webauthn::build_webauthn(
-        &config.webauthn_rp_id,
-        &config.webauthn_rp_name,
-        &rp_origin,
-    )
-    .expect("webauthn build");
-
-    let jwt_secret = config.jwt_secret.clone();
-    let encryption_key_arc = std::sync::Arc::new(encryption_key);
-
-    let ws_manager = kyomi_auth::websocket::WebSocketManager::new(
-        None, db.clone(),
-    );
-
-    let state = kyomi_server::state::AppState {
-        db: db.clone(),
-        kv: kv.clone(),
-        redis: None,
-        config: std::sync::Arc::new(config.clone()),
-        encryption_key: encryption_key_arc.clone(),
-        webauthn: std::sync::Arc::new(webauthn),
-        embedding: kyomi_embed::LazyEmbedding::loaded(kyomi_embed::EmbeddingService::new().expect("embedding model")),
-        ws_manager,
-        stripe: None,
-        mcp_sessions: kyomi_server::mcp_session_manager::MCPSessionManager::new(kv.clone()),
-        cancel_registry: kyomi_server::cancel_registry::CancelRegistry::default(),
-        connect_token: None,
-        connect_registry: kyomi_server::connect::registry::ConnectRegistry::new_local(),
-        platforms: std::sync::Arc::new(kyomi_core::platform::PlatformRegistry::new()),
-    };
-
-    let app = kyomi_server::build_service(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    TestServer {
-        base_url: format!("http://{addr}"),
-        db: Some(db),
-        jwt_secret: Some(jwt_secret),
-        encryption_key: Some(encryption_key_arc),
-    }
-}
-
-async fn base_url() -> String {
-    setup_server().await.base_url
-}
-
 /// Create an authenticated test context with Starter tier (MCP requires Starter+).
 async fn setup_auth_context(suffix: &str) -> Option<AuthContext> {
-    let server = setup_server().await;
-    let db = server.db?;
-    let jwt_secret = server
-        .jwt_secret
-        .expect("jwt_secret should be set in Rust mode");
-    let encryption_key = server
-        .encryption_key
-        .expect("encryption_key should be set in Rust mode");
-
-    let email = format!("mcp-test-{suffix}@contract-test.local");
-
-    cleanup_test_user(&db, &email).await;
-
-    let user = kyomi_auth::user_service::create_user(&db, &email, Some("MCP Test User"), true)
-        .await
-        .expect("should create test user");
-
-    let workspace_id = kyomi_auth::user_service::create_workspace_for_user(
-        &db,
-        &user.user_id,
-        Some("MCP Test User"),
-        &email,
-        None,
-    )
-    .await
-    .expect("should create test workspace");
-
-    // Upgrade workspace to starter tier for MCP access
+    let ctx = kyomi_test_harness::setup_auth_context("MCP Test User", "mcp", suffix).await?;
     kyomi_core::db_execute!(
-        &db,
+        &ctx.db,
         "UPDATE workspaces SET subscription_tier = 'starter' WHERE workspace_id = $1",
-        &workspace_id
+        &ctx.workspace_id
     )
     .expect("should upgrade to starter tier");
-
-    let mut extra = HashMap::new();
-    extra.insert("user_id".to_string(), json!(user.user_id));
-    extra.insert("email".to_string(), json!(email));
-    extra.insert("name".to_string(), json!("MCP Test User"));
-    extra.insert("workspace_id".to_string(), json!(workspace_id));
-    extra.insert(
-        "workspace_roles".to_string(),
-        json!(["workspace_admin"]),
-    );
-
-    let access_token = kyomi_auth::jwt::create_access_token_str(
-        &user.user_id,
-        &jwt_secret,
-        60,
-        extra,
-    )
-    .expect("should create access token");
-
-    Some(AuthContext {
-        base_url: server.base_url,
-        access_token,
-        user_id: user.user_id,
-        workspace_id,
-        db,
-        encryption_key,
-        jwt_secret,
-    })
+    Some(ctx)
 }
 
 /// Create an authenticated test context with free tier (MCP should be denied).
 async fn setup_free_auth_context(suffix: &str) -> Option<AuthContext> {
-    let server = setup_server().await;
-    let db = server.db?;
-    let jwt_secret = server
-        .jwt_secret
-        .expect("jwt_secret should be set in Rust mode");
-    let encryption_key = server
-        .encryption_key
-        .expect("encryption_key should be set in Rust mode");
-
-    let email = format!("mcp-test-{suffix}@contract-test.local");
-
-    cleanup_test_user(&db, &email).await;
-
-    let user = kyomi_auth::user_service::create_user(&db, &email, Some("MCP Free User"), true)
-        .await
-        .expect("should create test user");
-
-    let workspace_id = kyomi_auth::user_service::create_workspace_for_user(
-        &db,
-        &user.user_id,
-        Some("MCP Free User"),
-        &email,
-        None,
-    )
-    .await
-    .expect("should create test workspace");
-
-    // Workspace stays at free tier (default)
-
-    let mut extra = HashMap::new();
-    extra.insert("user_id".to_string(), json!(user.user_id));
-    extra.insert("email".to_string(), json!(email));
-    extra.insert("name".to_string(), json!("MCP Free User"));
-    extra.insert("workspace_id".to_string(), json!(workspace_id));
-    extra.insert(
-        "workspace_roles".to_string(),
-        json!(["workspace_admin"]),
-    );
-
-    let access_token = kyomi_auth::jwt::create_access_token_str(
-        &user.user_id,
-        &jwt_secret,
-        60,
-        extra,
-    )
-    .expect("should create access token");
-
-    Some(AuthContext {
-        base_url: server.base_url,
-        access_token,
-        user_id: user.user_id,
-        workspace_id,
-        db,
-        encryption_key,
-        jwt_secret,
-    })
-}
-
-async fn cleanup_test_user(db: &kyomi_core::DbPool, email: &str) {
-    let user_id: Option<String> = match db {
-        kyomi_core::db::DbPool::Postgres(pg) =>
-            sqlx::query_scalar::<_, String>("SELECT user_id FROM users WHERE email = $1")
-                .bind(email).fetch_optional(pg).await.unwrap_or(None),
-        kyomi_core::db::DbPool::Sqlite(sq) =>
-            sqlx::query_scalar::<_, String>("SELECT user_id FROM users WHERE email = $1")
-                .bind(email).fetch_optional(sq).await.unwrap_or(None),
-    };
-
-    if let Some(uid) = user_id {
-        let workspace_ids: Vec<String> = match db {
-            kyomi_core::db::DbPool::Postgres(pg) =>
-                sqlx::query_scalar::<_, String>("SELECT workspace_id FROM workspaces WHERE owner_user_id = $1")
-                    .bind(&uid).fetch_all(pg).await.unwrap_or_default(),
-            kyomi_core::db::DbPool::Sqlite(sq) =>
-                sqlx::query_scalar::<_, String>("SELECT workspace_id FROM workspaces WHERE owner_user_id = $1")
-                    .bind(&uid).fetch_all(sq).await.unwrap_or_default(),
-        };
-
-        for ws_id in &workspace_ids {
-            let _ = kyomi_core::db_execute!(db, "DELETE FROM workspace_users WHERE workspace_id = $1", ws_id);
-
-            let _ = kyomi_core::db_execute!(db, "DELETE FROM workspaces WHERE workspace_id = $1", ws_id);
-        }
-
-        let _ = kyomi_core::db_execute!(db, "DELETE FROM workspace_users WHERE user_id = $1", &uid);
-
-        let _ = kyomi_core::db_execute!(db, "DELETE FROM users WHERE user_id = $1", &uid);
-    }
+    kyomi_test_harness::setup_auth_context("MCP Free User", "mcp", suffix).await
 }
 
 fn client() -> reqwest::Client {

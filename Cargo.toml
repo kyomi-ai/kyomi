@@ -11,6 +11,7 @@ members = [
     "apps/desktop",
     "enterprise/kyomi-slack",
     "crates/kyomi-ui",
+    "crates/kyomi-test-harness",
 ]
 resolver = "3"
 
@@ -125,6 +126,8 @@ kyomi-agent = { path = "crates/kyomi-agent" }
 kyomi-chart-theme = { path = "crates/kyomi-chart-theme" }
 kyomi-knowledge = { path = "crates/kyomi-knowledge" }
 kyomi-ui = { path = "crates/kyomi-ui" }
+kyomi-server = { path = "apps/server" }
+kyomi-test-harness = { path = "crates/kyomi-test-harness" }
 kyomi-connect-protocol = "1"
 kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
 

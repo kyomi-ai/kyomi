@@ -1,0 +1,17 @@
+[package]
+name = "kyomi-test-harness"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish = false
+
+[dependencies]
+kyomi-core = { workspace = true, features = ["test-helpers"] }
+kyomi-auth = { workspace = true }
+kyomi-embed = { workspace = true }
+kyomi-server = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
