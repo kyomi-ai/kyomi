@@ -595,20 +595,25 @@ pub fn ChatsListPage() -> impl IntoView {
                         <span class="text-sm font-medium text-foreground">
                             {move || format!("{} selected", selection_count())}
                         </span>
-                        <button
+                        <Button
+                            variant=ButtonVariant::GhostDestructive
+                            size=ButtonSize::Sm
+                            disabled=is_bulk_deleting.get()
                             on:click=handle_bulk_delete
-                            disabled=move || is_bulk_deleting.get()
-                            class="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-error-foreground bg-error/10 hover:bg-error/20 rounded-lg transition-colors disabled:opacity-50"
                         >
-                            <Icon icon=phosphor_leptos::TRASH size="16px" />
-                            {move || if is_bulk_deleting.get() { "Deleting..." } else { "Delete" }}
-                        </button>
-                        <button
+                            <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4 sm:mr-1.5" />
+                            <span class="hidden sm:inline">
+                                {move || if is_bulk_deleting.get() { "Deleting..." } else { "Delete" }}
+                            </span>
+                        </Button>
+                        <Button
+                            variant=ButtonVariant::GhostMuted
+                            size=ButtonSize::Sm
+                            class="ml-auto"
                             on:click=move |_| set_selected_chats.set(Vec::new())
-                            class="ml-auto px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground hover:bg-secondary rounded-lg transition-colors"
                         >
                             "Cancel"
-                        </button>
+                        </Button>
                     </div>
                 </Show>
 
