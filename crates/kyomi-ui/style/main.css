@@ -29,7 +29,7 @@ html {
   --color-secondary-foreground: #3D3835;
   --color-accent: #FEF3C7;
   --color-accent-foreground: #1C1917;
-  --color-destructive: #ef4444;
+  --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
   --color-muted: #F5F3EF;
   --color-muted-foreground: #6B6660;
@@ -838,7 +838,7 @@ html {
   --color-secondary-foreground: #A8A29E;
   --color-accent: #451A03;
   --color-accent-foreground: #F5F3EF;
-  --color-destructive: #ef4444;
+  --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
   --color-muted: #1C1917;
   --color-muted-foreground: #A8A29E;
