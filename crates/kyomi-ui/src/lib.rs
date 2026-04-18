@@ -8,6 +8,7 @@
 //! hydrate (WASM) targets are supported via feature flags.
 
 pub mod app;
+pub mod chartml_provider;
 pub mod components;
 pub mod datasource;
 pub mod pages;

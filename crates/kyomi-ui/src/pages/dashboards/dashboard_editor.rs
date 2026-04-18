@@ -28,8 +28,9 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use leptos_router::hooks::use_params_map;
 
+use crate::chartml_provider::DashboardChartProviders;
 use crate::components::dashboard::{
-    ChartBuilderModal, ChartInfoModal, CopilotSidebar, DashboardSourceCache, HistoryPanel,
+    ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer, markdown_renderer::kyomi_palette,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
@@ -53,9 +54,12 @@ enum EditorMode {
 /// existing dashboard and loads it into the editor.
 #[component]
 pub fn DashboardEditorPage() -> impl IntoView {
-    // Provide a dashboard-scoped source cache — same pattern as the viewer.
-    // Editor previews render ChartBlocks that pull this via use_context.
-    provide_context(DashboardSourceCache::new());
+    // The chartml 5.0 resolver's KyomiDatasourceProvider + per-workspace
+    // IndexedDB cache backend are wired by `DashboardChartProviders` (around
+    // the inline `MarkdownRenderer` preview in `DashboardEditorInner`) once
+    // the workspace id is known. We can't call `provide_context` here
+    // because the workspace id loads asynchronously via the user-context
+    // resource. Same pattern as the viewer.
 
     let params = use_params_map();
     let dashboard_id = Memo::new(move |_| params.get().get("id").unwrap_or_default());
@@ -245,6 +249,17 @@ fn DashboardEditorInner(
             .get()
             .and_then(|r| r.ok())
             .map(|ctx| ctx.chart_palette)
+    });
+    // Workspace UUID for the chartml 5.0 provider + IndexedDB cache. Falls
+    // back to "default" for single-tenant deployments where the user context
+    // has no workspace_id (matches the viewer's fallback). See
+    // [`crate::chartml_provider::DashboardChartProviders`] for wiring details.
+    let workspace_id = Memo::new(move |_| {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.workspace_id)
+            .unwrap_or_else(|| "default".to_string())
     });
 
     // ── Unsaved changes (derived) ────────────────────────────────────────
@@ -799,24 +814,26 @@ fn DashboardEditorInner(
                                     // for chart container styling (border, bg, header bar)
                                     <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
                                         <div class="dashboard-content p-6 flex-1">
-                                            <MarkdownRenderer
-                                                content=effective_preview
-                                                chart_palette=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
-                                                on_chart_info=Callback::new(move |yaml: String| {
-                                                    set_chart_info_yaml.set(yaml);
-                                                    set_chart_info_open.set(true);
-                                                })
-                                                on_edit_chart=Callback::new(move |(block_index, _array_index): (usize, usize)| {
-                                                    // Extract the YAML at block_index from editor content
-                                                    let content = editor_content.get_untracked();
-                                                    let re = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```").unwrap();
-                                                    if let Some(cap) = re.captures_iter(&content).nth(block_index) {
-                                                        let yaml = cap.get(1).map_or("", |m| m.as_str()).trim().to_string();
-                                                        set_edit_chart_yaml.set(Some(yaml));
-                                                        set_chart_builder_open.set(true);
-                                                    }
-                                                })
-                                            />
+                                            <DashboardChartProviders workspace_id=workspace_id.get()>
+                                                <MarkdownRenderer
+                                                    content=effective_preview
+                                                    chart_palette=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
+                                                    on_chart_info=Callback::new(move |yaml: String| {
+                                                        set_chart_info_yaml.set(yaml);
+                                                        set_chart_info_open.set(true);
+                                                    })
+                                                    on_edit_chart=Callback::new(move |(block_index, _array_index): (usize, usize)| {
+                                                        // Extract the YAML at block_index from editor content
+                                                        let content = editor_content.get_untracked();
+                                                        let re = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```").unwrap();
+                                                        if let Some(cap) = re.captures_iter(&content).nth(block_index) {
+                                                            let yaml = cap.get(1).map_or("", |m| m.as_str()).trim().to_string();
+                                                            set_edit_chart_yaml.set(Some(yaml));
+                                                            set_chart_builder_open.set(true);
+                                                        }
+                                                    })
+                                                />
+                                            </DashboardChartProviders>
                                         </div>
                                     </div>
                                 </div>

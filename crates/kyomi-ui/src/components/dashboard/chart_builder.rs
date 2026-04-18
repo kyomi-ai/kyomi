@@ -684,8 +684,12 @@ pub fn ChartBuilderModal(
     let (query_error, set_query_error) = signal(None::<String>);
 
     // ── Preview state — remote data fetching ──────────────────────────
+    // `ChartMLRef` is `Rc<ChartML>` on WASM (!Send + !Sync). Leptos signals
+    // require Send + Sync on the inner value, so we wrap in SendWrapper —
+    // safe because wasm32-unknown-unknown is single-threaded and the wrapper
+    // panics if accessed from a different thread (which can never happen).
     let (preview_chartml, set_preview_chartml) =
-        signal(None::<Arc<chartml_core::ChartML>>);
+        signal(None::<send_wrapper::SendWrapper<chartml_leptos::ChartMLRef>>);
     let (preview_loading, set_preview_loading) = signal(false);
     let (preview_error, set_preview_error) = signal(None::<String>);
 
@@ -724,7 +728,9 @@ pub fn ChartBuilderModal(
                                         chartml_inst.set_default_palette(colors);
                                         chartml_inst.set_theme(theme);
                                         chartml_inst.register_source("_remote", data_table);
-                                        set_preview_chartml.set(Some(Arc::new(chartml_inst)));
+                                        set_preview_chartml.set(Some(send_wrapper::SendWrapper::new(
+                                            chartml_leptos::ChartMLRef::new(chartml_inst),
+                                        )));
                                     }
                                     Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
                                 }
@@ -1374,7 +1380,9 @@ pub fn ChartBuilderModal(
                                                                         chartml_inst.set_default_palette(colors);
                                                                         chartml_inst.set_theme(theme);
                                                                         chartml_inst.register_source("_remote", data_table);
-                                                                        set_preview_chartml.set(Some(Arc::new(chartml_inst)));
+                                                                        set_preview_chartml.set(Some(send_wrapper::SendWrapper::new(
+                                            chartml_leptos::ChartMLRef::new(chartml_inst),
+                                        )));
                                                                     }
                                                                     Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
                                                                 }
@@ -1425,9 +1433,11 @@ pub fn ChartBuilderModal(
                                                 </div>
                                             }.into_any()
                                         } else if let Some(chartml_inst) = preview_chartml.get() {
-                                            // Render remote chart preview — data was fetched
+                                            // Render remote chart preview — data was fetched.
+                                            // SendWrapper unwraps to ChartMLRef on the wasm main thread.
                                             let preview_yaml = current_yaml.get();
                                             let preview_spec = rewrite_spec_for_remote(&preview_yaml);
+                                            let chartml_inst = chartml_inst.take();
                                             view! {
                                                 <ChartPreview
                                                     spec=preview_spec
@@ -1504,7 +1514,7 @@ fn rewrite_spec_for_remote(yaml: &str) -> String {
 #[component]
 fn ChartPreview(
     #[prop(into)] spec: String,
-    chartml: Arc<chartml_core::ChartML>,
+    chartml: chartml_leptos::ChartMLRef,
 ) -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {

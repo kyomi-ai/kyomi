@@ -1487,8 +1487,6 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "chartml-chart-cartesian"
 version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f455aef9197d49648cf99344670842935115b65d3d921f09862197ff83bb21d"
 dependencies = [
  "chartml-core",
  "serde_json",
@@ -1497,8 +1495,6 @@ dependencies = [
 [[package]]
 name = "chartml-chart-metric"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "260fe123506364761489daa65816904094c0b3867a76984bec2d32e9ee616602"
 dependencies = [
  "chartml-core",
 ]
@@ -1506,8 +1502,6 @@ dependencies = [
 [[package]]
 name = "chartml-chart-pie"
 version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30c9603f67e97f55b14b7ca4eff14bb478b581c724eb7572256bc051b357b304"
 dependencies = [
  "chartml-core",
 ]
@@ -1515,8 +1509,6 @@ dependencies = [
 [[package]]
 name = "chartml-chart-scatter"
 version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af375f54eb580f42491027513bd3d8b3a5d1301dcc8b2e60d3de88d2de7d315f"
 dependencies = [
  "chartml-core",
 ]
@@ -1524,8 +1516,6 @@ dependencies = [
 [[package]]
 name = "chartml-chart-table"
 version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec059ee5f89281357123ee7026bc3823a1158a6ca3a21ba974c34bfe678465bc"
 dependencies = [
  "chartml-core",
 ]
@@ -1533,24 +1523,32 @@ dependencies = [
 [[package]]
 name = "chartml-core"
 version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34f3dae0532d99764f4318aad1f0575d187ce758a736057dea593bfa2fc1ee5a"
 dependencies = [
  "arrow",
  "async-trait",
  "chrono",
+ "futures",
+ "humantime",
+ "idb",
  "indexmap 2.13.0",
+ "js-sys",
+ "pollster",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
+ "xxhash-rust",
 ]
 
 [[package]]
 name = "chartml-datafusion"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5a4015a7daaf96b00f4e5003dd7cc2217920c58dbfbb949bc0f7f04e0f10844"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1560,6 +1558,7 @@ dependencies = [
  "datafusion",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
+ "indexmap 2.13.0",
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
@@ -1568,8 +1567,6 @@ dependencies = [
 [[package]]
 name = "chartml-forecast"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8ec030b5e1a734340c7417855df2eac08714f8a95b2be120b12a08ea8e4cacc"
 dependencies = [
  "augurs-core",
  "augurs-ets",
@@ -1587,10 +1584,9 @@ dependencies = [
 [[package]]
 name = "chartml-leptos"
 version = "4.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff486b1defee982b22199f5a61b03ddd0fa2d449cebb776e5b1a77a5a059ad4e"
 dependencies = [
  "chartml-core",
+ "humantime",
  "js-sys",
  "leptos",
  "send_wrapper",
@@ -1603,8 +1599,6 @@ dependencies = [
 [[package]]
 name = "chartml-render"
 version = "4.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c14fe5f3d64a59a9c77f99c335186419f66bf5d5cea9f675badfccc66823d1b"
 dependencies = [
  "chartml-core",
  "fontdb 0.22.0",
@@ -5226,6 +5220,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
+name = "idb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6554f394e990a1af530a528a7fdcad6e01b29cb1b990f89df3ffd62cf15f7828"
+dependencies = [
+ "indexmap 2.13.0",
+ "js-sys",
+ "num-traits",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7900,6 +7909,12 @@ dependencies = [
  "flate2",
  "miniz_oxide",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "polyval"

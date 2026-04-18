@@ -19,8 +19,9 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
+use crate::chartml_provider::DashboardChartProviders;
 use crate::components::dashboard::{
-    ChartInfoModal, DashboardSourceCache, HistoryPanel, MarkdownRenderer, DashboardParameters,
+    ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters,
     SaveDashboardModal,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner, Skeleton};
@@ -149,10 +150,11 @@ fn InlineEditableTitle(
 /// content, history panel, modals, and footer.
 #[component]
 pub fn DashboardViewerPage() -> impl IntoView {
-    // Provide a dashboard-scoped source cache. ChartBlock pulls this via
-    // use_context to dedupe and cache remote datasource fetches across all
-    // charts on this dashboard.
-    provide_context(DashboardSourceCache::new());
+    // The chartml 5.0 resolver's KyomiDatasourceProvider + per-workspace
+    // IndexedDB cache backend are wired by `DashboardChartProviders` (used
+    // around the `MarkdownRenderer` below) once the workspace id is known.
+    // We can't call `provide_context` here because the workspace id loads
+    // asynchronously via the user-context resource.
 
     let params = use_params_map();
     let dashboard_id = Memo::new(move |_| {
@@ -309,6 +311,19 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 let chart_palette = user_ctx.as_ref()
                     .map(|ctx| ctx.chart_palette.clone())
                     .unwrap_or_else(|| "kyomi".to_string());
+
+                // Workspace UUID used by `KyomiDatasourceProvider` to namespace
+                // every cache entry (cross-workspace isolation) and by
+                // `IndexedDbBackend` to scope the persistent tier-2 cache so
+                // multiple users on the same browser cannot read each other's
+                // cached query results. Falls back to "default" only when the
+                // user context lacks a workspace_id (single-tenant deployments
+                // and the legacy free-tier path) — in that case the namespace
+                // simply doesn't isolate, which matches what the legacy
+                // bespoke fetch path did.
+                let workspace_id = user_ctx.as_ref()
+                    .and_then(|ctx| ctx.workspace_id.clone())
+                    .unwrap_or_else(|| "default".to_string());
 
                 Some(match dashboard_result {
                     Err(e) => {
@@ -929,16 +944,26 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                             </div>
                                                         }.into_any()
                                                     } else if params_initialized.get() || is_previewing {
+                                                        // Clone captures up front so the surrounding reactive
+                                                        // closure can stay `FnMut` even though the inner
+                                                        // `ChildrenFn` body needs to be `Fn` (callable many
+                                                        // times). Both `palette` and `ws_id` are cloned again
+                                                        // inside the body so the body itself doesn't move
+                                                        // anything out of its environment.
+                                                        let palette = chart_palette.clone();
+                                                        let ws_id = workspace_id.clone();
                                                         view! {
                                                             <div class="animate-fade-in">
-                                                                <MarkdownRenderer
-                                                                    content=display_content
-                                                                    parameters=Signal::derive(move || param_values.get())
-                                                                    on_save_to_dashboard=on_save_to_dashboard
-                                                                    on_chart_info=on_chart_info
-                                                                    on_ask_about_chart=on_ask_about_chart
-                                                                    chart_palette=chart_palette.clone()
-                                                                />
+                                                                <DashboardChartProviders workspace_id=ws_id.clone()>
+                                                                    <MarkdownRenderer
+                                                                        content=display_content
+                                                                        parameters=Signal::derive(move || param_values.get())
+                                                                        on_save_to_dashboard=on_save_to_dashboard
+                                                                        on_chart_info=on_chart_info
+                                                                        on_ask_about_chart=on_ask_about_chart
+                                                                        chart_palette=palette.clone()
+                                                                    />
+                                                                </DashboardChartProviders>
                                                             </div>
                                                         }.into_any()
                                                     } else {
