@@ -39,6 +39,17 @@ pub struct CreateConnectResult {
     pub connect_token: String,
 }
 
+/// Response for [`connect_status`] — Kyomi Connect agent presence.
+///
+/// Matches the shape of the REST `GET /{identifier}/connect/status` response:
+/// `last_seen` is an ISO-8601/RFC-3339 string when the agent is connected,
+/// `None` otherwise.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConnectStatusResponse {
+    pub connected: bool,
+    pub last_seen: Option<String>,
+}
+
 // ─── Server Functions ───────────────────────────────────────────────────────
 
 /// List datasources filtered to `connection_type == "connect"`.
@@ -198,6 +209,86 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
     );
 
     Ok(token)
+}
+
+/// Check whether the Kyomi Connect agent is currently connected for a
+/// datasource.
+///
+/// Mirrors `GET /api/v1/datasources/{identifier}/connect/status`. When the
+/// server is running without Redis (single-instance mode), the agent is always
+/// reported as disconnected — matching the REST handler's behavior.
+#[server(prefix = "/leptos-api")]
+pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusResponse, ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    require_workspace_admin(&auth)?;
+
+    let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
+
+    if ds.connection_type != "connect" {
+        return Err(ServerFnError::new(
+            "Connect status is only available for Connect datasources",
+        ));
+    }
+
+    // Single-instance mode (no Redis) — always report disconnected.
+    let Some(mut redis) = ctx.redis.clone() else {
+        return Ok(ConnectStatusResponse {
+            connected: false,
+            last_seen: None,
+        });
+    };
+
+    let presence = kyomi_auth::connect_token::check_presence(&mut redis, &ds.id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(ConnectStatusResponse {
+        connected: presence.connected,
+        last_seen: presence.last_seen.map(|ts| ts.to_rfc3339()),
+    })
+}
+
+/// Disconnect (revoke) the Kyomi Connect token for a datasource.
+///
+/// Mirrors `POST /api/v1/datasources/{identifier}/connect/disconnect`.
+/// Clears the stored JTI so any active token immediately fails verification.
+#[server(prefix = "/leptos-api")]
+pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), ServerFnError> {
+    let auth = extract_auth().await?;
+    let ctx = extract_context()?;
+    let ws_id = workspace_id(&auth)?;
+
+    require_workspace_admin(&auth)?;
+
+    let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
+
+    if ds.connection_type != "connect" {
+        return Err(ServerFnError::new(
+            "Disconnect is only available for Connect datasources",
+        ));
+    }
+
+    kyomi_auth::datasource_service::clear_connect_jti(&ctx.db, &ds.id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    tracing::info!(
+        "Disconnected Connect datasource '{}' (id: {}) by user {}",
+        ds.slug,
+        ds.id,
+        auth.user_id
+    );
+
+    Ok(())
 }
 
 // ─── Helpers (server-only) ──────────────────────────────────────────────────

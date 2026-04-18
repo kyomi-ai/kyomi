@@ -4,4 +4,4 @@
 
 mod connect_setup_page;
 
-pub use connect_setup_page::ConnectSetupPage;
+pub use connect_setup_page::{CONNECT_TYPES, ConnectSetupPage};

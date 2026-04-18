@@ -92,10 +92,12 @@ mod icons {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Format millisecond timestamp as relative time string.
-fn format_relative_time(timestamp_ms: f64) -> String {
-    let now = js_sys::Date::now();
-    let diff_ms = now - timestamp_ms;
+/// Format millisecond timestamp as relative time string against a caller-supplied "now".
+///
+/// Pure math — no clock reads — so the caller controls when the label re-evaluates.
+/// The `ChartHeaderBar` reactive `now_ms` signal drives those re-evaluations.
+fn format_relative_time(timestamp_ms: f64, now_ms: f64) -> String {
+    let diff_ms = now_ms - timestamp_ms;
     let diff_secs = (diff_ms / 1000.0) as i64;
 
     if diff_secs < 5 { return "just now".to_string(); }
@@ -264,6 +266,50 @@ pub fn ChartHeaderBar(
     let co = StoredValue::new(chart_orientation.clone());
     let cm = StoredValue::new(chart_mode.clone());
 
+    // Reactive "now" used by the "Last refreshed" label so it advances while the
+    // chart sits untouched. Native/SSR builds get a stable zero — the client
+    // hydrates and re-evaluates with a real clock. See timer Effect below.
+    #[cfg(target_arch = "wasm32")]
+    let (now_ms, set_now_ms) = signal(js_sys::Date::now());
+    #[cfg(not(target_arch = "wasm32"))]
+    let (now_ms, _) = signal(0.0_f64);
+
+    // Wall-clock tick — re-evaluates the relative-time label every 30s while a
+    // timestamp exists; matches React's `_startTimestampUpdater`. Effect re-runs
+    // when `last_updated` toggles None↔Some so the interval is torn down once
+    // there's nothing to display and (re)established when data arrives.
+    #[cfg(target_arch = "wasm32")]
+    if let Some(last_sig) = last_updated {
+        Effect::new(move |_| {
+            if last_sig.get().is_none() {
+                return;
+            }
+            use wasm_bindgen::prelude::*;
+            use wasm_bindgen::JsCast;
+
+            let Some(window) = web_sys::window() else { return };
+
+            let closure = Closure::<dyn Fn()>::new(move || {
+                set_now_ms.set(js_sys::Date::now());
+            });
+
+            let interval_id = window
+                .set_interval_with_callback_and_timeout_and_arguments_0(
+                    closure.as_ref().unchecked_ref(),
+                    30_000,
+                )
+                .unwrap_or(0);
+
+            let wrapper = send_wrapper::SendWrapper::new(closure);
+            on_cleanup(move || {
+                if let Some(window) = web_sys::window() {
+                    window.clear_interval_with_handle(interval_id);
+                }
+                drop(wrapper);
+            });
+        });
+    }
+
     // Determine which modifier chips to show based on chart type
     let show_orientation_chip = chart_type.as_deref() == Some("bar") && show_type_selector;
     let show_mode_chip = matches!(chart_type.as_deref(), Some("bar") | Some("area")) && show_type_selector;
@@ -282,7 +328,10 @@ pub fn ChartHeaderBar(
                 {last_updated.map(|sig| view! {
                     <span class="text-xs text-muted-foreground truncate">
                         {move || {
-                            let text = sig.get().map(format_relative_time).unwrap_or_default();
+                            let now = now_ms.get();
+                            let text = sig.get()
+                                .map(|ts| format_relative_time(ts, now))
+                                .unwrap_or_default();
                             if text.is_empty() {
                                 String::new()
                             } else {

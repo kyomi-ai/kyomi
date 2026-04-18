@@ -8,10 +8,16 @@
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
-    Alert, AlertDescription, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant,
-    Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, Switch,
+    Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
+    ButtonVariant, Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, Switch,
 };
 use crate::components::DynSelect;
+use crate::pages::connect_setup::CONNECT_TYPES;
+use crate::pages::settings::connect_deployment::{
+    CopyButton, DeploymentCommands, DeploymentTabStrip, build_deployment_commands, default_port,
+};
+use crate::pages::settings::connect_status_panel::ConnectStatusPanel;
+use crate::server_fns::connect::create_connect_datasource;
 use crate::server_fns::datasources::*;
 use crate::server_fns::onboarding::{
     check_sample_datasource_available, create_sample_datasource,
@@ -352,9 +358,13 @@ fn DatasourceRow(
                 <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-1.5 sm:gap-2">
                         <span class="font-medium truncate">{ds.name.clone()}</span>
-                        <Badge variant=BadgeVariant::Outline>
-                            {ds.type_display_name.clone()}
-                        </Badge>
+                        <span aria-hidden="true" class="text-muted-foreground">"·"</span>
+                        <span class="text-sm text-muted-foreground">{ds.type_display_name.clone()}</span>
+                        {(ds.connection_type == "connect").then(|| view! {
+                            <Badge variant=BadgeVariant::Secondary class="text-xs">
+                                "Connect"
+                            </Badge>
+                        })}
                         {ds.is_sample.then(|| view! {
                             <Badge variant=BadgeVariant::Secondary class="text-xs">
                                 "Sample"
@@ -522,6 +532,31 @@ pub fn DatasourceModal(
     let (settings_loading, set_settings_loading) = signal(false);
     let (error_msg, set_error_msg) = signal::<Option<String>>(None);
 
+    // ── Connect datasource state ─────────────────────────────────────────
+    // `connection_type` is `"direct"` for standard provider datasources and
+    // `"connect"` for Kyomi Connect agent datasources. In edit mode we branch
+    // on this to swap the connection/auth form for `ConnectStatusPanel`.
+    // Used by BOTH modes: loaded from `settings.connection_type` in edit mode,
+    // driven by the create-mode Direct / Kyomi Connect toggle in create mode.
+    let (connection_type, set_connection_type) = signal::<String>("direct".to_string());
+
+    // ── Create-mode Connect flow state ───────────────────────────────────
+    // `connect_token`: populated after `create_connect_datasource` succeeds;
+    // presence of a token swaps the modal body to the post-create view
+    // (token display + deployment tabs + Done button).
+    // `connect_created_name` / `connect_created_type`: snapshot of the
+    // datasource we just created (so we can render its name in the post-
+    // create header and its default port in the deployment commands).
+    // `creating_connect`: in-flight flag for the create server_fn — disables
+    // the submit button and swaps its label for "Creating...".
+    // `active_deploy_tab`: which of the four deployment tabs is active in
+    // the post-create view. Default `"linux"` (matches `ConnectStatusPanel`).
+    let (connect_token, set_connect_token) = signal::<Option<String>>(None);
+    let (connect_created_name, set_connect_created_name) = signal::<String>(String::new());
+    let (connect_created_type, set_connect_created_type) = signal::<String>(String::new());
+    let (creating_connect, set_creating_connect) = signal(false);
+    let (active_deploy_tab, set_active_deploy_tab) = signal::<String>("linux".to_string());
+
     // ── Sample datasource state ──────────────────────────────────────────
     // `is_sample`: true when editing an existing sample datasource (loaded from
     // connection_config.is_sample). Gates the read-only sample view.
@@ -585,6 +620,12 @@ pub fn DatasourceModal(
         set_discovered_warehouses.set(vec![]);
         set_discovered_catalogs.set(vec![]);
         set_is_sample.set(false);
+        set_connection_type.set("direct".to_string());
+        set_connect_token.set(None);
+        set_connect_created_name.set(String::new());
+        set_connect_created_type.set(String::new());
+        set_creating_connect.set(false);
+        set_active_deploy_tab.set("linux".to_string());
         // Don't reset sample_available / sample_already_added here — those are
         // refreshed by an async effect when the modal opens in create mode.
         set_creating_sample.set(false);
@@ -615,6 +656,7 @@ pub fn DatasourceModal(
                             set_name.set(settings.name.clone());
                             set_slug.set(settings.slug.clone());
                             set_ds_type.set(settings.datasource_type.clone());
+                            set_connection_type.set(settings.connection_type.clone());
 
                             // Load connection_config fields
                             let cfg = &settings.connection_config;
@@ -1049,8 +1091,59 @@ pub fn DatasourceModal(
         });
     };
 
+    // ── Create-mode: create a Connect datasource ─────────────────────────
+    // Called from the create-mode footer when `connection_type == "connect"`.
+    // On success, stashes the returned token + datasource name/type so the
+    // modal body swaps to the post-create deployment view. The datasource
+    // list refresh happens later, when the user clicks "Done" (which calls
+    // on_saved, same as the direct create path's success callback).
+    let do_create_connect = move || {
+        let name_val = name.get_untracked().trim().to_string();
+        let slug_val = slug.get_untracked();
+        let ds_type_val = ds_type.get_untracked();
+
+        if name_val.is_empty() {
+            set_error_msg.set(Some("Name is required".to_string()));
+            return;
+        }
+
+        set_creating_connect.set(true);
+        set_error_msg.set(None);
+
+        let slug_opt = if slug_val.trim().is_empty() {
+            None
+        } else {
+            Some(slug_val)
+        };
+
+        leptos::task::spawn_local(async move {
+            match create_connect_datasource(name_val.clone(), slug_opt, ds_type_val.clone()).await {
+                Ok(result) => {
+                    set_connect_created_name.set(name_val);
+                    set_connect_created_type.set(ds_type_val);
+                    set_connect_token.set(Some(result.connect_token));
+                }
+                Err(e) => {
+                    set_error_msg.set(Some(e.to_string()));
+                }
+            }
+            set_creating_connect.set(false);
+        });
+    };
+
     // ── Derived: is create mode ──────────────────────────────────────────
     let is_create_mode = Signal::derive(move || datasource_id.get().is_none());
+
+    // ── Derived: is this a Kyomi Connect datasource? ─────────────────────
+    // True in edit mode when the loaded datasource has `connection_type ==
+    // "connect"`, and true in create mode when the user has picked "Kyomi
+    // Connect" on the top-of-modal toggle.
+    let is_connect = Signal::derive(move || connection_type.get() == "connect");
+
+    // ── Derived: have we finished creating a Connect datasource? ─────────
+    // When true, the modal body swaps to the post-create view (token +
+    // deployment tabs + Done button). Cleared on modal close via reset_form.
+    let connect_create_complete = Signal::derive(move || connect_token.get().is_some());
 
     // ── Modal title ──────────────────────────────────────────────────────
     let modal_title = Signal::derive(move || {
@@ -1078,25 +1171,34 @@ pub fn DatasourceModal(
                         let do_save = do_save;
                         let is_saving = saving.get();
                         let sample = is_sample.get();
+                        let connect = is_connect.get();
+                        // Connect + sample both render as read-only in the
+                        // body, so neither has a Save action. Label the
+                        // dismiss button "Close" in both cases to signal the
+                        // read-only nature.
+                        let read_only = sample || connect;
                         view! {
                             // Edit mode footer.
                             //
                             // The sample datasource is intentionally read-only:
                             // its connection settings are managed by the server
                             // via `SAMPLE_CLICKHOUSE_*` env vars, so there is
-                            // nothing for the user to save. We surface a single
-                            // "Close" button (no "Save") to make the read-only
-                            // nature explicit, matching the React reference
-                            // in `apps/frontend/src/components/settings/
-                            // datasources/DatasourceModal.jsx` around the
-                            // sample tab render path.
+                            // nothing for the user to save. Connect datasources
+                            // are also read-only here — connection settings
+                            // live on the remote agent, not in this modal. We
+                            // surface a single "Close" button (no "Save") to
+                            // make the read-only nature explicit, matching the
+                            // React reference in `apps/frontend/src/components/
+                            // settings/datasources/DatasourceModal.jsx` for
+                            // both the sample and `connection_type === 'connect'`
+                            // branches.
                             <Button
                                 variant=ButtonVariant::Outline
                                 on:click=move |_| on_close.run(())
                             >
-                                {if sample { "Close" } else { "Cancel" }}
+                                {if read_only { "Close" } else { "Cancel" }}
                             </Button>
-                            <Show when=move || !is_sample.get()>
+                            <Show when=move || !is_sample.get() && !is_connect.get()>
                                 <Button
                                     disabled=is_saving
                                     on:click=move |_| do_save()
@@ -1107,9 +1209,62 @@ pub fn DatasourceModal(
                         }.into_any()
                     }
                 >
-                    // Create mode footer
+                    // Create mode footer.
+                    //
+                    // Three distinct sub-modes, each with its own footer:
+                    //   1. Direct create: Cancel + Next/Create (existing flow).
+                    //   2. Connect create, pre-submit: Cancel + "Create Connect
+                    //      Datasource" which calls `do_create_connect`.
+                    //   3. Connect create, post-submit (token in hand): a
+                    //      single "Done" button which calls `on_saved` —
+                    //      same callback the direct-create success path uses,
+                    //      so the modal closes and the datasource list
+                    //      refreshes.
                     {move || {
                         let do_save = do_save;
+                        let do_create_connect = do_create_connect;
+                        // Post-create view (Connect create finished) — single Done button.
+                        if connect_create_complete.get() {
+                            return view! {
+                                <Button
+                                    on:click=move |_| {
+                                        on_saved.run(DatasourceResult {
+                                            id: String::new(),
+                                            slug: String::new(),
+                                            name: connect_created_name.get_untracked(),
+                                            datasource_type: connect_created_type.get_untracked(),
+                                        });
+                                    }
+                                >
+                                    "Done"
+                                </Button>
+                            }.into_any();
+                        }
+
+                        // Pre-submit Connect create — single "Create Connect
+                        // Datasource" action; no tab navigation.
+                        if is_connect.get() {
+                            return view! {
+                                <Button
+                                    variant=ButtonVariant::Outline
+                                    on:click=move |_| on_close.run(())
+                                >
+                                    "Cancel"
+                                </Button>
+                                <Button
+                                    disabled=Signal::derive(move || creating_connect.get() || name.get().trim().is_empty())
+                                    on:click=move |_| do_create_connect()
+                                >
+                                    {move || if creating_connect.get() {
+                                        "Creating..."
+                                    } else {
+                                        "Create Connect Datasource"
+                                    }}
+                                </Button>
+                            }.into_any();
+                        }
+
+                        // Direct create footer (original behavior).
                         let is_connection_tab = active_tab.get() == "connection";
                         let can_next = test_result.get().map(|r| r.success).unwrap_or(false) && !name.get().is_empty();
                         let is_saving = saving.get();
@@ -1176,8 +1331,118 @@ pub fn DatasourceModal(
                     </Show>
 
                     <Show when=move || !settings_loading.get()>
-                        // Tab bar
-                        <Show when=move || is_create_mode.get()>
+                        // ── Connection Method toggle (create mode only) ──
+                        //
+                        // Large two-column card selector. Follows the
+                        // DESIGN.md "radio card" pattern used for selected /
+                        // unselected choice cards: `rounded-lg border` with
+                        // selected state switching to `border-primary
+                        // bg-primary/5`. Hidden once the user has clicked
+                        // "Create Connect Datasource" successfully — the
+                        // post-create view below takes over the modal body.
+                        <Show when=move || is_create_mode.get() && !connect_create_complete.get()>
+                            <div class="mb-5">
+                                <label class="block text-sm font-medium text-foreground mb-2">
+                                    "Connection Method"
+                                </label>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <button
+                                        type="button"
+                                        on:click=move |_| {
+                                            set_connection_type.set("direct".to_string());
+                                            set_error_msg.set(None);
+                                        }
+                                        class=move || {
+                                            let selected = connection_type.get() == "direct";
+                                            if selected {
+                                                "p-4 rounded-lg border text-left transition-colors border-primary/20 bg-primary/10 text-primary"
+                                            } else {
+                                                "p-4 rounded-lg border text-left transition-colors border-border hover:border-muted-foreground/30 text-foreground"
+                                            }
+                                        }
+                                    >
+                                        <div class="font-medium text-sm">
+                                            "Direct Connection"
+                                        </div>
+                                        <div class="text-xs text-muted-foreground mt-1">
+                                            "Connect directly from Kyomi to your database."
+                                        </div>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        on:click=move |_| {
+                                            set_connection_type.set("connect".to_string());
+                                            set_error_msg.set(None);
+                                            // If the user had picked a type
+                                            // that isn't Connect-compatible
+                                            // (e.g. BigQuery), snap to the
+                                            // first Connect-compatible type
+                                            // so the simplified form below
+                                            // doesn't render with a disabled
+                                            // placeholder value.
+                                            let current = ds_type.get_untracked();
+                                            let compatible = CONNECT_TYPES
+                                                .iter()
+                                                .any(|(v, _)| *v == current);
+                                            if !compatible
+                                                && let Some((v, _)) = CONNECT_TYPES.first()
+                                            {
+                                                set_ds_type.set((*v).to_string());
+                                            }
+                                        }
+                                        class=move || {
+                                            let selected = connection_type.get() == "connect";
+                                            if selected {
+                                                "p-4 rounded-lg border text-left transition-colors border-primary/20 bg-primary/10 text-primary"
+                                            } else {
+                                                "p-4 rounded-lg border text-left transition-colors border-border hover:border-muted-foreground/30 text-foreground"
+                                            }
+                                        }
+                                    >
+                                        <div class="font-medium text-sm">
+                                            "Kyomi Connect"
+                                        </div>
+                                        <div class="text-xs text-muted-foreground mt-1">
+                                            "Self-hosted agent — works through firewalls."
+                                        </div>
+                                    </button>
+                                </div>
+                            </div>
+                        </Show>
+
+                        // ── Post-create Connect view ──
+                        //
+                        // Rendered when the user has successfully created a
+                        // Connect datasource in this session. Replaces the
+                        // whole content area (tab bar + connection form) with
+                        // a one-time token display + the four deployment
+                        // command tabs. Footer provides a single "Done"
+                        // button which closes the modal and refreshes the
+                        // datasource list.
+                        <Show when=move || connect_create_complete.get() && is_create_mode.get()>
+                            <ConnectCreateSuccessView
+                                token=Signal::derive(move || {
+                                    connect_token
+                                        .get()
+                                        .expect("connect_token is set before the success view renders")
+                                })
+                                datasource_name=Signal::derive(move || connect_created_name.get())
+                                datasource_type=Signal::derive(move || connect_created_type.get())
+                                active_tab=active_deploy_tab
+                                set_active_tab=set_active_deploy_tab
+                            />
+                        </Show>
+
+                        // Tab bar — hidden in Connect create-mode (the simplified
+                        // Connect form has no separate Catalog step; the catalog
+                        // is indexed automatically after agent registration) and
+                        // hidden after a successful Connect create (the post-
+                        // create view owns the whole body).
+                        <Show when=move || {
+                            is_create_mode.get()
+                                && !is_connect.get()
+                                && !connect_create_complete.get()
+                        }>
                             <div class="flex border-b border-border mb-4">
                                 <button
                                     class=move || if active_tab.get() == "connection" { TAB_ACTIVE } else { TAB_INACTIVE }
@@ -1204,7 +1469,38 @@ pub fn DatasourceModal(
                             </div>
                         </Show>
 
-                        // Content area (min-height from React)
+                        // ── Connect create-mode simplified form ──
+                        //
+                        // When the user picked "Kyomi Connect" above, we
+                        // show a compact form: name + restricted type
+                        // selector + a short info panel. No credentials,
+                        // no test-connection, no catalog tab — the agent
+                        // owns the connection. The submit button lives in
+                        // the footer.
+                        <Show when=move || {
+                            is_create_mode.get()
+                                && is_connect.get()
+                                && !connect_create_complete.get()
+                        }>
+                            <ConnectCreateForm
+                                name=name
+                                set_name=set_name
+                                slug=slug
+                                set_slug=set_slug
+                                slug_manually_edited=slug_manually_edited
+                                set_slug_manually_edited=set_slug_manually_edited
+                                ds_type=ds_type
+                                set_ds_type=set_ds_type
+                            />
+                        </Show>
+
+                        // Content area (min-height from React). Hidden in
+                        // Connect create-mode (simplified form takes over)
+                        // and post-create (deployment view takes over).
+                        <Show when=move || {
+                            !(connect_create_complete.get()
+                                || is_create_mode.get() && is_connect.get())
+                        }>
                         <div class="space-y-4 min-h-[400px]">
 
                             // ── CONNECTION TAB ──
@@ -1353,6 +1649,43 @@ pub fn DatasourceModal(
                                             </p>
                                         </div>
                                     </div>
+
+                                    // ── Kyomi Connect status panel ──
+                                    // For Connect datasources, the agent owns
+                                    // the connection config (host, port,
+                                    // credentials), not this modal. Show the
+                                    // status / rotate-token / disconnect UI
+                                    // instead of the per-provider form.
+                                    // create-mode is gated out because Connect
+                                    // datasources are created via the dedicated
+                                    // Connect Setup page.
+                                    <Show
+                                        when=move || is_connect.get() && !is_create_mode.get()
+                                        // Use a fallback-free closure so the
+                                        // panel is freshly mounted (and its
+                                        // polling interval freshly spawned)
+                                        // each time the user opens a Connect
+                                        // datasource in the modal.
+                                    >
+                                        {move || {
+                                            let ds_id = datasource_id
+                                                .get()
+                                                .unwrap_or_default();
+                                            let ds_type_val = ds_type.get();
+                                            view! {
+                                                <ConnectStatusPanel
+                                                    datasource_id=ds_id
+                                                    datasource_type=ds_type_val
+                                                />
+                                            }
+                                        }}
+                                    </Show>
+
+                                    // Everything from auth-mode selectors onward
+                                    // is hidden for Connect datasources — the
+                                    // ConnectStatusPanel above replaces them.
+                                    <Show when=move || !is_connect.get()>
+                                    <div class="space-y-4">
 
                                     // BigQuery auth mode selector
                                     <Show when=move || ds_type.get() == "bigquery">
@@ -1514,6 +1847,9 @@ pub fn DatasourceModal(
                                     </div>
                                     </Show>
 
+                                    </div>
+                                    </Show>
+
                                 </div>
                             </Show>
 
@@ -1539,12 +1875,226 @@ pub fn DatasourceModal(
                             </Show>
 
                         </div>
+                        </Show>
                     </Show>
                 }
             }}
                 </Modal>
             }
         }}
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connect Create Form (create-mode, simplified)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Simplified form rendered when the create-mode user selects "Kyomi Connect".
+///
+/// Shows only the fields needed to provision a Connect datasource: name +
+/// slug + type (restricted to [`CONNECT_TYPES`]). Submission happens via
+/// the modal footer (`do_create_connect`), not via an in-form button, so
+/// the user's save gesture is consistent across Direct and Connect modes.
+#[component]
+fn ConnectCreateForm(
+    name: ReadSignal<String>,
+    set_name: WriteSignal<String>,
+    slug: ReadSignal<String>,
+    set_slug: WriteSignal<String>,
+    slug_manually_edited: ReadSignal<bool>,
+    set_slug_manually_edited: WriteSignal<bool>,
+    ds_type: ReadSignal<String>,
+    set_ds_type: WriteSignal<String>,
+) -> impl IntoView {
+    view! {
+        <div class="space-y-4 min-h-[400px]">
+            // Info panel — matches the React "How Kyomi Connect works" box
+            // (same three-step sequence, same copy).
+            <div class="rounded-lg border border-border bg-muted/30 p-4">
+                <p class="text-sm text-foreground font-medium mb-2">
+                    "How Kyomi Connect works"
+                </p>
+                <ol class="text-sm text-muted-foreground space-y-1 list-decimal list-inside">
+                    <li>"Save this datasource to generate a secure token"</li>
+                    <li>"Deploy the Kyomi Connect agent in your network"</li>
+                    <li>"The agent connects outbound to Kyomi — no inbound access needed"</li>
+                </ol>
+            </div>
+
+            // Name + Slug
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-sm font-medium mb-1">
+                        "Name "
+                        <span class="text-error-foreground">"*"</span>
+                    </label>
+                    <input
+                        type="text"
+                        class=MODAL_INPUT_CLASS
+                        placeholder="Production Database"
+                        prop:value=move || name.get()
+                        on:input=move |ev| {
+                            let new_name = event_target_value(&ev);
+                            // Auto-generate slug until the user edits it
+                            // manually — same rule the Direct form uses.
+                            if !slug_manually_edited.get_untracked() {
+                                set_slug.set(generate_slug(&new_name));
+                            }
+                            set_name.set(new_name);
+                        }
+                    />
+                </div>
+                <div>
+                    <label class="block text-sm font-medium mb-1">"Slug"</label>
+                    <input
+                        type="text"
+                        class=format!("{} font-mono", MODAL_INPUT_CLASS)
+                        placeholder="production-db"
+                        prop:value=move || slug.get()
+                        on:input=move |ev| {
+                            set_slug_manually_edited.set(true);
+                            let val = event_target_value(&ev)
+                                .to_lowercase()
+                                .chars()
+                                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                                .collect::<String>();
+                            set_slug.set(val);
+                        }
+                    />
+                    <p class="text-xs text-muted-foreground mt-1">
+                        "Auto-generated from name if left empty"
+                    </p>
+                </div>
+            </div>
+
+            // Type selector — restricted to Connect-compatible types.
+            // Drives the default port baked into the deployment commands
+            // on the post-create view.
+            <div>
+                <label class="block text-sm font-medium mb-1">"Type"</label>
+                <DynSelect
+                    value=Signal::derive(move || ds_type.get())
+                    options=Signal::stored(
+                        CONNECT_TYPES
+                            .iter()
+                            .map(|(v, l)| ((*v).to_string(), (*l).to_string()))
+                            .collect::<Vec<_>>()
+                    )
+                    on_change=move |val: String| set_ds_type.set(val)
+                />
+                <p class="text-xs text-muted-foreground mt-1">
+                    "BigQuery, Snowflake, and Databricks use OAuth and don't need Kyomi Connect."
+                </p>
+            </div>
+        </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connect Create Success View (post-create token display + deployment tabs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Post-create view rendered after `create_connect_datasource` succeeds.
+///
+/// Shows a one-time-display warning Alert, the new Connect token in a
+/// copy-ready mono block, and the four deployment-command tabs with the
+/// real token substituted in. The "Done" button lives in the modal footer
+/// and fires `on_saved` to close the modal + refresh the list.
+///
+/// Reuses [`build_deployment_commands`] (same function powering the
+/// edit-mode `ConnectStatusPanel`) so command text stays byte-equivalent
+/// across both flows.
+#[component]
+fn ConnectCreateSuccessView(
+    token: Signal<String>,
+    datasource_name: Signal<String>,
+    datasource_type: Signal<String>,
+    active_tab: ReadSignal<String>,
+    set_active_tab: WriteSignal<String>,
+) -> impl IntoView {
+    // Derived: the four deployment commands, rebuilt whenever the token or
+    // type changes (both are stable for the lifetime of this view, but the
+    // memo keeps us honest if that ever stops being true).
+    let deployment_commands: Memo<DeploymentCommands> = Memo::new(move |_| {
+        let tok = token.get();
+        let ty = datasource_type.get();
+        build_deployment_commands(&ty, Some(&tok), None)
+    });
+
+    // Displayed port reflects the default for the selected type — matches
+    // what the commands embed, so the user can correlate them.
+    let displayed_port = Signal::derive(move || default_port(&datasource_type.get()));
+
+    let active_command = move || -> String {
+        let tab = active_tab.get();
+        deployment_commands.with(|cmds| cmds.for_tab(&tab).to_string())
+    };
+
+    view! {
+        <div class="space-y-5 min-h-[400px]">
+            // Header — datasource name + short framing text.
+            <div class="space-y-1">
+                <h3 class="text-lg font-semibold text-foreground">
+                    "Deploy Kyomi Connect"
+                </h3>
+                <p class="text-sm text-muted-foreground">
+                    "Install the Connect agent to bridge "
+                    <span class="font-medium text-foreground">
+                        {move || datasource_name.get()}
+                    </span>
+                    " to Kyomi."
+                </p>
+            </div>
+
+            // One-time-display warning — same copy as ConnectStatusPanel's
+            // post-rotation alert so the "save this token" message reads
+            // identically across the creation + rotation flows.
+            <Alert variant=AlertVariant::Warning>
+                <AlertTitle>"Save this token now"</AlertTitle>
+                <AlertDescription>
+                    "It will not be shown again. Store it somewhere safe — \
+                     you'll need it to deploy the Kyomi Connect agent."
+                </AlertDescription>
+            </Alert>
+
+            // Token display with copy-to-clipboard.
+            <div class="space-y-1.5">
+                <label class="block text-sm font-medium text-foreground">
+                    "Connect Token"
+                </label>
+                <div class="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+                    <code class="flex-1 text-xs font-mono text-foreground break-all select-all">
+                        {move || token.get()}
+                    </code>
+                    <CopyButton text=Signal::derive(move || token.get())/>
+                </div>
+            </div>
+
+            // Deployment tabs — same module powers ConnectStatusPanel.
+            <div class="space-y-2">
+                <div class="flex items-center justify-between">
+                    <h4 class="text-sm font-medium text-foreground">"Deployment Instructions"</h4>
+                    <span class="text-xs text-muted-foreground font-mono">
+                        {move || format!("default port: {}", displayed_port.get())}
+                    </span>
+                </div>
+                <DeploymentTabStrip
+                    active_tab=active_tab.into()
+                    set_active_tab=set_active_tab
+                />
+                <div class="relative rounded-md border border-border bg-muted/30">
+                    <pre class="p-4 pr-12 text-xs font-mono text-foreground overflow-x-auto whitespace-pre">
+                        {active_command}
+                    </pre>
+                    <div class="absolute top-2 right-2">
+                        <CopyButton text=Signal::derive(move || {
+                            let tab = active_tab.get();
+                            deployment_commands.with(|cmds| cmds.for_tab(&tab).to_string())
+                        })/>
+                    </div>
+                </div>
+            </div>
+        </div>
     }
 }
 

@@ -320,6 +320,7 @@ Trunk runs tailwindcss as a pre-build hook automatically. Release profile embeds
 - nginx on NAS (192.168.1.100) proxies `dev.kyomi.ai` → `192.168.1.200:3000`
 - Runs in **SaaS mode** (Postgres + Redis)
 - Use `dev-server` profile — reads `dist/` from disk, no restart for frontend changes
+- Health probes: `GET /health`, `GET /api/health`, and `GET /api/v1/health` all return the same JSON payload and are backed by the same handler. Uptime monitors that prefix paths with `/api/v1/...` should use `/api/v1/health`.
 
 ### trunk serve (port 8080) — Fastest iteration
 

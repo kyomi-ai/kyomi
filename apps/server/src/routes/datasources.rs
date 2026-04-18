@@ -2932,34 +2932,21 @@ async fn connect_status(
         ));
     }
 
-    // Check Redis for the Connect agent presence key.
-    // The key stores a connection_id (u64) with a 60s TTL refreshed by heartbeats.
-    // If the key exists, the agent is currently connected.
     // In single-instance mode (no Redis), always report disconnected.
+    // Otherwise delegate to the shared presence helper so the Leptos
+    // server_fn path and this REST handler stay in lock-step.
     let Some(mut redis) = state.redis.clone() else {
         return Ok(Json(ConnectStatusResponse {
             connected: false,
             last_seen: None,
         }));
     };
-    let redis_key = format!("connect:{}", ds.id);
-    let presence: Option<String> = redis::cmd("GET")
-        .arg(&redis_key)
-        .query_async(&mut redis)
-        .await
-        .unwrap_or(None);
 
-    let connected = presence.is_some();
-    // When connected, the agent was just seen (heartbeat refreshes the key every 30s).
-    let last_seen = if connected {
-        Some(chrono::Utc::now().to_rfc3339())
-    } else {
-        None
-    };
+    let presence = kyomi_auth::connect_token::check_presence(&mut redis, &ds.id).await?;
 
     Ok(Json(ConnectStatusResponse {
-        connected,
-        last_seen,
+        connected: presence.connected,
+        last_seen: presence.last_seen.map(|ts| ts.to_rfc3339()),
     }))
 }
 

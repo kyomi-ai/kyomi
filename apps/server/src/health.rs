@@ -4,6 +4,7 @@
 //!
 //! - `GET /api/health` — service health with DB, KV store, chart renderer checks
 //! - `GET /health` — alias for nginx-less deployments
+//! - `GET /api/v1/health` — alias for uptime probes targeting the versioned API prefix
 
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};

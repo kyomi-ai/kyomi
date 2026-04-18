@@ -390,24 +390,31 @@ pub fn FeedbackModal(
                                 </div>
                             }
                         >
-                            <div class="relative inline-block">
-                                <img
-                                    src=move || screenshot_preview.get().unwrap_or_default()
-                                    alt="Screenshot preview"
-                                    class="max-h-32 rounded border border-border"
-                                />
-                                <Button
-                                    variant=ButtonVariant::Ghost
-                                    size=ButtonSize::Sm
-                                    class="absolute top-1 right-1 h-6 w-6 p-0"
-                                    aria_label="Remove screenshot"
-                                    on:click=move |_| {
-                                        set_screenshot_data.set(None);
-                                        set_screenshot_preview.set(None);
-                                    }
-                                >
-                                    <Icon icon=phosphor_leptos::X weight=IconWeight::Regular size="14px"/>
-                                </Button>
+                            <div class="flex items-start gap-3">
+                                <div class="relative inline-block shrink-0">
+                                    <img
+                                        src=move || screenshot_preview.get().unwrap_or_default()
+                                        alt="Screenshot preview"
+                                        class="max-h-32 rounded border border-border"
+                                    />
+                                </div>
+                                <div class="flex flex-col gap-2 min-w-0">
+                                    <div class="flex items-center gap-1.5 text-sm font-medium text-success-foreground">
+                                        <Icon icon=phosphor_leptos::CHECK_CIRCLE weight=IconWeight::Fill size="16px"/>
+                                        "Screenshot attached"
+                                    </div>
+                                    <Button
+                                        variant=ButtonVariant::Outline
+                                        size=ButtonSize::Sm
+                                        on:click=move |_| {
+                                            set_screenshot_data.set(None);
+                                            set_screenshot_preview.set(None);
+                                        }
+                                    >
+                                        <Icon icon=phosphor_leptos::X weight=IconWeight::Regular size="14px"/>
+                                        "Remove"
+                                    </Button>
+                                </div>
                             </div>
                         </Show>
                     </div>

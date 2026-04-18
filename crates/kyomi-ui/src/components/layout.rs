@@ -19,6 +19,7 @@ use leptos_router::NavigateOptions;
 use crate::components::chat::WebSocketProvider;
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::feedback_modal::FeedbackModal;
+use crate::components::popover::{Placement, Popover};
 use crate::components::EmptyState;
 use crate::query_cache::{provide_query_cache, use_query};
 #[cfg(target_arch = "wasm32")]
@@ -757,9 +758,10 @@ fn Sidebar(
                         let is_personal = user.is_personal_mode;
                         let show_feedback = !user.is_personal_mode && !user.is_self_hosted;
                         let email = user.email.clone();
+                        let trigger_ref = NodeRef::<leptos::html::Div>::new();
 
                         view! {
-                            <div class="relative">
+                            <div node_ref=trigger_ref>
                                 <button
                                     on:click=move |_| set_user_menu_open.update(|o| *o = !*o)
                                     class=move || format!(
@@ -797,72 +799,74 @@ fn Sidebar(
                                     </span>
                                 </button>
 
-                                // User menu dropdown — dark theme to match sidebar context.
-                                // React: dark popover with border-[var(--color-sidebar-border)], bg matching sidebar.
-                                <Show when=move || user_menu_open.get()>
-                                    <div class="absolute bottom-full left-0 mb-2 bg-[var(--color-sidebar)] border border-[var(--color-sidebar-border)] rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 z-50 min-w-48">
-                                        // User info header — hide in personal mode
-                                        {if !is_personal {
-                                            Some(view! {
-                                                <div class="px-4 py-3 border-b border-[var(--color-sidebar-border)]">
-                                                    <div class="text-sm font-medium text-[var(--color-sidebar-foreground)]">{display_name.clone()}</div>
-                                                    <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] truncate">{email.clone()}</div>
-                                                </div>
-                                            })
-                                        } else {
-                                            None
-                                        }}
-                                        <a
-                                            href="/settings"
-                                            on:click=move |_| set_user_menu_open.set(false)
-                                            class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
-                                        >
-                                            <Icon icon=phosphor_leptos::GEAR weight=IconWeight::Light size="16px"/>
-                                            <span>"Settings"</span>
-                                        </a>
-                                        <a
-                                            href="https://kyomi.ai/docs"
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
-                                        >
-                                            <Icon icon=phosphor_leptos::BOOK_OPEN weight=IconWeight::Light size="16px"/>
-                                            <span>"Help & Docs"</span>
-                                        </a>
-                                        {if show_feedback {
-                                            Some(view! {
-                                                <button
-                                                    on:click=move |_| {
-                                                        set_user_menu_open.set(false);
-                                                        set_feedback_open.set(true);
-                                                    }
-                                                    class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
-                                                >
-                                                    <Icon icon=phosphor_leptos::CHAT_CIRCLE_DOTS weight=IconWeight::Light size="16px"/>
-                                                    <span>"Send Feedback"</span>
-                                                </button>
-                                            })
-                                        } else {
-                                            None
-                                        }}
-                                        {if !is_personal {
-                                            Some(view! {
-                                                <button
-                                                    on:click=move |_| {
-                                                        set_user_menu_open.set(false);
-                                                        logout_action.dispatch(());
-                                                    }
-                                                    class="w-full text-left px-4 py-2 text-sm text-error-foreground transition-colors hover:bg-error/10 flex items-center space-x-3"
-                                                >
-                                                    <Icon icon=phosphor_leptos::SIGN_OUT weight=IconWeight::Light size="16px"/>
-                                                    <span>"Logout"</span>
-                                                </button>
-                                            })
-                                        } else {
-                                            None
-                                        }}
-                                    </div>
-                                </Show>
+                                <Popover
+                                    trigger_ref=trigger_ref
+                                    open=Signal::derive(move || user_menu_open.get())
+                                    on_close=Callback::new(move |()| set_user_menu_open.set(false))
+                                    placement=Placement::TOP_START
+                                    class="bg-[var(--color-sidebar)] border border-[var(--color-sidebar-border)] rounded-lg shadow-[0_8px_24px_rgba(0,0,0,0.3)] py-1 min-w-48"
+                                >
+                                    // User info header — hide in personal mode
+                                    {if !is_personal {
+                                        Some(view! {
+                                            <div class="px-4 py-3 border-b border-[var(--color-sidebar-border)]">
+                                                <div class="text-sm font-medium text-[var(--color-sidebar-foreground)]">{display_name.clone()}</div>
+                                                <div class="text-xs text-[var(--color-sidebar-foreground-secondary)] truncate">{email.clone()}</div>
+                                            </div>
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                    <a
+                                        href="/settings"
+                                        on:click=move |_| set_user_menu_open.set(false)
+                                        class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
+                                    >
+                                        <Icon icon=phosphor_leptos::GEAR weight=IconWeight::Light size="16px"/>
+                                        <span>"Settings"</span>
+                                    </a>
+                                    <a
+                                        href="https://kyomi.ai/docs"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
+                                    >
+                                        <Icon icon=phosphor_leptos::BOOK_OPEN weight=IconWeight::Light size="16px"/>
+                                        <span>"Help & Docs"</span>
+                                    </a>
+                                    {if show_feedback {
+                                        Some(view! {
+                                            <button
+                                                on:click=move |_| {
+                                                    set_user_menu_open.set(false);
+                                                    set_feedback_open.set(true);
+                                                }
+                                                class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
+                                            >
+                                                <Icon icon=phosphor_leptos::CHAT_CIRCLE_DOTS weight=IconWeight::Light size="16px"/>
+                                                <span>"Send Feedback"</span>
+                                            </button>
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                    {if !is_personal {
+                                        Some(view! {
+                                            <button
+                                                on:click=move |_| {
+                                                    set_user_menu_open.set(false);
+                                                    logout_action.dispatch(());
+                                                }
+                                                class="w-full text-left px-4 py-2 text-sm text-error-foreground transition-colors hover:bg-error/10 flex items-center space-x-3"
+                                            >
+                                                <Icon icon=phosphor_leptos::SIGN_OUT weight=IconWeight::Light size="16px"/>
+                                                <span>"Logout"</span>
+                                            </button>
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                </Popover>
                             </div>
                         }.into_any()
                     })}

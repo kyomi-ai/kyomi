@@ -63,6 +63,12 @@ pub struct ServerContext {
     /// Required by Slack connect flow; `None` disables OAuth URL generation.
     pub kv: Option<kyomi_core::KVPool>,
 
+    /// Raw Redis connection pool used for components that need direct Redis
+    /// access from server functions (e.g. Connect agent presence checks).
+    /// `None` when running without Redis (single-instance mode) — callers
+    /// must treat this as "feature unavailable" and respond accordingly.
+    pub redis: Option<kyomi_core::RedisPool>,
+
     /// WebAuthn instance for passkey registration/authentication.
     /// Built once at server startup from config.
     pub webauthn: Option<std::sync::Arc<webauthn_rs::Webauthn>>,

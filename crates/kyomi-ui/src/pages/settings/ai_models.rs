@@ -28,7 +28,7 @@ pub struct ModelOption {
 /// existing bundle billing only meters Anthropic). Keep this list Anthropic-only
 /// until the bundle accounting supports other providers.
 pub const KYOMI_CREDITS_MODELS: &[ModelOption] = &[
-    ModelOption { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
+    ModelOption { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
     ModelOption { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
 ];
 

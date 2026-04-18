@@ -39,6 +39,31 @@ function convertVisualizeForTypeChange(viz, fromType, toType) {
 
 const container = document.getElementById("chart");
 
+// Singleton ChartML instance — WASM init is async but idempotent.
+// v4 made the constructor private; ChartML.create() returns a promise that
+// dedupes concurrent callers internally, so caching the promise here is
+// purely ergonomic.
+let chartmlPromise = null;
+function getChartML() {
+  if (!chartmlPromise) chartmlPromise = ChartML.create();
+  return chartmlPromise;
+}
+
+// v4's RenderOptions no longer accepts a palette field (it only has width/height).
+// Palette must be baked into the YAML at `visualize.style.colors` before render —
+// this mirrors the server-side `chartml_factory::inject_palette` used for PDF export.
+function ensurePaletteOnSpec(spec, palette) {
+  if (!palette || !palette.length) return spec;
+  const out = JSON.parse(JSON.stringify(spec));
+  const viz = out.visualize ?? {};
+  viz.style = viz.style ?? {};
+  if (!viz.style.colors || viz.style.colors.length === 0) {
+    viz.style.colors = palette;
+  }
+  out.visualize = viz;
+  return out;
+}
+
 // 1. Create app instance (autoResize reports content size to host)
 const app = new App({ name: "Kyomi Chart Viewer", version: "1.0.0" });
 
@@ -427,9 +452,7 @@ function createDashboardPanel() {
 }
 
 async function renderChart(spec, palette) {
-  const chartml = new ChartML({
-    defaultPalette: palette || null,
-  });
+  const chartml = await getChartML();
 
   container.innerHTML = "";
 
@@ -541,7 +564,14 @@ async function renderChart(spec, palette) {
   const chartWrapper = document.createElement("div");
   container.appendChild(chartWrapper);
 
-  await chartml.render(spec, chartWrapper);
+  // v4 returns an SVG string from renderToSvg(yaml). The server has already
+  // resolved the datasource and stripped the `transform` section before
+  // sending `spec` (see crates/kyomi-agent/src/tools/chart.rs), so inline
+  // data is always present and the sync renderer is sufficient.
+  const finalSpec = ensurePaletteOnSpec(spec, palette);
+  const specYaml = yaml.dump(finalSpec, { lineWidth: -1, quotingType: '"', forceQuotes: false });
+  const svg = chartml.renderToSvg(specYaml);
+  chartWrapper.innerHTML = svg;
 }
 
 // 2. Register handlers BEFORE connecting

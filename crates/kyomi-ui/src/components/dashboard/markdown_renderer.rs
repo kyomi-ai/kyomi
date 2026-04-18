@@ -317,6 +317,19 @@ pub(crate) fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
+/// Extract the explicit chart height from `visualize.style.height` in the YAML spec.
+///
+/// Returns `None` if the spec omits it — callers should fall back to the
+/// built-in renderer default (400px) so the loading placeholder reserves
+/// the same vertical space the rendered chart will occupy, preventing
+/// layout shift on data-arrival.
+fn extract_chart_height(spec: &serde_json::Value) -> Option<f64> {
+    spec.get("visualize")
+        .and_then(|v| v.get("style"))
+        .and_then(|s| s.get("height"))
+        .and_then(|h| h.as_f64())
+}
+
 /// Extract `layout.colSpan` (or snake_case `col_span`) from a parsed spec,
 /// clamped to 1..=12. Defaults to 12 when missing / invalid.
 fn extract_col_span(spec: &serde_json::Value) -> u8 {
@@ -582,6 +595,17 @@ fn ChartBlock(
     let initial_chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
     let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
     let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
+
+    // Reserve the rendered chart's height on the outer wrapper so the
+    // ChartMLChart loading placeholder doesn't cause a layout shift when data
+    // arrives. Falls back to chartml's default of 400px when the spec omits an
+    // explicit height. (Preserves main commit 7adc7c5 intent after PR #129
+    // deleted the bespoke remote-fetch loading placeholder.)
+    const DEFAULT_CHART_HEIGHT_PX: f64 = 400.0;
+    let chart_height_px = parsed_spec
+        .as_ref()
+        .and_then(extract_chart_height)
+        .unwrap_or(DEFAULT_CHART_HEIGHT_PX);
 
     // -- Override signals (matches React's ChartWithChrome state) --
     let (type_override, set_type_override) = signal(None::<String>);
@@ -882,7 +906,12 @@ fn ChartBlock(
             // dispatches through the chartml resolver. ChartMLChart owns the
             // entire fetch → transform → render pipeline plus its own loading
             // and error states; this wrapper exists only for layout.
-            <div class="w-full">
+            //
+            // `min-height` reserves the rendered chart's vertical space so the
+            // inner "Loading..." placeholder doesn't cause a layout shift when
+            // the SVG arrives. (Preserves main commit 7adc7c5 intent — see
+            // `chart_height_px` derivation above.)
+            <div class="w-full" style=format!("min-height: {}px", chart_height_px)>
                 <ChartMLChart
                     spec=spec_signal
                     chartml=chartml
@@ -959,7 +988,12 @@ pub fn MarkdownRenderer(
     let ask_cb = StoredValue::new(on_ask_about_chart);
 
     view! {
-        <div class=format!("prose-kyomi{}", if extra_class.is_empty() { String::new() } else { format!(" {extra_class}") })>
+        // Single outer grid lets adjacent chartml blocks share rows; each
+        // segment picks its own col-span so two `colSpan: 6` charts in
+        // separate ```chartml``` fences render side-by-side instead of in
+        // isolated 12-column grids. Prose typography rules still apply
+        // inside each Markdown segment's inner_html div.
+        <div class=format!("prose-kyomi grid grid-cols-12 gap-4{}", if extra_class.is_empty() { String::new() } else { format!(" {extra_class}") })>
             <For
                 each=move || {
                     segments.get().into_iter().enumerate().collect::<Vec<_>>()
@@ -970,12 +1004,14 @@ pub fn MarkdownRenderer(
                         ContentSegment::Markdown(md) => {
                             let html = markdown_to_html(&md);
                             view! {
-                                <div inner_html=html></div>
+                                <div class="col-span-12" inner_html=html></div>
                             }.into_any()
                         }
                         ContentSegment::CodeBlock { language, code } => {
                             view! {
-                                <CodeBlockView language=language code=code />
+                                <div class="col-span-12">
+                                    <CodeBlockView language=language code=code />
+                                </div>
                             }.into_any()
                         }
                         ContentSegment::ChartML { yamls, block_index } => {
@@ -985,7 +1021,10 @@ pub fn MarkdownRenderer(
                             let info = info_cb.get_value();
                             let ask = ask_cb.get_value();
                             let palette_val = palette_name.get_value();
-                            let chart_items = yamls
+                            // Emit each chart as its own grid item directly into the
+                            // outer grid (no nested `grid grid-cols-12` wrapper) so
+                            // siblings from different ChartML segments can share rows.
+                            yamls
                                 .into_iter()
                                 .enumerate()
                                 .map(|(array_index, chart_yaml)| {
@@ -1013,10 +1052,8 @@ pub fn MarkdownRenderer(
                                         </div>
                                     }
                                 })
-                                .collect_view();
-                            view! {
-                                <div class="grid grid-cols-12 gap-4 my-2">{chart_items}</div>
-                            }.into_any()
+                                .collect_view()
+                                .into_any()
                         }
                     }
                 }
@@ -1286,5 +1323,51 @@ mod tests {
         params.insert("year".to_string(), "2026".to_string());
         let out = substitute_params(yaml, &params);
         assert_eq!(out, "title: Sales for 2026\n");
+    }
+
+    /// Regression guard for KYO-95: two adjacent ```chartml``` fences with
+    /// `layout.colSpan: 6` must parse into two separate ChartML segments,
+    /// each carrying a single yaml whose colSpan is 6. The renderer flattens
+    /// these into the outer 12-column grid, so both end up as
+    /// `col-span-12 md:col-span-6` siblings sharing one row instead of
+    /// occupying isolated grids.
+    #[test]
+    fn test_adjacent_chartml_blocks_with_col_span() {
+        let input = "\
+```chartml
+- type: bar
+  layout:
+    colSpan: 6
+  data: a
+```
+
+```chartml
+- type: line
+  layout:
+    colSpan: 6
+  data: b
+```";
+        let segments = parse_segments(input);
+        let chartml_segments: Vec<_> = segments
+            .iter()
+            .filter_map(|s| match s {
+                ContentSegment::ChartML { yamls, .. } => Some(yamls),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chartml_segments.len(),
+            2,
+            "two adjacent chartml blocks should produce two segments"
+        );
+        for yamls in &chartml_segments {
+            assert_eq!(yamls.len(), 1, "each block contains a single chart");
+            let val: serde_json::Value = serde_yaml::from_str(&yamls[0]).unwrap();
+            assert_eq!(
+                extract_col_span(&val),
+                6,
+                "each chart's colSpan should parse as 6"
+            );
+        }
     }
 }

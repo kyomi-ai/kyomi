@@ -6,6 +6,8 @@ pub mod ai;
 pub mod ai_models;
 pub mod analytics;
 pub mod billing;
+pub mod connect_deployment;
+pub mod connect_status_panel;
 pub mod datasources;
 pub mod profile;
 pub mod push_notifications;

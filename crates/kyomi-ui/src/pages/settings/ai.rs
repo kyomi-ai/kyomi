@@ -36,7 +36,7 @@ use crate::server_fns::context::UserContext;
 // ─────────────────────────────────────────────────────────────────────────────
 
 const KYOMI_PROVIDER: &str = "kyomi";
-const DEFAULT_KYOMI_MODEL: &str = "claude-sonnet-4-5-20250929";
+const DEFAULT_KYOMI_MODEL: &str = "claude-sonnet-4-6";
 const CUSTOM_MODEL_SENTINEL: &str = "__custom__";
 
 const PROVIDER_OPTIONS: &[(&str, &str)] = &[

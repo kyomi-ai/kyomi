@@ -75,6 +75,10 @@ fn get_model_pricing(model: &str) -> Option<ModelPricing> {
             input: 3.00,
             output: 15.00,
         }),
+        "claude-sonnet-4-6" => Some(ModelPricing {
+            input: 3.00,
+            output: 15.00,
+        }),
         "claude-haiku-4-5-20251001" => Some(ModelPricing {
             input: 1.00,
             output: 5.00,
