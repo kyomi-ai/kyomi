@@ -186,6 +186,58 @@ fn generate_jti() -> String {
     URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
+// ─── Connect agent presence (Redis-backed heartbeat state) ──────────────────
+
+/// Result of a Connect agent presence check.
+///
+/// Populated by [`check_presence`] from the Redis key
+/// `connect:{datasource_config_id}`, which is refreshed by heartbeats from the
+/// connected Kyomi Connect agent (30s cadence, 60s TTL). A populated key means
+/// the agent is currently connected.
+#[derive(Debug, Clone)]
+pub struct ConnectPresence {
+    /// Whether the agent is currently connected (presence key exists in Redis).
+    pub connected: bool,
+    /// When the agent was last observed. `Some(now)` while connected (the
+    /// heartbeat refreshes the key on a 30s cadence), `None` otherwise.
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Check whether a Kyomi Connect agent is currently connected for the given
+/// datasource by inspecting its Redis heartbeat key.
+///
+/// The presence key (`connect:{datasource_config_id}`) stores a `connection_id`
+/// (u64) with a 60s TTL that is refreshed every 30s by the Connect agent's
+/// heartbeat. A present key means the agent is currently connected.
+///
+/// Redis command/argument failures are mapped to "disconnected" — this matches
+/// the existing REST handler behavior, where any transient Redis issue reports
+/// the agent as disconnected rather than 500-ing the HTTP endpoint.
+pub async fn check_presence(
+    redis: &mut kyomi_core::RedisPool,
+    datasource_config_id: &str,
+) -> kyomi_core::Result<ConnectPresence> {
+    let redis_key = format!("connect:{datasource_config_id}");
+    let presence: Option<String> = redis::cmd("GET")
+        .arg(&redis_key)
+        .query_async(redis)
+        .await
+        .unwrap_or(None);
+
+    let connected = presence.is_some();
+    // When connected, the agent was just seen (heartbeat refreshes the key every 30s).
+    let last_seen = if connected {
+        Some(chrono::Utc::now())
+    } else {
+        None
+    };
+
+    Ok(ConnectPresence {
+        connected,
+        last_seen,
+    })
+}
+
 /// Derive the base URL from a Connect WebSocket URL.
 ///
 /// Strips the path and converts the scheme: `wss` → `https`, `ws` → `http`.

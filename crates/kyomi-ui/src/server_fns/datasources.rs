@@ -468,6 +468,10 @@ pub struct DatasourceSettingsResult {
     pub name: String,
     pub slug: String,
     pub datasource_type: String,
+    /// `"direct"` for standard provider connections, `"connect"` for Kyomi
+    /// Connect agent datasources. Drives the edit-mode branch that swaps the
+    /// connection/auth form for the `ConnectStatusPanel`.
+    pub connection_type: String,
     pub connection_config: serde_json::Value,
     pub user_settings: serde_json::Value,
     pub has_oauth: bool,
@@ -761,6 +765,7 @@ pub async fn get_datasource_settings(
         name: ds.name,
         slug: ds.slug,
         datasource_type: ds.datasource_type.to_string(),
+        connection_type: ds.connection_type.clone(),
         connection_config: masked_config,
         user_settings,
         has_oauth,

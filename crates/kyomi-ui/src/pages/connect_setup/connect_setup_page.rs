@@ -34,7 +34,12 @@ use crate::server_fns::context::get_user_context;
 
 /// Datasource types that support Kyomi Connect.
 /// Matches React's `CONNECT_TYPES` array exactly.
-const CONNECT_TYPES: &[(&str, &str)] = &[
+///
+/// Shared with `pages::settings::datasources` so the create-mode Connect
+/// branch restricts its type selector to the same list without duplicating
+/// it — the server-side `create_connect_datasource` server_fn is the other
+/// source of truth (it rejects `bigquery`/`snowflake`/`databricks`).
+pub const CONNECT_TYPES: &[(&str, &str)] = &[
     ("postgres", "PostgreSQL"),
     ("mysql", "MySQL"),
     ("clickhouse", "ClickHouse"),
