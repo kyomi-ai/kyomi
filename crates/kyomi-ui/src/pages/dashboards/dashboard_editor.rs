@@ -29,8 +29,8 @@ use phosphor_leptos::Icon;
 use leptos_router::hooks::use_params_map;
 
 use crate::components::dashboard::{
-    ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel, InsertDashboardLinkModal,
-    MarkdownRenderer, markdown_renderer::kyomi_palette,
+    ChartBuilderModal, ChartInfoModal, CopilotSidebar, DashboardSourceCache, HistoryPanel,
+    InsertDashboardLinkModal, MarkdownRenderer, markdown_renderer::kyomi_palette,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
@@ -53,6 +53,10 @@ enum EditorMode {
 /// existing dashboard and loads it into the editor.
 #[component]
 pub fn DashboardEditorPage() -> impl IntoView {
+    // Provide a dashboard-scoped source cache — same pattern as the viewer.
+    // Editor previews render ChartBlocks that pull this via use_context.
+    provide_context(DashboardSourceCache::new());
+
     let params = use_params_map();
     let dashboard_id = Memo::new(move |_| params.get().get("id").unwrap_or_default());
 

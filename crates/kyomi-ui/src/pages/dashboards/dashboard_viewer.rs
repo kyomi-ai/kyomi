@@ -20,7 +20,8 @@ use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
 use crate::components::dashboard::{
-    ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters, SaveDashboardModal,
+    ChartInfoModal, DashboardSourceCache, HistoryPanel, MarkdownRenderer, DashboardParameters,
+    SaveDashboardModal,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner, Skeleton};
 #[cfg(target_arch = "wasm32")]
@@ -148,6 +149,11 @@ fn InlineEditableTitle(
 /// content, history panel, modals, and footer.
 #[component]
 pub fn DashboardViewerPage() -> impl IntoView {
+    // Provide a dashboard-scoped source cache. ChartBlock pulls this via
+    // use_context to dedupe and cache remote datasource fetches across all
+    // charts on this dashboard.
+    provide_context(DashboardSourceCache::new());
+
     let params = use_params_map();
     let dashboard_id = Memo::new(move |_| {
         params.get().get("id").unwrap_or_default()

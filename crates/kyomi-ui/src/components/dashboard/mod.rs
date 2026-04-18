@@ -14,6 +14,7 @@ pub mod markdown_renderer;
 pub mod parameters;
 pub mod save_dashboard_modal;
 pub(crate) mod shared;
+pub mod source_cache;
 
 pub use chart_builder::ChartBuilderModal;
 pub use chart_info_modal::ChartInfoModal;
@@ -23,3 +24,4 @@ pub use insert_link_modal::InsertDashboardLinkModal;
 pub use markdown_renderer::MarkdownRenderer;
 pub use parameters::DashboardParameters;
 pub use save_dashboard_modal::SaveDashboardModal;
+pub use source_cache::DashboardSourceCache;

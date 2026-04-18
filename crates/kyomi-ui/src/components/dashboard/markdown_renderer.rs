@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
@@ -28,6 +29,7 @@ use chartml_leptos::{use_chartml_configured, ChartMLChart};
 // file don't have to touch their import paths.
 pub(crate) use kyomi_chart_theme::{kyomi_palette, kyomi_theme};
 use super::chart_header_bar::ChartHeaderBar;
+use super::source_cache::DashboardSourceCache;
 use leptos::prelude::*;
 
 use crate::server_fns::datasources::query_datasource_arrow;
@@ -307,6 +309,229 @@ fn extract_query(spec: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
+// ---------------------------------------------------------------------------
+// Named-source dispatch helpers
+// ---------------------------------------------------------------------------
+
+/// Reserved keys that indicate a flat/inline data source. Any `data:` map whose
+/// keys are all in this set is treated as the flat shape, not a named-source map.
+/// Mirrors React's `RESERVED_DATA_KEYS` in `packages/chartml-transform/src/helpers.js`.
+const RESERVED_DATA_KEYS: &[&str] = &[
+    "datasource",
+    "provider",
+    "query",
+    "rows",
+    "url",
+    "cache",
+    "endpoint",
+];
+
+/// Parsed description of one entry in a named-sources map.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NamedSourceSpec {
+    /// User-provided source name (the YAML key). This is what the ChartML spec
+    /// ends up referencing — i.e. after we register the table under this name,
+    /// rewriting `data:` to `Value::String(name)` makes `DataRef::Named` resolve.
+    pub name: String,
+    /// Datasource slug (`datasource:` or alias `endpoint:`).
+    pub slug: String,
+    /// SQL query (`query:` or alias `url:`).
+    pub query: String,
+    /// Cache TTL parsed from `cache.ttl`, if present. `None` = no expiry.
+    pub ttl: Option<Duration>,
+}
+
+/// Detect a map-of-maps `data:` shape and return each entry as a `NamedSourceSpec`.
+///
+/// Returns:
+/// - `None` if `data` is a string, array, a flat inline source (contains any
+///   reserved key at the top level), or is missing / not an object.
+/// - `None` if the map is empty.
+/// - `None` if any entry is malformed (missing `datasource`/`endpoint` or
+///   `query`/`url`). Caller treats this as Unknown and does not fetch.
+/// - `Some(Vec)` for a well-formed named-source map.
+fn extract_named_sources(spec: &serde_json::Value) -> Option<Vec<NamedSourceSpec>> {
+    let data = spec.get("data")?;
+    let obj = data.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    // If ANY reserved key is present at the top level, it's the flat shape.
+    if obj.keys().any(|k| RESERVED_DATA_KEYS.contains(&k.as_str())) {
+        return None;
+    }
+
+    let mut sources = Vec::with_capacity(obj.len());
+    for (name, value) in obj {
+        let entry = value.as_object()?;
+        let slug = entry
+            .get("datasource")
+            .or_else(|| entry.get("endpoint"))
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let query = entry
+            .get("query")
+            .or_else(|| entry.get("url"))
+            .and_then(|v| v.as_str())?
+            .to_string();
+        let ttl = entry
+            .get("cache")
+            .and_then(|c| c.get("ttl"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_ttl);
+
+        sources.push(NamedSourceSpec {
+            name: name.clone(),
+            slug,
+            query,
+            ttl,
+        });
+    }
+    Some(sources)
+}
+
+/// Parse a human-friendly TTL string to a `Duration`.
+///
+/// Supported units (case-insensitive): `ms`, `s`, `m`, `h`, `d`. Integer-only
+/// values — fractional TTLs are rejected.
+///
+/// Examples: `"6h"`, `"30m"`, `"1d"`, `"45s"`, `"500ms"`.
+fn parse_ttl(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    // Order matters: "ms" must be tried before "s".
+    for (suffix, unit) in [
+        ("ms", DurationUnit::Millis),
+        ("s", DurationUnit::Seconds),
+        ("m", DurationUnit::Minutes),
+        ("h", DurationUnit::Hours),
+        ("d", DurationUnit::Days),
+    ] {
+        if let Some(num_str) = lower.strip_suffix(suffix) {
+            let n: u64 = num_str.trim().parse().ok()?;
+            return Some(unit.duration(n));
+        }
+    }
+    None
+}
+
+#[derive(Copy, Clone)]
+enum DurationUnit {
+    Millis,
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl DurationUnit {
+    fn duration(self, n: u64) -> Duration {
+        match self {
+            DurationUnit::Millis => Duration::from_millis(n),
+            DurationUnit::Seconds => Duration::from_secs(n),
+            DurationUnit::Minutes => Duration::from_secs(n * 60),
+            DurationUnit::Hours => Duration::from_secs(n * 3600),
+            DurationUnit::Days => Duration::from_secs(n * 86_400),
+        }
+    }
+}
+
+/// True when `spec.transform` is a non-empty object. Matches React's truthy
+/// `spec.transform` check but tightens it — an empty map means "no transform".
+fn has_transform(spec: &serde_json::Value) -> bool {
+    spec.get("transform")
+        .and_then(|t| t.as_object())
+        .map(|o| !o.is_empty())
+        .unwrap_or(false)
+}
+
+/// Shape classification of a chart's `data:` section. Drives the `ChartBlock`
+/// dispatch — each variant maps to either a specific render path or a specific
+/// user-facing error message.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ChartDataShape {
+    /// Either `data.provider == "inline"` or a literal `rows:` array — the
+    /// chartml renderer handles these directly without any host-side fetch.
+    Inline,
+    /// `data: "<name>"` — a reference to a pre-registered source.
+    StringRef,
+    /// Flat single-source shape: `data: { datasource, query }` (or the `endpoint`
+    /// / `url` aliases). Host fetches, registers as `"_remote"`, rewrites `data:`.
+    FlatRemote,
+    /// One named source with no transform — host fetches, registers under the
+    /// user's chosen name, rewrites `data:` to that name. Renders cleanly.
+    NamedSingleNoTransform,
+    /// One named source WITH a transform block — transforms against named
+    /// sources aren't supported by the Rust chartml renderer yet (KYO-90).
+    NamedSingleWithTransform,
+    /// Multiple named sources with no transform — invalid per React's own
+    /// validation rules (no sensible single-source to render).
+    NamedMultiNoTransform,
+    /// Multiple named sources with a transform — would need cross-source SQL
+    /// joins, also blocked on KYO-90.
+    NamedMultiWithTransform,
+    /// Couldn't classify the `data:` section. Treated like `Inline` (no fetch);
+    /// chartml's own parser reports any real parse error downstream.
+    Unknown,
+}
+
+/// Classify a ChartML spec by its `data:` shape. Pure parsing — no side effects.
+fn classify_chart_data(spec: &serde_json::Value) -> ChartDataShape {
+    let Some(data) = spec.get("data") else {
+        return ChartDataShape::Unknown;
+    };
+    // String reference: `data: "my_source"`
+    if data.is_string() {
+        return ChartDataShape::StringRef;
+    }
+    // Arrays aren't a valid `data:` shape — let chartml's parser complain.
+    if !data.is_object() {
+        return ChartDataShape::Unknown;
+    }
+    let Some(obj) = data.as_object() else {
+        return ChartDataShape::Unknown;
+    };
+
+    // Inline by provider or rows.
+    let provider_is_inline = obj
+        .get("provider")
+        .and_then(|p| p.as_str())
+        .map(|s| s.eq_ignore_ascii_case("inline"))
+        .unwrap_or(false);
+    if provider_is_inline || obj.contains_key("rows") {
+        return ChartDataShape::Inline;
+    }
+
+    // Flat remote: contains datasource/endpoint + query/url at the top level.
+    let has_slug = obj.contains_key("datasource") || obj.contains_key("endpoint");
+    let has_query = obj.contains_key("query") || obj.contains_key("url");
+    if has_slug && has_query {
+        return ChartDataShape::FlatRemote;
+    }
+
+    // Named-source map detection. If none of the reserved keys appear at the
+    // top level, it's a map-of-maps named-source shape.
+    if obj.is_empty() || obj.keys().any(|k| RESERVED_DATA_KEYS.contains(&k.as_str())) {
+        return ChartDataShape::Unknown;
+    }
+
+    // It's named-source shape; count entries and check transform.
+    let named = match extract_named_sources(spec) {
+        Some(v) if !v.is_empty() => v,
+        _ => return ChartDataShape::Unknown,
+    };
+    let tx = has_transform(spec);
+    match (named.len(), tx) {
+        (1, false) => ChartDataShape::NamedSingleNoTransform,
+        (1, true) => ChartDataShape::NamedSingleWithTransform,
+        (_, false) => ChartDataShape::NamedMultiNoTransform,
+        (_, true) => ChartDataShape::NamedMultiWithTransform,
+    }
+}
+
 /// Extract the chart type from a parsed YAML spec (e.g. "bar", "line", "pie").
 pub(crate) fn extract_chart_type(spec: &serde_json::Value) -> Option<String> {
     spec.get("visualize")
@@ -390,6 +615,32 @@ pub(crate) fn configured_chartml(palette_name: &str, is_dark: bool) -> Arc<Chart
         c.set_default_palette(colors.clone());
         c.set_theme(theme.clone());
     })
+}
+
+/// Build a fresh `ChartML` instance (the mutable variant) with the same wiring
+/// as `configured_chartml` — all renderers, the DataFusion transform, the
+/// user's palette, and the editorial theme. Used by the remote-fetch paths
+/// which need to `register_source` on the instance before handing it to
+/// `ChartMLChart` (Arc doesn't expose mutable access once cloned).
+///
+/// Any changes to the renderer/palette/theme wiring MUST also be applied to
+/// `configured_chartml` so the inline-data and remote-data paths stay aligned.
+fn build_chartml_mut(palette_name: &str, is_dark: bool) -> ChartML {
+    let mut chartml_mut = ChartML::new();
+    let colors = kyomi_palette(palette_name, is_dark);
+    let theme = kyomi_theme(is_dark);
+    chartml_mut.register_renderer("bar", CartesianRenderer::new());
+    chartml_mut.register_renderer("line", CartesianRenderer::new());
+    chartml_mut.register_renderer("area", CartesianRenderer::new());
+    chartml_mut.register_renderer("pie", PieRenderer::new());
+    chartml_mut.register_renderer("doughnut", PieRenderer::new());
+    chartml_mut.register_renderer("scatter", ScatterRenderer::new());
+    chartml_mut.register_renderer("metric", MetricRenderer::new());
+    chartml_mut.register_renderer("table", TableRenderer::new());
+    chartml_mut.register_transform(DataFusionTransform);
+    chartml_mut.set_default_palette(colors);
+    chartml_mut.set_theme(theme);
+    chartml_mut
 }
 
 // ---------------------------------------------------------------------------
@@ -590,9 +841,79 @@ fn ChartBlock(
     let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
     let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
 
-    let datasource_slug = parsed_spec.as_ref().and_then(extract_datasource);
-    let sql_query = parsed_spec.as_ref().and_then(extract_query);
-    let is_remote = datasource_slug.is_some() && sql_query.is_some();
+    // Classify the data shape once — drives everything below (fetch path,
+    // error surfacing, data-rewrite logic). For shapes that map to a user-
+    // facing error we set `initial_error` so the error branch renders
+    // immediately without a wasted fetch attempt.
+    let data_shape = parsed_spec
+        .as_ref()
+        .map(classify_chart_data)
+        .unwrap_or(ChartDataShape::Unknown);
+    let named_sources = parsed_spec.as_ref().and_then(extract_named_sources);
+
+    // For the flat-remote path we need the top-level datasource+query as
+    // strings. For the named-single path the slug/query/name all live in
+    // the first (and only) entry of `named_sources`.
+    let flat_ds_slug = parsed_spec.as_ref().and_then(extract_datasource);
+    let flat_sql_query = parsed_spec.as_ref().and_then(extract_query);
+
+    // Which shapes trigger a remote fetch (loading spinner, async Effect).
+    let is_remote = matches!(
+        data_shape,
+        ChartDataShape::FlatRemote | ChartDataShape::NamedSingleNoTransform
+    );
+
+    // For the remote-fetch paths, resolve the (slug, query, registered-name,
+    // optional TTL) that the Effect will consume. The registered-name is what
+    // the rewritten `data:` string will point at. For the flat shape we keep
+    // the legacy `"_remote"` name — existing production dashboards depend on
+    // it, and changing it would invalidate any YAML that happens to reference
+    // `_remote` by hand.
+    const FLAT_REMOTE_NAME: &str = "_remote";
+    let (remote_slug, remote_query, registered_name, remote_ttl) = match data_shape {
+        ChartDataShape::FlatRemote => (
+            flat_ds_slug.clone(),
+            flat_sql_query.clone(),
+            Some(FLAT_REMOTE_NAME.to_string()),
+            None,
+        ),
+        ChartDataShape::NamedSingleNoTransform => {
+            let entry = named_sources.as_ref().and_then(|v| v.first()).cloned();
+            match entry {
+                Some(ns) => (
+                    Some(ns.slug),
+                    Some(ns.query),
+                    Some(ns.name),
+                    ns.ttl,
+                ),
+                None => (None, None, None, None),
+            }
+        }
+        _ => (None, None, None, None),
+    };
+
+    // Classify-time error message for shapes we cannot render. The empty
+    // string means "no classify-time error" — set lazily below when we know
+    // the shape.
+    let initial_error: Option<String> = match data_shape {
+        ChartDataShape::NamedSingleWithTransform => Some(
+            "Named data sources with a transform block require chartml ≥ 4.2 \
+             (tracked in KYO-90). Until then, use the flat 'data: { datasource, query }' \
+             shape or remove the transform."
+                .to_string(),
+        ),
+        ChartDataShape::NamedMultiNoTransform => Some(
+            "Named data sources require a transform block when multiple sources are defined"
+                .to_string(),
+        ),
+        ChartDataShape::NamedMultiWithTransform => Some(
+            "Cross-source SQL joins aren't supported by the Rust chartml renderer yet \
+             (tracked in KYO-90). Each source is registered but the transform stage \
+             can only reference a single table."
+                .to_string(),
+        ),
+        _ => None,
+    };
 
     // -- Override signals (matches React's ChartWithChrome state) --
     let (type_override, set_type_override) = signal(None::<String>);
@@ -653,86 +974,75 @@ fn ChartBlock(
 
     // -- Remote data path: fetch data, register on ChartML instance, render via ChartMLChart --
     // We store fetched remote data as a signal. When data arrives, we create a new ChartML
-    // instance with the data registered as a named source ("_remote") and rewrite the YAML
-    // `data:` section to reference it. This lets ChartMLChart handle everything uniformly.
+    // instance with the data registered under `registered_name` and rewrite the YAML `data:`
+    // section to reference it. This lets ChartMLChart handle everything uniformly.
     let (remote_chartml, set_remote_chartml) = signal(None::<Arc<ChartML>>);
-    let (remote_error, set_remote_error) = signal(None::<String>);
-    let (remote_loading, set_remote_loading) = signal(is_remote);
+    let (remote_error, set_remote_error) = signal(initial_error.clone());
+    let (remote_loading, set_remote_loading) = signal(is_remote && initial_error.is_none());
 
-    if is_remote {
-        let ds_slug = datasource_slug.clone();
-        let sql = sql_query.clone();
+    // Pull the dashboard-scoped cache from context. Fallback: a fresh per-block
+    // cache for call sites (e.g. chart-builder preview) without a dashboard
+    // ancestor. Still honors TTL/dedup within that block's lifetime.
+    let source_cache = use_context::<DashboardSourceCache>()
+        .unwrap_or_else(DashboardSourceCache::new);
+
+    if is_remote && initial_error.is_none() {
+        let ds_slug = remote_slug.clone();
+        let sql = remote_query.clone();
+        let reg_name = registered_name.clone();
         let palette_for_remote = palette.clone();
         let is_dark_for_remote = is_dark;
+        let ttl_for_remote = remote_ttl;
+        let cache_for_remote = source_cache.clone();
 
         Effect::new(move || {
             let params = parameters.get();
             let _refresh = refresh_count.get();
             let ds = ds_slug.clone();
             let q = sql.clone();
+            let name = reg_name.clone();
             let pal = palette_for_remote.clone();
             let is_dark = is_dark_for_remote;
+            let ttl = ttl_for_remote;
+            let cache = cache_for_remote.clone();
 
             set_remote_loading.set(true);
             set_remote_error.set(None);
             set_is_refreshing.set(true);
 
             leptos::task::spawn_local(async move {
+                // These unwraps cannot panic — we only install this Effect
+                // when `is_remote` is true, which guarantees all three are
+                // Some. Kept as unwrap to make that invariant loud.
                 let slug = ds.unwrap();
                 let query = q.unwrap();
+                let register_as = name.unwrap();
                 let resolved_sql = substitute_params(&query, &params);
 
-                match query_datasource_arrow(slug, resolved_sql, None).await {
-                    Ok(query_result) => {
-                        use base64::Engine;
-                        let ipc_bytes = match base64::engine::general_purpose::STANDARD
-                            .decode(&query_result.ipc_base64)
-                        {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                set_remote_error.set(Some(format!("Base64 decode error: {e}")));
-                                set_remote_loading.set(false);
-                                set_is_refreshing.set(false);
-                                return;
+                // Cache key is per (slug, resolved_sql) — parameter substitutions
+                // with different values produce independent cache entries.
+                let fetch_slug = slug.clone();
+                let fetch_query = resolved_sql.clone();
+                let fetch_result = cache
+                    .fetch(&slug, &resolved_sql, ttl, move || async move {
+                        match query_datasource_arrow(fetch_slug, fetch_query, None).await {
+                            Ok(query_result) => {
+                                use base64::Engine;
+                                let ipc_bytes = base64::engine::general_purpose::STANDARD
+                                    .decode(&query_result.ipc_base64)
+                                    .map_err(|e| format!("Base64 decode error: {e}"))?;
+                                chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes)
+                                    .map_err(|e| format!("Arrow decode error: {e}"))
                             }
-                        };
+                            Err(e) => Err(format!("Query error: {e}")),
+                        }
+                    })
+                    .await;
 
-                        let data_table =
-                            match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
-                                Ok(dt) => dt,
-                                Err(e) => {
-                                    set_remote_error
-                                        .set(Some(format!("Arrow decode error: {e}")));
-                                    set_remote_loading.set(false);
-                                    set_is_refreshing.set(false);
-                                    return;
-                                }
-                            };
-
-                        // Create a new ChartML instance with the fetched data registered
-                        let instance = configured_chartml(&pal, is_dark);
-                        // Safety: Arc::get_mut works here because we just created it and
-                        // hold the only reference. We need to register the source before
-                        // wrapping it.
-                        let mut chartml_mut = ChartML::new();
-                        // Re-register all renderers + transform + palette + theme on the
-                        // mutable instance — must stay in sync with `configured_chartml`.
-                        let colors = kyomi_palette(&pal, is_dark);
-                        let theme = kyomi_theme(is_dark);
-                        chartml_mut.register_renderer("bar", CartesianRenderer::new());
-                        chartml_mut.register_renderer("line", CartesianRenderer::new());
-                        chartml_mut.register_renderer("area", CartesianRenderer::new());
-                        chartml_mut.register_renderer("pie", PieRenderer::new());
-                        chartml_mut.register_renderer("doughnut", PieRenderer::new());
-                        chartml_mut.register_renderer("scatter", ScatterRenderer::new());
-                        chartml_mut.register_renderer("metric", MetricRenderer::new());
-                        chartml_mut.register_renderer("table", TableRenderer::new());
-                        chartml_mut.register_transform(DataFusionTransform);
-                        chartml_mut.set_default_palette(colors);
-                        chartml_mut.set_theme(theme);
-                        chartml_mut.register_source("_remote", data_table);
-                        let _ = instance; // drop unused Arc
-
+                match fetch_result {
+                    Ok(data_table) => {
+                        let mut chartml_mut = build_chartml_mut(&pal, is_dark);
+                        chartml_mut.register_source(&register_as, data_table);
                         set_remote_chartml.set(Some(Arc::new(chartml_mut)));
                         let now_ms = js_sys::Date::now();
                         set_last_refreshed.set(Some(now_ms));
@@ -740,7 +1050,7 @@ fn ChartBlock(
                         set_is_refreshing.set(false);
                     }
                     Err(e) => {
-                        set_remote_error.set(Some(format!("Query error: {e}")));
+                        set_remote_error.set(Some(e));
                         set_remote_loading.set(false);
                         set_is_refreshing.set(false);
                     }
@@ -749,32 +1059,38 @@ fn ChartBlock(
         });
     }
 
-    // Set initial "Last refreshed" timestamp for inline charts (rendered immediately on mount)
+    // Set initial "Last refreshed" timestamp for non-fetching charts (inline data
+    // and error-shape charts) — rendered immediately on mount, no async path.
     if !is_remote {
         set_last_refreshed.set(Some(js_sys::Date::now()));
     }
 
     // RwSignal for ChartMLChart spec — updated by Effect when overrides change.
+    // For remote shapes, rewrite `data:` to the registered source name so
+    // chartml resolves it via DataRef::Named. For inline/string-ref shapes,
+    // pass through unchanged.
     let (chartml_spec, set_chartml_spec) = signal(yaml_owned.clone());
+    let reg_name_for_rewrite = registered_name.clone();
     Effect::new(move || {
         let base_spec = effective_spec.get();
 
-        let final_spec = if !is_remote {
-            base_spec
-        } else {
-            // Rewrite the data section to reference the named "_remote" source
-            match serde_yaml::from_str::<serde_json::Value>(&base_spec) {
-                Ok(mut val) => {
-                    if let Some(obj) = val.as_object_mut() {
-                        obj.insert(
-                            "data".to_string(),
-                            serde_json::Value::String("_remote".to_string()),
-                        );
+        let final_spec = match reg_name_for_rewrite.as_deref() {
+            Some(name) => {
+                // Rewrite the data section to reference the registered source name
+                match serde_yaml::from_str::<serde_json::Value>(&base_spec) {
+                    Ok(mut val) => {
+                        if let Some(obj) = val.as_object_mut() {
+                            obj.insert(
+                                "data".to_string(),
+                                serde_json::Value::String(name.to_string()),
+                            );
+                        }
+                        serde_yaml::to_string(&val).unwrap_or(base_spec)
                     }
-                    serde_yaml::to_string(&val).unwrap_or(base_spec)
+                    Err(_) => base_spec,
                 }
-                Err(_) => base_spec,
             }
+            None => base_spec,
         };
         set_chartml_spec.set(final_spec);
     });
@@ -919,61 +1235,73 @@ fn ChartBlock(
                 }
             }}
             // Chart content area — unified through ChartMLChart
-            {if is_remote {
-                // Remote path: show loading/error states, or ChartMLChart once data arrives
-                view! {
-                    <div class="w-full">
-                        {move || {
-                            if let Some(err) = remote_error.get() {
-                                view! {
-                                    <div class="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-                                        <div class="flex items-start gap-3">
-                                            <svg class="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                            </svg>
-                                            <div class="flex-1">
-                                                <h3 class="text-sm font-semibold text-destructive mb-1">"Chart Error"</h3>
-                                                <p class="text-sm text-destructive/90">{err}</p>
-                                                <button
-                                                    on:click=move |_| set_refresh_count.update(|c| *c += 1)
-                                                    class="mt-2 text-xs text-primary underline transition-colors hover:text-primary/80"
-                                                >
-                                                    "Retry"
-                                                </button>
+            {
+                // Shapes that produce an error without fetching (named-single with
+                // transform, named-multi). They render the error-only branch below.
+                let has_initial_error = initial_error.is_some();
+                if is_remote || has_initial_error {
+                    // Remote / error path: show loading/error states, or ChartMLChart once data arrives
+                    let can_retry = is_remote; // error-only shapes have no fetch to retry
+                    view! {
+                        <div class="w-full">
+                            {move || {
+                                if let Some(err) = remote_error.get() {
+                                    view! {
+                                        <div class="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
+                                            <div class="flex items-start gap-3">
+                                                <svg class="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                </svg>
+                                                <div class="flex-1">
+                                                    <h3 class="text-sm font-semibold text-destructive mb-1">"Chart Error"</h3>
+                                                    <p class="text-sm text-destructive/90">{err}</p>
+                                                    {if can_retry {
+                                                        view! {
+                                                            <button
+                                                                on:click=move |_| set_refresh_count.update(|c| *c += 1)
+                                                                class="mt-2 text-xs text-primary underline transition-colors hover:text-primary/80"
+                                                            >
+                                                                "Retry"
+                                                            </button>
+                                                        }.into_any()
+                                                    } else {
+                                                        view! { <span /> }.into_any()
+                                                    }}
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
-                                }.into_any()
-                            } else if remote_loading.get() {
-                                view! {
-                                    <div class="flex flex-col items-center justify-center py-12 gap-3">
-                                        <img src="/kyomi_animated_logo.svg" alt="Loading" class="w-8 h-8" />
-                                        <span class="text-sm text-muted-foreground">"Loading chart..."</span>
-                                    </div>
-                                }.into_any()
-                            } else if let Some(remote_instance) = remote_chartml.get() {
-                                view! {
-                                    <ChartMLChart
-                                        spec=spec_signal
-                                        chartml=remote_instance
-                                    />
-                                }.into_any()
-                            } else {
-                                // Should not happen — either loading, error, or data
-                                view! { <div /> }.into_any()
-                            }
-                        }}
-                    </div>
-                }.into_any()
-            } else {
-                // Inline data path — delegate to ChartMLChart directly
-                view! {
-                    <ChartMLChart
-                        spec=spec_signal
-                        chartml=chartml_for_inline
-                    />
-                }.into_any()
-            }}
+                                    }.into_any()
+                                } else if remote_loading.get() {
+                                    view! {
+                                        <div class="flex flex-col items-center justify-center py-12 gap-3">
+                                            <img src="/kyomi_animated_logo.svg" alt="Loading" class="w-8 h-8" />
+                                            <span class="text-sm text-muted-foreground">"Loading chart..."</span>
+                                        </div>
+                                    }.into_any()
+                                } else if let Some(remote_instance) = remote_chartml.get() {
+                                    view! {
+                                        <ChartMLChart
+                                            spec=spec_signal
+                                            chartml=remote_instance
+                                        />
+                                    }.into_any()
+                                } else {
+                                    // Should not happen — either loading, error, or data
+                                    view! { <div /> }.into_any()
+                                }
+                            }}
+                        </div>
+                    }.into_any()
+                } else {
+                    // Inline / string-ref data path — delegate to ChartMLChart directly
+                    view! {
+                        <ChartMLChart
+                            spec=spec_signal
+                            chartml=chartml_for_inline
+                        />
+                    }.into_any()
+                }
+            }
         </div>
     }
 }
@@ -1373,5 +1701,229 @@ mod tests {
         assert_eq!(extract_col_span(&s3), 12); // out of range → default 12
         let s4: serde_json::Value = serde_json::json!({});
         assert_eq!(extract_col_span(&s4), 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Named-source dispatch helper tests
+    // -----------------------------------------------------------------------
+
+    /// Helper to parse a YAML snippet into a serde_json::Value for tests.
+    fn yaml(src: &str) -> serde_json::Value {
+        serde_yaml::from_str(src).expect("test fixture must parse as YAML")
+    }
+
+    #[test]
+    fn test_extract_named_sources_flat_remote_is_none() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  datasource: main_db\n  query: SELECT 1\n",
+        );
+        assert!(extract_named_sources(&spec).is_none());
+    }
+
+    #[test]
+    fn test_extract_named_sources_inline_provider_is_none() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  provider: inline\n  rows:\n    - x: 1\n",
+        );
+        assert!(extract_named_sources(&spec).is_none());
+    }
+
+    #[test]
+    fn test_extract_named_sources_string_ref_is_none() {
+        let spec = yaml("type: chart\ndata: my_source\n");
+        assert!(extract_named_sources(&spec).is_none());
+    }
+
+    #[test]
+    fn test_extract_named_sources_empty_map_is_none() {
+        let spec = yaml("type: chart\ndata: {}\n");
+        assert!(extract_named_sources(&spec).is_none());
+    }
+
+    #[test]
+    fn test_extract_named_sources_single() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  visitors:\n    datasource: main_db\n    query: SELECT * FROM hits\n",
+        );
+        let v = extract_named_sources(&spec).expect("one named source");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "visitors");
+        assert_eq!(v[0].slug, "main_db");
+        assert_eq!(v[0].query, "SELECT * FROM hits");
+        assert_eq!(v[0].ttl, None);
+    }
+
+    #[test]
+    fn test_extract_named_sources_multi_with_cache_ttl() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  visitors:\n    datasource: main_db\n    query: q1\n    cache:\n      ttl: 6h\n  revenue:\n    datasource: main_db\n    query: q2\n",
+        );
+        let v = extract_named_sources(&spec).expect("two named sources");
+        assert_eq!(v.len(), 2);
+        let by_name: HashMap<_, _> = v.iter().map(|s| (s.name.as_str(), s)).collect();
+        assert_eq!(by_name["visitors"].ttl, Some(Duration::from_secs(6 * 3600)));
+        assert_eq!(by_name["revenue"].ttl, None);
+    }
+
+    #[test]
+    fn test_extract_named_sources_endpoint_url_aliases() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  sales:\n    endpoint: main_db\n    url: SELECT 1\n",
+        );
+        let v = extract_named_sources(&spec).expect("accepts endpoint+url aliases");
+        assert_eq!(v[0].slug, "main_db");
+        assert_eq!(v[0].query, "SELECT 1");
+    }
+
+    #[test]
+    fn test_extract_named_sources_missing_slug_returns_none() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  visitors:\n    query: SELECT 1\n",
+        );
+        assert!(extract_named_sources(&spec).is_none());
+    }
+
+    #[test]
+    fn test_parse_ttl_units() {
+        assert_eq!(parse_ttl("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_ttl("45s"), Some(Duration::from_secs(45)));
+        assert_eq!(parse_ttl("30m"), Some(Duration::from_secs(30 * 60)));
+        assert_eq!(parse_ttl("6h"), Some(Duration::from_secs(6 * 3600)));
+        assert_eq!(parse_ttl("1d"), Some(Duration::from_secs(86_400)));
+    }
+
+    #[test]
+    fn test_parse_ttl_case_insensitive() {
+        assert_eq!(parse_ttl("6H"), Some(Duration::from_secs(6 * 3600)));
+        assert_eq!(parse_ttl("500MS"), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn test_parse_ttl_rejects_invalid() {
+        assert_eq!(parse_ttl(""), None);
+        assert_eq!(parse_ttl("abc"), None);
+        assert_eq!(parse_ttl("5"), None); // no unit
+        assert_eq!(parse_ttl("1.5h"), None); // fractions rejected
+        assert_eq!(parse_ttl("-3s"), None);
+        assert_eq!(parse_ttl("5 minutes"), None);
+    }
+
+    #[test]
+    fn test_has_transform_true_when_non_empty_map() {
+        let spec = yaml("type: chart\ntransform:\n  sql: SELECT 1\n");
+        assert!(has_transform(&spec));
+    }
+
+    #[test]
+    fn test_has_transform_false_when_missing() {
+        let spec = yaml("type: chart\n");
+        assert!(!has_transform(&spec));
+    }
+
+    #[test]
+    fn test_has_transform_false_when_empty_map() {
+        let spec = yaml("type: chart\ntransform: {}\n");
+        assert!(!has_transform(&spec));
+    }
+
+    #[test]
+    fn test_has_transform_false_when_null() {
+        let spec = yaml("type: chart\ntransform: null\n");
+        assert!(!has_transform(&spec));
+    }
+
+    #[test]
+    fn test_classify_chart_data_string_ref() {
+        let spec = yaml("type: chart\ndata: sales\n");
+        assert_eq!(classify_chart_data(&spec), ChartDataShape::StringRef);
+    }
+
+    #[test]
+    fn test_classify_chart_data_inline_provider() {
+        let spec = yaml("type: chart\ndata:\n  provider: inline\n  rows:\n    - x: 1\n");
+        assert_eq!(classify_chart_data(&spec), ChartDataShape::Inline);
+    }
+
+    #[test]
+    fn test_classify_chart_data_inline_rows_only() {
+        let spec = yaml("type: chart\ndata:\n  rows:\n    - x: 1\n    - x: 2\n");
+        assert_eq!(classify_chart_data(&spec), ChartDataShape::Inline);
+    }
+
+    #[test]
+    fn test_classify_chart_data_flat_remote() {
+        let spec = yaml(
+            "type: chart\ndata:\n  datasource: main_db\n  query: SELECT 1\n",
+        );
+        assert_eq!(classify_chart_data(&spec), ChartDataShape::FlatRemote);
+    }
+
+    #[test]
+    fn test_classify_chart_data_named_single_no_transform() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  visitors:\n    datasource: main_db\n    query: SELECT 1\n",
+        );
+        assert_eq!(
+            classify_chart_data(&spec),
+            ChartDataShape::NamedSingleNoTransform
+        );
+    }
+
+    #[test]
+    fn test_classify_chart_data_named_single_with_transform() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  visitors:\n    datasource: main_db\n    query: SELECT 1\n\
+             transform:\n  sql: SELECT * FROM visitors\n",
+        );
+        assert_eq!(
+            classify_chart_data(&spec),
+            ChartDataShape::NamedSingleWithTransform
+        );
+    }
+
+    #[test]
+    fn test_classify_chart_data_named_multi_no_transform() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  a:\n    datasource: db\n    query: q1\n  b:\n    datasource: db\n    query: q2\n",
+        );
+        assert_eq!(
+            classify_chart_data(&spec),
+            ChartDataShape::NamedMultiNoTransform
+        );
+    }
+
+    #[test]
+    fn test_classify_chart_data_named_multi_with_transform() {
+        let spec = yaml(
+            "type: chart\n\
+             data:\n  a:\n    datasource: db\n    query: q1\n  b:\n    datasource: db\n    query: q2\n\
+             transform:\n  sql: SELECT * FROM a JOIN b USING(id)\n",
+        );
+        assert_eq!(
+            classify_chart_data(&spec),
+            ChartDataShape::NamedMultiWithTransform
+        );
+    }
+
+    #[test]
+    fn test_classify_chart_data_missing_data_is_unknown() {
+        let spec = yaml("type: chart\ntitle: X\n");
+        assert_eq!(classify_chart_data(&spec), ChartDataShape::Unknown);
+    }
+
+    #[test]
+    fn test_classify_chart_data_malformed_named_map_is_unknown() {
+        // Entry value is a scalar, not a map — not a valid named-sources shape.
+        let spec = yaml("type: chart\ndata:\n  foo: bar\n");
+        assert_eq!(classify_chart_data(&spec), ChartDataShape::Unknown);
     }
 }
