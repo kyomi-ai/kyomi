@@ -546,6 +546,12 @@ pub fn ChartBuilderModal(
     let is_edit_mode = existing_yaml.is_some();
     let existing_yaml_stored = StoredValue::new(existing_yaml.clone());
 
+    // Must capture before spawn_local — the Leptos owner is lost across awaits,
+    // so use_theme() returns None inside async closures.
+    let initial_is_dark = crate::components::theme::use_theme()
+        .map(|s| s.effective.get_untracked() == "dark")
+        .unwrap_or(false);
+
     // ── Canonical state: the chart-document AST ─────────────────────────
     // All three sub-tabs read from and write to this signal. There is NO
     // effect that syncs AST → yaml_text; instead, every AST-mutating handler
@@ -814,9 +820,7 @@ pub fn ChartBuilderModal(
                             Ok(ipc_bytes) => {
                                 match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                     Ok(data_table) => {
-                                        let is_dark = crate::components::theme::use_theme()
-                                            .map(|s| s.effective.get_untracked() == "dark")
-                                            .unwrap_or(false);
+                                        let is_dark = initial_is_dark;
                                         let colors = kyomi_palette("kyomi", is_dark);
                                         let theme = kyomi_theme(is_dark);
                                         let mut chartml_inst = chartml_core::ChartML::new();
@@ -1529,9 +1533,7 @@ pub fn ChartBuilderModal(
                                                             Ok(ipc_bytes) => {
                                                                 match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                                                     Ok(data_table) => {
-                                                                        let is_dark = crate::components::theme::use_theme()
-                                                                            .map(|s| s.effective.get_untracked() == "dark")
-                                                                            .unwrap_or(false);
+                                                                        let is_dark = initial_is_dark;
                                                                         let colors = kyomi_palette("kyomi", is_dark);
                                                                         let theme = kyomi_theme(is_dark);
                                                                         let mut chartml_inst = chartml_core::ChartML::new();
