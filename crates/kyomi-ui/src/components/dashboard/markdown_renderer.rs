@@ -1044,7 +1044,12 @@ pub fn MarkdownRenderer(
     let ask_cb = StoredValue::new(on_ask_about_chart);
 
     view! {
-        <div class=format!("prose-kyomi{}", if extra_class.is_empty() { String::new() } else { format!(" {extra_class}") })>
+        // Single outer grid lets adjacent chartml blocks share rows; each
+        // segment picks its own col-span so two `colSpan: 6` charts in
+        // separate ```chartml``` fences render side-by-side instead of in
+        // isolated 12-column grids. Prose typography rules still apply
+        // inside each Markdown segment's inner_html div.
+        <div class=format!("prose-kyomi grid grid-cols-12 gap-4{}", if extra_class.is_empty() { String::new() } else { format!(" {extra_class}") })>
             <For
                 each=move || {
                     segments.get().into_iter().enumerate().collect::<Vec<_>>()
@@ -1055,12 +1060,14 @@ pub fn MarkdownRenderer(
                         ContentSegment::Markdown(md) => {
                             let html = markdown_to_html(&md);
                             view! {
-                                <div inner_html=html></div>
+                                <div class="col-span-12" inner_html=html></div>
                             }.into_any()
                         }
                         ContentSegment::CodeBlock { language, code } => {
                             view! {
-                                <CodeBlockView language=language code=code />
+                                <div class="col-span-12">
+                                    <CodeBlockView language=language code=code />
+                                </div>
                             }.into_any()
                         }
                         ContentSegment::ChartML { yamls, block_index } => {
@@ -1070,7 +1077,10 @@ pub fn MarkdownRenderer(
                             let info = info_cb.get_value();
                             let ask = ask_cb.get_value();
                             let palette_val = palette_name.get_value();
-                            let chart_items = yamls
+                            // Emit each chart as its own grid item directly into the
+                            // outer grid (no nested `grid grid-cols-12` wrapper) so
+                            // siblings from different ChartML segments can share rows.
+                            yamls
                                 .into_iter()
                                 .enumerate()
                                 .map(|(array_index, chart_yaml)| {
@@ -1098,10 +1108,8 @@ pub fn MarkdownRenderer(
                                         </div>
                                     }
                                 })
-                                .collect_view();
-                            view! {
-                                <div class="grid grid-cols-12 gap-4 my-2">{chart_items}</div>
-                            }.into_any()
+                                .collect_view()
+                                .into_any()
                         }
                     }
                 }
@@ -1373,5 +1381,51 @@ mod tests {
         assert_eq!(extract_col_span(&s3), 12); // out of range → default 12
         let s4: serde_json::Value = serde_json::json!({});
         assert_eq!(extract_col_span(&s4), 12);
+    }
+
+    /// Regression guard for KYO-95: two adjacent ```chartml``` fences with
+    /// `layout.colSpan: 6` must parse into two separate ChartML segments,
+    /// each carrying a single yaml whose colSpan is 6. The renderer flattens
+    /// these into the outer 12-column grid, so both end up as
+    /// `col-span-12 md:col-span-6` siblings sharing one row instead of
+    /// occupying isolated grids.
+    #[test]
+    fn test_adjacent_chartml_blocks_with_col_span() {
+        let input = "\
+```chartml
+- type: bar
+  layout:
+    colSpan: 6
+  data: a
+```
+
+```chartml
+- type: line
+  layout:
+    colSpan: 6
+  data: b
+```";
+        let segments = parse_segments(input);
+        let chartml_segments: Vec<_> = segments
+            .iter()
+            .filter_map(|s| match s {
+                ContentSegment::ChartML { yamls, .. } => Some(yamls),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chartml_segments.len(),
+            2,
+            "two adjacent chartml blocks should produce two segments"
+        );
+        for yamls in &chartml_segments {
+            assert_eq!(yamls.len(), 1, "each block contains a single chart");
+            let val: serde_json::Value = serde_yaml::from_str(&yamls[0]).unwrap();
+            assert_eq!(
+                extract_col_span(&val),
+                6,
+                "each chart's colSpan should parse as 6"
+            );
+        }
     }
 }
