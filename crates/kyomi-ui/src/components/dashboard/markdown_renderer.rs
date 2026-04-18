@@ -331,6 +331,19 @@ pub(crate) fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
+/// Extract the explicit chart height from `visualize.style.height` in the YAML spec.
+///
+/// Returns `None` if the spec omits it — callers should fall back to the
+/// built-in renderer default (400px) so the loading placeholder reserves
+/// the same vertical space the rendered chart will occupy, preventing
+/// layout shift on data-arrival.
+fn extract_chart_height(spec: &serde_json::Value) -> Option<f64> {
+    spec.get("visualize")
+        .and_then(|v| v.get("style"))
+        .and_then(|s| s.get("height"))
+        .and_then(|h| h.as_f64())
+}
+
 /// Extract `layout.colSpan` (or snake_case `col_span`) from a parsed spec,
 /// clamped to 1..=12. Defaults to 12 when missing / invalid.
 fn extract_col_span(spec: &serde_json::Value) -> u8 {
@@ -593,6 +606,15 @@ fn ChartBlock(
     let datasource_slug = parsed_spec.as_ref().and_then(extract_datasource);
     let sql_query = parsed_spec.as_ref().and_then(extract_query);
     let is_remote = datasource_slug.is_some() && sql_query.is_some();
+
+    // Reserve the rendered chart's height in the loading placeholder so data
+    // arrival doesn't cause a layout shift. Falls back to chartml's default of
+    // 400px when the spec doesn't set an explicit height.
+    const DEFAULT_CHART_HEIGHT_PX: f64 = 400.0;
+    let chart_height_px = parsed_spec
+        .as_ref()
+        .and_then(extract_chart_height)
+        .unwrap_or(DEFAULT_CHART_HEIGHT_PX);
 
     // -- Override signals (matches React's ChartWithChrome state) --
     let (type_override, set_type_override) = signal(None::<String>);
@@ -946,7 +968,10 @@ fn ChartBlock(
                                 }.into_any()
                             } else if remote_loading.get() {
                                 view! {
-                                    <div class="flex flex-col items-center justify-center py-12 gap-3">
+                                    <div
+                                        class="flex flex-col items-center justify-center gap-3"
+                                        style=format!("min-height: {}px", chart_height_px)
+                                    >
                                         <img src="/kyomi_animated_logo.svg" alt="Loading" class="w-8 h-8" />
                                         <span class="text-sm text-muted-foreground">"Loading chart..."</span>
                                     </div>
