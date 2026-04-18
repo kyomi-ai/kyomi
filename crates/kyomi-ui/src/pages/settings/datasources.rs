@@ -358,9 +358,8 @@ fn DatasourceRow(
                 <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-1.5 sm:gap-2">
                         <span class="font-medium truncate">{ds.name.clone()}</span>
-                        <Badge variant=BadgeVariant::Outline>
-                            {ds.type_display_name.clone()}
-                        </Badge>
+                        <span aria-hidden="true" class="text-muted-foreground">"·"</span>
+                        <span class="text-sm text-muted-foreground">{ds.type_display_name.clone()}</span>
                         {(ds.connection_type == "connect").then(|| view! {
                             <Badge variant=BadgeVariant::Secondary class="text-xs">
                                 "Connect"
