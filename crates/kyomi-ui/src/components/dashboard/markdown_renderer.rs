@@ -588,7 +588,34 @@ fn ChartBlock(
     let (orientation_override, set_orientation_override) = signal(None::<Option<String>>);
     let (mode_override, set_mode_override) = signal(None::<Option<String>>);
 
-    let refresh_count = RwSignal::new(0_u32);
+    // Per-chart refresh signal. The toolbar's per-chart "Refresh" button
+    // increments this; we fold it together with the optional dashboard-wide
+    // `RefreshAllSignal` (read from Leptos context below) into the
+    // `refresh_trigger` prop on `ChartMLChart`. The chartml component handles
+    // the actual cache invalidation + re-fetch — this side just owns the
+    // *trigger*, not the invalidation work.
+    let local_refresh = RwSignal::new(0_u32);
+
+    // Dashboard-wide refresh signal — provided by `DashboardViewerPage` via
+    // context so the toolbar's "Refresh All" button (a sibling of
+    // `DashboardChartProviders`, not a child) can share state with every
+    // chart on the page. `None` in contexts that don't provide it (the
+    // dashboard editor's live preview, the chart-builder preview, etc.) —
+    // the chart still works, the per-chart "Refresh" button is the only
+    // refresh path.
+    let refresh_all = use_context::<crate::chartml_provider::RefreshAllSignal>();
+
+    // Combined `Signal<u32>` for ChartMLChart's `refresh_trigger` prop. We
+    // sum the two counters so a bump on either source produces a distinct
+    // value — `Signal<u32>` only fires on value-change, and addition keeps
+    // every distinct (local, global) pair distinct. Wrapping at u32 max
+    // (every ~4 billion clicks) is fine because the chartml component reacts
+    // to *change*, not magnitude.
+    let combined_refresh = Signal::derive(move || {
+        let l = local_refresh.get();
+        let g = refresh_all.map(|s| s.get()).unwrap_or(0);
+        l.wrapping_add(g)
+    });
 
     // Derive current chart type / orientation / mode for the header bar display.
     let initial_type_stored = StoredValue::new(initial_chart_type.clone());
@@ -672,9 +699,8 @@ fn ChartBlock(
     // as soon as it's ready (no re-mount required).
     //
     // The `ResolverRef` (`Rc<Resolver>` on WASM) is wrapped in `SendWrapper`
-    // for the same reason as `chartml_for_refresh` above — Leptos requires
-    // `Send + Sync` on reactive closures, but wasm32-unknown-unknown is
-    // single-threaded so the wrapper is sound.
+    // because Leptos requires `Send + Sync` on reactive closures, but
+    // wasm32-unknown-unknown is single-threaded so the wrapper is sound.
     {
         let resolver = send_wrapper::SendWrapper::new(chartml.resolver());
         let cache_signal = use_context::<crate::chartml_provider::CacheBackendSignal>();
@@ -702,9 +728,12 @@ fn ChartBlock(
     // we asked for fresh data," which is what users actually want to know.
     let (last_refreshed, set_last_refreshed) = signal(Some(js_sys::Date::now()));
     Effect::new(move || {
-        // Subscribe to every input that triggers a resolver call.
+        // Subscribe to every input that triggers a resolver call. The
+        // `combined_refresh` signal already folds the per-chart and the
+        // dashboard-wide refresh counters, so subscribing to it covers both
+        // refresh paths in one read.
         let _spec_tick = chartml_spec_signal.get();
-        let _refresh_tick = refresh_count.get();
+        let _refresh_tick = combined_refresh.get();
         let _params_tick = parameters.get();
         set_last_refreshed.set(Some(js_sys::Date::now()));
     });
@@ -736,28 +765,15 @@ fn ChartBlock(
     let on_mode_change_cb = Callback::new(move |m: Option<String>| {
         set_mode_override.set(Some(m));
     });
-    // Refresh: invalidate the resolver's cache for every source in this chart's
-    // spec, then bump `refresh_count` to trigger a re-fetch through ChartMLChart.
-    // Resolver invalidation is the load-bearing step — without it the next
-    // render hits the in-memory cache and returns instantly.
-    //
-    // `ChartMLRef` is `Rc<ChartML>` on WASM (!Send + !Sync). `Callback::new`
-    // requires `Fn + Send + Sync`, so we wrap the captured ref in
-    // `SendWrapper`. Safe in practice — wasm32-unknown-unknown is single
-    // -threaded; the wrapper panics if accessed from another thread (which
-    // can never happen).
-    let chartml_for_refresh = send_wrapper::SendWrapper::new(chartml.clone());
+    // Per-chart "Refresh" button — bumps the local trigger, which feeds
+    // through `combined_refresh` to `ChartMLChart`'s `refresh_trigger` prop.
+    // The chartml component owns the actual cache invalidation: it parses
+    // the current spec, computes the resolver key for every source, calls
+    // `invalidate` on each, and re-runs its main fetch effect. We just bump
+    // the counter — no `invalidate_all` round-trip from this side, no manual
+    // resolver plumbing.
     let on_refresh_cb = Callback::new(move |()| {
-        let resolver = chartml_for_refresh.resolver();
-        let resolver_clone = send_wrapper::SendWrapper::new(resolver.clone());
-        leptos::task::spawn_local(async move {
-            // Invalidate everything in the resolver's caches. Scoping per-spec
-            // would require parsing the spec to compute every source's
-            // resolver key; clearing all is correct because each ChartBlock
-            // owns its own ChartML instance and therefore its own resolver.
-            resolver_clone.take().invalidate_all().await;
-        });
-        refresh_count.update(|c| *c += 1);
+        local_refresh.update(|c| *c += 1);
     });
 
     // Build typed callbacks for the header bar's action buttons.
@@ -870,6 +886,7 @@ fn ChartBlock(
                 <ChartMLChart
                     spec=spec_signal
                     chartml=chartml
+                    refresh_trigger=combined_refresh
                 />
             </div>
         </div>

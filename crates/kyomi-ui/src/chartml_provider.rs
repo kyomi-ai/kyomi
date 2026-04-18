@@ -307,12 +307,47 @@ impl chartml_core::ResolverHooks for TracingHooks {
 ///
 /// Wrapped in a [`Signal`] (rather than [`Memo`]) because
 /// `Arc<dyn CacheBackend>` doesn't implement `PartialEq` — Memo's value
-/// caching depends on equality. `Signal::derive` reads the underlying
+/// caching depends on equality. `Signal::derive_local` reads the underlying
 /// `RwSignal` on every access without comparing.
 ///
-/// On native targets (server-side render) this is always `None` — `IndexedDbBackend`
-/// is browser-only.
-pub type CacheBackendSignal = Signal<Option<chartml_leptos::CacheBackendRef>>;
+/// # Why `LocalStorage`?
+///
+/// `chartml_leptos::CacheBackendRef` aliases to `Arc<dyn CacheBackend>` on
+/// native and `Rc<dyn CacheBackend>` on wasm32. `Rc<T>` is *unconditionally*
+/// `!Send + !Sync` regardless of `T`, so the default `SyncStorage` (which
+/// requires `T: Send + Sync` for the contained value's accessors) refuses
+/// to wrap it on browser builds — every `RwSignal::set` / `Signal::get`
+/// site fails to compile with `Rc<(dyn CacheBackend + 'static)> cannot be
+/// sent between threads safely`.
+///
+/// `LocalStorage` lifts that restriction by storing the value inside a
+/// [`send_wrapper::SendWrapper`] that pretends to be `Send + Sync` but
+/// panics if accessed from any thread other than the one that created it.
+/// Sound for our use case because wasm32-unknown-unknown is single-threaded
+/// (browser charts never cross workers), and we lose nothing — the
+/// `Signal::get()` API is identical regardless of storage.
+///
+/// On native targets (server-side render) this is always `None` —
+/// `IndexedDbBackend` is browser-only — but we still pay the `LocalStorage`
+/// machinery there for one reactive type alias across both targets.
+pub type CacheBackendSignal =
+    Signal<Option<chartml_leptos::CacheBackendRef>, LocalStorage>;
+
+/// Dashboard-wide "refresh all charts" signal. The dashboard viewer's
+/// "Refresh All" toolbar button increments this; every descendant
+/// `ChartMLChart` (via the `ChartBlock` wrapper in `markdown_renderer`)
+/// folds it into the `refresh_trigger` prop on `chartml_leptos::ChartMLChart`,
+/// which invalidates each spec source's resolver cache key and re-runs the
+/// fetch + transform + render pipeline against the current YAML.
+///
+/// Provided via Leptos context at `DashboardViewerPage` (above
+/// `DashboardChartProviders` so the toolbar button — which sits as a
+/// sibling of the providers, not a child — can share the same signal).
+/// Surfaces in `ChartBlock` via `use_context::<RefreshAllSignal>()`, which
+/// returns `None` in contexts that don't provide it (the dashboard editor's
+/// live preview, the chart-builder preview, etc.); per-chart refresh works
+/// in those contexts via the chart's own header-bar refresh button.
+pub type RefreshAllSignal = RwSignal<u32>;
 
 /// Wrapper component that wires the chartml 5.0 provider, persistent cache
 /// backend, and observability hooks into Leptos context for every descendant
@@ -384,16 +419,29 @@ pub fn DashboardChartProviders(
     children()
 }
 
-/// Spawn the IndexedDB open and return a `Signal<Option<CacheBackendRef>>`
-/// that flips to `Some` when the open succeeds, or stays `None` if it
-/// fails. Browser-only — native targets immediately return `None`.
+/// Spawn the IndexedDB open and return a [`CacheBackendSignal`] that flips
+/// to `Some` when the open succeeds, or stays `None` if it fails.
+/// Browser-only — native targets immediately return `None`.
 ///
 /// Returns a `Signal` rather than a `Memo` because `Arc<dyn CacheBackend>`
 /// doesn't implement `PartialEq` (Memo's diff-and-skip optimization needs
-/// equality). `Signal::derive` reads the underlying `RwSignal` unconditionally,
-/// which is fine here — the signal flips at most once per workspace.
+/// equality). `Signal::derive_local` reads the underlying `RwSignal`
+/// unconditionally, which is fine here — the signal flips at most once
+/// per workspace.
+///
+/// # `LocalStorage` everywhere
+///
+/// Both the inner [`RwSignal`] and the returned [`Signal`] use
+/// [`LocalStorage`]. The reason: `chartml_leptos::CacheBackendRef` is
+/// `Rc<dyn CacheBackend>` on wasm32 (`Rc` is unconditionally `!Send +
+/// !Sync` regardless of `T`), so the default `SyncStorage` rejects it at
+/// compile time. `LocalStorage` wraps the value in a [`send_wrapper`] that
+/// makes it nominally `Send + Sync` but panics on cross-thread access —
+/// which can't happen because wasm32-unknown-unknown is single-threaded.
+/// See the [`CacheBackendSignal`] doc comment for the long form.
 fn open_indexeddb_backend(workspace_id: &str) -> CacheBackendSignal {
-    let backend_state: RwSignal<Option<chartml_leptos::CacheBackendRef>> = RwSignal::new(None);
+    let backend_state: RwSignal<Option<chartml_leptos::CacheBackendRef>, LocalStorage> =
+        RwSignal::new_local(None);
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -403,7 +451,7 @@ fn open_indexeddb_backend(workspace_id: &str) -> CacheBackendSignal {
             match IndexedDbBackend::new(KYOMI_CHARTML_CACHE_DB, &id).await {
                 Ok(backend) => {
                     let backend: chartml_leptos::CacheBackendRef =
-                        std::sync::Arc::new(backend);
+                        std::rc::Rc::new(backend);
                     backend_state.set(Some(backend));
                 }
                 Err(e) => {
@@ -422,7 +470,7 @@ fn open_indexeddb_backend(workspace_id: &str) -> CacheBackendSignal {
     #[cfg(not(target_arch = "wasm32"))]
     let _ = workspace_id;
 
-    Signal::derive(move || backend_state.get())
+    Signal::derive_local(move || backend_state.get())
 }
 
 #[cfg(test)]

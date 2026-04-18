@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
-use crate::chartml_provider::DashboardChartProviders;
+use crate::chartml_provider::{DashboardChartProviders, RefreshAllSignal};
 use crate::components::dashboard::{
     ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters,
     SaveDashboardModal,
@@ -220,6 +220,20 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
     // ── Title editing state (for optimistic update) ─────────────────────
     let (title_override, set_title_override) = signal(Option::<String>::None);
+
+    // ── Dashboard-wide refresh signal ───────────────────────────────────
+    // Provided here (above `DashboardChartProviders`) so the toolbar's
+    // "Refresh All" button — which sits as a sibling of the providers, not
+    // a descendant — can share the same `RwSignal` that every nested
+    // `ChartBlock` reads from context. Bumping `refresh_all` propagates
+    // through `ChartBlock`'s `combined_refresh` derived signal into
+    // `chartml_leptos::ChartMLChart`'s `refresh_trigger` prop, which
+    // invalidates each spec source's resolver key and re-runs the fetch
+    // pipeline. Replaces the legacy `dashboard-refresh-all` CustomEvent
+    // dispatch (which had no listener) and the per-chart
+    // `resolver.invalidate_all()` round-trip in `ChartBlock`.
+    let refresh_all: RefreshAllSignal = RwSignal::new(0_u32);
+    provide_context(refresh_all);
 
     // ── Set user default action ─────────────────────────────────────────
     let (setting_user_default, set_setting_user_default) = signal(false);
@@ -426,12 +440,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         });
 
                         // ── Refresh All handler ────────────────────────
+                        // Bump the dashboard-wide `RefreshAllSignal` (provided
+                        // via context at the top of this component). Every
+                        // nested `ChartBlock` folds the bumped value into its
+                        // `ChartMLChart`'s `refresh_trigger`, which invalidates
+                        // each chart's resolver cache keys and re-runs the
+                        // fetch pipeline.
                         let on_refresh_all = move |_: leptos::ev::MouseEvent| {
-                            #[cfg(target_arch = "wasm32")]
-                            if let Some(window) = web_sys::window() {
-                                let event = web_sys::CustomEvent::new("dashboard-refresh-all").unwrap();
-                                let _ = window.dispatch_event(&event);
-                            }
+                            refresh_all.update(|n| *n += 1);
                         };
 
                         // ── PDF export handler ─────────────────────────
