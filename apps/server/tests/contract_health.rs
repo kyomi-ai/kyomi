@@ -163,6 +163,119 @@ async fn health_status_reflects_service_health() {
     );
 }
 
+// ─── /api/v1/health alias ────────────────────────────────────────────────────
+//
+// Uptime probes targeting the versioned API prefix (`/api/v1/...`) must hit
+// the real health handler, not fall through to the SPA catch-all and receive
+// `200 text/html`. These tests mirror the core `/api/health` assertions to
+// lock in the alias contract.
+
+#[tokio::test]
+async fn health_v1_alias_returns_200_json() {
+    let base = base_url().await;
+    let resp = client()
+        .get(format!("{base}/api/v1/health"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default();
+    assert!(
+        ct.contains("application/json"),
+        "/api/v1/health should return JSON, got content-type: {ct}"
+    );
+}
+
+#[tokio::test]
+async fn health_v1_alias_response_has_required_fields() {
+    let base = base_url().await;
+    let resp = client()
+        .get(format!("{base}/api/v1/health"))
+        .send()
+        .await
+        .unwrap();
+
+    let body: Value = resp.json().await.unwrap();
+
+    assert!(body.get("status").is_some(), "missing 'status' field");
+    assert!(body.get("version").is_some(), "missing 'version' field");
+    assert!(body.get("services").is_some(), "missing 'services' field");
+
+    assert!(body["status"].is_string());
+    assert!(body["version"].is_string());
+    assert!(body["services"].is_object());
+
+    let services = body["services"].as_object().unwrap();
+    assert!(
+        services.contains_key("database"),
+        "services missing 'database'"
+    );
+    assert!(
+        services.contains_key("kv_store"),
+        "services missing 'kv_store'"
+    );
+
+    let status = body["status"].as_str().unwrap();
+    assert!(
+        status == "healthy" || status == "degraded",
+        "unexpected status: {status}"
+    );
+}
+
+#[tokio::test]
+async fn health_v1_alias_matches_api_health_shape() {
+    // Both endpoints must be backed by the same handler and return
+    // structurally identical responses.
+    let base = base_url().await;
+
+    let api_health: Value = client()
+        .get(format!("{base}/api/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let v1_health: Value = client()
+        .get(format!("{base}/api/v1/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Same top-level keys
+    let api_keys: std::collections::BTreeSet<_> =
+        api_health.as_object().unwrap().keys().collect();
+    let v1_keys: std::collections::BTreeSet<_> =
+        v1_health.as_object().unwrap().keys().collect();
+    assert_eq!(
+        api_keys, v1_keys,
+        "/api/health and /api/v1/health must return the same top-level fields"
+    );
+
+    // Same services keys
+    let api_services: std::collections::BTreeSet<_> =
+        api_health["services"].as_object().unwrap().keys().collect();
+    let v1_services: std::collections::BTreeSet<_> =
+        v1_health["services"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        api_services, v1_services,
+        "/api/health and /api/v1/health must report the same services"
+    );
+
+    // Version string must match exactly
+    assert_eq!(api_health["version"], v1_health["version"]);
+}
+
 // ─── Root endpoint ───────────────────────────────────────────────────────────
 //
 // The root route (`GET /`) now serves the SPA frontend (rust-embed), so it

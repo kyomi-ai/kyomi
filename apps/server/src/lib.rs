@@ -111,9 +111,11 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
     let demo_mode = state.config.demo_mode;
 
     Router::new()
-        // Health check at both /api/health and /health (alias for nginx-less deployments)
+        // Health check at /api/health, /health (nginx-less deployments), and
+        // /api/v1/health (uptime probes that target the versioned API prefix).
         .route("/api/health", axum::routing::get(health::health_check))
         .route("/health", axum::routing::get(health::health_check))
+        .route("/api/v1/health", axum::routing::get(health::health_check))
         // Auth routes under /api/v1/auth
         .nest("/api/v1/auth", routes::auth::routes())
         .nest("/api/v1/auth", routes::auth_google_oauth::routes())
