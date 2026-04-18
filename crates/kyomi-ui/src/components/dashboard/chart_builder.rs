@@ -8,6 +8,20 @@
 //! 2. **Chart Config** — split pane: left editing panel (Visual / AI / YAML sub-tabs),
 //!    right live preview
 //!
+//! ## State model — single source of truth
+//!
+//! The three config sub-tabs (Visual / AI / YAML) all share a single source of
+//! truth: the parsed YAML AST (`serde_yaml::Value`) held in `ast`. Every tab
+//! reads from and writes to this AST. The `yaml_text` signal is just a buffer
+//! for the YAML editor — when a Visual-tab control mutates the AST, the handler
+//! also synchronously writes the freshly-serialized YAML into `yaml_text`.
+//! There is intentionally NO effect that reacts to AST changes and re-syncs
+//! `yaml_text`, because that would clobber in-progress typing in the YAML tab.
+//!
+//! Parse errors while typing in the YAML tab surface in `yaml_parse_error`
+//! without disturbing the AST or the text buffer — the Visual tab keeps
+//! showing the last-known-good AST.
+//!
 //! React reference: `ChartBuilderModal.jsx`, `ChartVisualEditor.jsx`,
 //! `ChartMLConfigEditor.jsx`, `ChartBuilderCopilotSidebar.jsx`.
 
@@ -15,6 +29,7 @@ use std::sync::Arc;
 
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
+use serde_yaml::{Mapping, Value};
 use crate::components::chat::CopilotChat;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
@@ -46,9 +61,27 @@ const CHART_TYPES: &[(&str, &str)] = &[
     ("metric", "Metric"),
 ];
 
-// ─── Series entry ───────────────────────────────────────────────────────────
+/// Seed YAML for a new (blank) chart.
+///
+/// The renderer's `extract_query` reads `data.query` (or `data.url`); it does
+/// NOT read `data.sql`. Seeding with `query:` ensures new single-chart
+/// dashboards actually render once data is supplied.
+const NEW_CHART_SEED: &str = r#"type: chart
+version: 1
+data:
+  datasource: ""
+  query: ""
+visualize:
+  type: bar
+  style:
+    title: "New Chart"
+"#;
 
-/// A single Y-axis series entry.
+// ─── Series entry (Visual tab view model) ───────────────────────────────────
+
+/// A single Y-axis series entry — used only as a view model for the Visual
+/// tab's series list so `<For>` gets stable keys. The canonical form lives in
+/// the AST under `visualize.rows`.
 #[derive(Clone, Debug)]
 struct SeriesEntry {
     /// Unique ID for stable keying in `<For>` loops.
@@ -57,316 +90,432 @@ struct SeriesEntry {
     label: String,
 }
 
-// ─── YAML parsing (for editing existing charts) ─────────────────────────────
+// ─── AST helpers: mapping / key manipulation ────────────────────────────────
 
-/// Parsed chart configuration extracted from existing ChartML YAML.
-#[derive(Clone, Debug, Default)]
-struct ParsedChart {
-    title: String,
-    datasource_slug: String,
-    sql: String,
-    chart_type: String,
-    x_field: String,
-    orientation: Option<String>,
-    mode: Option<String>,
-    series: Vec<SeriesEntry>,
+/// Ensure `ast` is a mapping, replacing non-mapping values with an empty one.
+fn ensure_root_mapping(ast: &mut Value) {
+    if !ast.is_mapping() {
+        *ast = Value::Mapping(Mapping::new());
+    }
 }
 
-/// Attempt to parse a ChartML YAML string into a `ParsedChart`.
-/// Falls back to defaults for any missing fields.
-fn parse_existing_yaml(yaml: &str) -> ParsedChart {
-    let mut chart = ParsedChart::default();
-
-    // Parse YAML — handle both single doc and list (ChartML wraps in a list)
-    let docs: Vec<serde_yaml::Value> = match serde_yaml::from_str::<serde_yaml::Value>(yaml) {
-        Ok(serde_yaml::Value::Sequence(seq)) => seq,
-        Ok(val) => vec![val],
-        Err(_) => return chart,
-    };
-
-    // Take the first chart-type document
-    let doc = docs
-        .iter()
-        .find(|d| {
-            d.get("type")
-                .and_then(|t| t.as_str()) == Some("chart")
-        })
-        .or(docs.first());
-
-    let Some(doc) = doc else {
-        return chart;
-    };
-
-    // Top-level title (React stores it here, not under visualize.style)
-    if let Some(title) = doc.get("title").and_then(|v| v.as_str()) {
-        chart.title = title.to_string();
-    }
-
-    if let Some(data) = doc.get("data") {
-        if let Some(ds) = data.get("datasource").and_then(|v| v.as_str()) {
-            chart.datasource_slug = ds.to_string();
-        }
-        // Support both "sql" and "query" field names
-        let sql_val = data
-            .get("sql")
-            .or_else(|| data.get("query"))
-            .and_then(|v| v.as_str());
-        if let Some(sql) = sql_val {
-            chart.sql = sql.to_string();
+/// Ensure `parent[key]` exists and is a mapping; create an empty one if missing.
+fn ensure_nested_mapping(parent: &mut Value, key: &str) {
+    ensure_root_mapping(parent);
+    let map = parent.as_mapping_mut().expect("ensured above");
+    let k = Value::String(key.to_string());
+    match map.get(&k) {
+        Some(v) if v.is_mapping() => {}
+        _ => {
+            map.insert(k, Value::Mapping(Mapping::new()));
         }
     }
-
-    if let Some(vis) = doc.get("visualize") {
-        if let Some(ct) = vis.get("type").and_then(|v| v.as_str()) {
-            chart.chart_type = ct.to_string();
-        }
-        if let Some(x) = vis.get("columns").and_then(|v| v.as_str()) {
-            chart.x_field = x.to_string();
-        }
-        if let Some(o) = vis.get("orientation").and_then(|v| v.as_str()) {
-            chart.orientation = Some(o.to_string());
-        }
-        if let Some(m) = vis.get("mode").and_then(|v| v.as_str()) {
-            chart.mode = Some(m.to_string());
-        }
-
-        // Title lives under visualize.style.title
-        if let Some(style) = vis.get("style")
-            && let Some(title) = style.get("title").and_then(|v| v.as_str())
-        {
-            chart.title = title.to_string();
-        }
-
-        // Parse rows — can be a bare string or a sequence of {field, label} objects
-        if let Some(rows_val) = vis.get("rows") {
-            match rows_val {
-                serde_yaml::Value::String(s) => {
-                    // Single row as bare string
-                    chart.series.push(SeriesEntry {
-                        id: 0,
-                        y_field: s.clone(),
-                        label: String::new(),
-                    });
-                }
-                serde_yaml::Value::Sequence(rows_seq) => {
-                    for (i, entry) in rows_seq.iter().enumerate() {
-                        match entry {
-                            serde_yaml::Value::String(s) => {
-                                chart.series.push(SeriesEntry {
-                                    id: i as u32,
-                                    y_field: s.clone(),
-                                    label: String::new(),
-                                });
-                            }
-                            _ => {
-                                let field = entry
-                                    .get("field")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let label = entry
-                                    .get("label")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                chart.series.push(SeriesEntry {
-                                    id: i as u32,
-                                    y_field: field,
-                                    label,
-                                });
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    chart
 }
 
-// ─── Chart form state snapshot ──────────────────────────────────────────────
-
-/// Snapshot of the form state for YAML generation/patching.
-/// Groups the parameters that `patch_yaml` and `build_yaml` share.
-struct ChartFormState<'a> {
-    title: &'a str,
-    datasource_slug: &'a str,
-    sql: &'a str,
-    chart_type: &'a str,
-    x_field: &'a str,
-    orientation: Option<&'a str>,
-    mode: Option<&'a str>,
-    series: &'a [SeriesEntry],
+/// Remove `parent[key]` if `parent` is a mapping.
+fn remove_key(parent: &mut Value, key: &str) {
+    if let Some(map) = parent.as_mapping_mut() {
+        map.remove(Value::String(key.to_string()));
+    }
 }
 
-// ─── YAML patching ──────────────────────────────────────────────────────────
+/// Get a nested string value by path (e.g. `["visualize", "type"]`).
+fn get_string_at(ast: &Value, path: &[&str]) -> Option<String> {
+    let mut cur = ast;
+    for k in path {
+        cur = cur.get(*k)?;
+    }
+    cur.as_str().map(String::from)
+}
 
-/// Patch an existing ChartML YAML string with form-state changes.
+// ─── AST: document extraction (strip sequence wrapper) ──────────────────────
+
+/// Extract the chart document from a top-level YAML `Value`.
 ///
-/// Preserves all fields not modeled by the form (inline data, provider,
-/// cache, etc.) — only updates the fields the form controls.
-/// Falls back to `build_yaml` if the original YAML is empty or unparseable.
-fn patch_yaml(original: &str, f: &ChartFormState<'_>) -> String {
-    if original.trim().is_empty() {
-        return build_yaml(f);
-    }
-
-    let mut val: serde_yaml::Value = match serde_yaml::from_str(original) {
-        Ok(v) => v,
-        Err(_) => return build_yaml(f),
-    };
-
-    // Get the chart document — handle both list and single-doc format
-    let doc = if let Some(seq) = val.as_sequence_mut() {
-        seq.iter_mut().find(|d| {
-            d.get("type").and_then(|t| t.as_str()) == Some("chart")
-        })
-    } else {
-        Some(&mut val)
-    };
-
-    let Some(doc) = doc else {
-        return build_yaml(f);
-    };
-
-    // Patch top-level title
-    if !f.title.is_empty() {
-        doc["title"] = serde_yaml::Value::String(f.title.to_string());
-    }
-
-    // Patch data section — only if datasource/sql are non-empty (remote chart).
-    // Don't overwrite inline data with empty datasource/sql.
-    if !f.datasource_slug.is_empty() {
-        if doc.get("data").is_none() {
-            doc["data"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        }
-        doc["data"]["datasource"] = serde_yaml::Value::String(f.datasource_slug.to_string());
-        if !f.sql.is_empty() {
-            doc["data"]["sql"] = serde_yaml::Value::String(f.sql.to_string());
-        }
-    }
-
-    // Patch visualize section
-    if doc.get("visualize").is_none() {
-        doc["visualize"] = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-
-    doc["visualize"]["type"] = serde_yaml::Value::String(f.chart_type.to_string());
-
-    // Orientation
-    if let Some(orient) = f.orientation {
-        doc["visualize"]["orientation"] = serde_yaml::Value::String(orient.to_string());
-    } else if let Some(vis) = doc.get_mut("visualize").and_then(|v| v.as_mapping_mut()) {
-        vis.remove(serde_yaml::Value::String("orientation".to_string()));
-    }
-
-    // Mode
-    if let Some(m) = f.mode {
-        doc["visualize"]["mode"] = serde_yaml::Value::String(m.to_string());
-    } else if let Some(vis) = doc.get_mut("visualize").and_then(|v| v.as_mapping_mut()) {
-        vis.remove(serde_yaml::Value::String("mode".to_string()));
-    }
-
-    // Columns
-    let needs_axes = !matches!(f.chart_type, "metric" | "pie" | "doughnut");
-    if needs_axes && !f.x_field.is_empty() {
-        doc["visualize"]["columns"] = serde_yaml::Value::String(f.x_field.to_string());
-    }
-
-    // Rows (series)
-    let non_empty_series: Vec<&SeriesEntry> =
-        f.series.iter().filter(|s| !s.y_field.is_empty()).collect();
-    if !non_empty_series.is_empty() {
-        let rows: Vec<serde_yaml::Value> = non_empty_series.iter().map(|s| {
-            if s.label.is_empty() {
-                serde_yaml::Value::String(s.y_field.clone())
-            } else {
-                let mut map = serde_yaml::Mapping::new();
-                map.insert(
-                    serde_yaml::Value::String("field".to_string()),
-                    serde_yaml::Value::String(s.y_field.clone()),
-                );
-                map.insert(
-                    serde_yaml::Value::String("label".to_string()),
-                    serde_yaml::Value::String(s.label.clone()),
-                );
-                serde_yaml::Value::Mapping(map)
+/// On-disk chart specs are a single-element sequence (`- type: chart\n ...`),
+/// but the AST we operate on internally is the bare chart mapping. This helper
+/// unwraps the sequence if present, preferring the first element whose
+/// `type: chart`.
+fn extract_chart_doc(val: Value) -> Value {
+    match val {
+        Value::Sequence(mut seq) => {
+            // Prefer an explicit `type: chart` entry, else fall back to first.
+            let idx = seq
+                .iter()
+                .position(|d| d.get("type").and_then(|t| t.as_str()) == Some("chart"));
+            match idx {
+                Some(i) => seq.swap_remove(i),
+                None => seq.into_iter().next().unwrap_or_else(|| Value::Mapping(Mapping::new())),
             }
-        }).collect();
-
-        if rows.len() == 1 && matches!(&rows[0], serde_yaml::Value::String(_)) {
-            doc["visualize"]["rows"] = rows.into_iter().next().unwrap();
-        } else {
-            doc["visualize"]["rows"] = serde_yaml::Value::Sequence(rows);
         }
+        other => other,
     }
-
-    serde_yaml::to_string(&val).unwrap_or_else(|_| original.to_string())
 }
 
-// ─── YAML generation (new charts only) ──────────────────────────────────────
+/// Wrap the chart document back into a single-element sequence for saving.
+fn wrap_as_sequence(doc: &Value) -> Value {
+    // Ensure the top-level `type: chart` tag is present — it's required for the
+    // renderer to identify the block.
+    let mut doc = doc.clone();
+    if doc.get("type").and_then(|v| v.as_str()) != Some("chart") {
+        ensure_root_mapping(&mut doc);
+        if let Some(map) = doc.as_mapping_mut() {
+            map.insert(
+                Value::String("type".to_string()),
+                Value::String("chart".to_string()),
+            );
+        }
+    }
+    Value::Sequence(vec![doc])
+}
 
-/// Build a ChartML YAML string from the form state.
-/// Used only for NEW charts — existing charts use `patch_yaml` to preserve data.
-fn build_yaml(f: &ChartFormState<'_>) -> String {
-    // Indent SQL lines for YAML block scalar
-    let sql_indented = f.sql
-        .lines()
-        .map(|line| format!("      {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+/// Parse an incoming YAML string into the chart-document AST. Returns `None`
+/// on parse error so the caller can display an inline error without disturbing
+/// the current AST.
+fn parse_chart_yaml(text: &str) -> Result<Value, serde_yaml::Error> {
+    serde_yaml::from_str::<Value>(text).map(extract_chart_doc)
+}
 
-    let datasource_slug = f.datasource_slug;
-    let chart_type = f.chart_type;
+/// Serialize the current AST for display in the YAML editor / preview.
+fn serialize_ast(ast: &Value) -> String {
+    serde_yaml::to_string(&wrap_as_sequence(ast)).unwrap_or_default()
+}
 
-    let mut yaml = format!(
-        r#"- type: chart
-  version: 1
-  data:
-    datasource: "{datasource_slug}"
-    sql: |
-{sql_indented}
-  visualize:
-    type: {chart_type}"#
-    );
+/// Produce the initial AST: either from existing YAML, or from the new-chart seed.
+fn initial_ast(existing: Option<&str>) -> Value {
+    match existing {
+        Some(y) if !y.trim().is_empty() => match serde_yaml::from_str::<Value>(y) {
+            Ok(v) => extract_chart_doc(v),
+            Err(_) => seed_ast(),
+        },
+        _ => seed_ast(),
+    }
+}
 
-    if let Some(orient) = f.orientation {
-        yaml.push_str(&format!("\n    orientation: {orient}"));
+/// Fresh AST for a new chart. Uses `data.query` (not `sql`) so the renderer
+/// picks it up.
+fn seed_ast() -> Value {
+    serde_yaml::from_str::<Value>(NEW_CHART_SEED)
+        .unwrap_or_else(|_| Value::Mapping(Mapping::new()))
+}
+
+// ─── AST field accessors — Visual tab controls ──────────────────────────────
+
+/// Get the chart title. The canonical location is `visualize.style.title`; we
+/// also accept a top-level `title` (some older exports).
+fn ast_get_title(ast: &Value) -> String {
+    get_string_at(ast, &["visualize", "style", "title"])
+        .or_else(|| get_string_at(ast, &["title"]))
+        .unwrap_or_default()
+}
+
+/// Set (or clear) the chart title, writing to `visualize.style.title`.
+fn ast_set_title(ast: &mut Value, val: &str) {
+    ensure_root_mapping(ast);
+    // Always strip any legacy top-level title so we don't have two copies.
+    remove_key(ast, "title");
+
+    if val.is_empty() {
+        // Remove from visualize.style.title; tidy up empty style mapping.
+        if let Some(vis) = ast.get_mut("visualize")
+            && let Some(style) = vis.get_mut("style")
+        {
+            remove_key(style, "title");
+            if style.as_mapping().is_some_and(|m| m.is_empty()) {
+                remove_key(vis, "style");
+            }
+        }
+        return;
     }
 
-    if let Some(m) = f.mode {
-        yaml.push_str(&format!("\n    mode: {m}"));
+    ensure_nested_mapping(ast, "visualize");
+    let vis = ast.get_mut("visualize").expect("ensured");
+    ensure_nested_mapping(vis, "style");
+    let style = vis.get_mut("style").expect("ensured");
+    if let Some(map) = style.as_mapping_mut() {
+        map.insert(
+            Value::String("title".to_string()),
+            Value::String(val.to_string()),
+        );
     }
+}
 
-    let needs_axes = !matches!(f.chart_type, "metric" | "pie" | "doughnut");
-    if needs_axes && !f.x_field.is_empty() {
-        yaml.push_str(&format!("\n    columns: {}", f.x_field));
+fn ast_get_datasource(ast: &Value) -> String {
+    get_string_at(ast, &["data", "datasource"]).unwrap_or_default()
+}
+
+fn ast_set_datasource(ast: &mut Value, val: &str) {
+    ensure_root_mapping(ast);
+    if val.is_empty() {
+        if let Some(data) = ast.get_mut("data") {
+            remove_key(data, "datasource");
+        }
+        return;
     }
+    ensure_nested_mapping(ast, "data");
+    let data = ast.get_mut("data").expect("ensured");
+    if let Some(map) = data.as_mapping_mut() {
+        map.insert(
+            Value::String("datasource".to_string()),
+            Value::String(val.to_string()),
+        );
+    }
+}
 
-    let non_empty_series: Vec<&SeriesEntry> =
-        f.series.iter().filter(|s| !s.y_field.is_empty()).collect();
-    if !non_empty_series.is_empty() {
-        if non_empty_series.len() == 1 && non_empty_series[0].label.is_empty() {
-            yaml.push_str(&format!("\n    rows: {}", non_empty_series[0].y_field));
-        } else {
-            yaml.push_str("\n    rows:");
-            for entry in &non_empty_series {
-                yaml.push_str(&format!("\n      - field: {}", entry.y_field));
-                if !entry.label.is_empty() {
-                    yaml.push_str(&format!("\n        label: \"{}\"", entry.label));
-                }
+/// Get the SQL query — accepts legacy `sql` as a fallback for older saves.
+fn ast_get_query(ast: &Value) -> String {
+    get_string_at(ast, &["data", "query"])
+        .or_else(|| get_string_at(ast, &["data", "sql"]))
+        .unwrap_or_default()
+}
+
+/// Set (or clear) the SQL query. Always writes to `data.query` — the renderer
+/// only reads `query`/`url`. Also migrates away from any legacy `data.sql`.
+fn ast_set_query(ast: &mut Value, val: &str) {
+    ensure_root_mapping(ast);
+    if val.is_empty() {
+        if let Some(data) = ast.get_mut("data") {
+            remove_key(data, "query");
+            remove_key(data, "sql");
+        }
+        return;
+    }
+    ensure_nested_mapping(ast, "data");
+    let data = ast.get_mut("data").expect("ensured");
+    // Clear legacy `sql` so the saved YAML is canonical.
+    remove_key(data, "sql");
+    if let Some(map) = data.as_mapping_mut() {
+        map.insert(
+            Value::String("query".to_string()),
+            Value::String(val.to_string()),
+        );
+    }
+}
+
+fn ast_get_chart_type(ast: &Value) -> String {
+    get_string_at(ast, &["visualize", "type"]).unwrap_or_else(|| "bar".to_string())
+}
+
+fn ast_set_chart_type(ast: &mut Value, val: &str) {
+    ensure_root_mapping(ast);
+    ensure_nested_mapping(ast, "visualize");
+    let vis = ast.get_mut("visualize").expect("ensured");
+    if let Some(map) = vis.as_mapping_mut() {
+        map.insert(
+            Value::String("type".to_string()),
+            Value::String(val.to_string()),
+        );
+    }
+}
+
+fn ast_get_x_field(ast: &Value) -> String {
+    get_string_at(ast, &["visualize", "columns"]).unwrap_or_default()
+}
+
+fn ast_set_x_field(ast: &mut Value, val: &str) {
+    ensure_root_mapping(ast);
+    if val.is_empty() {
+        if let Some(vis) = ast.get_mut("visualize") {
+            remove_key(vis, "columns");
+        }
+        return;
+    }
+    ensure_nested_mapping(ast, "visualize");
+    let vis = ast.get_mut("visualize").expect("ensured");
+    if let Some(map) = vis.as_mapping_mut() {
+        map.insert(
+            Value::String("columns".to_string()),
+            Value::String(val.to_string()),
+        );
+    }
+}
+
+fn ast_get_orientation(ast: &Value) -> Option<String> {
+    get_string_at(ast, &["visualize", "orientation"])
+}
+
+fn ast_set_orientation(ast: &mut Value, val: Option<&str>) {
+    ensure_root_mapping(ast);
+    match val {
+        None => {
+            if let Some(vis) = ast.get_mut("visualize") {
+                remove_key(vis, "orientation");
+            }
+        }
+        Some(v) => {
+            ensure_nested_mapping(ast, "visualize");
+            let vis = ast.get_mut("visualize").expect("ensured");
+            if let Some(map) = vis.as_mapping_mut() {
+                map.insert(
+                    Value::String("orientation".to_string()),
+                    Value::String(v.to_string()),
+                );
             }
         }
     }
+}
 
-    if !f.title.is_empty() {
-        yaml.push_str(&format!("\n    style:\n      title: \"{}\"", f.title));
+fn ast_get_mode(ast: &Value) -> Option<String> {
+    get_string_at(ast, &["visualize", "mode"])
+}
+
+fn ast_set_mode(ast: &mut Value, val: Option<&str>) {
+    ensure_root_mapping(ast);
+    match val {
+        None => {
+            if let Some(vis) = ast.get_mut("visualize") {
+                remove_key(vis, "mode");
+            }
+        }
+        Some(v) => {
+            ensure_nested_mapping(ast, "visualize");
+            let vis = ast.get_mut("visualize").expect("ensured");
+            if let Some(map) = vis.as_mapping_mut() {
+                map.insert(
+                    Value::String("mode".to_string()),
+                    Value::String(v.to_string()),
+                );
+            }
+        }
+    }
+}
+
+// ─── Series (visualize.rows) ────────────────────────────────────────────────
+
+/// Derive the Visual-tab series view model from the AST's `visualize.rows`.
+///
+/// `rows` may be:
+/// - absent (→ empty list)
+/// - a bare string (single series by field name)
+/// - a single `{field, label}` mapping
+/// - a sequence of strings or `{field, label}` mappings
+///
+/// Unknown entry shapes are rendered as an empty-field entry so the list still
+/// round-trips in length; we don't silently drop entries.
+fn ast_get_series(ast: &Value) -> Vec<SeriesEntry> {
+    let Some(rows_val) = ast.get("visualize").and_then(|v| v.get("rows")) else {
+        return Vec::new();
+    };
+    match rows_val {
+        Value::String(s) => vec![SeriesEntry {
+            id: 0,
+            y_field: s.clone(),
+            label: String::new(),
+        }],
+        Value::Mapping(m) => {
+            let field = m
+                .get(Value::String("field".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let label = m
+                .get(Value::String("label".to_string()))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            vec![SeriesEntry { id: 0, y_field: field, label }]
+        }
+        Value::Sequence(seq) => seq
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| match entry {
+                Value::String(s) => SeriesEntry {
+                    id: i as u32,
+                    y_field: s.clone(),
+                    label: String::new(),
+                },
+                _ => SeriesEntry {
+                    id: i as u32,
+                    y_field: entry
+                        .get("field")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    label: entry
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                },
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Derive the Visual-tab series view-state from the AST.
+///
+/// If the AST has no series entries, returns a single blank row so the user
+/// always has something to type into. The returned list is the authoritative
+/// editable state for the Visual tab's series list — see the `visual_series`
+/// signal in `ChartBuilderModal`.
+fn visual_series_from_ast(ast: &Value) -> Vec<SeriesEntry> {
+    let series = ast_get_series(ast);
+    if series.is_empty() {
+        vec![SeriesEntry {
+            id: 0,
+            y_field: String::new(),
+            label: String::new(),
+        }]
+    } else {
+        series
+    }
+}
+
+/// Next `SeriesEntry.id` to hand out, given an existing list. Used to keep
+/// `<For>` keys stable across adds/removes.
+fn next_id_after(entries: &[SeriesEntry]) -> u32 {
+    entries.iter().map(|s| s.id).max().map(|m| m + 1).unwrap_or(1)
+}
+
+/// Write the series list back to `visualize.rows`, preserving the compact-form
+/// conventions used on-disk: a single bare-field entry collapses to a string.
+fn ast_set_series(ast: &mut Value, series: &[SeriesEntry]) {
+    let non_empty: Vec<&SeriesEntry> = series.iter().filter(|s| !s.y_field.is_empty()).collect();
+
+    ensure_root_mapping(ast);
+
+    if non_empty.is_empty() {
+        if let Some(vis) = ast.get_mut("visualize") {
+            remove_key(vis, "rows");
+        }
+        return;
     }
 
-    yaml.push('\n');
-    yaml
+    ensure_nested_mapping(ast, "visualize");
+    let vis = ast.get_mut("visualize").expect("ensured");
+    let vis_map = vis.as_mapping_mut().expect("ensured");
+
+    // Single entry, no label → store as bare string for parity with React.
+    if non_empty.len() == 1 && non_empty[0].label.is_empty() {
+        vis_map.insert(
+            Value::String("rows".to_string()),
+            Value::String(non_empty[0].y_field.clone()),
+        );
+        return;
+    }
+
+    let rows: Vec<Value> = non_empty
+        .iter()
+        .map(|s| {
+            if s.label.is_empty() {
+                Value::String(s.y_field.clone())
+            } else {
+                let mut map = Mapping::new();
+                map.insert(
+                    Value::String("field".to_string()),
+                    Value::String(s.y_field.clone()),
+                );
+                map.insert(
+                    Value::String("label".to_string()),
+                    Value::String(s.label.clone()),
+                );
+                Value::Mapping(map)
+            }
+        })
+        .collect();
+
+    vis_map.insert(Value::String("rows".to_string()), Value::Sequence(rows));
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -397,106 +546,66 @@ pub fn ChartBuilderModal(
     let is_edit_mode = existing_yaml.is_some();
     let existing_yaml_stored = StoredValue::new(existing_yaml.clone());
 
-    // The original YAML — used as the base for patching in edit mode.
-    // New charts start with an empty string (build_yaml generates from scratch).
-    let (original_yaml, set_original_yaml) = signal(
-        existing_yaml.clone().unwrap_or_default()
-    );
+    // ── Canonical state: the chart-document AST ─────────────────────────
+    // All three sub-tabs read from and write to this signal. There is NO
+    // effect that syncs AST → yaml_text; instead, every AST-mutating handler
+    // in the Visual/AI tabs also writes the serialized AST into yaml_text
+    // synchronously.
+    let initial_ast_val = initial_ast(existing_yaml.as_deref());
 
-    // Parse existing YAML or use defaults
-    let initial = existing_yaml
-        .as_ref()
-        .map(|y| parse_existing_yaml(y))
-        .unwrap_or_default();
+    // Title used in the modal header — derived once at open time from the
+    // AST; the header doesn't need to track live edits.
+    let initial_title = ast_get_title(&initial_ast_val);
 
-    // ── Unique ID counter for series entries ─────────────────────────────
-    let (next_series_id, set_next_series_id) = signal(
-        initial.series.iter().map(|s| s.id).max().map(|m| m + 1).unwrap_or(1)
-    );
+    let ast = RwSignal::new(initial_ast_val.clone());
 
-    // ── Form state ──────────────────────────────────────────────────────
+    // ── Text buffer for the YAML editor ─────────────────────────────────
+    // Tracks what the user is typing; never clobbered by an AST write.
+    let initial_yaml_text = existing_yaml
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| serialize_ast(&initial_ast_val));
+    let yaml_text = RwSignal::new(initial_yaml_text);
 
-    let (title, set_title) = signal(if initial.title.is_empty() {
-        "New Chart".to_string()
-    } else {
-        initial.title.clone()
-    });
+    // Inline parse error for the YAML editor; None = clean.
+    let yaml_parse_error = RwSignal::new(None::<String>);
 
-    let (datasource_slug, set_datasource_slug) = signal(initial.datasource_slug.clone());
+    // ── Visual-tab series view-state ────────────────────────────────────
+    // The AST is the serialization authority — `ast_set_series` drops empty
+    // entries so the saved YAML stays clean — but the Visual tab needs to
+    // keep blank rows around while the user is typing (otherwise
+    // "+ Add Series" would do nothing visible on a chart that already has
+    // a series). `visual_series` is the editable list the Visual tab's
+    // `<For>` iterates; non-empty entries are propagated into the AST on
+    // every edit.
+    let initial_visual_series = visual_series_from_ast(&initial_ast_val);
+    let (next_series_id, set_next_series_id) = signal(next_id_after(&initial_visual_series));
+    let visual_series = RwSignal::new(initial_visual_series);
 
-    let (sql, set_sql) = signal(initial.sql.clone());
-
-    let (chart_type, set_chart_type) = signal(if initial.chart_type.is_empty() {
-        "bar".to_string()
-    } else {
-        initial.chart_type.clone()
-    });
-
-    let (x_field, set_x_field) = signal(initial.x_field.clone());
-
-    let (orientation, set_orientation) = signal(initial.orientation.clone());
-    let (mode, set_mode) = signal(initial.mode.clone());
-
-    let initial_series = if initial.series.is_empty() {
-        vec![SeriesEntry {
-            id: 0,
-            y_field: String::new(),
-            label: String::new(),
-        }]
-    } else {
-        initial.series.clone()
-    };
-    let (series, set_series) = signal(initial_series);
-
-    // ── YAML editor state (separate from form, synced on sub-tab switch) ──
-    let (yaml_text, set_yaml_text) = signal(String::new());
-
-    // ── Reset form state when modal opens with different yaml ────────────
+    // ── Reset state when the modal opens with new yaml ──────────────────
     Effect::new(move || {
         if open.get() {
             let yaml = existing_yaml_stored.get_value();
+            let new_ast = initial_ast(yaml.as_deref());
 
-            // Store original YAML for patching
-            set_original_yaml.set(yaml.clone().unwrap_or_default());
+            // Derive Visual-tab series state (seeded with one blank if empty)
+            // and re-seed the id counter so new rows never collide with the
+            // ones we just loaded.
+            let new_visual_series = visual_series_from_ast(&new_ast);
+            set_next_series_id.set(next_id_after(&new_visual_series));
 
-            let parsed = yaml
-                .as_ref()
-                .map(|y| parse_existing_yaml(y))
-                .unwrap_or_default();
+            // Text buffer: prefer the raw existing YAML so the user sees
+            // exactly what was saved (preserves formatting/comments the AST
+            // might drop). For a brand-new chart, use the seed serialization.
+            let text = yaml
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| serialize_ast(&new_ast));
 
-            set_title.set(if parsed.title.is_empty() {
-                "New Chart".to_string()
-            } else {
-                parsed.title.clone()
-            });
-            set_datasource_slug.set(parsed.datasource_slug.clone());
-            set_sql.set(parsed.sql.clone());
-            set_chart_type.set(if parsed.chart_type.is_empty() {
-                "bar".to_string()
-            } else {
-                parsed.chart_type.clone()
-            });
-            set_x_field.set(parsed.x_field.clone());
-            set_orientation.set(parsed.orientation.clone());
-            set_mode.set(parsed.mode.clone());
-
-            if parsed.series.is_empty() {
-                set_next_series_id.set(1);
-                set_series.set(vec![SeriesEntry {
-                    id: 0,
-                    y_field: String::new(),
-                    label: String::new(),
-                }]);
-            } else {
-                set_next_series_id.set(
-                    parsed.series.iter().map(|s| s.id).max().unwrap_or(0) + 1
-                );
-                set_series.set(parsed.series);
-            }
-
-            // Sync YAML text — use the original YAML directly for edit mode
-            // so the user sees the actual chart spec, not a reconstruction
-            set_yaml_text.set(yaml.unwrap_or_default());
+            ast.set(new_ast);
+            visual_series.set(new_visual_series);
+            yaml_text.set(text);
+            yaml_parse_error.set(None);
         }
     });
 
@@ -526,75 +635,86 @@ pub fn ChartBuilderModal(
             .collect::<Vec<(String, String)>>()
     });
 
-    // ── Series management ───────────────────────────────────────────────
+    // ── Derived signals for Visual-tab inputs ───────────────────────────
+    // Each getter reads only the slice of the AST it needs, so an edit to
+    // e.g. the title doesn't invalidate the chart-type <DynSelect>.
+    let title_sig = Signal::derive(move || ast.with(ast_get_title));
+    let datasource_slug_sig = Signal::derive(move || ast.with(ast_get_datasource));
+    let sql_sig = Signal::derive(move || ast.with(ast_get_query));
+    let chart_type_sig = Signal::derive(move || ast.with(ast_get_chart_type));
+    let x_field_sig = Signal::derive(move || ast.with(ast_get_x_field));
+    let orientation_sig = Signal::derive(move || ast.with(ast_get_orientation));
+    let mode_sig = Signal::derive(move || ast.with(ast_get_mode));
 
+    // ── Helper: mutate AST and refresh the YAML text buffer atomically ──
+    // Used by every Visual-tab / AI-tab handler that touches the AST. Keeping
+    // both writes in one place guarantees yaml_text never lags behind the AST
+    // (no feedback loop, no effect needed).
+    //
+    // This is a plain function that takes the signals as arguments. All three
+    // signals here are `Copy` (RwSignal), so handlers can just capture them by
+    // value and call `mutate_ast(ast, yaml_text, yaml_parse_error, |a| …)`.
+    fn mutate_ast(
+        ast: RwSignal<Value>,
+        yaml_text: RwSignal<String>,
+        yaml_parse_error: RwSignal<Option<String>>,
+        f: impl FnOnce(&mut Value),
+    ) {
+        ast.update(f);
+        yaml_text.set(ast.with_untracked(serialize_ast));
+        yaml_parse_error.set(None);
+    }
+
+    // ── Series management ───────────────────────────────────────────────
+    // Adds / removes operate on `visual_series` first, then propagate the
+    // non-empty subset into the AST via `ast_set_series`. The blank row
+    // produced by "+ Add Series" lives only in `visual_series` until the
+    // user types a field name — this is what makes the row show up in the
+    // Visual tab without polluting the saved YAML with empty entries.
     let add_series = move |_: web_sys::MouseEvent| {
         let id = next_series_id.get_untracked();
         set_next_series_id.set(id + 1);
-        set_series.update(|s| {
+        visual_series.update(|s| {
             s.push(SeriesEntry {
                 id,
                 y_field: String::new(),
                 label: String::new(),
             });
         });
+        // No AST mutation here — the new row is empty, so `ast_set_series`
+        // would drop it anyway.
     };
 
-    let remove_series = move |idx: usize| {
-        set_series.update(|s| {
-            if s.len() > 1 {
-                s.remove(idx);
-            }
+    let remove_series = move |id: u32| {
+        // Preserve the "always at least one row" invariant: refuse to remove
+        // the final row so the user always has somewhere to type.
+        if visual_series.with_untracked(|s| s.len()) <= 1 {
+            return;
+        }
+        visual_series.update(|s| s.retain(|e| e.id != id));
+        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+            ast_set_series(a, &visual_series.get_untracked());
         });
     };
 
-    // ── Derived YAML from form state (for preview and YAML tab) ─────────
-    // In edit mode, patches the original YAML to preserve inline data etc.
-    // In create mode, builds from scratch.
-    let current_yaml = Memo::new(move |_| {
-        let t = title.get();
-        let ds = datasource_slug.get();
-        let s = sql.get();
-        let ct = chart_type.get();
-        let xf = x_field.get();
-        let o = orientation.get();
-        let m = mode.get();
-        let sr = series.get();
-        let form = ChartFormState {
-            title: &t,
-            datasource_slug: &ds,
-            sql: &s,
-            chart_type: &ct,
-            x_field: &xf,
-            orientation: o.as_deref(),
-            mode: m.as_deref(),
-            series: &sr,
-        };
-        patch_yaml(&original_yaml.get(), &form)
-    });
-
-    // ── Insert / Update handler ─────────────────────────────────────────
-
+    // ── Save handler ────────────────────────────────────────────────────
     let handle_insert = Callback::new(move |()| {
-        let yaml = current_yaml.get_untracked();
+        let yaml =
+            serde_yaml::to_string(&wrap_as_sequence(&ast.get_untracked())).unwrap_or_default();
         on_insert.run(yaml);
         on_close.run(());
     });
 
     // ── Footer ──────────────────────────────────────────────────────────
-
-    // React: Cancel = ghost style, Save = primary style
-    let cancel_class = format!("{BTN_BASE} text-foreground hover:text-foreground hover:bg-secondary {BTN_SIZE}");
+    let cancel_class = format!(
+        "{BTN_BASE} text-foreground hover:text-foreground hover:bg-secondary {BTN_SIZE}"
+    );
     let insert_class = format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}");
 
     let cancel_class_clone = cancel_class.clone();
     let insert_class_clone = insert_class.clone();
 
-    let insert_label = if is_edit_mode {
-        "Update Chart"
-    } else {
-        "Save Chart"
-    };
+    let insert_label = if is_edit_mode { "Update Chart" } else { "Save Chart" };
 
     let footer_view: ChildrenFn = Arc::new(move || {
         let cancel_class = cancel_class_clone.clone();
@@ -602,10 +722,10 @@ pub fn ChartBuilderModal(
 
         // Disable insert: inline charts are always saveable, but remote charts
         // (datasource selected) require SQL to be useful.
-        let is_disabled = if datasource_slug.get().is_empty() {
+        let is_disabled = if datasource_slug_sig.get().is_empty() {
             false // inline chart — no SQL required
         } else {
-            sql.get().trim().is_empty() // remote chart — SQL is required
+            sql_sig.get().trim().is_empty() // remote chart — SQL is required
         };
 
         view! {
@@ -626,50 +746,38 @@ pub fn ChartBuilderModal(
         .into_any()
     });
 
-    // ── SQL Editor sub-component ────────────────────────────────────────
-    // Rendered conditionally — kode-leptos requires wasm32.
-
-    let sql_on_change: Arc<dyn Fn(String) + Send + Sync> =
-        Arc::new(move |new_val: String| {
-            set_sql.set(new_val);
+    // ── SQL Editor on_change — writes to AST ────────────────────────────
+    let sql_on_change: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |new_val: String| {
+        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+            ast_set_query(a, &new_val);
         });
+    });
     let sql_on_change = StoredValue::new(sql_on_change);
 
-    // ── YAML editor on_change ────────────────────────────────────────────
-    // ── Shared: apply parsed YAML back into form signals ───────────────
-    // Used by both the YAML editor on_change and the AI copilot on_chart_update.
-    let apply_parsed = move |parsed: ParsedChart, yaml_str: &str| {
-        if !parsed.chart_type.is_empty() {
-            set_chart_type.set(parsed.chart_type);
+    // ── YAML editor on_change ───────────────────────────────────────────
+    // Writes the incoming text to yaml_text unconditionally (so cursor state
+    // survives). Attempts a parse: on success, update the AST and clear the
+    // error; on failure, surface the error but leave the AST untouched.
+    let yaml_on_change: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |new_val: String| {
+        yaml_text.set(new_val.clone());
+        match parse_chart_yaml(&new_val) {
+            Ok(doc) => {
+                // Re-derive Visual-tab series state from the new AST so the
+                // Visual tab reflects whatever the user just wrote in YAML
+                // (e.g. adding a 3rd series). Bump the id counter past the
+                // loaded rows so subsequent "+ Add Series" clicks don't
+                // collide with freshly-loaded entry ids.
+                let new_visual_series = visual_series_from_ast(&doc);
+                set_next_series_id.set(next_id_after(&new_visual_series));
+                visual_series.set(new_visual_series);
+                ast.set(doc);
+                yaml_parse_error.set(None);
+            }
+            Err(e) => {
+                yaml_parse_error.set(Some(e.to_string()));
+            }
         }
-        if !parsed.title.is_empty() || yaml_str.contains("title:") {
-            set_title.set(parsed.title);
-        }
-        set_x_field.set(parsed.x_field);
-        set_orientation.set(parsed.orientation);
-        set_mode.set(parsed.mode);
-        if !parsed.datasource_slug.is_empty() {
-            set_datasource_slug.set(parsed.datasource_slug);
-        }
-        if !parsed.sql.is_empty() {
-            set_sql.set(parsed.sql);
-        }
-        if !parsed.series.is_empty() {
-            set_next_series_id.set(
-                parsed.series.iter().map(|s| s.id).max().unwrap_or(0) + 1
-            );
-            set_series.set(parsed.series);
-        }
-    };
-
-    let yaml_on_change: Arc<dyn Fn(String) + Send + Sync> =
-        Arc::new(move |new_val: String| {
-            set_yaml_text.set(new_val.clone());
-            // Update the base YAML so future form changes patch from this version
-            set_original_yaml.set(new_val.clone());
-            let parsed = parse_existing_yaml(&new_val);
-            apply_parsed(parsed, &new_val);
-        });
+    });
     let yaml_on_change = StoredValue::new(yaml_on_change);
 
     // ── Catalog sidebar state ──────────────────────────────────────────
@@ -692,8 +800,8 @@ pub fn ChartBuilderModal(
     // ── Auto-fetch preview data when opening with existing datasource + SQL ──
     #[cfg(target_arch = "wasm32")]
     {
-        let initial_ds = initial.datasource_slug.clone();
-        let initial_sql = initial.sql.clone();
+        let initial_ds = ast_get_datasource(&initial_ast_val);
+        let initial_sql = ast_get_query(&initial_ast_val);
         if !initial_ds.is_empty() && !initial_sql.trim().is_empty() {
             set_preview_loading.set(true);
             leptos::task::spawn_local(async move {
@@ -745,7 +853,7 @@ pub fn ChartBuilderModal(
     // ── View ────────────────────────────────────────────────────────────
 
     let modal_title = if is_edit_mode {
-        format!("Chart Builder: {}", initial.title)
+        format!("Chart Builder: {initial_title}")
     } else {
         "Chart Builder: New Chart".to_string()
     };
@@ -781,6 +889,11 @@ pub fn ChartBuilderModal(
     const CHIP_INACTIVE: &str =
         "inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-full border transition-colors bg-transparent border-border text-muted-foreground hover:border-foreground hover:text-foreground";
 
+    // ── Preview YAML — derived from the AST ─────────────────────────────
+    // The preview pane renders the current AST serialization, not the raw
+    // text buffer, so invalid YAML in the editor doesn't blank the preview.
+    let preview_yaml = Signal::derive(move || ast.with(serialize_ast));
+
     view! {
         <Modal
             show=open
@@ -808,11 +921,7 @@ pub fn ChartBuilderModal(
                         class=move || {
                             if active_tab.get() == "chart" { TAB_ACTIVE } else { TAB_INACTIVE }
                         }
-                        on:click=move |_| {
-                            // Sync YAML text from current form state when switching to chart tab
-                            set_yaml_text.set(current_yaml.get_untracked());
-                            set_active_tab.set("chart".to_string());
-                        }
+                        on:click=move |_| set_active_tab.set("chart".to_string())
                     >
                         "Chart Config"
                     </button>
@@ -836,9 +945,13 @@ pub fn ChartBuilderModal(
                                             <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
                                         }>
                                             <DynSelect
-                                                value=Signal::derive(move || datasource_slug.get())
+                                                value=datasource_slug_sig
                                                 options=datasource_options
-                                                on_change=move |slug: String| set_datasource_slug.set(slug)
+                                                on_change=move |slug: String| {
+                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                        ast_set_datasource(a, &slug);
+                                                    });
+                                                }
                                                 placeholder="Select a datasource..."
                                             />
                                         </Suspense>
@@ -863,7 +976,7 @@ pub fn ChartBuilderModal(
                                 // SQL query editor — fills remaining space
                                 <div class="flex-1 min-h-0">
                                     <SqlEditorSection
-                                        content=sql.into()
+                                        content=sql_sig
                                         on_change=sql_on_change.get_value()
                                     />
                                 </div>
@@ -888,10 +1001,10 @@ pub fn ChartBuilderModal(
                                     <button
                                         type="button"
                                         class=format!("{BTN_BASE} {BTN_DEFAULT} {BTN_SIZE}")
-                                        disabled=move || query_running.get() || datasource_slug.get().is_empty() || sql.get().trim().is_empty()
+                                        disabled=move || query_running.get() || datasource_slug_sig.get().is_empty() || sql_sig.get().trim().is_empty()
                                         on:click=move |_| {
-                                            let ds_slug = datasource_slug.get_untracked();
-                                            let query_text = sql.get_untracked();
+                                            let ds_slug = datasource_slug_sig.get_untracked();
+                                            let query_text = sql_sig.get_untracked();
                                             if ds_slug.is_empty() || query_text.trim().is_empty() {
                                                 return;
                                             }
@@ -947,7 +1060,7 @@ pub fn ChartBuilderModal(
                             // Catalog sidebar (280px, shown when catalog_open is true)
                             {move || catalog_open.get().then(|| {
                                 let catalog_slug_signal = Signal::derive(move || {
-                                    let slug = datasource_slug.get();
+                                    let slug = datasource_slug_sig.get();
                                     if slug.is_empty() { None } else { Some(slug) }
                                 });
 
@@ -1026,21 +1139,25 @@ pub fn ChartBuilderModal(
                                                                 refresh_trigger=Signal::derive(move || catalog_refresh_trigger.get())
                                                                 on_table_click=Callback::new(move |table_id: String| {
                                                                     // Insert table name into SQL — append at cursor or end
-                                                                    set_sql.update(|s| {
-                                                                        if s.is_empty() {
-                                                                            *s = format!("SELECT * FROM {table_id}");
+                                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                        let cur = ast_get_query(a);
+                                                                        let next = if cur.is_empty() {
+                                                                            format!("SELECT * FROM {table_id}")
                                                                         } else {
-                                                                            s.push(' ');
-                                                                            s.push_str(&table_id);
-                                                                        }
+                                                                            format!("{cur} {table_id}")
+                                                                        };
+                                                                        ast_set_query(a, &next);
                                                                     });
                                                                 })
                                                                 on_column_click=Callback::new(move |col_name: String| {
-                                                                    set_sql.update(|s| {
-                                                                        if !s.is_empty() {
-                                                                            s.push(' ');
-                                                                        }
-                                                                        s.push_str(&col_name);
+                                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                        let cur = ast_get_query(a);
+                                                                        let next = if cur.is_empty() {
+                                                                            col_name.clone()
+                                                                        } else {
+                                                                            format!("{cur} {col_name}")
+                                                                        };
+                                                                        ast_set_query(a, &next);
                                                                     });
                                                                 })
                                                             />
@@ -1091,11 +1208,7 @@ pub fn ChartBuilderModal(
                                     <button
                                         type="button"
                                         class=move || if config_tab.get() == "yaml" { SUB_TAB_ACTIVE } else { SUB_TAB_INACTIVE }
-                                        on:click=move |_| {
-                                            // Sync YAML text from form state when switching to YAML tab
-                                            set_yaml_text.set(current_yaml.get_untracked());
-                                            set_config_tab.set("yaml".to_string());
-                                        }
+                                        on:click=move |_| set_config_tab.set("yaml".to_string())
                                     >
                                         "YAML"
                                     </button>
@@ -1110,7 +1223,7 @@ pub fn ChartBuilderModal(
                                             <div class="space-y-2">
                                                 <label class=LABEL_CLASS>"Chart Type"</label>
                                                 <DynSelect
-                                                    value=Signal::derive(move || chart_type.get())
+                                                    value=chart_type_sig
                                                     options=Signal::stored(
                                                         CHART_TYPES
                                                             .iter()
@@ -1118,72 +1231,83 @@ pub fn ChartBuilderModal(
                                                             .collect::<Vec<_>>()
                                                     )
                                                     on_change=move |ct: String| {
-                                                        // Clear incompatible modifiers on type change
-                                                        if ct != "bar" {
-                                                            set_orientation.set(None);
-                                                        }
-                                                        if ct != "bar" && ct != "area" {
-                                                            set_mode.set(None);
-                                                        }
-                                                        set_chart_type.set(ct);
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                            // Clear incompatible modifiers on type change.
+                                                            if ct != "bar" {
+                                                                ast_set_orientation(a, None);
+                                                            }
+                                                            if ct != "bar" && ct != "area" {
+                                                                ast_set_mode(a, None);
+                                                            }
+                                                            ast_set_chart_type(a, &ct);
+                                                        });
                                                     }
                                                 />
 
                                                 // Modifier chips — contextual based on chart type
                                                 // React: ChartVisualEditor lines 216-258
                                                 {move || {
-                                                    let ct = chart_type.get();
+                                                    let ct = chart_type_sig.get();
                                                     (ct == "bar" || ct == "area").then(|| view! {
                                                         <div class="flex flex-wrap gap-2 mt-2">
                                                             // Horizontal chip (bar only)
-                                                            {move || (chart_type.get() == "bar").then(|| view! {
+                                                            {move || (chart_type_sig.get() == "bar").then(|| view! {
                                                                 <button
                                                                     type="button"
                                                                     class=move || {
-                                                                        if orientation.get().as_deref() == Some("horizontal") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                        if orientation_sig.get().as_deref() == Some("horizontal") { CHIP_ACTIVE } else { CHIP_INACTIVE }
                                                                     }
                                                                     on:click=move |_| {
-                                                                        if orientation.get_untracked().as_deref() == Some("horizontal") {
-                                                                            set_orientation.set(None);
-                                                                        } else {
-                                                                            set_orientation.set(Some("horizontal".to_string()));
-                                                                        }
+                                                                        let is_horizontal = orientation_sig.get_untracked().as_deref() == Some("horizontal");
+                                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                            if is_horizontal {
+                                                                                ast_set_orientation(a, None);
+                                                                            } else {
+                                                                                ast_set_orientation(a, Some("horizontal"));
+                                                                            }
+                                                                        });
                                                                     }
                                                                 >
                                                                     "Horizontal"
                                                                 </button>
                                                             })}
                                                             // Grouped chip (bar only)
-                                                            {move || (chart_type.get() == "bar").then(|| view! {
+                                                            {move || (chart_type_sig.get() == "bar").then(|| view! {
                                                                 <button
                                                                     type="button"
                                                                     class=move || {
-                                                                        if mode.get().as_deref() == Some("grouped") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                        if mode_sig.get().as_deref() == Some("grouped") { CHIP_ACTIVE } else { CHIP_INACTIVE }
                                                                     }
                                                                     on:click=move |_| {
-                                                                        if mode.get_untracked().as_deref() == Some("grouped") {
-                                                                            set_mode.set(None);
-                                                                        } else {
-                                                                            set_mode.set(Some("grouped".to_string()));
-                                                                        }
+                                                                        let is_grouped = mode_sig.get_untracked().as_deref() == Some("grouped");
+                                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                            if is_grouped {
+                                                                                ast_set_mode(a, None);
+                                                                            } else {
+                                                                                ast_set_mode(a, Some("grouped"));
+                                                                            }
+                                                                        });
                                                                     }
                                                                 >
                                                                     "Grouped"
                                                                 </button>
                                                             })}
                                                             // Normalized chip (area only)
-                                                            {move || (chart_type.get() == "area").then(|| view! {
+                                                            {move || (chart_type_sig.get() == "area").then(|| view! {
                                                                 <button
                                                                     type="button"
                                                                     class=move || {
-                                                                        if mode.get().as_deref() == Some("normalized") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                        if mode_sig.get().as_deref() == Some("normalized") { CHIP_ACTIVE } else { CHIP_INACTIVE }
                                                                     }
                                                                     on:click=move |_| {
-                                                                        if mode.get_untracked().as_deref() == Some("normalized") {
-                                                                            set_mode.set(None);
-                                                                        } else {
-                                                                            set_mode.set(Some("normalized".to_string()));
-                                                                        }
+                                                                        let is_normalized = mode_sig.get_untracked().as_deref() == Some("normalized");
+                                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                            if is_normalized {
+                                                                                ast_set_mode(a, None);
+                                                                            } else {
+                                                                                ast_set_mode(a, Some("normalized"));
+                                                                            }
+                                                                        });
                                                                     }
                                                                 >
                                                                     "Normalized"
@@ -1200,15 +1324,20 @@ pub fn ChartBuilderModal(
                                                 <input
                                                     type="text"
                                                     class=INPUT_CLASS
-                                                    prop:value=move || title.get()
-                                                    on:input=move |ev| set_title.set(event_target_value(&ev))
+                                                    prop:value=move || title_sig.get()
+                                                    on:input=move |ev| {
+                                                        let val = event_target_value(&ev);
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                            ast_set_title(a, &val);
+                                                        });
+                                                    }
                                                     placeholder="Chart title"
                                                 />
                                             </div>
 
                                             // X Axis Field — hidden for pie/doughnut/metric
                                             {move || {
-                                                let ct = chart_type.get();
+                                                let ct = chart_type_sig.get();
                                                 let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
                                                 needs_axes.then(|| view! {
                                                     <div class="space-y-2">
@@ -1216,8 +1345,13 @@ pub fn ChartBuilderModal(
                                                         <input
                                                             type="text"
                                                             class=INPUT_CLASS
-                                                            prop:value=move || x_field.get()
-                                                            on:input=move |ev| set_x_field.set(event_target_value(&ev))
+                                                            prop:value=move || x_field_sig.get()
+                                                            on:input=move |ev| {
+                                                                let val = event_target_value(&ev);
+                                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                    ast_set_x_field(a, &val);
+                                                                });
+                                                            }
                                                             placeholder="e.g. date, category, name..."
                                                         />
                                                     </div>
@@ -1238,18 +1372,22 @@ pub fn ChartBuilderModal(
                                                 </div>
 
                                                 <For
-                                                    each=move || {
-                                                        let s = series.get();
-                                                        s.into_iter().enumerate().collect::<Vec<_>>()
-                                                    }
-                                                    key=|(_, entry)| entry.id
-                                                    let:item
+                                                    // Iterate `visual_series` directly — it always
+                                                    // contains at least one (possibly blank) entry
+                                                    // thanks to `visual_series_from_ast` seeding,
+                                                    // so no ghost-row fallback is needed.
+                                                    each=move || visual_series.get()
+                                                    key=|entry| entry.id
+                                                    let:entry
                                                 >
                                                     {
-                                                        let (idx, entry) = item;
+                                                        // Capture the stable entry id — not the
+                                                        // position — so surviving rows after a
+                                                        // remove still target the right entry.
+                                                        let entry_id = entry.id;
                                                         let y_val = entry.y_field.clone();
                                                         let label_val = entry.label.clone();
-                                                        let show_remove = move || series.get().len() > 1;
+                                                        let show_remove = move || visual_series.with(|s| s.len() > 1);
 
                                                         view! {
                                                             <div class="flex items-start gap-2">
@@ -1260,10 +1398,16 @@ pub fn ChartBuilderModal(
                                                                         prop:value=y_val.clone()
                                                                         on:input=move |ev| {
                                                                             let val = event_target_value(&ev);
-                                                                            set_series.update(|s| {
-                                                                                if let Some(entry) = s.get_mut(idx) {
-                                                                                    entry.y_field = val;
+                                                                            // Update view-state by id, then
+                                                                            // propagate the non-empty subset
+                                                                            // into the AST.
+                                                                            visual_series.update(|s| {
+                                                                                if let Some(e) = s.iter_mut().find(|e| e.id == entry_id) {
+                                                                                    e.y_field = val;
                                                                                 }
+                                                                            });
+                                                                            mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                                ast_set_series(a, &visual_series.get_untracked());
                                                                             });
                                                                         }
                                                                         placeholder="Y field name (e.g. revenue, count)"
@@ -1274,10 +1418,13 @@ pub fn ChartBuilderModal(
                                                                         prop:value=label_val.clone()
                                                                         on:input=move |ev| {
                                                                             let val = event_target_value(&ev);
-                                                                            set_series.update(|s| {
-                                                                                if let Some(entry) = s.get_mut(idx) {
-                                                                                    entry.label = val;
+                                                                            visual_series.update(|s| {
+                                                                                if let Some(e) = s.iter_mut().find(|e| e.id == entry_id) {
+                                                                                    e.label = val;
                                                                                 }
+                                                                            });
+                                                                            mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                                ast_set_series(a, &visual_series.get_untracked());
                                                                             });
                                                                         }
                                                                         placeholder="Label (optional)"
@@ -1288,7 +1435,7 @@ pub fn ChartBuilderModal(
                                                                         <button
                                                                             type="button"
                                                                             class="mt-1 p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                                                                            on:click=move |_| remove_series(idx)
+                                                                            on:click=move |_| remove_series(entry_id)
                                                                             title="Remove series"
                                                                         >
                                                                             <Icon icon=phosphor_leptos::X size="16px" />
@@ -1306,23 +1453,49 @@ pub fn ChartBuilderModal(
                                     // ── AI sub-tab ─────────────────────
                                     {move || (config_tab.get() == "ai").then(|| view! {
                                         <ChartCopilot
-                                            chart_yaml=Signal::derive(move || current_yaml.get())
+                                            chart_yaml=preview_yaml
                                             on_chart_update=Callback::new(move |new_yaml: String| {
-                                                let parsed = parse_existing_yaml(&new_yaml);
-                                                apply_parsed(parsed, &new_yaml);
-                                                set_original_yaml.set(new_yaml.clone());
-                                                set_yaml_text.set(new_yaml);
+                                                // AI returns fresh YAML — replace the AST and sync the
+                                                // text buffer. On parse failure, leave the AST alone and
+                                                // surface the error in the YAML tab.
+                                                match parse_chart_yaml(&new_yaml) {
+                                                    Ok(doc) => {
+                                                        // Keep the Visual tab and id counter in sync
+                                                        // with the AI-produced AST, same as the YAML
+                                                        // editor path.
+                                                        let new_visual_series = visual_series_from_ast(&doc);
+                                                        set_next_series_id.set(next_id_after(&new_visual_series));
+                                                        visual_series.set(new_visual_series);
+                                                        ast.set(doc);
+                                                        yaml_text.set(ast.with_untracked(serialize_ast));
+                                                        yaml_parse_error.set(None);
+                                                    }
+                                                    Err(e) => {
+                                                        yaml_parse_error.set(Some(e.to_string()));
+                                                    }
+                                                }
                                             })
                                         />
                                     })}
 
                                     // ── YAML sub-tab ────────────────────
                                     {move || (config_tab.get() == "yaml").then(|| view! {
-                                        <div class="h-full min-h-[400px]">
-                                            <YamlEditorSection
-                                                content=Signal::derive(move || yaml_text.get())
-                                                on_change=yaml_on_change.get_value()
-                                            />
+                                        <div class="flex flex-col h-full min-h-[400px]">
+                                            // Inline parse error banner — shown only while the buffer
+                                            // fails to parse. The AST keeps showing the last-known-good
+                                            // state to the Visual tab in the meantime.
+                                            {move || yaml_parse_error.get().map(|msg| view! {
+                                                <div class="mx-4 mt-3 border border-error-border rounded-md bg-error p-3">
+                                                    <p class="text-sm text-error-foreground font-medium">"YAML Parse Error"</p>
+                                                    <p class="text-xs text-error-foreground mt-1 font-mono whitespace-pre-wrap">{msg}</p>
+                                                </div>
+                                            })}
+                                            <div class="flex-1 min-h-0">
+                                                <YamlEditorSection
+                                                    content=Signal::derive(move || yaml_text.get())
+                                                    on_change=yaml_on_change.get_value()
+                                                />
+                                            </div>
                                         </div>
                                     })}
                                 </div>
@@ -1339,8 +1512,8 @@ pub fn ChartBuilderModal(
                                         title="Refresh preview"
                                         disabled=move || preview_loading.get()
                                         on:click=move |_| {
-                                            let ds_slug = datasource_slug.get_untracked();
-                                            let query_text = sql.get_untracked();
+                                            let ds_slug = datasource_slug_sig.get_untracked();
+                                            let query_text = sql_sig.get_untracked();
                                             if ds_slug.is_empty() || query_text.trim().is_empty() {
                                                 return;
                                             }
@@ -1426,25 +1599,23 @@ pub fn ChartBuilderModal(
                                             }.into_any()
                                         } else if let Some(chartml_inst) = preview_chartml.get() {
                                             // Render remote chart preview — data was fetched
-                                            let preview_yaml = current_yaml.get();
-                                            let preview_spec = rewrite_spec_for_remote(&preview_yaml);
+                                            let spec = rewrite_spec_for_remote(&preview_yaml.get());
                                             view! {
                                                 <ChartPreview
-                                                    spec=preview_spec
+                                                    spec=spec
                                                     chartml=chartml_inst
                                                 />
                                             }.into_any()
-                                        } else if datasource_slug.get().is_empty() {
+                                        } else if datasource_slug_sig.get().is_empty() {
                                             // Inline data chart — render directly without remote fetch.
                                             // ChartML with DataFusionTransform handles inline data natively.
                                             let is_dark = crate::components::theme::use_theme()
                                                 .map(|s| s.effective.get_untracked() == "dark")
                                                 .unwrap_or(false);
                                             let chartml_inst = configured_chartml("kyomi", is_dark);
-                                            let preview_yaml = current_yaml.get();
                                             view! {
                                                 <ChartPreview
-                                                    spec=preview_yaml
+                                                    spec=preview_yaml.get()
                                                     chartml=chartml_inst
                                                 />
                                             }.into_any()
@@ -1650,4 +1821,3 @@ fn ChartCopilot(
         />
     }
 }
-
