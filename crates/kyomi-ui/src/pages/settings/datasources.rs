@@ -1325,7 +1325,7 @@ pub fn DatasourceModal(
 
                     // Loading state (edit mode)
                     <Show when=move || settings_loading.get()>
-                        <div class="flex items-center justify-center py-12">
+                        <div class="flex items-center justify-center min-h-[400px]">
                             <span class="text-sm text-muted-foreground">"Loading settings..."</span>
                         </div>
                     </Show>

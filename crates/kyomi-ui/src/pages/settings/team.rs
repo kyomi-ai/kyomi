@@ -11,7 +11,7 @@ use leptos::prelude::*;
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
-    ButtonVariant, ConfirmDialog, EmptyState, Modal, ModalSize, INPUT_CLASS,
+    ButtonVariant, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, INPUT_CLASS,
 };
 use crate::components::select::SELECT_CLASS;
 use crate::server_fns::context::UserContext;
@@ -395,9 +395,10 @@ fn TeamPageInner() -> impl IntoView {
                     "Pending Invitations"
                 </h3>
                 <Transition fallback=move || view! {
-                    <div class="text-center py-8">
-                        <span class="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent inline-block"></span>
-                        <p class="text-muted-foreground mt-2">"Loading invitations..."</p>
+                    <div class="space-y-3">
+                        <Skeleton class="h-14 w-full"/>
+                        <Skeleton class="h-14 w-full"/>
+                        <Skeleton class="h-14 w-full"/>
                     </div>
                 }>
                     {move || {
@@ -472,9 +473,11 @@ fn TeamPageInner() -> impl IntoView {
                     "Workspace Members"
                 </h3>
                 <Transition fallback=move || view! {
-                    <div class="text-center py-8">
-                        <span class="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent inline-block"></span>
-                        <p class="text-muted-foreground mt-2">"Loading members..."</p>
+                    <div class="space-y-3">
+                        <Skeleton class="h-14 w-full"/>
+                        <Skeleton class="h-14 w-full"/>
+                        <Skeleton class="h-14 w-full"/>
+                        <Skeleton class="h-14 w-full"/>
                     </div>
                 }>
                     {move || {

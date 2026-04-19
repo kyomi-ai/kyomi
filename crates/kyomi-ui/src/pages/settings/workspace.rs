@@ -9,7 +9,7 @@ use leptos::prelude::*;
 
 use crate::components::{
     ActionStatus, Alert, AlertDescription, AlertVariant, Button, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, INPUT_CLASS,
+    CardDescription, CardHeader, CardTitle, Skeleton, INPUT_CLASS,
 };
 use crate::server_fns::workspace::*;
 use crate::types::WorkspaceSettingsData;
@@ -30,13 +30,35 @@ pub fn WorkspacePage() -> impl IntoView {
             </p>
 
             <Transition fallback=move || view! {
-                <Card>
-                    <CardContent>
-                        <p class="text-sm text-muted-foreground text-center py-8">
-                            "Loading workspace settings..."
-                        </p>
-                    </CardContent>
-                </Card>
+                <div class="space-y-6">
+                    <Card>
+                        <CardHeader>
+                            <Skeleton class="h-5 w-1/3"/>
+                            <Skeleton class="h-4 w-2/3 mt-1"/>
+                        </CardHeader>
+                        <CardContent>
+                            <Skeleton class="h-10 w-full"/>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardHeader>
+                            <Skeleton class="h-5 w-1/4"/>
+                            <Skeleton class="h-4 w-1/2 mt-1"/>
+                        </CardHeader>
+                        <CardContent>
+                            <Skeleton class="h-24 w-full"/>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardHeader>
+                            <Skeleton class="h-5 w-1/3"/>
+                            <Skeleton class="h-4 w-2/3 mt-1"/>
+                        </CardHeader>
+                        <CardContent>
+                            <Skeleton class="h-20 w-full"/>
+                        </CardContent>
+                    </Card>
+                </div>
             }>
                 {move || {
                     settings.get().map(|result| match result {
