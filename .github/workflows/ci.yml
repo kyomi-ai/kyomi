@@ -66,5 +66,13 @@ jobs:
         working-directory: apps/mcp-chart-app
         run: npm install && npm run build
 
+      # Strip the local-dev [patch.crates-io] block before clippy. The block
+      # points at /home/jason/repos/* paths that only exist on Jason's laptop;
+      # CI must resolve chartml-* etc. from crates.io. Mirrors the Dockerfile
+      # sed at apps/server/Dockerfile (which strips the same markers for
+      # production builds).
+      - name: Strip local-dev patch.crates-io block
+        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace -- -D warnings

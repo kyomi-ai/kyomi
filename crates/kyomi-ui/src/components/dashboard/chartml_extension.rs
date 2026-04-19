@@ -7,8 +7,6 @@
 //! tree editor uses `<For>` keyed rendering, so chart components persist
 //! across editor re-renders as long as their content doesn't change.
 
-use std::sync::Arc;
-
 use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_chart_pie::PieRenderer;
@@ -28,7 +26,7 @@ use crate::components::dashboard::markdown_renderer::{
 
 /// Create a configured ChartML instance, optionally with a color palette
 /// and a Kyomi chart theme (chrome + typography + shape).
-fn create_chartml(colors: Option<Vec<String>>, theme: Option<Theme>) -> Arc<ChartML> {
+fn create_chartml(colors: Option<Vec<String>>, theme: Option<Theme>) -> chartml_leptos::ChartMLRef {
     let mut chartml = ChartML::new();
     chartml.register_renderer("bar", CartesianRenderer::new());
     chartml.register_renderer("line", CartesianRenderer::new());
@@ -44,12 +42,17 @@ fn create_chartml(colors: Option<Vec<String>>, theme: Option<Theme>) -> Arc<Char
     if let Some(theme) = theme {
         chartml.set_theme(theme);
     }
-    Arc::new(chartml)
+    chartml_leptos::ChartMLRef::new(chartml)
 }
 
 /// Kode extension that renders `chartml` code blocks as live charts.
 pub struct ChartMLExtension {
-    chartml: Arc<ChartML>,
+    /// `ChartMLRef` is `Rc<ChartML>` on WASM (!Send + !Sync), but the
+    /// `Extension: Send + Sync` supertrait requires the impl type be both.
+    /// `SendWrapper` provides the bound by panicking if accessed from a
+    /// different thread, which never happens on the single-threaded
+    /// wasm32-unknown-unknown runtime.
+    chartml: send_wrapper::SendWrapper<chartml_leptos::ChartMLRef>,
 }
 
 impl Default for ChartMLExtension {
@@ -61,13 +64,13 @@ impl Default for ChartMLExtension {
 impl ChartMLExtension {
     pub fn new() -> Self {
         Self {
-            chartml: create_chartml(None, None),
+            chartml: send_wrapper::SendWrapper::new(create_chartml(None, None)),
         }
     }
 
     pub fn with_colors(colors: Vec<String>) -> Self {
         Self {
-            chartml: create_chartml(Some(colors), None),
+            chartml: send_wrapper::SendWrapper::new(create_chartml(Some(colors), None)),
         }
     }
 
@@ -76,7 +79,7 @@ impl ChartMLExtension {
     /// charts with the same chrome as the dashboard viewer.
     pub fn with_colors_and_theme(colors: Vec<String>, theme: Theme) -> Self {
         Self {
-            chartml: create_chartml(Some(colors), Some(theme)),
+            chartml: send_wrapper::SendWrapper::new(create_chartml(Some(colors), Some(theme))),
         }
     }
 }
@@ -102,7 +105,9 @@ impl Extension for ChartMLExtension {
         }
 
         let yaml = content.to_string();
-        let chartml = self.chartml.clone();
+        // Unwrap the SendWrapper to get the inner `ChartMLRef`. Safe on the
+        // wasm32 main thread where this is always called.
+        let chartml: chartml_leptos::ChartMLRef = (*self.chartml).clone();
 
         // Parse initial chart metadata from YAML
         let parsed_spec: Option<serde_json::Value> = serde_yaml::from_str(&yaml).ok();

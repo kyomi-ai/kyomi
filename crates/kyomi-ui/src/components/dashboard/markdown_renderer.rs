@@ -4,21 +4,23 @@
 //!
 //! Splits content into alternating Markdown, code-block, and ChartML segments.
 //! Markdown is rendered via `pulldown-cmark`, code blocks get syntax-styled
-//! `<pre><code>` with a copy button, and ChartML blocks are parsed, data is
-//! fetched via the datasource server function, rendered through chartml-core,
-//! and the resulting `ChartElement` tree is converted to Leptos SVG views.
+//! `<pre><code>` with a copy button, and ChartML blocks are handed verbatim
+//! to `chartml_leptos::ChartMLChart` which dispatches every `data:` shape
+//! (inline, flat-remote, named-single, named-multi + transform) through the
+//! chartml 5.0 resolver. Kyomi installs its `KyomiDatasourceProvider` via
+//! Leptos context at the dashboard root so any chart spec carrying a
+//! `datasource` slug + `query` flows through Kyomi's auth + datasource
+//! plumbing transparently.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use chartml_chart_cartesian::CartesianRenderer;
 use chartml_chart_metric::MetricRenderer;
 use chartml_chart_table::TableRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
-use chartml_core::ChartML;
 use chartml_datafusion::DataFusionTransform;
-use chartml_leptos::{use_chartml_configured, ChartMLChart};
+use chartml_leptos::{use_chartml_configured, ChartMLChart, ChartMLRef};
 // `kyomi_palette` and `kyomi_theme` live in the tiny `kyomi-chart-theme`
 // crate so they're accessible from both the browser rendering path
 // (kyomi-ui compiled for wasm32) and the SSR rendering path (kyomi-agent
@@ -29,8 +31,6 @@ use chartml_leptos::{use_chartml_configured, ChartMLChart};
 pub(crate) use kyomi_chart_theme::{kyomi_palette, kyomi_theme};
 use super::chart_header_bar::ChartHeaderBar;
 use leptos::prelude::*;
-
-use crate::server_fns::datasources::query_datasource_arrow;
 
 // ---------------------------------------------------------------------------
 // Content segmentation
@@ -271,7 +271,13 @@ fn markdown_to_html(markdown: &str) -> String {
 // Parameter substitution
 // ---------------------------------------------------------------------------
 
-/// Replace `{{param_id}}` placeholders in SQL with parameter values.
+/// Replace `{{param_id}}` placeholders with parameter values.
+///
+/// Operates on raw text — when applied to a full ChartML YAML spec, every
+/// occurrence of `{{key}}` (in `query:` fields, `title:`, anywhere else) is
+/// substituted. This matches the legacy behavior of the React frontend and
+/// keeps existing dashboard templates working unchanged through the
+/// chartml 5.0 cutover.
 fn substitute_params(sql: &str, params: &HashMap<String, String>) -> String {
     let mut result = sql.to_string();
     for (key, value) in params {
@@ -283,29 +289,9 @@ fn substitute_params(sql: &str, params: &HashMap<String, String>) -> String {
 // ---------------------------------------------------------------------------
 // ChartML spec extraction helpers
 // ---------------------------------------------------------------------------
-
-/// Extract the chart title from a parsed YAML spec.
-fn extract_title(spec: &serde_json::Value) -> Option<String> {
-    spec.get("title")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-/// Extract the datasource slug from a parsed YAML spec.
-fn extract_datasource(spec: &serde_json::Value) -> Option<String> {
-    spec.get("data")
-        .and_then(|d| d.get("datasource").or_else(|| d.get("endpoint")))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
-
-/// Extract the SQL query from a parsed YAML spec.
-fn extract_query(spec: &serde_json::Value) -> Option<String> {
-    spec.get("data")
-        .and_then(|d| d.get("query").or_else(|| d.get("url")))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-}
+// Used to populate the `ChartHeaderBar` selectors. The chart title itself is
+// extracted by chartml-leptos directly from the YAML it receives, so the
+// renderer doesn't surface it here.
 
 /// Extract the chart type from a parsed YAML spec (e.g. "bar", "line", "pie").
 pub(crate) fn extract_chart_type(spec: &serde_json::Value) -> Option<String> {
@@ -387,7 +373,12 @@ fn chart_col_span_class(col_span: u8) -> &'static str {
 /// Create a configured ChartML instance with all chart renderers registered,
 /// the user's palette preference applied, and the Kyomi editorial theme wired
 /// in. `is_dark` selects per-mode palette slots and chrome colors.
-pub(crate) fn configured_chartml(palette_name: &str, is_dark: bool) -> Arc<ChartML> {
+///
+/// Returns a [`ChartMLRef`] (`Rc<ChartML>` on WASM, `Arc<ChartML>` on native)
+/// ready to hand to `chartml_leptos::ChartMLChart`. Provider + cache + hooks
+/// are pulled from Leptos context inside the chart component, so this factory
+/// stays focused on visual configuration only.
+pub(crate) fn configured_chartml(palette_name: &str, is_dark: bool) -> ChartMLRef {
     let colors = kyomi_palette(palette_name, is_dark);
     let theme = kyomi_theme(is_dark);
     use_chartml_configured(|c| {
@@ -558,17 +549,17 @@ pub(crate) fn apply_spec_overrides(
     serde_yaml::to_string(&spec).unwrap_or_else(|_| yaml.to_string())
 }
 
-/// Renders a single ChartML chart with chrome (header bar, type/orientation/mode
-/// overrides, refresh, and action menu).
+/// Renders a single ChartML chart with chrome (header bar with type / orientation
+/// / mode overrides, refresh button, action menu).
 ///
-/// Uses `ChartHeaderBar` (Kyomi's native Rust/Tailwind header bar) instead of the
-/// JS `<chart-header-bar>` web component. Type/orientation/mode overrides are
-/// applied as reactive signals that derive an effective YAML spec.
-///
-/// For **remote datasource** charts (with `data.datasource` + `data.query`),
-/// fetches data via `query_datasource_arrow`, injects it into a per-render
-/// `ChartML` instance, and renders via `ChartMLChart`. For **inline data**
-/// charts, passes through directly to `ChartMLChart`.
+/// All data dispatch — inline rows, flat-remote `{ datasource, query }`,
+/// named-single, and named-multi + transform — is handled by
+/// `chartml_leptos::ChartMLChart` and the chartml 5.0 resolver. Kyomi's
+/// [`KyomiDatasourceProvider`](crate::chartml_provider::KyomiDatasourceProvider)
+/// is registered via Leptos context at the dashboard root, so any chart spec
+/// carrying a `datasource` slug + SQL `query` flows through the same provider
+/// regardless of named-vs-flat shape. This component is thin glue: parameter
+/// substitution, override application, and chrome wiring.
 #[component]
 fn ChartBlock(
     #[prop(into)] yaml: String,
@@ -594,22 +585,22 @@ fn ChartBlock(
     let yaml_for_save = yaml.clone();
     let yaml_for_ask = yaml.clone();
 
-    // Parse the spec to extract metadata
+    // Parse the spec for chrome metadata (chart type / orientation / mode for
+    // the header bar selectors). Errors are non-fatal: the YAML still flows
+    // to ChartMLChart which surfaces parse failures to the user with full
+    // context.
     let parsed_spec: Option<serde_json::Value> =
         serde_yaml::from_str(&yaml_owned).ok();
 
-    let _chart_title = parsed_spec.as_ref().and_then(extract_title);
     let initial_chart_type = parsed_spec.as_ref().and_then(extract_chart_type);
     let initial_orientation = parsed_spec.as_ref().and_then(extract_chart_orientation);
     let initial_mode = parsed_spec.as_ref().and_then(extract_chart_mode);
 
-    let datasource_slug = parsed_spec.as_ref().and_then(extract_datasource);
-    let sql_query = parsed_spec.as_ref().and_then(extract_query);
-    let is_remote = datasource_slug.is_some() && sql_query.is_some();
-
-    // Reserve the rendered chart's height in the loading placeholder so data
-    // arrival doesn't cause a layout shift. Falls back to chartml's default of
-    // 400px when the spec doesn't set an explicit height.
+    // Reserve the rendered chart's height on the outer wrapper so the
+    // ChartMLChart loading placeholder doesn't cause a layout shift when data
+    // arrives. Falls back to chartml's default of 400px when the spec omits an
+    // explicit height. (Preserves main commit 7adc7c5 intent after PR #129
+    // deleted the bespoke remote-fetch loading placeholder.)
     const DEFAULT_CHART_HEIGHT_PX: f64 = 400.0;
     let chart_height_px = parsed_spec
         .as_ref()
@@ -621,11 +612,36 @@ fn ChartBlock(
     let (orientation_override, set_orientation_override) = signal(None::<Option<String>>);
     let (mode_override, set_mode_override) = signal(None::<Option<String>>);
 
-    let (refresh_count, set_refresh_count) = signal(0_u32);
-    let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
-    let (is_refreshing, set_is_refreshing) = signal(false);
+    // Per-chart refresh signal. The toolbar's per-chart "Refresh" button
+    // increments this; we fold it together with the optional dashboard-wide
+    // `RefreshAllSignal` (read from Leptos context below) into the
+    // `refresh_trigger` prop on `ChartMLChart`. The chartml component handles
+    // the actual cache invalidation + re-fetch — this side just owns the
+    // *trigger*, not the invalidation work.
+    let local_refresh = RwSignal::new(0_u32);
 
-    // Derive current chart type/orientation/mode for the header bar display
+    // Dashboard-wide refresh signal — provided by `DashboardViewerPage` via
+    // context so the toolbar's "Refresh All" button (a sibling of
+    // `DashboardChartProviders`, not a child) can share state with every
+    // chart on the page. `None` in contexts that don't provide it (the
+    // dashboard editor's live preview, the chart-builder preview, etc.) —
+    // the chart still works, the per-chart "Refresh" button is the only
+    // refresh path.
+    let refresh_all = use_context::<crate::chartml_provider::RefreshAllSignal>();
+
+    // Combined `Signal<u32>` for ChartMLChart's `refresh_trigger` prop. We
+    // sum the two counters so a bump on either source produces a distinct
+    // value — `Signal<u32>` only fires on value-change, and addition keeps
+    // every distinct (local, global) pair distinct. Wrapping at u32 max
+    // (every ~4 billion clicks) is fine because the chartml component reacts
+    // to *change*, not magnitude.
+    let combined_refresh = Signal::derive(move || {
+        let l = local_refresh.get();
+        let g = refresh_all.map(|s| s.get()).unwrap_or(0);
+        l.wrapping_add(g)
+    });
+
+    // Derive current chart type / orientation / mode for the header bar display.
     let initial_type_stored = StoredValue::new(initial_chart_type.clone());
     let initial_orient_stored = StoredValue::new(initial_orientation.clone());
     let initial_mode_stored = StoredValue::new(initial_mode.clone());
@@ -646,159 +662,104 @@ fn ChartBlock(
         }
     });
 
-    // Derive the effective YAML spec with overrides applied
+    // Effective YAML: apply overrides + dashboard-parameter substitution. The
+    // resulting string is fed to ChartMLChart which re-runs its resolver
+    // pipeline (fetch → transform → render) on every change. The substitution
+    // is done at the YAML-text level (rather than per-field) so `{{param}}`
+    // placeholders embedded anywhere in the spec — `query:`, `title:`, axis
+    // labels — get resolved uniformly. Matches React's behavior.
     let yaml_for_spec = yaml_owned.clone();
-    let effective_spec = Memo::new(move |_| {
+    let chartml_spec_signal = Memo::new(move |_| {
         let t_ovr = type_override.get();
         let o_ovr = orientation_override.get();
         let m_ovr = mode_override.get();
 
-        // No overrides — return original YAML unchanged
-        if t_ovr.is_none() && o_ovr.is_none() && m_ovr.is_none() {
-            return yaml_for_spec.clone();
-        }
+        let with_overrides = if t_ovr.is_none() && o_ovr.is_none() && m_ovr.is_none() {
+            yaml_for_spec.clone()
+        } else {
+            apply_spec_overrides(
+                &yaml_for_spec,
+                t_ovr.as_deref(),
+                o_ovr.as_ref().map(|o| o.as_deref()),
+                m_ovr.as_ref().map(|m| m.as_deref()),
+            )
+        };
 
-        apply_spec_overrides(
-            &yaml_for_spec,
-            t_ovr.as_deref(),
-            o_ovr.as_ref().map(|o| o.as_deref()),
-            m_ovr.as_ref().map(|m| m.as_deref()),
-        )
+        let params = parameters.get();
+        if params.is_empty() {
+            with_overrides
+        } else {
+            substitute_params(&with_overrides, &params)
+        }
     });
 
-    // Create the ChartML instance
+    // Build the configured ChartML instance — renderers, palette, theme.
+    // Provider + (in-memory tier-1) cache + hooks come from Leptos context
+    // (wired at the dashboard root by `DashboardChartProviders`). When this
+    // component is used outside a dashboard (e.g. chart-builder preview)
+    // the inline / string-ref shapes still render, and the slug-based
+    // shapes surface a clear "no provider for 'datasource'" error from
+    // the resolver.
     let palette = chart_palette.unwrap_or_else(|| "kyomi".to_string());
     let is_dark = crate::components::theme::use_theme()
         .map(|s| s.effective.get_untracked() == "dark")
         .unwrap_or(false);
     let chartml = configured_chartml(&palette, is_dark);
 
-    // -- Remote data path: fetch data, register on ChartML instance, render via ChartMLChart --
-    // We store fetched remote data as a signal. When data arrives, we create a new ChartML
-    // instance with the data registered as a named source ("_remote") and rewrite the YAML
-    // `data:` section to reference it. This lets ChartMLChart handle everything uniformly.
-    let (remote_chartml, set_remote_chartml) = signal(None::<Arc<ChartML>>);
-    let (remote_error, set_remote_error) = signal(None::<String>);
-    let (remote_loading, set_remote_loading) = signal(is_remote);
+    // Install the tracing-based resolver hooks directly on the chart's
+    // resolver. We bypass Leptos context for hooks because `HooksRef` is
+    // `Rc<dyn ResolverHooks>` on WASM — `provide_context` requires
+    // `Send + Sync` and `Rc` is neither. Constructing a fresh `HooksRef`
+    // here avoids the context plumbing entirely and stays cheap (the
+    // `TracingHooks` struct is a unit type, allocation is one Rc node).
+    chartml
+        .resolver()
+        .set_hooks(crate::chartml_provider::tracing_hooks_ref());
 
-    if is_remote {
-        let ds_slug = datasource_slug.clone();
-        let sql = sql_query.clone();
-        let palette_for_remote = palette.clone();
-        let is_dark_for_remote = is_dark;
-
-        Effect::new(move || {
-            let params = parameters.get();
-            let _refresh = refresh_count.get();
-            let ds = ds_slug.clone();
-            let q = sql.clone();
-            let pal = palette_for_remote.clone();
-            let is_dark = is_dark_for_remote;
-
-            set_remote_loading.set(true);
-            set_remote_error.set(None);
-            set_is_refreshing.set(true);
-
-            leptos::task::spawn_local(async move {
-                let slug = ds.unwrap();
-                let query = q.unwrap();
-                let resolved_sql = substitute_params(&query, &params);
-
-                match query_datasource_arrow(slug, resolved_sql, None).await {
-                    Ok(query_result) => {
-                        use base64::Engine;
-                        let ipc_bytes = match base64::engine::general_purpose::STANDARD
-                            .decode(&query_result.ipc_base64)
-                        {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                set_remote_error.set(Some(format!("Base64 decode error: {e}")));
-                                set_remote_loading.set(false);
-                                set_is_refreshing.set(false);
-                                return;
-                            }
-                        };
-
-                        let data_table =
-                            match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
-                                Ok(dt) => dt,
-                                Err(e) => {
-                                    set_remote_error
-                                        .set(Some(format!("Arrow decode error: {e}")));
-                                    set_remote_loading.set(false);
-                                    set_is_refreshing.set(false);
-                                    return;
-                                }
-                            };
-
-                        // Create a new ChartML instance with the fetched data registered
-                        let instance = configured_chartml(&pal, is_dark);
-                        // Safety: Arc::get_mut works here because we just created it and
-                        // hold the only reference. We need to register the source before
-                        // wrapping it.
-                        let mut chartml_mut = ChartML::new();
-                        // Re-register all renderers + transform + palette + theme on the
-                        // mutable instance — must stay in sync with `configured_chartml`.
-                        let colors = kyomi_palette(&pal, is_dark);
-                        let theme = kyomi_theme(is_dark);
-                        chartml_mut.register_renderer("bar", CartesianRenderer::new());
-                        chartml_mut.register_renderer("line", CartesianRenderer::new());
-                        chartml_mut.register_renderer("area", CartesianRenderer::new());
-                        chartml_mut.register_renderer("pie", PieRenderer::new());
-                        chartml_mut.register_renderer("doughnut", PieRenderer::new());
-                        chartml_mut.register_renderer("scatter", ScatterRenderer::new());
-                        chartml_mut.register_renderer("metric", MetricRenderer::new());
-                        chartml_mut.register_renderer("table", TableRenderer::new());
-                        chartml_mut.register_transform(DataFusionTransform);
-                        chartml_mut.set_default_palette(colors);
-                        chartml_mut.set_theme(theme);
-                        chartml_mut.register_source("_remote", data_table);
-                        let _ = instance; // drop unused Arc
-
-                        set_remote_chartml.set(Some(Arc::new(chartml_mut)));
-                        let now_ms = js_sys::Date::now();
-                        set_last_refreshed.set(Some(now_ms));
-                        set_remote_loading.set(false);
-                        set_is_refreshing.set(false);
-                    }
-                    Err(e) => {
-                        set_remote_error.set(Some(format!("Query error: {e}")));
-                        set_remote_loading.set(false);
-                        set_is_refreshing.set(false);
-                    }
+    // Hydrate the resolver's tier-2 (persistent IndexedDB) cache from the
+    // context-provided backend signal. The signal flips to `Some` when the
+    // dashboard root finishes opening IndexedDB; we install via an Effect
+    // so charts that mounted before the open completes pick up the cache
+    // as soon as it's ready (no re-mount required).
+    //
+    // The `ResolverRef` (`Rc<Resolver>` on WASM) is wrapped in `SendWrapper`
+    // because Leptos requires `Send + Sync` on reactive closures, but
+    // wasm32-unknown-unknown is single-threaded so the wrapper is sound.
+    {
+        let resolver = send_wrapper::SendWrapper::new(chartml.resolver());
+        let cache_signal = use_context::<crate::chartml_provider::CacheBackendSignal>();
+        if let Some(sig) = cache_signal {
+            Effect::new(move |_| {
+                if let Some(backend) = sig.get() {
+                    resolver.set_persistent_cache(backend);
                 }
             });
-        });
+        }
     }
 
-    // Set initial "Last refreshed" timestamp for inline charts (rendered immediately on mount)
-    if !is_remote {
-        set_last_refreshed.set(Some(js_sys::Date::now()));
-    }
+    // Spec signal for ChartMLChart — Memo<String> implements Into<Signal<String>>.
+    let spec_signal = Signal::derive(move || chartml_spec_signal.get());
 
-    // RwSignal for ChartMLChart spec — updated by Effect when overrides change.
-    let (chartml_spec, set_chartml_spec) = signal(yaml_owned.clone());
+    // Last-refreshed timestamp surfaced in the header bar. We can't observe
+    // ChartMLChart's internal "rendered" event from outside the component
+    // without context plumbing — the inner pipeline does write the wall-clock
+    // ms to its own container's `data-last-refreshed-ms` attribute, but that
+    // element is nested inside a child component and reactively reading it
+    // would require a MutationObserver. Instead, we stamp `now` whenever the
+    // inputs that DRIVE a re-fetch change (spec signal, refresh tick, params).
+    // This is one reactive frame later than reality but stays within the
+    // resolver's cache TTL so the displayed value is always "the last time
+    // we asked for fresh data," which is what users actually want to know.
+    let (last_refreshed, set_last_refreshed) = signal(Some(js_sys::Date::now()));
     Effect::new(move || {
-        let base_spec = effective_spec.get();
-
-        let final_spec = if !is_remote {
-            base_spec
-        } else {
-            // Rewrite the data section to reference the named "_remote" source
-            match serde_yaml::from_str::<serde_json::Value>(&base_spec) {
-                Ok(mut val) => {
-                    if let Some(obj) = val.as_object_mut() {
-                        obj.insert(
-                            "data".to_string(),
-                            serde_json::Value::String("_remote".to_string()),
-                        );
-                    }
-                    serde_yaml::to_string(&val).unwrap_or(base_spec)
-                }
-                Err(_) => base_spec,
-            }
-        };
-        set_chartml_spec.set(final_spec);
+        // Subscribe to every input that triggers a resolver call. The
+        // `combined_refresh` signal already folds the per-chart and the
+        // dashboard-wide refresh counters, so subscribing to it covers both
+        // refresh paths in one read.
+        let _spec_tick = chartml_spec_signal.get();
+        let _refresh_tick = combined_refresh.get();
+        let _params_tick = parameters.get();
+        set_last_refreshed.set(Some(js_sys::Date::now()));
     });
 
     // Determine which callbacks are available
@@ -828,8 +789,15 @@ fn ChartBlock(
     let on_mode_change_cb = Callback::new(move |m: Option<String>| {
         set_mode_override.set(Some(m));
     });
+    // Per-chart "Refresh" button — bumps the local trigger, which feeds
+    // through `combined_refresh` to `ChartMLChart`'s `refresh_trigger` prop.
+    // The chartml component owns the actual cache invalidation: it parses
+    // the current spec, computes the resolver key for every source, calls
+    // `invalidate` on each, and re-runs its main fetch effect. We just bump
+    // the counter — no `invalidate_all` round-trip from this side, no manual
+    // resolver plumbing.
     let on_refresh_cb = Callback::new(move |()| {
-        set_refresh_count.update(|c| *c += 1);
+        local_refresh.update(|c| *c += 1);
     });
 
     // Build typed callbacks for the header bar's action buttons.
@@ -873,13 +841,6 @@ fn ChartBlock(
         }
     });
 
-    // Spec signal for ChartMLChart — reads from the RwSignal updated by the Effect above
-    let spec_signal = Signal::derive(move || chartml_spec.get());
-
-    // ChartML instance signal — for remote charts, uses the instance with data registered;
-    // for inline charts, uses the static configured instance.
-    let chartml_for_inline = chartml.clone();
-
     // Store callbacks as StoredValues for use inside the reactive header closure.
     let on_type_change_stored = StoredValue::new(on_type_change_cb);
     let on_orientation_change_stored = StoredValue::new(on_orientation_change_cb);
@@ -899,10 +860,6 @@ fn ChartBlock(
                 let co = current_orientation.get();
                 let cm = current_mode.get();
 
-                // Build the header bar view. ChartHeaderBar uses #[prop(optional, into)]
-                // for string props (expects Into<String>, wraps in Some automatically)
-                // and #[prop(optional)] for callbacks (expects bare Callback<T>).
-                // We conditionally pass props only when values are present.
                 let type_cb = on_type_change_stored.get_value();
                 let orient_cb = on_orientation_change_stored.get_value();
                 let mode_cb = on_mode_change_stored.get_value();
@@ -913,7 +870,12 @@ fn ChartBlock(
                 let info_action = on_info_stored.get_value();
                 let ask_action = on_ask_stored.get_value();
                 let last_sig = Signal::derive(move || last_refreshed.get());
-                let refreshing_sig = Signal::derive(move || is_refreshing.get());
+                // ChartMLChart owns its own loading state (handles its own
+                // spinner inside the SVG host). The header bar's spinner
+                // exists for the legacy bespoke fetch path and is now always
+                // false; future work could wire `ResolverHooks::on_progress`
+                // through context to drive it.
+                let refreshing_sig = Signal::derive(|| false);
                 view! {
                     <ChartHeaderBar
                         chart_type=ct.unwrap_or_default()
@@ -940,64 +902,22 @@ fn ChartBlock(
                     />
                 }
             }}
-            // Chart content area — unified through ChartMLChart
-            {if is_remote {
-                // Remote path: show loading/error states, or ChartMLChart once data arrives
-                view! {
-                    <div class="w-full">
-                        {move || {
-                            if let Some(err) = remote_error.get() {
-                                view! {
-                                    <div class="p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
-                                        <div class="flex items-start gap-3">
-                                            <svg class="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                            </svg>
-                                            <div class="flex-1">
-                                                <h3 class="text-sm font-semibold text-destructive mb-1">"Chart Error"</h3>
-                                                <p class="text-sm text-destructive/90">{err}</p>
-                                                <button
-                                                    on:click=move |_| set_refresh_count.update(|c| *c += 1)
-                                                    class="mt-2 text-xs text-primary underline transition-colors hover:text-primary/80"
-                                                >
-                                                    "Retry"
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                }.into_any()
-                            } else if remote_loading.get() {
-                                view! {
-                                    <div
-                                        class="flex items-center justify-center"
-                                        style=format!("min-height: {}px", chart_height_px)
-                                    >
-                                        <img src="/kyomi_animated_logo.svg" alt="Loading" class="w-8 h-8" />
-                                    </div>
-                                }.into_any()
-                            } else if let Some(remote_instance) = remote_chartml.get() {
-                                view! {
-                                    <ChartMLChart
-                                        spec=spec_signal
-                                        chartml=remote_instance
-                                    />
-                                }.into_any()
-                            } else {
-                                // Should not happen — either loading, error, or data
-                                view! { <div /> }.into_any()
-                            }
-                        }}
-                    </div>
-                }.into_any()
-            } else {
-                // Inline data path — delegate to ChartMLChart directly
-                view! {
-                    <ChartMLChart
-                        spec=spec_signal
-                        chartml=chartml_for_inline
-                    />
-                }.into_any()
-            }}
+            // Chart content — every shape (inline / flat-remote / named-*)
+            // dispatches through the chartml resolver. ChartMLChart owns the
+            // entire fetch → transform → render pipeline plus its own loading
+            // and error states; this wrapper exists only for layout.
+            //
+            // `min-height` reserves the rendered chart's vertical space so the
+            // inner "Loading..." placeholder doesn't cause a layout shift when
+            // the SVG arrives. (Preserves main commit 7adc7c5 intent — see
+            // `chart_height_px` derivation above.)
+            <div class="w-full" style=format!("min-height: {}px", chart_height_px)>
+                <ChartMLChart
+                    spec=spec_signal
+                    chartml=chartml
+                    refresh_trigger=combined_refresh
+                />
+            </div>
         </div>
     }
 }
@@ -1304,34 +1224,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_extract_title() {
-        let spec: serde_json::Value =
-            serde_json::json!({"type": "chart", "title": "Revenue", "visualize": {"type": "bar"}});
-        assert_eq!(extract_title(&spec), Some("Revenue".to_string()));
-    }
-
-    #[test]
-    fn test_extract_datasource() {
-        let spec: serde_json::Value = serde_json::json!({
-            "type": "chart",
-            "data": {"datasource": "main_db", "query": "SELECT 1"}
-        });
-        assert_eq!(extract_datasource(&spec), Some("main_db".to_string()));
-    }
-
-    #[test]
-    fn test_extract_query() {
-        let spec: serde_json::Value = serde_json::json!({
-            "type": "chart",
-            "data": {"datasource": "main_db", "query": "SELECT * FROM users"}
-        });
-        assert_eq!(
-            extract_query(&spec),
-            Some("SELECT * FROM users".to_string())
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Streaming markdown cleanup tests
     // -----------------------------------------------------------------------
@@ -1405,6 +1297,32 @@ mod tests {
         assert_eq!(extract_col_span(&s3), 12); // out of range → default 12
         let s4: serde_json::Value = serde_json::json!({});
         assert_eq!(extract_col_span(&s4), 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Substitution end-to-end (whole-spec text replacement)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_substitute_params_inside_yaml_query() {
+        // Verifies that placeholder substitution still works when applied to
+        // the full YAML text — `{{region}}` inside a `query:` value gets
+        // replaced exactly the way it did in the bespoke fetch path.
+        let yaml = "data:\n  datasource: db\n  query: SELECT * FROM t WHERE r = '{{region}}'\n";
+        let mut params = HashMap::new();
+        params.insert("region".to_string(), "US".to_string());
+        let out = substitute_params(yaml, &params);
+        assert!(out.contains("WHERE r = 'US'"));
+        assert!(!out.contains("{{region}}"));
+    }
+
+    #[test]
+    fn test_substitute_params_in_title() {
+        let yaml = "title: Sales for {{year}}\n";
+        let mut params = HashMap::new();
+        params.insert("year".to_string(), "2026".to_string());
+        let out = substitute_params(yaml, &params);
+        assert_eq!(out, "title: Sales for 2026\n");
     }
 
     /// Regression guard for KYO-95: two adjacent ```chartml``` fences with

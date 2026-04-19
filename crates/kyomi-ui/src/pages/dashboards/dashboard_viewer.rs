@@ -19,8 +19,10 @@ use std::collections::HashMap;
 use leptos::prelude::*;
 use leptos_router::hooks::use_params_map;
 
+use crate::chartml_provider::{DashboardChartProviders, RefreshAllSignal};
 use crate::components::dashboard::{
-    ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters, SaveDashboardModal,
+    ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters,
+    SaveDashboardModal,
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner, Skeleton};
 #[cfg(target_arch = "wasm32")]
@@ -148,6 +150,12 @@ fn InlineEditableTitle(
 /// content, history panel, modals, and footer.
 #[component]
 pub fn DashboardViewerPage() -> impl IntoView {
+    // The chartml 5.0 resolver's KyomiDatasourceProvider + per-workspace
+    // IndexedDB cache backend are wired by `DashboardChartProviders` (used
+    // around the `MarkdownRenderer` below) once the workspace id is known.
+    // We can't call `provide_context` here because the workspace id loads
+    // asynchronously via the user-context resource.
+
     let params = use_params_map();
     let dashboard_id = Memo::new(move |_| {
         params.get().get("id").unwrap_or_default()
@@ -212,6 +220,20 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
     // ── Title editing state (for optimistic update) ─────────────────────
     let (title_override, set_title_override) = signal(Option::<String>::None);
+
+    // ── Dashboard-wide refresh signal ───────────────────────────────────
+    // Provided here (above `DashboardChartProviders`) so the toolbar's
+    // "Refresh All" button — which sits as a sibling of the providers, not
+    // a descendant — can share the same `RwSignal` that every nested
+    // `ChartBlock` reads from context. Bumping `refresh_all` propagates
+    // through `ChartBlock`'s `combined_refresh` derived signal into
+    // `chartml_leptos::ChartMLChart`'s `refresh_trigger` prop, which
+    // invalidates each spec source's resolver key and re-runs the fetch
+    // pipeline. Replaces the legacy `dashboard-refresh-all` CustomEvent
+    // dispatch (which had no listener) and the per-chart
+    // `resolver.invalidate_all()` round-trip in `ChartBlock`.
+    let refresh_all: RefreshAllSignal = RwSignal::new(0_u32);
+    provide_context(refresh_all);
 
     // ── Set user default action ─────────────────────────────────────────
     let (setting_user_default, set_setting_user_default) = signal(false);
@@ -303,6 +325,19 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 let chart_palette = user_ctx.as_ref()
                     .map(|ctx| ctx.chart_palette.clone())
                     .unwrap_or_else(|| "kyomi".to_string());
+
+                // Workspace UUID used by `KyomiDatasourceProvider` to namespace
+                // every cache entry (cross-workspace isolation) and by
+                // `IndexedDbBackend` to scope the persistent tier-2 cache so
+                // multiple users on the same browser cannot read each other's
+                // cached query results. Falls back to "default" only when the
+                // user context lacks a workspace_id (single-tenant deployments
+                // and the legacy free-tier path) — in that case the namespace
+                // simply doesn't isolate, which matches what the legacy
+                // bespoke fetch path did.
+                let workspace_id = user_ctx.as_ref()
+                    .and_then(|ctx| ctx.workspace_id.clone())
+                    .unwrap_or_else(|| "default".to_string());
 
                 Some(match dashboard_result {
                     Err(e) => {
@@ -405,12 +440,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         });
 
                         // ── Refresh All handler ────────────────────────
+                        // Bump the dashboard-wide `RefreshAllSignal` (provided
+                        // via context at the top of this component). Every
+                        // nested `ChartBlock` folds the bumped value into its
+                        // `ChartMLChart`'s `refresh_trigger`, which invalidates
+                        // each chart's resolver cache keys and re-runs the
+                        // fetch pipeline.
                         let on_refresh_all = move |_: leptos::ev::MouseEvent| {
-                            #[cfg(target_arch = "wasm32")]
-                            if let Some(window) = web_sys::window() {
-                                let event = web_sys::CustomEvent::new("dashboard-refresh-all").unwrap();
-                                let _ = window.dispatch_event(&event);
-                            }
+                            refresh_all.update(|n| *n += 1);
                         };
 
                         // ── PDF export handler ─────────────────────────
@@ -923,16 +960,26 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                             </div>
                                                         }.into_any()
                                                     } else if params_initialized.get() || is_previewing {
+                                                        // Clone captures up front so the surrounding reactive
+                                                        // closure can stay `FnMut` even though the inner
+                                                        // `ChildrenFn` body needs to be `Fn` (callable many
+                                                        // times). Both `palette` and `ws_id` are cloned again
+                                                        // inside the body so the body itself doesn't move
+                                                        // anything out of its environment.
+                                                        let palette = chart_palette.clone();
+                                                        let ws_id = workspace_id.clone();
                                                         view! {
                                                             <div class="animate-fade-in">
-                                                                <MarkdownRenderer
-                                                                    content=display_content
-                                                                    parameters=Signal::derive(move || param_values.get())
-                                                                    on_save_to_dashboard=on_save_to_dashboard
-                                                                    on_chart_info=on_chart_info
-                                                                    on_ask_about_chart=on_ask_about_chart
-                                                                    chart_palette=chart_palette.clone()
-                                                                />
+                                                                <DashboardChartProviders workspace_id=ws_id.clone()>
+                                                                    <MarkdownRenderer
+                                                                        content=display_content
+                                                                        parameters=Signal::derive(move || param_values.get())
+                                                                        on_save_to_dashboard=on_save_to_dashboard
+                                                                        on_chart_info=on_chart_info
+                                                                        on_ask_about_chart=on_ask_about_chart
+                                                                        chart_palette=palette.clone()
+                                                                    />
+                                                                </DashboardChartProviders>
                                                             </div>
                                                         }.into_any()
                                                     } else {
