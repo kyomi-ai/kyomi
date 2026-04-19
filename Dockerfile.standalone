@@ -28,10 +28,19 @@ COPY enterprise/ ./enterprise/
 # Remove desktop from workspace members (not built in server Docker image)
 RUN sed -i '/"apps\/desktop",/d' Cargo.toml
 
-# Copy files needed for include_str!/include_bytes! paths
+# Strip the local-dev [patch.crates-io] block — prod uses crates.io versions.
+# Mirrors apps/server/Dockerfile and .github/workflows/ci.yml.
+RUN sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+
+# Copy files needed for include_str!/include_bytes! paths. The Leptos WASM
+# frontend (crates/kyomi-ui/dist/) is pre-built on the host by the release
+# workflow and COPY'd in — keeps this Dockerfile cross-arch friendly since
+# the heavy trunk/wasm-bindgen tooling runs on the native amd64 host, not
+# inside QEMU-emulated containers for other targets.
 COPY data/ ./data/
 COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
+COPY crates/kyomi-ui/dist/ ./crates/kyomi-ui/dist/
 
 # Build the binary. The BGE-small-en-v1.5 model is downloaded by build.rs
 # and embedded via include_bytes!() — no runtime model files needed.

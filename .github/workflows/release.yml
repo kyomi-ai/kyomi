@@ -1,15 +1,20 @@
 # =============================================================================
 # Kyomi — Release Workflow
 # =============================================================================
-# Triggered by version tags (v*). Builds standalone binaries for 4 platforms,
-# publishes a multi-arch Docker image to GHCR, and creates a GitHub Release.
+# Triggered by version tags (v*). Builds a multi-arch Docker image on GHCR
+# for self-hosted users and creates a GitHub Release.
 #
 # Usage:
-#   git tag v1.4.0
+#   git tag v2026.04.19.2
 #   git push --tags
 #
-# This workflow is INDEPENDENT of the deploy-*.yml workflows that handle
-# internal infrastructure deployment on push to main.
+# The Leptos WASM frontend is pre-built on the amd64 runner and COPY'd into
+# the Docker image. This keeps Dockerfile.standalone cross-arch friendly —
+# trunk / wasm-bindgen / tailwindcss run natively on the runner rather than
+# under QEMU emulation for arm64 targets.
+#
+# Standalone per-platform binary tarballs are intentionally deferred — see
+# KYO-41 follow-ups. Self-hosted install is Docker-only for now.
 # =============================================================================
 
 name: Release
@@ -24,8 +29,11 @@ permissions:
   packages: write
 
 env:
-  BINARY_NAME: kyomi
   GHCR_REGISTRY: ghcr.io/kyomi-ai
+  TRUNK_VERSION: 0.21.14
+  WASM_BINDGEN_VERSION: 0.2.114
+  TAILWIND_VERSION: v4.2.2
+  BINARYEN_VERSION: version_123
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -40,198 +48,81 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
   # ---------------------------------------------------------------------------
-  # Build: Linux amd64
-  # ---------------------------------------------------------------------------
-  build-linux-amd64:
-    needs: [prepare]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build MCP chart app
-        working-directory: apps/mcp-chart-app
-        run: |
-          npm install
-          npm run build
-          cp dist/mcp-app.html chart_app.html
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build release binary
-        run: cargo build --release -p kyomi-server
-
-      - name: Package binary
-        run: |
-          mkdir -p release
-          cp target/release/${{ env.BINARY_NAME }} release/
-          tar -czf kyomi-linux-amd64.tar.gz -C release kyomi
-          rm -rf release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kyomi-linux-amd64
-          path: kyomi-linux-amd64.tar.gz
-
-  # ---------------------------------------------------------------------------
-  # Build: Linux arm64
-  # ---------------------------------------------------------------------------
-  build-linux-arm64:
-    needs: [prepare]
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build MCP chart app
-        working-directory: apps/mcp-chart-app
-        run: |
-          npm install
-          npm run build
-          cp dist/mcp-app.html chart_app.html
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build release binary
-        run: cargo build --release -p kyomi-server
-
-      - name: Package binary
-        run: |
-          mkdir -p release
-          cp target/release/${{ env.BINARY_NAME }} release/
-          tar -czf kyomi-linux-arm64.tar.gz -C release kyomi
-          rm -rf release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kyomi-linux-arm64
-          path: kyomi-linux-arm64.tar.gz
-
-  # ---------------------------------------------------------------------------
-  # Build: macOS arm64 (Apple Silicon)
-  # ---------------------------------------------------------------------------
-  build-macos-arm64:
-    needs: [prepare]
-    runs-on: macos-14
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build MCP chart app
-        working-directory: apps/mcp-chart-app
-        run: |
-          npm install
-          npm run build
-          cp dist/mcp-app.html chart_app.html
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build release binary
-        run: cargo build --release -p kyomi-server
-
-      - name: Package binary
-        run: |
-          mkdir -p release
-          cp target/release/${{ env.BINARY_NAME }} release/
-          tar -czf kyomi-macos-arm64.tar.gz -C release kyomi
-          rm -rf release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kyomi-macos-arm64
-          path: kyomi-macos-arm64.tar.gz
-
-  # ---------------------------------------------------------------------------
-  # Build: macOS amd64 (Intel)
-  # ---------------------------------------------------------------------------
-  build-macos-amd64:
-    needs: [prepare]
-    runs-on: macos-13
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build MCP chart app
-        working-directory: apps/mcp-chart-app
-        run: |
-          npm install
-          npm run build
-          cp dist/mcp-app.html chart_app.html
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Build release binary
-        run: cargo build --release -p kyomi-server
-
-      - name: Package binary
-        run: |
-          mkdir -p release
-          cp target/release/${{ env.BINARY_NAME }} release/
-          tar -czf kyomi-macos-amd64.tar.gz -C release kyomi
-          rm -rf release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: kyomi-macos-amd64
-          path: kyomi-macos-amd64.tar.gz
-
-  # ---------------------------------------------------------------------------
   # Docker: Multi-arch image (linux/amd64 + linux/arm64)
   # ---------------------------------------------------------------------------
+  # Pre-builds MCP chart app + Leptos WASM dist on the amd64 runner, then
+  # multi-arch builds the image (cargo build runs under QEMU for arm64).
   docker:
     needs: [prepare]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Delete package-lock.json before install — npm has a known bug with
+      # platform-specific optional deps (rollup) when the lock was generated
+      # on a different platform. A fresh resolve dodges it.
+      - name: Build MCP chart app
+        working-directory: apps/mcp-chart-app
+        run: |
+          rm -f package-lock.json
+          npm install
+          npm run build
+          cp dist/mcp-app.html chart_app.html
+
+      - name: Install Rust stable + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      # Same local-dev [patch.crates-io] strip as ci.yml / apps/server/Dockerfile.
+      - name: Strip local-dev patch.crates-io block
+        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+
+      # brotli is used by Trunk.toml's post_build hook to precompress dist/
+      # assets (.br + .gz) so the server can serve them with Content-Encoding.
+      # Without it, first-load WASM transfer is ~11MB instead of ~6.2MB.
+      - name: Install brotli (Trunk post_build hook dependency)
+        run: sudo apt-get install -y --no-install-recommends brotli
+
+      # Trunk resolves wasm-opt from $HOME/.cache/trunk/... — on the runner
+      # that's /home/runner/.cache, which differs from apps/server/Dockerfile
+      # (which runs as root and uses /root/.cache). Both are correct for
+      # their respective contexts.
+      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin trunk
+          sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin \
+                "wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen"
+          sudo curl -fsSL -o /usr/local/bin/tailwindcss \
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64"
+          sudo chmod +x /usr/local/bin/tailwindcss
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar -xz -C /tmp
+          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
+          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
+          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+
+      - name: Build Leptos WASM frontend
+        working-directory: crates/kyomi-ui
+        run: trunk build --release
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -259,18 +150,9 @@ jobs:
   # GitHub Release
   # ---------------------------------------------------------------------------
   release:
-    needs: [prepare, build-linux-amd64, build-linux-arm64, build-macos-arm64, build-macos-amd64, docker]
+    needs: [prepare, docker]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-
-      - name: Generate checksums
-        run: |
-          for f in kyomi-*.tar.gz; do sha256sum "$f" > "$f.sha256"; done
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -280,30 +162,19 @@ jobs:
 
             ### Docker (recommended)
             ```bash
-            curl -fsSL https://get.kyomi.ai | sh
-            ```
-            Or pull directly:
-            ```bash
             docker pull ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
             ```
 
-            ### Standalone binary
-            Download the binary for your platform, extract, and run:
+            Then run:
             ```bash
-            tar -xzf kyomi-<platform>.tar.gz
-            ./kyomi
+            docker run -v kyomi-data:/data -p 3000:3000 \
+              -e ANTHROPIC_API_KEY=sk-ant-... \
+              ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
             ```
 
-            The binary is fully self-contained — frontend, AI model, and server in a single file.
-            Requires an LLM API key (Anthropic, OpenAI, or Gemini) set via environment variable.
+            The image is multi-arch (linux/amd64 + linux/arm64) and fully
+            self-contained — frontend, ML model, and server in a single binary.
+            Requires an LLM API key (Anthropic, OpenAI, or Gemini).
 
-            See [Self-Hosting Guide](https://kyomi.ai/self-hosting) for full setup instructions.
-
-            ## Checksums
-            Verify your download:
-            ```bash
-            sha256sum -c kyomi-<platform>.tar.gz.sha256
-            ```
-          files: |
-            kyomi-*.tar.gz
-            kyomi-*.tar.gz.sha256
+            See [Self-Hosting Guide](https://kyomi.ai/self-hosting) for full
+            setup instructions.
