@@ -389,44 +389,68 @@ Detail/viewer pages show a metadata footer at the bottom with created/updated ti
 - Items separated by `gap-4`
 - Padding matches header: `px-4 md:px-6`
 
-### Side Panel Pattern
+### Right Panel Pattern — Editorial Margin
 
-For secondary contextual content (history, filters, details, comments) that can be shown/hidden. The dashboard viewer's History panel is the reference.
+All right-side docked panels (copilot, collections, catalog, version history) share a single `<RightPanel>` component in `crates/kyomi-ui/src/components/right_panel.rs`. It owns the chrome, resize behavior, mobile overlay, and escape-to-close; callers provide title/header content, body, and optional footer.
+
+**Design thesis.** The panel is not a second surface docked *next to* the content area — it is part of the same continuous warm surface, separated only by a 1px border. The § typographic mark in the header (amber italic Instrument Serif) supplies editorial voice and is the anchor every Kyomi panel shares. No other BI tool does this.
 
 **Animation — CRITICAL:**
 - The panel is **always in the DOM**. Never use `<Show>` to mount/unmount — this prevents CSS transitions.
-- Matches the left nav sidebar pattern: animate width between 0 and the target width.
-- Inner content container has a fixed `min-width` equal to the default panel width, so content doesn't reflow during the width transition — it clips via `overflow: hidden` on the outer div.
+- Desktop: animate `width` between `0` and the target width (clip via `overflow: hidden`).
+- Mobile: animate `transform: translateX()` between `0` and `100%`; backdrop fades via opacity.
 
-**Desktop (768px+):**
-- Inline resizable sidebar on the right side of the content area
-- Width range: 320-600px, default 384px
-- `border-l border-t border-border`, `bg-muted`
-- Drag handle for resize (4px wide, centered, `bg-border` → `bg-muted-foreground/50` on hover)
-- Width controlled by inline `style` (dynamic from drag), not a Tailwind class
-- Sits inside the `flex-1 overflow-hidden flex` content zone alongside the main scroll area
-- Open: `width: {panel_width}px`
-- Closed: `width: 0px` with `overflow: hidden`
+**Desktop (≥768px):**
+- Inline slab on the right of the content area, `flex-shrink-0`
+- Width range: 280–600px (each caller picks its own default and clamp within that range)
+- `bg-background` (same as content — **not** `bg-muted`); single `border-l border-border`; **no** `border-t`
+- Full-height slab from top of `page-header` through the bottom of the content area — no box-joint corner
+- Resize handle: 4px invisible hit-zone on the left edge of the panel, `cursor-ew-resize`; subtle `bg-border-strong` on hover
+- Width controlled by inline `style` (dynamic from drag signal), not a Tailwind class
+- Open: `width: {signal}px`; Closed: `width: 0px`
 - Transition: `transition-[width] duration-300 ease-in-out`
 
-**Mobile (below 768px):**
-- Fixed overlay panel from the right
-- `fixed top-32 right-0 bottom-0`, max-width 85vw
-- Backdrop: `bg-[var(--color-overlay)]`, click to close, `transition-opacity duration-300 ease-in-out`
-- `bg-muted`, `shadow-xl`
-- Open: `transform: translateX(0)`
-- Closed: `transform: translateX(100%)`
-- Transition: `transition-transform duration-300 ease-in-out`
+**Header (h-16, matches `page-header`):**
+- Simple mode: amber italic `§` mark (Instrument Serif ~22px, `text-primary`) + Instrument Serif 20px title (`text-foreground`)
+- Custom mode: callers with non-title chrome (e.g. the SQL editor's Catalog/History tab strip) pass a `header` ChildrenFn that fills the space left of the close button
+- Close button: `ButtonVariant::GhostMuted`, `ButtonSize::IconSm`, right-aligned — **always rendered by `<RightPanel>`**, never by the caller
+- **No** `border-b` — the panel surface stays continuous
 
-### Copilot Sidebar Pattern
+**Body:**
+- `flex-1 overflow-y-auto` scroll region (provided by `<RightPanel>`)
+- Base text 13.5px (one notch down from content's 15px) to reinforce the "commentary / tool" register
+- Secondary labels use `text-secondary`
+- Internal surfaces that need framing (input pills, selected rows, nested cards) use `bg-surface-alt` — the panel itself provides no background differentiation
 
-AI copilot sidebars (dashboard copilot, chart builder copilot, watch copilot) share a unified `ChatEngine` and `CopilotChat` component. All copilots follow the same rules:
+**Footer (optional):**
+- `border-t border-border` + whatever padding the caller chooses
+- Used for copilot chat input rows, collections' "+ New collection" action, catalog metadata lines
 
+**Mobile (<768px):**
+- Full-height slide-in from the right, max-width 85vw, fixed `top-0 right-0 bottom-0`
+- Background: `bg-muted` + `shadow-lg` — **intentional desktop/mobile divergence**: mobile needs the sheet signal because there's no adjacent content to visually anchor the panel against
+- Backdrop: `bg-[var(--color-overlay)]`, click to close
+- Open: `translate-x-0`; Closed: `translate-x-full` (`pointer-events-none` on backdrop when closed)
+- Transition: `transition-transform duration-300 ease-in-out` + backdrop `transition-opacity duration-300`
+
+**`<RightPanel>` API (summary):**
+- `open: Signal<bool>`, `on_close: Callback<()>`, `width: RwSignal<f64>`
+- `min_width` / `max_width` (defaults 280 / 600)
+- Either `title: Option<String>` (simple § mode) **or** `header: Option<ChildrenFn>` (custom mode — header wins if both supplied)
+- `children: ChildrenFn` (body) + `footer: Option<ChildrenFn>`
+- `close_label: String` (default `"Close panel"`) — aria label for the close button
+
+**Callers today:**
+- `components/dashboard/copilot_sidebar.rs` — title `"Copilot"`, CopilotChat body, chat-input footer
+- `components/dashboard/history_panel.rs` — title `"Version History"`, version-list/diff body, `ConfirmDialog` sibling
+- `pages/dashboards/collections_sidebar.rs` — title `"Collections"`, list body, `"+ New Collection"` footer, `CollectionModal`/`ConfirmDialog` siblings
+- `pages/sql_editor/sidebar.rs` — custom header (Catalog / History tab strip + context-aware refresh button), tabbed body, no footer
+
+**Copilot notes (kept from prior Copilot Sidebar Pattern):**
 - **No confirmation dialogs.** The AI applies changes directly via WebSocket events (`dashboard_update`, `chart_update`, `watch_update`). No "Apply to Dashboard" button or approval step.
-- **Document history is the safety net.** Users can revert any unwanted AI changes via the document version history panel. This is simpler and more trustworthy than manual apply/reject flows.
-- **Session lifecycle is ephemeral.** Sessions are created when the sidebar opens and deleted when it closes. No persistent copilot history.
-- **Layout follows the Side Panel Pattern** above (resizable desktop sidebar, slide-in mobile panel).
-- **Chat UI uses `CopilotChat` component** which delegates all state to `ChatEngine` (session, WS subscriptions, messages, thinking, scroll, send/cancel).
+- **Document history is the safety net.** Users revert unwanted AI changes via the version-history panel.
+- **Session lifecycle is ephemeral.** Sessions are created when the sidebar opens and deleted when it closes via `CopilotChat`'s `active` prop.
+- **Chat UI uses `CopilotChat`**, which delegates all state to `ChatEngine` (session, WS subscriptions, messages, thinking, scroll, send/cancel).
 
 ### Empty State Pattern (In-Page)
 
@@ -1028,3 +1052,4 @@ The current PDF template uses cold generic grays. Replace with warm design syste
 | 2026-04-07 | Supersedes docs/DESIGN_SYSTEM.md | New file is comprehensive. Old file preserved as historical reference. |
 | 2026-04-07 | Chart design system: Kyomi overrides, not chartml defaults | chartml stays generic (cool grays, system fonts). Kyomi brands charts via CSS variable overrides in main.css. Warm grays, DM Sans, Geist Mono, slate-blue tooltips. |
 | 2026-04-09 | Unify knowledge files and dashboards into one document system | Both are markdown documents in collections. The folder-tree UI felt like Windows Explorer, not Kyomi. A type field preserves the user's mental model (separate nav items) while the data model, collections, search, editor, and agent tools are shared. Deletes the file-manager UI entirely. |
+| 2026-04-19 | Unified right-panel pattern: Editorial Margin + shared `<RightPanel>` | Copilot / collections / catalog / version-history were each re-implementing the same chrome with drift (different widths, animations, bg, headers). The old `bg-muted` + `border-l + border-t` slab looked like tacked-on chrome and violated the "one continuous warm surface" principle. Editorial Margin keeps the panel on `bg-background` separated only by a hairline, with an amber italic `§` Instrument Serif title as the shared editorial anchor. Nobody in BI does this. Mobile retains `bg-muted` + `shadow-lg` because the sheet signal is load-bearing with no adjacent content. Decision captured via `/design-consultation` — KYO-47. |

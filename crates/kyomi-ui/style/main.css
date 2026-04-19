@@ -366,38 +366,10 @@ html {
   pointer-events: none;
 }
 
-/* ── History panel slide animations ──────────────────────────────
- * Driven by data-anim attribute to avoid Leptos view re-creation. */
-
-.history-panel-mobile[data-anim="in"],
-.history-panel-desktop[data-anim="in"] {
-  animation: sidebar-enter 300ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.history-panel-mobile[data-anim="out"],
-.history-panel-desktop[data-anim="out"] {
-  animation: sidebar-exit 300ms cubic-bezier(0.7, 0, 0.84, 0) forwards;
-}
-
-/* ── Sidebar slide animations ───────────────────────────────────── */
-
-.sidebar-slide-in {
-  animation: sidebar-enter 300ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.sidebar-slide-out {
-  animation: sidebar-exit 300ms cubic-bezier(0.7, 0, 0.84, 0) forwards;
-}
-
-@keyframes sidebar-enter {
-  from { transform: translateX(100%); opacity: 0; }
-  to   { transform: translateX(0); opacity: 1; }
-}
-
-@keyframes sidebar-exit {
-  from { transform: translateX(0); opacity: 1; }
-  to   { transform: translateX(100%); opacity: 0; }
-}
+/* Right-panel slide animations live inside <RightPanel> via Tailwind
+ * transition classes (transform + opacity, duration-300). The previous
+ * `.history-panel-*` / `.sidebar-slide-*` classes + `@keyframes sidebar-*`
+ * were removed with the KYO-47 migration to the shared component. */
 
 /* Accessibility: respect reduced motion preferences */
 @media (prefers-reduced-motion: reduce) {

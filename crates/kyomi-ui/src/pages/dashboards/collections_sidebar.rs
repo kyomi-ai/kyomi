@@ -10,12 +10,10 @@ use std::sync::Arc;
 
 use leptos::ev;
 use leptos::prelude::*;
-#[cfg(feature = "hydrate")]
-use wasm_bindgen::prelude::*;
 
 use phosphor_leptos::Icon;
 use crate::components::{
-    Button, ButtonSize, ButtonVariant, ConfirmDialog, Label, Modal, ModalSize,
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, Label, Modal, ModalSize, RightPanel,
     Switch, INPUT_CLASS,
 };
 use crate::query_cache::{use_query, QueryCache};
@@ -41,15 +39,10 @@ const PRESET_COLORS: &[(&str, &str)] = &[
 const DEFAULT_WIDTH: f64 = 320.0;
 
 /// Minimum sidebar width in pixels.
-#[cfg(feature = "hydrate")]
 const MIN_WIDTH: f64 = 280.0;
 
 /// Maximum sidebar width in pixels.
-#[cfg(feature = "hydrate")]
 const MAX_WIDTH: f64 = 480.0;
-
-/// Mobile breakpoint (matches React `window.innerWidth < 768`).
-const MOBILE_BREAKPOINT: f64 = 768.0;
 
 
 // ─── Collection form data ───────────────────────────────────────────────────
@@ -72,57 +65,6 @@ impl Default for CollectionFormData {
             is_public: false,
         }
     }
-}
-
-// ─── Detect mobile ──────────────────────────────────────────────────────────
-
-/// Returns a reactive signal that tracks whether the viewport is mobile-sized.
-fn use_is_mobile() -> Signal<bool> {
-    let (is_mobile, set_is_mobile) = signal(false);
-
-    Effect::new(move || {
-        if let Some(window) = web_sys::window() {
-            let width = window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0);
-            set_is_mobile.set(width < MOBILE_BREAKPOINT);
-        }
-    });
-
-    // Listen for resize events — cleaned up on unmount
-    #[cfg(feature = "hydrate")]
-    {
-        use send_wrapper::SendWrapper;
-        use wasm_bindgen::closure::Closure;
-
-        let handler = Closure::<dyn Fn()>::new(move || {
-            if let Some(window) = web_sys::window() {
-                let width = window
-                    .inner_width()
-                    .ok()
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(1024.0);
-                set_is_mobile.set(width < MOBILE_BREAKPOINT);
-            }
-        });
-
-        if let Some(window) = web_sys::window() {
-            let _ = window.add_event_listener_with_callback(
-                "resize",
-                handler.as_ref().unchecked_ref(),
-            );
-            let handler_ref = SendWrapper::new(
-                handler.as_ref().unchecked_ref::<js_sys::Function>().clone(),
-            );
-            let window = SendWrapper::new(window);
-            let handler_wrapper = SendWrapper::new(handler);
-            on_cleanup(move || {
-                let _ =
-                    window.take().remove_event_listener_with_callback("resize", &handler_ref.take());
-                drop(handler_wrapper);
-            });
-        }
-    }
-
-    is_mobile.into()
 }
 
 // ─── Collection item row ────────────────────────────────────────────────────
@@ -316,36 +258,6 @@ fn CollectionList(
             } else {
                 None
             }}
-        </div>
-    }
-}
-
-// ─── Sidebar header + new-collection button ─────────────────────────────────
-
-/// Sidebar header with title, close button, and "New Collection" action.
-#[component]
-fn SidebarHeader(
-    on_close: Callback<()>,
-    on_new: Callback<()>,
-) -> impl IntoView {
-    view! {
-        <div class="px-4 py-3 border-b border-border flex items-center justify-between flex-shrink-0">
-            <h3 class="font-semibold text-foreground">"Collections"</h3>
-            <Button
-                variant=ButtonVariant::GhostMuted
-                size=ButtonSize::Icon
-                aria_label="Close"
-                on:click=move |_| on_close.run(())
-            >
-                <Icon icon=phosphor_leptos::X size="20px" />
-            </Button>
-        </div>
-
-        <div class="flex-shrink-0 p-4 border-b border-border">
-            <Button class="w-full" on:click=move |_| on_new.run(())>
-                <Icon icon=phosphor_leptos::PLUS size="14px" />
-                "New Collection"
-            </Button>
         </div>
     }
 }
@@ -639,8 +551,6 @@ pub fn CollectionsSidebar(
     #[prop(optional, into)]
     doc_type: Option<String>,
 ) -> impl IntoView {
-    let is_mobile = use_is_mobile();
-
     // Type-aware labels — one place to change if renaming
     let (type_name_plural, type_name_lower) = match doc_type.as_deref() {
         Some("knowledge") => ("Documents", "documents"),
@@ -648,10 +558,8 @@ pub fn CollectionsSidebar(
     };
     let doc_type_for_modal = StoredValue::new(doc_type.clone());
 
-    // Sidebar width for desktop resize — set_sidebar_width used in hydrate feature only
-    let (sidebar_width, set_sidebar_width) = signal(DEFAULT_WIDTH);
-    #[cfg(not(feature = "hydrate"))]
-    let _ = set_sidebar_width;
+    // Width owned by caller so RightPanel can animate/resize it.
+    let sidebar_width = RwSignal::new(DEFAULT_WIDTH);
 
     // Collection data — filtered by doc_type. Backed by the Layout-level
     // QueryCache so the same `(name, doc_type)` key is shared with the host
@@ -683,9 +591,6 @@ pub fn CollectionsSidebar(
     let (confirm_title, set_confirm_title) = signal(String::new());
     let (confirm_message, set_confirm_message) = signal(String::new());
     let (deleting_id, set_deleting_id) = signal::<Option<String>>(None);
-
-    // Resize state
-    let (is_resizing, set_is_resizing) = signal(false);
 
     // Dashboard count placeholder — parent would need to pass this
     // For now, we can't know the total count from inside the sidebar.
@@ -769,301 +674,81 @@ pub fn CollectionsSidebar(
         on_collections_changed.run(());
     });
 
-    // ── Resize drag handling (desktop) ──────────────────────────────────
-
-    // We attach document-level mousemove/mouseup listeners when resizing.
-    // This is the same pattern as the React useEffect in DashboardsList.jsx.
-    Effect::new(move || {
-        let resizing = is_resizing.get();
-        if resizing {
-            #[cfg(feature = "hydrate")]
-            {
-                let Some(window) = web_sys::window() else { return };
-                let Some(document) = window.document() else { return };
-                let body = document.body();
-
-                // Set cursor
-                if let Some(ref body) = body {
-                    let _ = body.style().set_property("cursor", "col-resize");
-                    let _ = body.style().set_property("user-select", "none");
-                }
-
-                // We need start_x captured at mousedown time.
-                // Since Effect re-runs when is_resizing changes, we capture the
-                // current mouse position from a stored signal.
-                // However, a simpler approach: attach listeners directly in the
-                // mousedown handler below. The Effect approach here just sets body cursor.
-                // The actual move/up handlers are set in handle_resize_start.
-
-                // Cleanup body styles when resizing stops
-                // (The mouseup handler does this, but just in case.)
-            }
-        }
-    });
-
-    #[cfg(feature = "hydrate")]
-    let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
-        StoredValue::new(None);
-
-    let handle_resize_start = move |ev: web_sys::MouseEvent| {
-        ev.prevent_default();
-        set_is_resizing.set(true);
-
-        #[cfg(feature = "hydrate")]
-        {
-            use std::cell::RefCell;
-            use std::rc::Rc;
-            use wasm_bindgen::closure::Closure;
-
-            let start_x = ev.client_x() as f64;
-            let start_w = sidebar_width.get_untracked();
-
-            let Some(window) = web_sys::window() else { return };
-            let Some(document) = window.document() else { return };
-
-            let move_handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
-                move |ev: web_sys::MouseEvent| {
-                    let diff = start_x - ev.client_x() as f64;
-                    let new_width = (start_w + diff).clamp(MIN_WIDTH, MAX_WIDTH);
-                    set_sidebar_width.set(new_width);
-                },
-            );
-
-            let move_ref = move_handler
-                .as_ref()
-                .unchecked_ref::<js_sys::Function>()
-                .clone();
-            let document_for_up = document.clone();
-            let move_fn_for_up = move_ref.clone();
-
-            let closures: Rc<RefCell<Option<(
-                Closure<dyn FnMut(web_sys::MouseEvent)>,
-                Closure<dyn FnMut()>,
-            )>>> = Rc::new(RefCell::new(None));
-            let closures_for_up = closures.clone();
-
-            let up_handler = Closure::<dyn FnMut()>::new(move || {
-                set_is_resizing.set(false);
-                let _ = document_for_up
-                    .remove_event_listener_with_callback("mousemove", &move_fn_for_up);
-                if let Some((_, ref up_cb)) = *closures_for_up.borrow() {
-                    let _ = document_for_up.remove_event_listener_with_callback(
-                        "mouseup",
-                        up_cb.as_ref().unchecked_ref(),
-                    );
-                }
-                if let Some(body) = document_for_up.body() {
-                    let _ = body.style().set_property("cursor", "");
-                    let _ = body.style().set_property("user-select", "");
-                }
-                closures_for_up.borrow_mut().take();
-                drag_cleanup.set_value(None);
-            });
-
-            let _ = document.add_event_listener_with_callback(
-                "mousemove",
-                move_ref.unchecked_ref(),
-            );
-            let _ = document.add_event_listener_with_callback(
-                "mouseup",
-                up_handler.as_ref().unchecked_ref(),
-            );
-
-            *closures.borrow_mut() = Some((move_handler, up_handler));
-
-            let closures_for_teardown = closures;
-            let document_for_teardown = document.clone();
-            let move_ref_for_teardown = move_ref.clone();
-            let teardown: Box<dyn FnOnce()> = Box::new(move || {
-                if let Some((_, ref up_cb)) = *closures_for_teardown.borrow() {
-                    let _ = document_for_teardown.remove_event_listener_with_callback(
-                        "mousemove",
-                        &move_ref_for_teardown,
-                    );
-                    let _ = document_for_teardown.remove_event_listener_with_callback(
-                        "mouseup",
-                        up_cb.as_ref().unchecked_ref(),
-                    );
-                }
-                closures_for_teardown.borrow_mut().take();
-            });
-            drag_cleanup.set_value(Some(send_wrapper::SendWrapper::new(teardown)));
-
-            if let Some(body) = document.body() {
-                let _ = body.style().set_property("cursor", "col-resize");
-                let _ = body.style().set_property("user-select", "none");
-            }
-        }
-    };
-
-    #[cfg(feature = "hydrate")]
-    on_cleanup(move || {
-        if let Some(teardown) = drag_cleanup.try_update_value(|v| v.take()).flatten() {
-            teardown.take()();
-        }
-    });
-
     // ── Render ───────────────────────────────────────────────────────────
 
-    // ── Animated open/close ───────────────────────────────────────────
-    // Instead of <Show> which unmounts instantly (no exit animation),
-    // we keep the element mounted while the closing animation plays,
-    // then unmount after the animation duration (300ms).
-    let (is_mounted, set_is_mounted) = signal(false);
-    let (is_animating_out, set_is_animating_out) = signal(false);
-
-    // Mount when open becomes true
-    Effect::new(move |_| {
-        if open.get() {
-            set_is_animating_out.set(false);
-            set_is_mounted.set(true);
-        } else if is_mounted.get_untracked() {
-            // Start exit animation, then unmount after 300ms
-            set_is_animating_out.set(true);
-            #[cfg(feature = "hydrate")]
-            {
-                use send_wrapper::SendWrapper;
-                let cb = SendWrapper::new(move || {
-                    set_is_mounted.set(false);
-                    set_is_animating_out.set(false);
-                });
-                leptos::task::spawn_local(async move {
-                    gloo_timers::future::TimeoutFuture::new(300).await;
-                    cb.take()();
-                });
-            }
-            #[cfg(not(feature = "hydrate"))]
-            {
-                set_is_mounted.set(false);
-                set_is_animating_out.set(false);
-            }
+    // Footer slot: "New Collection" primary action.
+    let footer_fn: ChildrenFn = Arc::new(move || {
+        view! {
+            <div class="p-4">
+                <Button
+                    class="w-full"
+                    on:click=move |_| handle_new.run(())
+                >
+                    <Icon icon=phosphor_leptos::PLUS size="14px" />
+                    "New Collection"
+                </Button>
+            </div>
         }
+        .into_any()
     });
 
     view! {
-        <Show when=move || is_mounted.get()>
+        <RightPanel
+            open=open
+            on_close=handle_close
+            width=sidebar_width
+            min_width=MIN_WIDTH
+            max_width=MAX_WIDTH
+            title="Collections".to_string()
+            close_label="Close collections".to_string()
+            footer=footer_fn
+        >
             {move || {
                 let collections = collections_resource.get()
                     .and_then(|r| r.ok())
                     .unwrap_or_default();
-
-                let modal_editing = editing_collection.get();
-                let show_modal_sig: Signal<bool> = show_modal.into();
-                let confirm_open_sig: Signal<bool> = confirm_open.into();
-                let confirm_title_val = confirm_title.get();
-                let confirm_message_val = confirm_message.get();
-
-                if is_mobile.get() {
-                    // Mobile: Fixed overlay with backdrop
-                    // React: `fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40`
-                    // React: `fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl`
-                    view! {
-                        <div>
-                            // Backdrop
-                            <div
-                                class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
-                                on:click=move |_| set_open.set(false)
-                            />
-                            // Sidebar panel
-                            <div class="fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-card flex flex-col shadow-xl">
-                                <SidebarHeader on_close=handle_close on_new=handle_new />
-                                <CollectionList
-                                    collections=collections.clone()
-                                    active_collection_id=active_collection_id
-                                    dashboard_count=dashboard_count
-                                    on_collection_click=handle_collection_click
-                                    on_all_click=handle_all_click
-                                    on_edit=handle_edit
-                                    on_delete=handle_delete
-                                    type_name_plural=type_name_plural.to_string()
-                                />
-                            </div>
-
-                            // Modals
-                            <CollectionModal
-                                show=show_modal_sig
-                                on_close=on_modal_close
-                                editing=modal_editing
-                                on_saved=on_modal_saved
-                                doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
-                                type_name_lower=type_name_lower.to_string()
-                            />
-                            <ConfirmDialog
-                                open=confirm_open_sig
-                                title=confirm_title_val
-                                message=confirm_message_val
-                                confirm_text="Delete Collection"
-                                on_confirm=on_confirm_delete
-                                on_cancel=on_cancel_delete
-                            />
-                        </div>
-                    }.into_any()
-                } else {
-                    // Desktop: Inline resizable sidebar
-                    let width_style = move || format!("width: {}px", sidebar_width.get());
-                    let sidebar_class = move || {
-                        if is_animating_out.get() {
-                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 sidebar-slide-out"
-                        } else {
-                            "border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 sidebar-slide-in"
-                        }
-                    };
-
-                    view! {
-                        <div>
-                            <div
-                                class=sidebar_class
-                                style=width_style
-                            >
-                                // Resize Handle
-                                // React: `flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10`
-                                <div
-                                    class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                    on:mousedown=handle_resize_start
-                                    aria-label="Drag to resize"
-                                >
-                                    // React: `w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors`
-                                    <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded-md transition-colors" />
-                                </div>
-
-                                // Main Content
-                                // React: `flex flex-col flex-1 min-w-0`
-                                <div class="flex flex-col flex-1 min-w-0">
-                                    <SidebarHeader on_close=handle_close on_new=handle_new />
-                                    <CollectionList
-                                        collections=collections.clone()
-                                        active_collection_id=active_collection_id
-                                        dashboard_count=dashboard_count
-                                        on_collection_click=handle_collection_click
-                                        on_all_click=handle_all_click
-                                        on_edit=handle_edit
-                                        on_delete=handle_delete
-                                        type_name_plural=type_name_plural.to_string()
-                                    />
-                                </div>
-                            </div>
-
-                            // Modals
-                            <CollectionModal
-                                show=show_modal_sig
-                                on_close=on_modal_close
-                                editing=modal_editing
-                                on_saved=on_modal_saved
-                                doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
-                                type_name_lower=type_name_lower.to_string()
-                            />
-                            <ConfirmDialog
-                                open=confirm_open_sig
-                                title=confirm_title_val
-                                message=confirm_message_val
-                                confirm_text="Delete Collection"
-                                on_confirm=on_confirm_delete
-                                on_cancel=on_cancel_delete
-                            />
-                        </div>
-                    }.into_any()
+                view! {
+                    <CollectionList
+                        collections=collections
+                        active_collection_id=active_collection_id
+                        dashboard_count=dashboard_count
+                        on_collection_click=handle_collection_click
+                        on_all_click=handle_all_click
+                        on_edit=handle_edit
+                        on_delete=handle_delete
+                        type_name_plural=type_name_plural.to_string()
+                    />
                 }
             }}
-        </Show>
+        </RightPanel>
+
+        // Modals — rendered as siblings so they overlay above the panel.
+        // Wrapped in a reactive closure so `editing` / `title` / `message`
+        // track their underlying signals. Without this, the modal is
+        // constructed once with the initial values (None / "" / "") and the
+        // edit/delete flows appear broken at runtime.
+        {move || {
+            let modal_editing = editing_collection.get();
+            let confirm_title_val = confirm_title.get();
+            let confirm_message_val = confirm_message.get();
+            view! {
+                <CollectionModal
+                    show=Signal::from(show_modal)
+                    on_close=on_modal_close
+                    editing=modal_editing
+                    on_saved=on_modal_saved
+                    doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
+                    type_name_lower=type_name_lower.to_string()
+                />
+                <ConfirmDialog
+                    open=Signal::from(confirm_open)
+                    title=confirm_title_val
+                    message=confirm_message_val
+                    confirm_text="Delete Collection"
+                    on_confirm=on_confirm_delete
+                    on_cancel=on_cancel_delete
+                />
+            }
+        }}
     }
 }

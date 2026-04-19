@@ -11,24 +11,18 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
-#[cfg(feature = "hydrate")]
-use wasm_bindgen::prelude::*;
 
 use crate::components::{
-    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, Tooltip,
+    Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, RightPanel, Spinner, Tooltip,
 };
 use crate::server_fns::dashboards::{
     diff_versions, get_version, list_versions, restore_version,
     DiffLine, VersionDiff, VersionDetail,
 };
 
-use super::shared::use_is_mobile;
-
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-#[cfg(feature = "hydrate")]
 const MIN_WIDTH: f64 = 320.0;
-#[cfg(feature = "hydrate")]
 const MAX_WIDTH: f64 = 600.0;
 const DEFAULT_WIDTH: f64 = 384.0;
 
@@ -185,13 +179,9 @@ pub fn HistoryPanel(
     on_restore: Callback<()>,
 ) -> impl IntoView {
     let dashboard_id = StoredValue::new(dashboard_id);
-    let is_mobile = use_is_mobile();
 
     // ── Panel width (desktop resize) ────────────────────────────────────
-    let (panel_width, set_panel_width) = signal(DEFAULT_WIDTH);
-    #[cfg(not(feature = "hydrate"))]
-    let _ = set_panel_width;
-    let (is_resizing, set_is_resizing) = signal(false);
+    let panel_width = RwSignal::new(DEFAULT_WIDTH);
 
     // ── Version list state ──────────────────────────────────────────────
     let (version_counter, set_version_counter) = signal(0u32);
@@ -316,109 +306,6 @@ pub fn HistoryPanel(
         });
     };
 
-    // ── Resize drag handling (desktop) ──────────────────────────────────
-    // Stores active drag cleanup so on_cleanup can remove listeners if the
-    // component unmounts mid-drag.
-
-    #[cfg(feature = "hydrate")]
-    let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
-        StoredValue::new(None);
-
-    let handle_resize_start = move |ev: web_sys::MouseEvent| {
-        ev.prevent_default();
-        set_is_resizing.set(true);
-
-        #[cfg(feature = "hydrate")]
-        {
-            use std::cell::RefCell;
-            use std::rc::Rc;
-            use wasm_bindgen::closure::Closure;
-
-            let start_x = ev.client_x() as f64;
-            let start_w = panel_width.get_untracked();
-
-            let Some(window) = web_sys::window() else {
-                return;
-            };
-            let Some(document) = window.document() else {
-                return;
-            };
-
-            let move_handler =
-                Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |ev: web_sys::MouseEvent| {
-                    let diff = start_x - ev.client_x() as f64;
-                    let new_width = (start_w + diff).clamp(MIN_WIDTH, MAX_WIDTH);
-                    set_panel_width.set(new_width);
-                });
-
-            let move_ref = move_handler
-                .as_ref()
-                .unchecked_ref::<js_sys::Function>()
-                .clone();
-            let document_for_up = document.clone();
-            let move_fn_for_up = move_ref.clone();
-
-            let closures: Rc<RefCell<Option<(
-                Closure<dyn FnMut(web_sys::MouseEvent)>,
-                Closure<dyn FnMut()>,
-            )>>> = Rc::new(RefCell::new(None));
-            let closures_for_up = closures.clone();
-
-            let up_handler = Closure::<dyn FnMut()>::new(move || {
-                set_is_resizing.set(false);
-                let _ = document_for_up
-                    .remove_event_listener_with_callback("mousemove", &move_fn_for_up);
-                if let Some((_, ref up_cb)) = *closures_for_up.borrow() {
-                    let _ = document_for_up.remove_event_listener_with_callback(
-                        "mouseup",
-                        up_cb.as_ref().unchecked_ref(),
-                    );
-                }
-                if let Some(body) = document_for_up.body() {
-                    let _ = body.style().set_property("cursor", "");
-                    let _ = body.style().set_property("user-select", "");
-                }
-                closures_for_up.borrow_mut().take();
-                drag_cleanup.set_value(None);
-            });
-
-            let _ = document
-                .add_event_listener_with_callback("mousemove", move_ref.unchecked_ref());
-            let _ = document
-                .add_event_listener_with_callback("mouseup", up_handler.as_ref().unchecked_ref());
-
-            *closures.borrow_mut() = Some((move_handler, up_handler));
-
-            let closures_for_teardown = closures;
-            let document_for_teardown = document.clone();
-            let move_ref_for_teardown = move_ref.clone();
-            let teardown: Box<dyn FnOnce()> = Box::new(move || {
-                if let Some((_, ref up_cb)) = *closures_for_teardown.borrow() {
-                    let _ = document_for_teardown
-                        .remove_event_listener_with_callback("mousemove", &move_ref_for_teardown);
-                    let _ = document_for_teardown.remove_event_listener_with_callback(
-                        "mouseup",
-                        up_cb.as_ref().unchecked_ref(),
-                    );
-                }
-                closures_for_teardown.borrow_mut().take();
-            });
-            drag_cleanup.set_value(Some(send_wrapper::SendWrapper::new(teardown)));
-
-            if let Some(body) = document.body() {
-                let _ = body.style().set_property("cursor", "col-resize");
-                let _ = body.style().set_property("user-select", "none");
-            }
-        }
-    };
-
-    #[cfg(feature = "hydrate")]
-    on_cleanup(move || {
-        if let Some(teardown) = drag_cleanup.try_update_value(|v| v.take()).flatten() {
-            teardown.take()();
-        }
-    });
-
     // ── Confirm dialog signals ──────────────────────────────────────────
     let confirm_open: Signal<bool> = Signal::derive(move || confirm_version.get().is_some());
     let confirm_message = move || {
@@ -435,31 +322,15 @@ pub fn HistoryPanel(
         set_confirm_version.set(None);
     });
 
-    // ── Panel content builder ───────────────────────────────────────────
-    // Both mobile and desktop layouts share this inner content.
-    let panel_content = move || {
+    // ── Panel body builder ──────────────────────────────────────────────
+    // Header + close button + resize + mobile overlay are all handled by
+    // <RightPanel>. This closure returns only the inner content.
+    let panel_body = move || {
         let current_error = error.get();
 
         view! {
-            <div class="flex flex-col flex-1 min-w-0 h-full">
-                // Header
-                <div class="flex items-center justify-between px-4 py-3 border-b border-border bg-muted flex-shrink-0">
-                    <div class="flex items-center gap-2">
-                        <Icon icon=phosphor_leptos::CLOCK attr:class="w-5 h-5 text-primary" />
-                        <span class="font-medium text-foreground">"Version History"</span>
-                    </div>
-                    <Button
-                        variant=ButtonVariant::GhostMuted
-                        size=ButtonSize::Icon
-                        aria_label="Close history"
-                        on:click=move |_| on_close.run(())
-                    >
-                        <Icon icon=phosphor_leptos::X size="20px" />
-                    </Button>
-                </div>
-
-                // Content area
-                <div class="flex-1 overflow-y-auto">
+            <div class="h-full">
+                // Error banner + version list / diff view
                     // Error banner (shown above content when there is an error)
                     {current_error.clone().map(|err| view! {
                         <div class="p-4 text-center">
@@ -811,121 +682,39 @@ pub fn HistoryPanel(
                         }}
                     </Show>
                 </div>
-            </div>
         }
     };
-
-    // ── Animation lifecycle ────────────────────────────────────────────
-    // Keep the panel mounted during the exit animation, then unmount after 300ms.
-    let (is_mounted, set_is_mounted) = signal(false);
-    let (is_animating_out, set_is_animating_out) = signal(false);
-
-    Effect::new(move |_| {
-        if open.get() {
-            set_is_animating_out.set(false);
-            set_is_mounted.set(true);
-        } else if is_mounted.get_untracked() {
-            set_is_animating_out.set(true);
-            #[cfg(feature = "hydrate")]
-            {
-                use send_wrapper::SendWrapper;
-                let cb = SendWrapper::new(move || {
-                    set_is_mounted.set(false);
-                    set_is_animating_out.set(false);
-                });
-                leptos::task::spawn_local(async move {
-                    gloo_timers::future::TimeoutFuture::new(300).await;
-                    cb.take()();
-                });
-            }
-            #[cfg(not(feature = "hydrate"))]
-            {
-                set_is_mounted.set(false);
-                set_is_animating_out.set(false);
-            }
-        }
-    });
 
     // ── Render ───────────────────────────────────────────────────────────
 
     view! {
-        <Show when=move || is_mounted.get()>
-            {move || {
-                let confirm_msg = confirm_message();
-                let confirm_open_sig: Signal<bool> = confirm_open;
-
-                // Animation state as a data attribute — avoids re-rendering the view tree
-                let anim_state = move || {
-                    if is_animating_out.get() { "out" } else { "in" }
-                };
-
-                if is_mobile.get() {
-                    // Mobile: Slide-in panel with backdrop
-                    view! {
-                        <div>
-                            <div
-                                class="fixed top-32 left-0 right-0 bottom-0 bg-[var(--color-overlay)] z-40"
-                                on:click=move |_| on_close.run(())
-                            />
-                            <div
-                                class="history-panel-mobile fixed top-32 right-0 bottom-0 w-80 max-w-[85vw] z-50 bg-muted flex flex-col shadow-xl"
-                                data-anim=anim_state
-                            >
-                                {panel_content()}
-                            </div>
-                            <ConfirmDialog
-                                open=confirm_open_sig
-                                title="Restore Version?"
-                                message=confirm_msg
-                                confirm_text="Restore"
-                                destructive=false
-                                on_confirm=on_confirm
-                                on_cancel=on_cancel
-                            />
-                        </div>
-                    }.into_any()
-                } else {
-                    // Desktop: Resizable inline sidebar
-                    let width_style = move || format!("width: {}px", panel_width.get());
-                    let panel_class = move || {
-                        if is_resizing.get() {
-                            "history-panel-desktop border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0 select-none"
-                        } else {
-                            "history-panel-desktop border-l border-t border-border bg-muted flex h-full overflow-hidden flex-shrink-0"
-                        }
-                    };
-
-                    view! {
-                        <div>
-                            <div
-                                class=panel_class
-                                style=width_style
-                                data-anim=anim_state
-                            >
-                                // Resize Handle
-                                <div
-                                    class="flex items-center justify-center cursor-col-resize select-none px-1 -mr-2 relative z-10"
-                                    on:mousedown=handle_resize_start
-                                    aria-label="Drag to resize"
-                                >
-                                    <div class="w-1 h-12 bg-border hover:bg-muted-foreground/50 rounded transition-colors" />
-                                </div>
-
-                                {panel_content()}
-                            </div>
-                            <ConfirmDialog
-                                open=confirm_open_sig
-                                title="Restore Version?"
-                                message=confirm_msg
-                                confirm_text="Restore"
-                                destructive=false
-                                on_confirm=on_confirm
-                                on_cancel=on_cancel
-                            />
-                        </div>
-                    }.into_any()
-                }
-            }}
-        </Show>
+        <RightPanel
+            open=open
+            on_close=on_close
+            width=panel_width
+            min_width=MIN_WIDTH
+            max_width=MAX_WIDTH
+            title="Version History".to_string()
+            close_label="Close history".to_string()
+        >
+            {panel_body()}
+        </RightPanel>
+        // Wrapped in a reactive closure so the confirm-dialog message re-renders
+        // when `confirm_version` changes; without this, `confirm_message()` is
+        // called once at init and the dialog shows an empty string.
+        {move || {
+            let message = confirm_message();
+            view! {
+                <ConfirmDialog
+                    open=confirm_open
+                    title="Restore Version?"
+                    message=message
+                    confirm_text="Restore"
+                    destructive=false
+                    on_confirm=on_confirm
+                    on_cancel=on_cancel
+                />
+            }
+        }}
     }
 }
