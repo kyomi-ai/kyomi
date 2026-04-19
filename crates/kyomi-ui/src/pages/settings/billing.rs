@@ -914,7 +914,10 @@ fn SeatCapCard(
                     "Seat Cap"
                 </CardTitle>
                 <CardDescription>
-                    "Your spending ceiling. Workspace admins can invite users up to this cap."
+                    {format!(
+                        "You're billed for active users only — ${:.0}/user/month. The seat cap limits how many users admins can invite, not how much you're charged.",
+                        PRICE_PER_USER
+                    )}
                 </CardDescription>
             </CardHeader>
             <CardContent>
@@ -943,9 +946,11 @@ fn SeatCapCard(
                         })}
                         <p class="text-xs text-muted-foreground mt-2">
                             {format!(
-                                "At ${:.0}/user/month, the cap limits your maximum monthly charge to ${:.0}.",
+                                "Current billing: {} active user{} × ${:.0}/month = ${:.0}/month",
+                                active_members,
+                                if active_members == 1 { "" } else { "s" },
                                 PRICE_PER_USER,
-                                if is_unlimited { 0.0 } else { PRICE_PER_USER * cap as f64 }
+                                PRICE_PER_USER * active_members as f64,
                             )}
                         </p>
                     </div>
@@ -955,6 +960,9 @@ fn SeatCapCard(
                         view! {
                             <div class="space-y-2 pt-3 border-t border-border">
                                 <Label>"New seat cap"</Label>
+                                <p class="text-xs text-muted-foreground">
+                                    "Set to 999,999 for unlimited. This controls how many users can be invited, not what you're billed."
+                                </p>
                                 <div class="flex gap-2">
                                     <input
                                         type="number"
