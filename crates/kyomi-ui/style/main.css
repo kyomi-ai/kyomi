@@ -237,20 +237,21 @@ html {
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 
-/* ── Chart containers: white card treatment ─────────────────────────
- * Charts get individual card styling (surface bg, border, radius-md, shadow-sm).
+/* Chart cards — each chartml chart on dashboard surfaces gets card chrome:
+ * border, background, rounded corners, subtle shadow. The outer grid on
+ * `.prose-kyomi` handles inter-card spacing via `gap-4`, so cards themselves
+ * carry no vertical margin. `overflow: hidden` ensures the ChartHeaderBar's
+ * border-b is clipped to the card's rounded corners.
  * See DESIGN.md "Chart Container Pattern". */
-
-.dashboard-content .my-2 {
+.dashboard-content .chart-card {
   background-color: var(--color-card);
   border: 1px solid var(--color-border);
   border-radius: 8px;
   box-shadow: 0 1px 2px rgba(28, 25, 23, 0.05);
-  margin: 24px 0;
   overflow: hidden;
 }
 
-.dashboard-content .my-2 > div:not(:first-child) {
+.dashboard-content .chart-card > div:not(:first-child) {
   padding: 16px;
 }
 
@@ -258,12 +259,8 @@ html {
  * need the 16px breathing room that bar/line/scatter/pie need for tick
  * labels, so tables get `padding: 0` overriding the default above when
  * the chart content is a chartml-table. KYO-14. */
-.dashboard-content .my-2:has(.chartml-table) > div:not(:first-child) {
+.dashboard-content .chart-card:has(.chartml-table) > div:not(:first-child) {
   padding: 0;
-}
-
-.dashboard-content .my-2 .bg-muted\/50 {
-  border-radius: 8px 8px 0 0;
 }
 
 /* ── Table styling ──────────────────────────────────────────────────

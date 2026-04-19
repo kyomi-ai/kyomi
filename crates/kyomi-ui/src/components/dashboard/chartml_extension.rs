@@ -222,9 +222,9 @@ impl Extension for ChartMLExtension {
 
         Some(
             view! {
-                // dashboard-content wrapper triggers chart container CSS (border, bg, radius)
+                // dashboard-content + chart-card wrappers trigger chart container CSS (border, bg, radius)
                 <div class="dashboard-content not-prose">
-                    <div class="my-2">
+                    <div class="chart-card">
                         // Reactive header bar — re-renders when type/orientation/mode change
                         {move || {
                             let ct = current_chart_type.get();
