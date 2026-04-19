@@ -62,6 +62,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
       - name: Build mcp-chart-app (required by kyomi-server include_str!)
         working-directory: apps/mcp-chart-app
         run: npm install && npm run build
@@ -73,6 +78,13 @@ jobs:
       # production builds).
       - name: Strip local-dev patch.crates-io block
         run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+
+      # RustEmbed's derive macro in apps/server/src/leptos_frontend.rs points at
+      # crates/kyomi-ui/dist/. If the folder is missing, the macro silently
+      # produces a struct without a `get()` method, causing E0599 in clippy.
+      # An empty folder is enough — we don't need real assets to lint.
+      - name: Ensure kyomi-ui/dist/ exists for RustEmbed
+        run: mkdir -p crates/kyomi-ui/dist
 
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace -- -D warnings

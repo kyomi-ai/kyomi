@@ -732,8 +732,8 @@ pub async fn search_dashboards(
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(b.updated_at.cmp(&a.updated_at))
         }),
-        SearchSort::Recent => results.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
-        SearchSort::Created => results.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        SearchSort::Recent => results.sort_by_key(|b| std::cmp::Reverse(b.updated_at)),
+        SearchSort::Created => results.sort_by_key(|b| std::cmp::Reverse(b.created_at)),
     }
     results.truncate(limit as usize);
 
