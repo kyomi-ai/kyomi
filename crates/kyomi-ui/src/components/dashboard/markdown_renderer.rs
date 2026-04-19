@@ -969,11 +969,10 @@ fn ChartBlock(
                             } else if remote_loading.get() {
                                 view! {
                                     <div
-                                        class="flex flex-col items-center justify-center gap-3"
+                                        class="flex items-center justify-center"
                                         style=format!("min-height: {}px", chart_height_px)
                                     >
                                         <img src="/kyomi_animated_logo.svg" alt="Loading" class="w-8 h-8" />
-                                        <span class="text-sm text-muted-foreground">"Loading chart..."</span>
                                     </div>
                                 }.into_any()
                             } else if let Some(remote_instance) = remote_chartml.get() {
