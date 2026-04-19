@@ -1,7 +1,7 @@
 # =============================================================================
 # Kyomi — Release Workflow
 # =============================================================================
-# Triggered by version tags (v*). Builds a multi-arch Docker image on GHCR
+# Triggered by version tags (v*). Builds a linux/amd64 Docker image on GHCR
 # for self-hosted users and creates a GitHub Release.
 #
 # Usage:
@@ -9,9 +9,10 @@
 #   git push --tags
 #
 # The Leptos WASM frontend is pre-built on the amd64 runner and COPY'd into
-# the Docker image. This keeps Dockerfile.standalone cross-arch friendly —
-# trunk / wasm-bindgen / tailwindcss run natively on the runner rather than
-# under QEMU emulation for arm64 targets.
+# the Docker image. Docker builds linux/amd64 only — arm64 via QEMU timed
+# out at ~85 min in initial testing (cargo build under emulation is too
+# slow). Native arm64 support is a KYO-41 follow-up via matrix build across
+# `ubuntu-latest` + `ubuntu-24.04-arm` + docker manifest create.
 #
 # Standalone per-platform binary tarballs are intentionally deferred — see
 # KYO-41 follow-ups. Self-hosted install is Docker-only for now.
@@ -48,10 +49,10 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
   # ---------------------------------------------------------------------------
-  # Docker: Multi-arch image (linux/amd64 + linux/arm64)
+  # Docker: linux/amd64 image
   # ---------------------------------------------------------------------------
   # Pre-builds MCP chart app + Leptos WASM dist on the amd64 runner, then
-  # multi-arch builds the image (cargo build runs under QEMU for arm64).
+  # builds the linux/amd64 image. arm64 deferred (QEMU + cargo is too slow).
   docker:
     needs: [prepare]
     runs-on: ubuntu-latest
@@ -127,18 +128,15 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Set up QEMU (for arm64 emulation)
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push multi-arch image
+      - name: Build and push image (linux/amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.standalone
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ${{ env.GHCR_REGISTRY }}/kyomi:${{ needs.prepare.outputs.version }}
@@ -172,9 +170,9 @@ jobs:
               ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
             ```
 
-            The image is multi-arch (linux/amd64 + linux/arm64) and fully
-            self-contained — frontend, ML model, and server in a single binary.
-            Requires an LLM API key (Anthropic, OpenAI, or Gemini).
+            The image is linux/amd64 and fully self-contained — frontend,
+            ML model, and server in a single binary. Requires an LLM API key
+            (Anthropic, OpenAI, or Gemini). arm64 support is on the roadmap.
 
             See [Self-Hosting Guide](https://kyomi.ai/self-hosting) for full
             setup instructions.
