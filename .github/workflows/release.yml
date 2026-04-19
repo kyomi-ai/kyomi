@@ -60,6 +60,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # The workspace release profile uses lto=true + codegen-units=1 + opt-level=z
+      # for smallest-possible binary. The final LTO link uses ~10-12 GB RAM, more
+      # than the 7 GB on ubuntu-latest → OOM during `cargo build --release`.
+      # Free ~20 GB of disk and add a 10 GB swapfile so the link step can page.
+      - name: Free disk space and add swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile >/dev/null
+          sudo swapon /swapfile
+          echo "--- memory ---"
+          free -h
+          echo "--- disk ---"
+          df -h /
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
