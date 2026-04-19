@@ -5,9 +5,6 @@
 target/
 apps/backend-rust/target
 
-# Trunk WASM output — rebuilt inside the Docker image
-crates/kyomi-ui/dist/
-
 # Local dev data
 .data/
 postgres_data/
