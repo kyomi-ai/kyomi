@@ -429,10 +429,14 @@ async fn handle_subscription_event(
         }
     };
 
-    // Build the update query based on event type
-    let period_start_str = sub_data.period_start.map(|dt| dt.to_rfc3339());
-    let period_end_str = sub_data.period_end.map(|dt| dt.to_rfc3339());
-
+    // Build the update query based on event type.
+    //
+    // `sub_data.period_start` / `period_end` are already `Option<DateTime<Utc>>`.
+    // Bind them directly — do NOT convert to RFC3339 strings. Postgres's
+    // `timestamp with time zone` column rejects `text` binds with
+    // `column … is of type timestamp with time zone but expression is of type text`
+    // (the KYO-106 production bug). sqlx's chrono integration maps
+    // `Option<DateTime<Utc>>` to `TIMESTAMPTZ` natively.
     let result = if event_type == "customer.subscription.created" {
         // On creation, also set stripe_subscription_id, stripe_customer_id, and reset credits
         kyomi_core::db_execute!(
@@ -451,8 +455,8 @@ async fn handle_subscription_event(
             &sub_data.tier,
             &sub_data.status,
             sub_data.billing_cycle.as_deref(),
-            period_start_str.as_deref(),
-            period_end_str.as_deref(),
+            sub_data.period_start,
+            sub_data.period_end,
             &sub_data.stripe_subscription_id,
             &sub_data.stripe_customer_id,
             sub_data.user_limit,
@@ -473,8 +477,8 @@ async fn handle_subscription_event(
             &sub_data.tier,
             &sub_data.status,
             sub_data.billing_cycle.as_deref(),
-            period_start_str.as_deref(),
-            period_end_str.as_deref(),
+            sub_data.period_start,
+            sub_data.period_end,
             sub_data.user_limit,
             &workspace_id
         )
