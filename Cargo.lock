@@ -1486,7 +1486,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chartml-chart-cartesian"
-version = "4.1.0"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
  "serde_json",
@@ -1494,35 +1494,35 @@ dependencies = [
 
 [[package]]
 name = "chartml-chart-metric"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
 ]
 
 [[package]]
 name = "chartml-chart-pie"
-version = "4.1.0"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
 ]
 
 [[package]]
 name = "chartml-chart-scatter"
-version = "4.1.0"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
 ]
 
 [[package]]
 name = "chartml-chart-table"
-version = "4.1.0"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
 ]
 
 [[package]]
 name = "chartml-core"
-version = "4.1.0"
+version = "5.0.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "chartml-datafusion"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "chartml-forecast"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "augurs-core",
  "augurs-ets",
@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "4.0.2"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
  "humantime",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "chartml-render"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "chartml-core",
  "fontdb 0.22.0",
@@ -5563,8 +5563,6 @@ dependencies = [
 [[package]]
 name = "kode-core"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ee27940b38157ef44ca5c291ad3f3e53859b3d856668313e31313fb791683c7"
 dependencies = [
  "ropey",
 ]
@@ -5572,8 +5570,6 @@ dependencies = [
 [[package]]
 name = "kode-doc"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17ac705f0f9f05b5fadfde011dae4937968bcee6d4933a61cdc58d72de8de1b0"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -5583,8 +5579,6 @@ dependencies = [
 [[package]]
 name = "kode-leptos"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b82a6eead79c07099977b7d039c2801c96f3ef80772acb0dd9abf380c5299bc0"
 dependencies = [
  "arborium",
  "arborium-theme",
@@ -5605,8 +5599,6 @@ dependencies = [
 [[package]]
 name = "kode-markdown"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1be9f26f58608e99165aee56d4460daee6ba077e1aa681a20ad7109072ca38f"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",

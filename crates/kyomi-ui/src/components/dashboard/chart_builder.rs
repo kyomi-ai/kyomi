@@ -538,6 +538,12 @@ pub fn ChartBuilderModal(
     /// Existing chart YAML to edit (None for new chart).
     #[prop(optional)]
     existing_yaml: Option<String>,
+    /// Workspace UUID — used to construct a `KyomiDatasourceProvider` registered
+    /// on the preview chartml so charts with `data: { datasource, query }` render
+    /// in the visual editor. The modal mounts outside the dashboard's own
+    /// DashboardChartProviders, so the provider must be supplied here.
+    #[prop(into, optional)]
+    workspace_id: String,
     /// Callback to close the modal.
     on_close: Callback<()>,
     /// Callback with the generated/updated ChartML YAML.
@@ -806,6 +812,30 @@ pub fn ChartBuilderModal(
         signal(None::<send_wrapper::SendWrapper<chartml_leptos::ChartMLRef>>);
     let (preview_loading, set_preview_loading) = signal(false);
     let (preview_error, set_preview_error) = signal(None::<String>);
+
+    // Stable ChartML instance for the inline-data preview branch. Constructed
+    // ONCE per modal mount and stashed in a `StoredValue` (Copy, survives
+    // across reactive closures) so the preview closure can read the same
+    // `ChartMLRef` on every re-render. Without this, the closure would call
+    // `configured_chartml(...)` on every render — handing `<ChartMLChart>`
+    // a fresh `chartml` prop each time, which restarts its internal Resource
+    // and visibly never settles. `StoredValue::new_local` allows the
+    // wasm-only `Rc`-backed `ChartMLRef` (`!Send`) without a SendWrapper.
+    //
+    // Also register `KyomiDatasourceProvider` on this chartml's resolver so
+    // preview charts with `data: { datasource, query }` work — the modal
+    // mounts outside DashboardChartProviders, so ChartMLChart's context
+    // fallback finds nothing. We register directly here.
+    let inline_chartml: StoredValue<chartml_leptos::ChartMLRef, LocalStorage> = {
+        let chartml = configured_chartml("kyomi", initial_is_dark);
+        if !workspace_id.is_empty() {
+            let provider: chartml_leptos::ProviderRef = std::sync::Arc::new(
+                crate::chartml_provider::KyomiDatasourceProvider::new(workspace_id.clone()),
+            );
+            chartml.resolver().register_provider("datasource", provider);
+        }
+        StoredValue::new_local(chartml)
+    };
 
     // ── Auto-fetch preview data when opening with existing datasource + SQL ──
     #[cfg(target_arch = "wasm32")]
@@ -1622,11 +1652,11 @@ pub fn ChartBuilderModal(
                                             }.into_any()
                                         } else if datasource_slug_sig.get().is_empty() {
                                             // Inline data chart — render directly without remote fetch.
-                                            // ChartML with DataFusionTransform handles inline data natively.
-                                            let is_dark = crate::components::theme::use_theme()
-                                                .map(|s| s.effective.get_untracked() == "dark")
-                                                .unwrap_or(false);
-                                            let chartml_inst = configured_chartml("kyomi", is_dark);
+                                            // Reuse the stable per-mount `inline_chartml` (created above
+                                            // outside the reactive closure) — recreating it here would
+                                            // re-mount `<ChartMLChart>` on every preview-yaml change and
+                                            // the chart would never settle.
+                                            let chartml_inst = inline_chartml.with_value(|c| c.clone());
                                             view! {
                                                 <ChartPreview
                                                     spec=preview_yaml.get()

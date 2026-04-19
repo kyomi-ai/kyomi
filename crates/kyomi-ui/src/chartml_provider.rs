@@ -392,31 +392,36 @@ pub fn DashboardChartProviders(
     /// (the dashboard re-renders the preview on every editor keystroke).
     children: ChildrenFn,
 ) -> impl IntoView {
-    // Provider — synchronous, cheap, ready immediately.
-    let provider: ProviderRef = Arc::new(KyomiDatasourceProvider::new(workspace_id.clone()));
-    provide_context(provider);
+    provide_chart_context(&workspace_id);
+    children()
+}
 
-    // Hooks — `HooksRef` is `Rc<dyn ResolverHooks>` on WASM and therefore
-    // `!Send + !Sync`, which makes it incompatible with `provide_context`
-    // (Leptos requires `Send + Sync`). Instead of plumbing them through the
-    // context the way the provider is plumbed, we expose a constructor on
-    // [`KyomiResolverHooks`] and wire them per-chart via the
-    // `ChartMLChart`'s `hooks` prop or via the `resolver().set_hooks(...)`
-    // call inside `ChartBlock::new`. This keeps the dashboard-root API
-    // tier-2-cache-only — same shape as the cache backend signal.
+/// Provide the chartml provider + cache backend context entries that
+/// [`DashboardChartProviders`] would set up — useful when wrapping in the
+/// component itself would force a `ChildrenFn` constraint that breaks
+/// surrounding `FnOnce` reactive closures (e.g. the visual editor mode in
+/// `dashboard_editor.rs` which moves a `Vec<ToolbarItem>` into its children).
+/// Call this at the top of a component body to make `ProviderRef` and
+/// `CacheBackendSignal` available to descendant `ChartMLChart`s via
+/// `use_context`.
+pub fn provide_chart_context(workspace_id: &str) {
+    // Provider — synchronous, cheap, ready immediately.
+    let provider: ProviderRef = Arc::new(KyomiDatasourceProvider::new(workspace_id.to_string()));
+    provide_context(provider);
 
     // IndexedDB cache backend — opens asynchronously, hydrates a reactive
     // signal that descendants can read via Leptos context. The signal is
     // provided immediately (so the context entry exists at child mount) and
     // populated when the open completes. `ChartMLChart` re-resolves its
     // cache_backend prop on every mount, so the persistent cache becomes
-    // active as soon as charts re-mount after open completion (e.g. on
-    // refresh-button press, navigation back, or any reactive prop change
-    // that re-mounts the inner ChartMLChart instance).
-    let backend_signal = open_indexeddb_backend(&workspace_id);
+    // active as soon as charts re-mount after open completion.
+    //
+    // Hooks (`HooksRef`) are NOT plumbed through context — they're
+    // `Rc<dyn ResolverHooks>` on WASM which is `!Send + !Sync` and
+    // incompatible with `provide_context`. Per-chart `set_hooks` wiring
+    // happens inside `ChartBlock::new`.
+    let backend_signal = open_indexeddb_backend(workspace_id);
     provide_context(backend_signal);
-
-    children()
 }
 
 /// Spawn the IndexedDB open and return a [`CacheBackendSignal`] that flips

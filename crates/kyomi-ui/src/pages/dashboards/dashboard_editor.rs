@@ -918,6 +918,16 @@ fn DashboardEditorInner(
                             ToolbarItem::Slot(editor_mode_toggle(mode, set_mode).into_any()),
                         ];
 
+                        // Provide the chartml provider + cache backend context
+                        // here so inline ChartMLChart renders inside the WYSIWYG
+                        // editor pick up the same KyomiDatasourceProvider as
+                        // Source mode's MarkdownRenderer. Without this, charts
+                        // with `data: { datasource, query }` surface
+                        // "no provider registered for kind datasource".
+                        // Direct `provide_context` (not the wrapper component)
+                        // because wrapping would impose ChildrenFn on the moved
+                        // `items: Vec<ToolbarItem>`.
+                        crate::chartml_provider::provide_chart_context(&workspace_id.get());
                         view! {
                             <div class="flex flex-1 min-h-0 overflow-hidden">
                                 <div class="flex-1 min-h-0 overflow-hidden">
@@ -1010,12 +1020,20 @@ fn DashboardEditorInner(
                         set_edit_chart_yaml.set(None);
                     });
                     let open_sig = Signal::derive(move || chart_builder_open.get());
+                    // Pass workspace_id so ChartBuilderModal can register its own
+                    // KyomiDatasourceProvider on its preview chartml. Without this,
+                    // charts with `data: { datasource: ..., query: ... }` in the
+                    // visual editor surface a "no provider registered for kind
+                    // datasource" error (the modal mounts outside the dashboard's
+                    // own DashboardChartProviders, so it has no provider context).
+                    let ws_id = workspace_id.get();
+                    let ws_id_for_some = ws_id.clone();
                     match existing {
                         Some(yaml) => view! {
-                            <ChartBuilderModal open=open_sig existing_yaml=yaml on_close=close_cb on_insert=insert_cb />
+                            <ChartBuilderModal open=open_sig existing_yaml=yaml workspace_id=ws_id_for_some on_close=close_cb on_insert=insert_cb />
                         }.into_any(),
                         None => view! {
-                            <ChartBuilderModal open=open_sig on_close=close_cb on_insert=insert_cb />
+                            <ChartBuilderModal open=open_sig workspace_id=ws_id on_close=close_cb on_insert=insert_cb />
                         }.into_any(),
                     }
                 }}
