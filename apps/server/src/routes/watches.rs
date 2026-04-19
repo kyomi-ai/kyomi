@@ -41,7 +41,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use kyomi_auth::{chat_service, middleware::AuthUser, watch_service};
+use kyomi_auth::{
+    chat_service, middleware::AuthUser, watch_service, websocket::helpers as ws_helpers,
+};
 use kyomi_core::capability;
 
 use crate::state::AppState;
@@ -444,6 +446,21 @@ async fn create_watch(
         name = %watch.name,
         "Created watch"
     );
+
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
+    ws_helpers::send_watch_update(
+        &state.ws_manager,
+        workspace_id,
+        &watch.watch_id,
+        "created",
+        &user.user_id,
+        changed_by_name,
+        None,
+    )
+    .await;
 
     Ok(Json(watch_to_response(&state.db, &watch).await))
 }
@@ -1110,6 +1127,21 @@ async fn update_watch(
 
     tracing::info!(watch_id = %watch_id, "Updated watch");
 
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
+    ws_helpers::send_watch_update(
+        &state.ws_manager,
+        workspace_id,
+        &watch_id,
+        "updated",
+        &user.user_id,
+        changed_by_name,
+        None,
+    )
+    .await;
+
     Ok(Json(watch_to_response(&state.db, &watch).await))
 }
 
@@ -1136,6 +1168,21 @@ async fn delete_watch(
         })?;
 
     tracing::info!(watch_id = %watch_id, "Deleted watch");
+
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
+    ws_helpers::send_watch_update(
+        &state.ws_manager,
+        workspace_id,
+        &watch_id,
+        "deleted",
+        &user.user_id,
+        changed_by_name,
+        None,
+    )
+    .await;
 
     Ok(Json(json!({
         "message": "Watch deleted",

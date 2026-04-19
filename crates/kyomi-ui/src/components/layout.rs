@@ -463,6 +463,13 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 cache_alerts_2.invalidate("unread_alerts");
             });
 
+            // Watch CRUD mutation — create/update/delete of a watch by this
+            // user or another workspace member. Refresh the watches list.
+            let cache_watches = query_cache;
+            let watch_update_unsub = ws.subscribe("watch_update", move |_msg| {
+                cache_watches.invalidate("watches");
+            });
+
             let dashboard_unsub = send_wrapper::SendWrapper::new(dashboard_unsub);
             let workspace_unsub = send_wrapper::SendWrapper::new(workspace_unsub);
             let session_created_unsub = send_wrapper::SendWrapper::new(session_created_unsub);
@@ -470,6 +477,7 @@ fn QueryCacheWsBridge() -> impl IntoView {
             let shared_activity_unsub = send_wrapper::SendWrapper::new(shared_activity_unsub);
             let watch_alert_unsub = send_wrapper::SendWrapper::new(watch_alert_unsub);
             let watch_state_unsub = send_wrapper::SendWrapper::new(watch_state_unsub);
+            let watch_update_unsub = send_wrapper::SendWrapper::new(watch_update_unsub);
             on_cleanup(move || {
                 dashboard_unsub.take()();
                 workspace_unsub.take()();
@@ -478,6 +486,7 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 shared_activity_unsub.take()();
                 watch_alert_unsub.take()();
                 watch_state_unsub.take()();
+                watch_update_unsub.take()();
             });
         });
     }
