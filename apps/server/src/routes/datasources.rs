@@ -974,6 +974,21 @@ async fn create_datasource(
     let masked_config =
         credential_service::mask_connection_config(&ds.connection_config, ds.datasource_type.as_ref());
 
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
+    ws_helpers::send_datasource_update(
+        &state.ws_manager,
+        workspace_id,
+        &ds.id,
+        "created",
+        &user.user_id,
+        changed_by_name,
+        None,
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(CreateDatasourceResponse {
@@ -1137,6 +1152,21 @@ async fn update_datasource(
         updated.datasource_type.as_ref(),
     );
 
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
+    ws_helpers::send_datasource_update(
+        &state.ws_manager,
+        workspace_id,
+        &updated.id,
+        "updated",
+        &user.user_id,
+        changed_by_name,
+        None,
+    )
+    .await;
+
     Ok(Json(DatasourceResponse {
         id: updated.id,
         slug: updated.slug,
@@ -1182,6 +1212,21 @@ async fn delete_datasource_handler(
     // No graph cleanup needed — cascade deletes handle this
 
     // Skip MCP notification (Phase 11)
+
+    let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
+    ws_helpers::send_datasource_update(
+        &state.ws_manager,
+        workspace_id,
+        &ds_id,
+        "deleted",
+        &user.user_id,
+        changed_by_name,
+        None,
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT)
 }

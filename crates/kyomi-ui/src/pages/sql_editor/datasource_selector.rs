@@ -12,6 +12,7 @@
 
 use leptos::prelude::*;
 use crate::components::{DynSelect, Spinner};
+use crate::query_cache::use_query;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
 /// localStorage key for persisting the last selected datasource slug.
@@ -64,14 +65,13 @@ impl DatasourceSelection {
 pub fn DatasourceSelector() -> impl IntoView {
     let selection = DatasourceSelection::use_selection();
 
-    // Fetch datasources as a resource.
-    let datasources_resource = Resource::new(|| (), |_| async move {
-        list_datasources().await
-    });
+    // Fetch datasources via the shared QueryCache so that `datasource_update`
+    // WS events refresh this dropdown too (see layout.rs QueryCacheWsBridge).
+    let datasources_signal = use_query("datasources", || (), |_: ()| list_datasources());
 
     // Once datasources load, filter to accessible ones and auto-select.
     let accessible_datasources: Memo<Vec<DatasourceInfo>> = Memo::new(move |_| {
-        let ds_list = match datasources_resource.get() {
+        let ds_list = match datasources_signal.get() {
             Some(Ok(list)) => list,
             _ => return Vec::new(),
         };
@@ -109,11 +109,11 @@ pub fn DatasourceSelector() -> impl IntoView {
     });
 
     // Loading state.
-    let is_loading = Memo::new(move |_| datasources_resource.get().is_none());
+    let is_loading = Memo::new(move |_| datasources_signal.get().is_none());
 
     // Error state.
     let has_error = Memo::new(move |_| {
-        matches!(datasources_resource.get(), Some(Err(_)))
+        matches!(datasources_signal.get(), Some(Err(_)))
     });
 
     view! {

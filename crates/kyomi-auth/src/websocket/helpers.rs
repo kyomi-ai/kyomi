@@ -682,6 +682,33 @@ pub async fn send_dashboard_update(
 }
 
 // ---------------------------------------------------------------------------
+// Datasource CRUD events
+// ---------------------------------------------------------------------------
+
+/// Broadcast a datasource_update to all workspace members (except the actor).
+pub async fn send_datasource_update(
+    manager: &WebSocketManager,
+    workspace_id: &str,
+    datasource_id: &str,
+    action: &str,
+    changed_by: &str,
+    changed_by_name: &str,
+    exclude_user_id: Option<&str>,
+) {
+    let msg = WebSocketMessage::new(MessageType::DatasourceUpdate)
+        .with_data(serde_json::json!({
+            "action": action,
+            "datasource_id": datasource_id,
+            "changed_by": changed_by,
+            "changed_by_name": changed_by_name,
+        }));
+
+    manager
+        .broadcast_to_workspace(workspace_id, msg, exclude_user_id)
+        .await;
+}
+
+// ---------------------------------------------------------------------------
 // Watch CRUD events
 // ---------------------------------------------------------------------------
 

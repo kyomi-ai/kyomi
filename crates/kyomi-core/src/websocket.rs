@@ -26,6 +26,7 @@ pub enum MessageType {
     WorkspaceInvitation,
     WorkspaceRemoved,
     DashboardUpdate,
+    DatasourceUpdate,
     ChartUpdate,
     WatchAlert,
     WatchStateUpdate,

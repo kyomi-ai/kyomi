@@ -180,17 +180,14 @@ pub fn WatchModal(
         }
     });
 
-    // ── Datasources resource ─────────────────────────────────────────────
-    let datasources_resource = Resource::new(
-        move || open.get(),
-        move |is_open| async move {
-            if !is_open {
-                return Vec::new();
-            }
-            crate::server_fns::datasources::list_datasources()
-                .await
-                .unwrap_or_default()
-        },
+    // ── Datasources query ────────────────────────────────────────────────
+    // Shared QueryCache entry — invalidated by `datasource_update` WS events
+    // (see layout.rs QueryCacheWsBridge) so the dropdown stays fresh when
+    // another tab/member creates, updates, or deletes a datasource.
+    let datasources_signal = crate::query_cache::use_query(
+        "datasources",
+        || (),
+        |_: ()| crate::server_fns::datasources::list_datasources(),
     );
 
     // ── Schedule change callback ────────────────────────────────────────
@@ -673,7 +670,7 @@ pub fn WatchModal(
                                                                 })
                                                                 options=Signal::derive(move || {
                                                                     let mut opts = vec![("none".to_string(), "None".to_string())];
-                                                                    if let Some(ds_list) = datasources_resource.get() {
+                                                                    if let Some(Ok(ds_list)) = datasources_signal.get() {
                                                                         for ds in ds_list {
                                                                             opts.push((ds.slug.clone(), ds.name.clone()));
                                                                         }

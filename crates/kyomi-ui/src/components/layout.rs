@@ -470,6 +470,13 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 cache_watches.invalidate("watches");
             });
 
+            // Datasource CRUD mutation — create/update/delete of a datasource by
+            // this user or another workspace member. Refresh the datasources list.
+            let cache_datasources = query_cache;
+            let datasource_update_unsub = ws.subscribe("datasource_update", move |_msg| {
+                cache_datasources.invalidate("datasources");
+            });
+
             let dashboard_unsub = send_wrapper::SendWrapper::new(dashboard_unsub);
             let workspace_unsub = send_wrapper::SendWrapper::new(workspace_unsub);
             let session_created_unsub = send_wrapper::SendWrapper::new(session_created_unsub);
@@ -478,6 +485,7 @@ fn QueryCacheWsBridge() -> impl IntoView {
             let watch_alert_unsub = send_wrapper::SendWrapper::new(watch_alert_unsub);
             let watch_state_unsub = send_wrapper::SendWrapper::new(watch_state_unsub);
             let watch_update_unsub = send_wrapper::SendWrapper::new(watch_update_unsub);
+            let datasource_update_unsub = send_wrapper::SendWrapper::new(datasource_update_unsub);
             on_cleanup(move || {
                 dashboard_unsub.take()();
                 workspace_unsub.take()();
@@ -487,6 +495,7 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 watch_alert_unsub.take()();
                 watch_state_unsub.take()();
                 watch_update_unsub.take()();
+                datasource_update_unsub.take()();
             });
         });
     }

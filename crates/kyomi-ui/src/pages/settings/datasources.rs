@@ -17,6 +17,7 @@ use crate::pages::settings::connect_deployment::{
     CopyButton, DeploymentCommands, DeploymentTabStrip, build_deployment_commands, default_port,
 };
 use crate::pages::settings::connect_status_panel::ConnectStatusPanel;
+use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::connect::create_connect_datasource;
 use crate::server_fns::datasources::*;
 use crate::server_fns::onboarding::{
@@ -56,40 +57,41 @@ fn generate_slug(name: &str) -> String {
 /// Data Sources settings page content.
 #[component]
 pub fn DatasourcesPage() -> impl IntoView {
-    let datasources_resource = Resource::new(|| (), |_| list_datasources());
+    // Layout-level QueryCache — cached across navigation and invalidated by
+    // `datasource_update` WS events so other tabs (and other workspace
+    // members) see create/update/delete mutations without a manual refresh.
+    let datasources_signal =
+        use_query("datasources", || (), |_: ()| list_datasources());
 
     view! {
-        <Transition fallback=move || view! { <DatasourcesLoadingSkeleton/> }>
-            {move || Suspend::new(async move {
-                match datasources_resource.await {
-                    Ok(datasources) => {
-                        view! {
-                            <DatasourcesContent
-                                initial_datasources=datasources
-                                datasources_resource=datasources_resource
-                            />
-                        }.into_any()
-                    }
-                    Err(e) => view! {
-                        <div class="p-4 sm:p-6 space-y-6">
-                            <div>
-                                <h2 class="text-xl font-display text-foreground">"Datasources"</h2>
-                                <p class="text-sm text-muted-foreground">
-                                    "Manage database connections"
+        {move || {
+            match datasources_signal.get() {
+                None => view! { <DatasourcesLoadingSkeleton/> }.into_any(),
+                Some(Ok(datasources)) => view! {
+                    <DatasourcesContent
+                        initial_datasources=datasources
+                        datasources_signal=datasources_signal
+                    />
+                }.into_any(),
+                Some(Err(e)) => view! {
+                    <div class="p-4 sm:p-6 space-y-6">
+                        <div>
+                            <h2 class="text-xl font-display text-foreground">"Datasources"</h2>
+                            <p class="text-sm text-muted-foreground">
+                                "Manage database connections"
+                            </p>
+                        </div>
+                        <Card>
+                            <div class="p-6">
+                                <p class="text-error-foreground">
+                                    {format!("Failed to load datasources: {e}")}
                                 </p>
                             </div>
-                            <Card>
-                                <div class="p-6">
-                                    <p class="text-error-foreground">
-                                        {format!("Failed to load datasources: {e}")}
-                                    </p>
-                                </div>
-                            </Card>
-                        </div>
-                    }.into_any(),
-                }
-            })}
-        </Transition>
+                        </Card>
+                    </div>
+                }.into_any(),
+            }
+        }}
     }
 }
 
@@ -112,9 +114,10 @@ fn DatasourcesLoadingSkeleton() -> impl IntoView {
 #[component]
 fn DatasourcesContent(
     initial_datasources: Vec<DatasourceInfo>,
-    datasources_resource: Resource<Result<Vec<DatasourceInfo>, ServerFnError>>,
+    datasources_signal: Signal<Option<Result<Vec<DatasourceInfo>, ServerFnError>>>,
 ) -> impl IntoView {
     let (datasources, set_datasources) = signal(initial_datasources);
+    let query_cache = expect_context::<QueryCache>();
 
     // ── Modal state ──────────────────────────────────────────────────────
     // None = closed, Some(None) = create mode, Some(Some(id)) = edit mode
@@ -129,13 +132,15 @@ fn DatasourcesContent(
 
     let on_datasource_saved = Callback::new(move |_result: DatasourceResult| {
         set_modal_datasource_id.set(None);
-        // Refresh the datasource list
-        datasources_resource.refetch();
+        // Refresh the datasource list — the cached signal will refetch in
+        // the background and reseed `datasources` via the Effect below.
+        query_cache.invalidate("datasources");
     });
 
-    // When resource refreshes, update local list
+    // When the shared cache refreshes (WS invalidation or explicit
+    // invalidate), sync the local optimistic list.
     Effect::new(move |_| {
-        if let Some(Ok(list)) = datasources_resource.get() {
+        if let Some(Ok(list)) = datasources_signal.get() {
             set_datasources.set(list);
         }
     });

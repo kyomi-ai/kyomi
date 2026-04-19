@@ -38,7 +38,7 @@ use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
 use crate::pages::sql_editor::types::QueryResult;
-use crate::server_fns::datasources::{list_datasources, query_datasource_arrow, DatasourceInfo};
+use crate::server_fns::datasources::{list_datasources, query_datasource_arrow};
 use crate::server_fns::sql_editor::execute_sql_query;
 
 use super::markdown_renderer::{configured_chartml, kyomi_palette, kyomi_theme};
@@ -622,19 +622,18 @@ pub fn ChartBuilderModal(
     });
 
     // ── Datasource options from server ──────────────────────────────────
-    let datasources_resource = Resource::new(
-        move || open.get(),
-        move |is_open| async move {
-            if !is_open {
-                return Ok(Vec::<DatasourceInfo>::new());
-            }
-            list_datasources().await
-        },
+    // Shared QueryCache entry — invalidated by `datasource_update` WS events
+    // (see layout.rs QueryCacheWsBridge) so the dropdown stays fresh when
+    // another tab/member creates, updates, or deletes a datasource.
+    let datasources_signal = crate::query_cache::use_query(
+        "datasources",
+        || (),
+        |_: ()| list_datasources(),
     );
 
     // Derive DynSelect options: (slug, "name (type)")
     let datasource_options = Signal::derive(move || {
-        datasources_resource
+        datasources_signal
             .get()
             .and_then(|res| res.ok())
             .unwrap_or_default()
