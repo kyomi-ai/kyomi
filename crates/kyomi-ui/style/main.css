@@ -83,6 +83,8 @@ html {
   --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
 }
 
+:root:not(.dark) { color-scheme: light; }
+
 /* === Animation Keyframes ===
  * Replaces tailwindcss-animate plugin (not available in standalone Tailwind CLI).
  * React uses these via the plugin; Leptos defines them manually. */
@@ -874,6 +876,8 @@ html {
   --chartml-bg: #12100F;
   --chartml-annotation: #78716C;
 }
+
+:root.dark { color-scheme: dark; }
 
 /* Interactive element defaults */
 button, [role="button"] {
