@@ -71,13 +71,6 @@ pub struct WorkspaceSettingsData {
     pub chart_palette: String,
 }
 
-/// Result of a knowledge graph rebuild.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GraphRebuildResult {
-    pub status: String,
-    pub learnings_with_references: i64,
-}
-
 /// Workspace-level Slack integration status.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceSlackStatus {

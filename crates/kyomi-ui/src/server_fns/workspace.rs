@@ -9,7 +9,7 @@
 
 use leptos::prelude::*;
 
-use crate::types::{GraphRebuildResult, WorkspaceSettingsData};
+use crate::types::WorkspaceSettingsData;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers (server-only)
@@ -205,34 +205,6 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(())
-}
-
-/// Rebuild the workspace knowledge graph. Requires admin role.
-///
-/// Runs the full population pipeline: tables, columns, learnings, and
-/// backfills learning references. Idempotent — safe to run multiple times.
-#[server(prefix = "/leptos-api")]
-pub async fn populate_knowledge_graph() -> Result<GraphRebuildResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
-
-    let ws_id = workspace_id(&auth)?;
-    let embed = ctx.embedding.get()
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    kyomi_knowledge::populate::populate_workspace(&ctx.db, embed, ws_id)
-        .await
-        .map_err(|e| ServerFnError::new(format!("Knowledge population failed: {e}")))?;
-
-    let refs_count = kyomi_knowledge::references::backfill_all_references(&ctx.db, ws_id)
-        .await
-        .map_err(|e| ServerFnError::new(format!("Reference backfill failed: {e}")))?;
-
-    Ok(GraphRebuildResult {
-        status: "complete".to_string(),
-        learnings_with_references: refs_count as i64,
-    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

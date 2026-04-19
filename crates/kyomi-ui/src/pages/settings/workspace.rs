@@ -8,9 +8,10 @@
 use leptos::prelude::*;
 
 use crate::components::{
-    ActionStatus, Alert, AlertDescription, AlertVariant, Button, ButtonVariant, Card, CardContent,
-    CardDescription, CardHeader, CardTitle, INPUT_CLASS,
+    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton, INPUT_CLASS,
 };
+#[cfg(feature = "slack")]
+use crate::components::{Alert, AlertDescription, AlertVariant, Button, ButtonVariant};
 use crate::server_fns::workspace::*;
 use crate::types::WorkspaceSettingsData;
 
@@ -30,13 +31,26 @@ pub fn WorkspacePage() -> impl IntoView {
             </p>
 
             <Transition fallback=move || view! {
-                <Card>
-                    <CardContent>
-                        <p class="text-sm text-muted-foreground text-center py-8">
-                            "Loading workspace settings..."
-                        </p>
-                    </CardContent>
-                </Card>
+                <div class="space-y-6">
+                    <Card>
+                        <CardHeader>
+                            <Skeleton class="h-5 w-1/3"/>
+                            <Skeleton class="h-4 w-2/3 mt-1"/>
+                        </CardHeader>
+                        <CardContent>
+                            <Skeleton class="h-10 w-full"/>
+                        </CardContent>
+                    </Card>
+                    <Card>
+                        <CardHeader>
+                            <Skeleton class="h-5 w-1/3"/>
+                            <Skeleton class="h-4 w-2/3 mt-1"/>
+                        </CardHeader>
+                        <CardContent>
+                            <Skeleton class="h-20 w-full"/>
+                        </CardContent>
+                    </Card>
+                </div>
             }>
                 {move || {
                     settings.get().map(|result| match result {
@@ -44,7 +58,6 @@ pub fn WorkspacePage() -> impl IntoView {
                             view! {
                                 <div class="space-y-6">
                                     <WorkspaceNameCard data=data/>
-                                    <KnowledgeGraphCard/>
                                     <WorkspaceSlackSection/>
                                 </div>
                             }.into_any()
@@ -107,80 +120,6 @@ fn WorkspaceNameCard(data: WorkspaceSettingsData) -> impl IntoView {
                     on:input=move |ev| set_name.set(event_target_value(&ev))
                     on:blur=on_blur
                 />
-            </CardContent>
-        </Card>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Knowledge Graph Card
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn KnowledgeGraphCard() -> impl IntoView {
-    let rebuild_action = Action::new(|_: &()| async move {
-        populate_knowledge_graph().await
-    });
-
-    view! {
-        <Card>
-            <CardHeader>
-                <CardTitle>"Knowledge Graph"</CardTitle>
-                <CardDescription>
-                    "Rebuild the knowledge graph from your catalog and learnings. This fixes stale or missing graph data."
-                </CardDescription>
-            </CardHeader>
-            <CardContent>
-                {move || {
-                    let value = rebuild_action.value().get();
-                    match value {
-                        Some(Ok(result)) => {
-                            view! {
-                                <Alert variant=AlertVariant::Success attr:class="mb-4">
-                                    <AlertDescription>
-                                        {format!(
-                                            "Graph rebuilt: {} learnings with references.",
-                                            result.learnings_with_references
-                                        )}
-                                    </AlertDescription>
-                                </Alert>
-                            }.into_any()
-                        },
-                        Some(Err(e)) => {
-                            view! {
-                                <Alert variant=AlertVariant::Error attr:class="mb-4">
-                                    <AlertDescription>{e.to_string()}</AlertDescription>
-                                </Alert>
-                            }.into_any()
-                        },
-                        None => view! { <span></span> }.into_any(),
-                    }
-                }}
-                <Button
-                    variant=ButtonVariant::Outline
-                    on:click=move |_| { rebuild_action.dispatch(()); }
-                    disabled=rebuild_action.pending().get()
-                >
-                    {move || {
-                        if rebuild_action.pending().get() {
-                            view! {
-                                <span class="inline-flex items-center gap-2">
-                                    <span class="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"></span>
-                                    "Rebuilding..."
-                                </span>
-                            }.into_any()
-                        } else {
-                            view! {
-                                <span class="inline-flex items-center gap-2">
-                                    <span class="inline-flex">
-                                        <phosphor_leptos::Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px"/>
-                                    </span>
-                                    "Rebuild Graph"
-                                </span>
-                            }.into_any()
-                        }
-                    }}
-                </Button>
             </CardContent>
         </Card>
     }

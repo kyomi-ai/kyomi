@@ -853,7 +853,7 @@ fn ChartBlock(
     let on_ask_stored = StoredValue::new(on_ask_cb);
 
     view! {
-        <div>
+        <div class="chart-card">
             // Native Rust ChartHeaderBar — re-renders when type/orientation/mode change
             {move || {
                 let ct = current_chart_type.get();

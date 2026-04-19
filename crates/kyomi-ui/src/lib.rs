@@ -202,7 +202,6 @@ pub fn register_server_functions() {
     register_explicit::<UpdateWorkspaceName>();
     register_explicit::<UpdateWorkspaceModel>();
     register_explicit::<UpdateWorkspaceChartmlConfig>();
-    register_explicit::<PopulateKnowledgeGraph>();
 
     use server_fns::knowledge::*;
     register_explicit::<ListKnowledgeDocs>();

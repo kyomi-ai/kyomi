@@ -257,7 +257,6 @@ Simplest standalone tab — good warmup for admin pages.
 Server functions:
 - `get_workspace_settings()` → WorkspaceSettingsData
 - `update_workspace_settings(name, default_model, chartml_config)`
-- `populate_knowledge_graph()` (triggers background rebuild)
 
 Slack-related server functions (if not already built in Task 2.3):
 - `get_slack_workspace_status()`
