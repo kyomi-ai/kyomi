@@ -802,7 +802,7 @@ pub fn ChartBuilderModal(
     let (catalog_open, set_catalog_open) = signal(false);
     let (catalog_tab, set_catalog_tab) = signal("catalog".to_string());
     let (catalog_search, set_catalog_search) = signal(String::new());
-    let (catalog_refresh_trigger, _set_catalog_refresh_trigger) = signal(0u32);
+    let (catalog_refresh_trigger, set_catalog_refresh_trigger) = signal(0u32);
 
     // ── Query execution state ─────────────────────────────────────────
     let (query_running, set_query_running) = signal(false);
@@ -1148,6 +1148,7 @@ pub fn ChartBuilderModal(
                                                     type="button"
                                                     class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
                                                     title="Refresh catalog"
+                                                    on:click=move |_| set_catalog_refresh_trigger.update(|v| *v += 1)
                                                 >
                                                     <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="14px" />
                                                 </button>
