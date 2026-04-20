@@ -14,6 +14,7 @@ use chartml_chart_scatter::ScatterRenderer;
 use chartml_chart_table::TableRenderer;
 use chartml_core::theme::Theme;
 use chartml_core::ChartML;
+use chartml_datafusion::DataFusionTransform;
 use chartml_leptos::ChartMLChart;
 use kode_leptos::extension::Extension;
 use leptos::prelude::*;
@@ -21,8 +22,8 @@ use leptos::tachys::view::any_view::AnyView;
 
 use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
 use crate::components::dashboard::markdown_renderer::{
-    apply_spec_overrides, extract_chart_mode, extract_chart_orientation, extract_chart_type,
-    split_chartml_block,
+    apply_spec_overrides, chart_col_span_class, extract_chart_mode, extract_chart_orientation,
+    extract_chart_type, extract_col_span, split_chartml_block,
 };
 
 /// Create a configured ChartML instance, optionally with a color palette
@@ -34,9 +35,11 @@ fn create_chartml(colors: Option<Vec<String>>, theme: Option<Theme>) -> chartml_
     chartml.register_renderer("area", CartesianRenderer::new());
     chartml.register_renderer("pie", PieRenderer::new());
     chartml.register_renderer("donut", PieRenderer::new());
+    chartml.register_renderer("doughnut", PieRenderer::new());
     chartml.register_renderer("scatter", ScatterRenderer::new());
     chartml.register_renderer("metric", MetricRenderer::new());
     chartml.register_renderer("table", TableRenderer::new());
+    chartml.register_transform(DataFusionTransform);
     if let Some(colors) = colors {
         chartml.set_default_palette(colors);
     }
@@ -128,22 +131,28 @@ impl Extension for ChartMLExtension {
             .into_iter()
             .enumerate()
             .map(|(array_index, item_yaml)| {
-                render_one_chart(
+                let col_span = serde_yaml::from_str::<serde_json::Value>(&item_yaml)
+                    .ok()
+                    .as_ref()
+                    .map(extract_col_span)
+                    .unwrap_or(12);
+                let col_class = chart_col_span_class(col_span);
+                let chart_view = render_one_chart(
                     item_yaml,
                     array_index,
                     full_block_content.clone(),
                     chartml.clone(),
-                )
+                );
+                view! { <div class=col_class>{chart_view}</div> }.into_any()
             })
             .collect();
 
         Some(
             view! {
                 // dashboard-content wrapper triggers chart container CSS (border,
-                // bg, radius) on each .chart-card child. The per-chart views
-                // each emit their own .chart-card so a sequence block renders
-                // as stacked cards.
-                <div class="dashboard-content not-prose">
+                // bg, radius) on each .chart-card child. Grid wrapping lets items
+                // with `layout.colSpan` share rows instead of stacking full-width.
+                <div class="dashboard-content not-prose grid grid-cols-12 gap-4">
                     {views}
                 </div>
             }

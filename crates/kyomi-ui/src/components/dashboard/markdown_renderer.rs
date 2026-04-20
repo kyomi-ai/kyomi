@@ -373,7 +373,7 @@ fn extract_chart_height(spec: &serde_json::Value) -> Option<f64> {
 
 /// Extract `layout.colSpan` (or snake_case `col_span`) from a parsed spec,
 /// clamped to 1..=12. Defaults to 12 when missing / invalid.
-fn extract_col_span(spec: &serde_json::Value) -> u8 {
+pub(crate) fn extract_col_span(spec: &serde_json::Value) -> u8 {
     let raw = spec
         .get("layout")
         .and_then(|l| l.get("colSpan").or_else(|| l.get("col_span")))
@@ -387,7 +387,7 @@ fn extract_col_span(spec: &serde_json::Value) -> u8 {
 /// Map colSpan (1..=12) to static Tailwind classes. Mobile = full width,
 /// `md:` breakpoint = specified span. Static strings so Tailwind's content
 /// scanner picks them up.
-fn chart_col_span_class(col_span: u8) -> &'static str {
+pub(crate) fn chart_col_span_class(col_span: u8) -> &'static str {
     match col_span {
         1 => "col-span-12 md:col-span-1",
         2 => "col-span-12 md:col-span-2",
@@ -427,6 +427,7 @@ pub(crate) fn configured_chartml(palette_name: &str, is_dark: bool) -> ChartMLRe
         c.register_renderer("line", CartesianRenderer::new());
         c.register_renderer("area", CartesianRenderer::new());
         c.register_renderer("pie", PieRenderer::new());
+        c.register_renderer("donut", PieRenderer::new());
         c.register_renderer("doughnut", PieRenderer::new());
         c.register_renderer("scatter", ScatterRenderer::new());
         c.register_renderer("metric", MetricRenderer::new());
