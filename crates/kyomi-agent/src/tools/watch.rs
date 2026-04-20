@@ -4,6 +4,8 @@
 
 use async_trait::async_trait;
 
+use kyomi_auth::websocket::helpers as ws_helpers;
+
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -245,6 +247,18 @@ impl AgentTool for CreateWatchTool {
             }
             Err(e) => return Err(e),
         };
+
+        // Broadcast watch creation to workspace members.
+        ws_helpers::send_watch_update(
+            &ctx.ws_manager,
+            &ctx.workspace_id,
+            &watch.watch_id,
+            "created",
+            &ctx.user_id,
+            &ctx.user_display_name,
+            Some(&ctx.user_id),
+        )
+        .await;
 
         let schedule_description =
             kyomi_auth::watch_service::describe_cron(&watch.schedule);
@@ -539,6 +553,18 @@ impl AgentTool for UpdateWatchTool {
             Err(e) => return Err(e),
         };
 
+        // Broadcast watch update to workspace members.
+        ws_helpers::send_watch_update(
+            &ctx.ws_manager,
+            &ctx.workspace_id,
+            &watch.watch_id,
+            "updated",
+            &ctx.user_id,
+            &ctx.user_display_name,
+            Some(&ctx.user_id),
+        )
+        .await;
+
         let schedule_description =
             kyomi_auth::watch_service::describe_cron(&watch.schedule);
         let next_run_display = watch
@@ -740,12 +766,26 @@ impl AgentTool for DeleteWatchTool {
         )
         .await
         {
-            Ok(()) => Ok(serde_json::json!({
-                "success": true,
-                "watch_id": watch_id,
-                "message": format!("Deleted watch '{watch_id}'"),
-            })
-            .to_string()),
+            Ok(()) => {
+                // Broadcast watch deletion to workspace members.
+                ws_helpers::send_watch_update(
+                    &ctx.ws_manager,
+                    &ctx.workspace_id,
+                    watch_id,
+                    "deleted",
+                    &ctx.user_id,
+                    &ctx.user_display_name,
+                    Some(&ctx.user_id),
+                )
+                .await;
+
+                Ok(serde_json::json!({
+                    "success": true,
+                    "watch_id": watch_id,
+                    "message": format!("Deleted watch '{watch_id}'"),
+                })
+                .to_string())
+            }
             Err(kyomi_core::Error::NotFound(msg)) => {
                 Ok(serde_json::json!({ "error": msg }).to_string())
             }
