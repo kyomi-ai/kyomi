@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use phosphor_leptos::{Icon, IconWeight};
-use crate::components::dashboard::MarkdownRenderer;
+use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
 use crate::components::popover::{Placement, Popover};
 use crate::components::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, EmptyState, Label,
@@ -286,6 +286,36 @@ pub fn AlertsHistory(
             .and_then(|ctx| ctx.workspace_id)
     });
 
+    // ── Chart header action state (KYO-120) ──────────────────────────────
+    // Each expanded alert renders its chartml blocks through `MarkdownRenderer`,
+    // and the renderer only shows the `info` + `ask-about-chart` header
+    // buttons when the caller wires the matching callbacks (see
+    // `markdown_renderer.rs::has_info / has_ask`). We keep the historical-
+    // snapshot semantics of an alert intact by NOT wiring `edit`, `delete`,
+    // `refresh`, or `save_to_dashboard` — alerts are point-in-time records.
+    let (chart_info_yaml, set_chart_info_yaml) = signal(String::new());
+    let (chart_info_open, set_chart_info_open) = signal(false);
+
+    let on_chart_info = Callback::new(move |yaml: String| {
+        set_chart_info_yaml.set(yaml);
+        set_chart_info_open.set(true);
+    });
+
+    let on_chart_info_close = Callback::new(move |()| {
+        set_chart_info_open.set(false);
+    });
+
+    // Navigate to the chat page with the chart YAML as context — matches
+    // the canonical flow in `dashboard_viewer.rs::on_ask_about_chart` so the
+    // chat page's existing `/chat?chart=...` handler picks it up unchanged.
+    let on_ask_about_chart = Callback::new(move |chart_md: String| {
+        let nav = leptos_router::hooks::use_navigate();
+        nav(
+            &format!("/chat?chart={}", js_sys::encode_uri_component(&chart_md)),
+            leptos_router::NavigateOptions::default(),
+        );
+    });
+
     // ── State ────────────────────────────────────────────────────────────
     let selected_watch_id = RwSignal::new(String::new());
     let expanded_alerts = RwSignal::new(HashSet::<i32>::new());
@@ -504,6 +534,14 @@ pub fn AlertsHistory(
 
     // ── Render ───────────────────────────────────────────────────────────
     view! {
+        // KYO-120: Chart info modal is a sibling of the alerts list so it
+        // survives the Suspense fallback and stays mounted while a user
+        // scrolls/pages through alerts. Matches `dashboard_viewer.rs` pattern.
+        <ChartInfoModal
+            open=Signal::derive(move || chart_info_open.get())
+            yaml=chart_info_yaml
+            on_close=on_chart_info_close
+        />
         <Suspense fallback=move || view! {
             <div class="flex items-center justify-center py-12">
                 <Spinner class="text-muted-foreground" />
@@ -872,6 +910,8 @@ pub fn AlertsHistory(
                                                                 <MarkdownRenderer
                                                                     content=Signal::derive(move || agent_response.clone())
                                                                     workspace_id=ws_id
+                                                                    on_chart_info=on_chart_info
+                                                                    on_ask_about_chart=on_ask_about_chart
                                                                 />
                                                             </div>
                                                         }

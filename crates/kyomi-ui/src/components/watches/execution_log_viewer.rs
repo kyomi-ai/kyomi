@@ -14,7 +14,7 @@ use leptos::server_fn::ServerFnError;
 use phosphor_leptos::Icon;
 use crate::components::chat::AgentThinking;
 use crate::components::chat::thinking::ThinkingEvent;
-use crate::components::dashboard::MarkdownRenderer;
+use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
 use crate::components::{Badge, BadgeVariant, Spinner};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::get_thinking_events;
@@ -207,6 +207,37 @@ pub fn ExecutionLogViewer(
             .and_then(|ctx| ctx.workspace_id)
     });
 
+    // ── Chart header action state (KYO-120) ──────────────────────────────
+    // The execution log renders chartml blocks through `MarkdownRenderer`,
+    // and the renderer only shows the `info` + `ask-about-chart` header
+    // buttons when the caller wires the matching callbacks (see
+    // `markdown_renderer.rs::has_info / has_ask`). We keep the historical-
+    // snapshot semantics of a watch execution intact by NOT wiring `edit`,
+    // `delete`, `refresh`, or `save_to_dashboard` — executions are
+    // point-in-time records.
+    let (chart_info_yaml, set_chart_info_yaml) = signal(String::new());
+    let (chart_info_open, set_chart_info_open) = signal(false);
+
+    let on_chart_info = Callback::new(move |yaml: String| {
+        set_chart_info_yaml.set(yaml);
+        set_chart_info_open.set(true);
+    });
+
+    let on_chart_info_close = Callback::new(move |()| {
+        set_chart_info_open.set(false);
+    });
+
+    // Navigate to the chat page with the chart YAML as context — matches
+    // the canonical flow in `dashboard_viewer.rs::on_ask_about_chart` so the
+    // chat page's existing `/chat?chart=...` handler picks it up unchanged.
+    let on_ask_about_chart = Callback::new(move |chart_md: String| {
+        let nav = leptos_router::hooks::use_navigate();
+        nav(
+            &format!("/chat?chart={}", js_sys::encode_uri_component(&chart_md)),
+            leptos_router::NavigateOptions::default(),
+        );
+    });
+
     // No executions at all
     if executions.is_empty() {
         return view! {
@@ -376,6 +407,8 @@ pub fn ExecutionLogViewer(
                                             <MarkdownRenderer
                                                 content=Signal::derive(move || response.clone())
                                                 workspace_id=ws_id
+                                                on_chart_info=on_chart_info
+                                                on_ask_about_chart=on_ask_about_chart
                                             />
                                         }.into_any()
                                     } else if status == "running" {
@@ -400,6 +433,16 @@ pub fn ExecutionLogViewer(
                     }
                 })
             }}
+
+            // KYO-120: Chart info modal for chartml blocks inside the agent
+            // response. Mirrors the `ChartInfoModal` placement in
+            // `dashboard_viewer.rs` — sibling of the content so the modal
+            // overlay renders on top of everything else.
+            <ChartInfoModal
+                open=Signal::derive(move || chart_info_open.get())
+                yaml=chart_info_yaml
+                on_close=on_chart_info_close
+            />
         </div>
     }
     .into_any()
