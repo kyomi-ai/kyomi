@@ -24,7 +24,11 @@ use crate::server_fns::home::{LandingConfig, get_landing_config};
 /// 3. `"sql_editor"` -> `/sql-editor`
 /// 4. `"dashboards"` -> user default dashboard > workspace default > `/dashboards`
 /// 5. Personal mode without LLM -> defaults to dashboards instead of chat
-fn resolve_redirect_target(config: &LandingConfig) -> String {
+///
+/// Public so callers outside this module (e.g. the sidebar logo link in
+/// [`crate::components::layout`]) can compute the user's landing href
+/// from a cached [`LandingConfig`] without duplicating the priority chain.
+pub fn resolve_redirect_target(config: &LandingConfig) -> String {
     // Determine the effective landing page, applying the personal mode special case
     let default_page = if config.is_personal_mode && !config.llm_configured {
         "dashboards"

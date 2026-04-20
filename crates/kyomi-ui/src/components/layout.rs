@@ -26,6 +26,7 @@ use crate::query_cache::{provide_query_cache, use_query};
 use crate::query_cache::QueryCache;
 use crate::server_fns::context::get_user_context;
 use crate::server_fns::security::logout;
+use crate::server_fns::home::get_landing_config;
 use crate::server_fns::sidebar::{get_recent_sessions, get_sidebar_user};
 use crate::server_fns::watches::get_unread_alerts_count;
 
@@ -526,6 +527,18 @@ fn Sidebar(
     // safe from hydration mismatch (same guarantee as the old LocalResource).
     // WS events (watch_alert, watch_state_update) invalidate via QueryCacheWsBridge.
     let unread_alerts = use_query("unread_alerts", || (), |()| get_unread_alerts_count());
+    // Landing page preference — powers the sidebar logo link (KYO-66) so
+    // clicking the logo jumps straight to the user's configured landing
+    // page. Cached via use_query: HomePage reads the same key on its own
+    // resolver run, so navigating `/` after a logo click is a cache hit.
+    let landing_config = use_query("landing_config", || (), |()| get_landing_config());
+    let landing_href = Signal::derive(move || match landing_config.get() {
+        Some(Ok(cfg)) => crate::pages::home::resolve_redirect_target(&cfg),
+        // Config not yet loaded or server error — fall back to /chat, which
+        // matches the default-landing behaviour in `resolve_redirect_target`
+        // when no preference is set.
+        Some(Err(_)) | None => "/chat".to_string(),
+    });
     let (user_menu_open, set_user_menu_open) = signal(false);
     let (feedback_open, set_feedback_open) = signal(false);
 
@@ -618,13 +631,24 @@ fn Sidebar(
                     </button>
                     // Logo — full logo to the right of the toggle, fades when collapsed.
                     // React: kyomi_full_logo_white.svg at h-12 in expanded mode.
+                    // KYO-66: logo links to the user's configured landing page.
+                    // `landing_href` is derived from `get_landing_config` via
+                    // `resolve_redirect_target` (shared with HomePage), so the
+                    // href reflects the user's preference without duplicating
+                    // the resolver.
                     <div
                         class="flex items-center overflow-hidden transition-[width,opacity] duration-300"
                         style=move || {
                             if collapsed.get() { "opacity: 0; width: 0; margin-left: 0" } else { "opacity: 1; margin-left: 0.5rem" }
                         }
                     >
-                        <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-12"/>
+                        <a
+                            href=move || landing_href.get()
+                            aria-label="Go to home"
+                            class="flex items-center hover:opacity-80 transition-opacity duration-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-md"
+                        >
+                            <img src="/kyomi_full_logo_white.svg" alt="Kyomi" class="h-12"/>
+                        </a>
                     </div>
                 </div>
             </div>
