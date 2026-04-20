@@ -28,7 +28,6 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use leptos_router::hooks::use_params_map;
 
-use crate::chartml_provider::DashboardChartProviders;
 use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer,
@@ -692,6 +691,18 @@ fn DashboardEditorInner(
         history_preview_content.get().is_some()
     });
 
+    // ── Chartml 5.0 provider + IndexedDB cache context ───────────────────
+    // Install on this component's owner so BOTH the Source-mode
+    // `MarkdownRenderer` preview and the Visual-mode inline
+    // `ChartMLChart` renders inherit a single `KyomiDatasourceProvider`
+    // + `CacheBackendSignal`. Calling at component-body scope (not inside
+    // the Source/Visual `move ||` closure) means one IndexedDB-open
+    // spawn per mount instead of one per mode toggle. `workspace_id` is
+    // a `Memo`, so `.get()` here subscribes this owner to it — if it
+    // ever changes, the reactive graph replaces the context, matching
+    // the previous per-branch behaviour at a cleaner scope.
+    crate::chartml_provider::provide_chart_context(&workspace_id.get());
+
     view! {
         <div class="flex flex-col h-full bg-background overflow-hidden @container">
             // ── Header bar — matches viewer: page-header pattern ────────
@@ -875,37 +886,39 @@ fn DashboardEditorInner(
                                     </div>
 
                                     // Right panel: Live preview — wrapped in dashboard-content
-                                    // for chart container styling (border, bg, header bar)
+                                    // for chart container styling (border, bg, header bar).
+                                    // Chartml provider + IndexedDB cache context come from
+                                    // `DashboardEditorInner`'s owner (installed above the
+                                    // Source/Visual `move ||` closure), so no per-mode wrapper
+                                    // is needed here.
                                     <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
                                         <div class="dashboard-content p-6 flex-1">
-                                            <DashboardChartProviders workspace_id=workspace_id.get()>
-                                                <MarkdownRenderer
-                                                    content=effective_preview
-                                                    chart_palette=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
-                                                    on_chart_info=Callback::new(move |yaml: String| {
-                                                        set_chart_info_yaml.set(yaml);
-                                                        set_chart_info_open.set(true);
-                                                    })
-                                                    on_edit_chart=Callback::new(move |(block_index, array_index): (usize, usize)| {
-                                                        // Extract the YAML for the clicked chart. For a sequence block
-                                                        // (```chartml` containing `- type: chart` items), `array_index`
-                                                        // selects which item within the block was clicked. For a mapping
-                                                        // block it's always 0.
-                                                        let content = editor_content.get_untracked();
-                                                        let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
-                                                        let Some(cap) = re.captures_iter(&content).nth(block_index) else { return; };
-                                                        let block_content = cap.get(1).map_or("", |m| m.as_str());
-                                                        let items = split_chartml_block(block_content.trim());
-                                                        let item_yaml = items
-                                                            .get(array_index)
-                                                            .cloned()
-                                                            .unwrap_or_else(|| block_content.trim().to_string());
-                                                        set_edit_chart_yaml.set(Some(item_yaml));
-                                                        set_edit_chart_target.set(Some((block_index, array_index)));
-                                                        set_chart_builder_open.set(true);
-                                                    })
-                                                />
-                                            </DashboardChartProviders>
+                                            <MarkdownRenderer
+                                                content=effective_preview
+                                                chart_palette=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
+                                                on_chart_info=Callback::new(move |yaml: String| {
+                                                    set_chart_info_yaml.set(yaml);
+                                                    set_chart_info_open.set(true);
+                                                })
+                                                on_edit_chart=Callback::new(move |(block_index, array_index): (usize, usize)| {
+                                                    // Extract the YAML for the clicked chart. For a sequence block
+                                                    // (```chartml` containing `- type: chart` items), `array_index`
+                                                    // selects which item within the block was clicked. For a mapping
+                                                    // block it's always 0.
+                                                    let content = editor_content.get_untracked();
+                                                    let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
+                                                    let Some(cap) = re.captures_iter(&content).nth(block_index) else { return; };
+                                                    let block_content = cap.get(1).map_or("", |m| m.as_str());
+                                                    let items = split_chartml_block(block_content.trim());
+                                                    let item_yaml = items
+                                                        .get(array_index)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| block_content.trim().to_string());
+                                                    set_edit_chart_yaml.set(Some(item_yaml));
+                                                    set_edit_chart_target.set(Some((block_index, array_index)));
+                                                    set_chart_builder_open.set(true);
+                                                })
+                                            />
                                         </div>
                                     </div>
                                 </div>
@@ -990,16 +1003,11 @@ fn DashboardEditorInner(
                             ToolbarItem::Slot(editor_mode_toggle(mode, set_mode).into_any()),
                         ];
 
-                        // Provide the chartml provider + cache backend context
-                        // here so inline ChartMLChart renders inside the WYSIWYG
-                        // editor pick up the same KyomiDatasourceProvider as
-                        // Source mode's MarkdownRenderer. Without this, charts
-                        // with `data: { datasource, query }` surface
-                        // "no provider registered for kind datasource".
-                        // Direct `provide_context` (not the wrapper component)
-                        // because wrapping would impose ChildrenFn on the moved
-                        // `items: Vec<ToolbarItem>`.
-                        crate::chartml_provider::provide_chart_context(&workspace_id.get());
+                        // Chartml provider + cache backend context are installed
+                        // once on `DashboardEditorInner`'s owner (above this
+                        // Source/Visual closure), so the inline ChartMLChart
+                        // renders inside the WYSIWYG editor inherit them via
+                        // `use_context` — no per-mode re-registration required.
                         view! {
                             <div class="flex flex-1 min-h-0 overflow-hidden">
                                 <div class="flex-1 min-h-0 overflow-hidden">
