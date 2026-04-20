@@ -31,7 +31,8 @@ use leptos_router::hooks::use_params_map;
 use crate::chartml_provider::DashboardChartProviders;
 use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
-    InsertDashboardLinkModal, MarkdownRenderer, markdown_renderer::kyomi_palette,
+    InsertDashboardLinkModal, MarkdownRenderer,
+    markdown_renderer::{kyomi_palette, split_chartml_block, splice_chartml_item},
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
@@ -43,6 +44,32 @@ use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dash
 enum EditorMode {
     Source,
     Visual,
+}
+
+/// Find the index of the ```chartml fence in `source` whose inner content
+/// matches `block_content` (byte-exact after trim). Returns `None` if no
+/// match is found.
+///
+/// Used by the chart-edit event listener to translate a Visual-mode chart
+/// click back to a (block_index, array_index) pair — the Visual extension
+/// can't count fences itself because it only sees one block's content at a
+/// time, so it ships the full block content as a fingerprint and we scan
+/// the source here.
+///
+/// Gated to `target_arch = "wasm32"` (where the event listener lives) plus
+/// `test` (for the focused unit tests below) — the server-side build has no
+/// event listeners and would otherwise flag this as dead code.
+#[cfg(any(target_arch = "wasm32", test))]
+fn find_chartml_block_index(source: &str, block_content: &str) -> Option<usize> {
+    let re = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```").ok()?;
+    let target = block_content.trim();
+    for (idx, cap) in re.captures_iter(source).enumerate() {
+        let inner = cap.get(1).map_or("", |m| m.as_str()).trim();
+        if inner == target {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 // ─── Top-level page component ────────────────────────────────────────────────
@@ -226,6 +253,12 @@ fn DashboardEditorInner(
     // ── Chart builder modal ──────────────────────────────────────────────
     let (chart_builder_open, set_chart_builder_open) = signal(false);
     let (edit_chart_yaml, set_edit_chart_yaml) = signal(Option::<String>::None);
+    // Target of an in-progress edit: `(block_index, array_index)` of the
+    // chartml fence + item within it that the user clicked. `None` means the
+    // chart builder is in "add new chart" mode (append at end of source).
+    // Source of truth for the save-back logic in `insert_cb` below.
+    let (edit_chart_target, set_edit_chart_target) =
+        signal(Option::<(usize, usize)>::None);
 
     // ── Insert link modal ────────────────────────────────────────────────
     let (insert_link_open, set_insert_link_open) = signal(false);
@@ -523,6 +556,16 @@ fn DashboardEditorInner(
     }
 
     // ── Chart edit event listener (from WYSIWYG extension + source preview) ──
+    // The WYSIWYG ChartMLExtension dispatches `chart-edit-request` with a
+    // JSON-stringified payload:
+    //   { yaml, block_content, array_index }
+    // We resolve `block_index` by scanning the editor source for a ```chartml
+    // fence whose inner content matches `block_content` (byte-for-byte after
+    // trim), then hand (block_index, array_index) + per-item yaml to the same
+    // chart-builder entry point as the source-mode edit button. That keeps
+    // one save-back code path for both edit modes — the save logic in
+    // `insert_cb` uses `edit_chart_target` regardless of whether the click
+    // came from Source mode or Visual mode.
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::prelude::*;
@@ -530,10 +573,31 @@ fn DashboardEditorInner(
 
         let handler = Closure::<dyn Fn(web_sys::CustomEvent)>::new(
             move |ev: web_sys::CustomEvent| {
-                if let Some(yaml) = ev.detail().as_string() {
-                    set_edit_chart_yaml.set(Some(yaml.trim().to_string()));
-                    set_chart_builder_open.set(true);
-                }
+                let Some(detail) = ev.detail().as_string() else { return; };
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&detail) else { return; };
+                let Some(yaml) = payload.get("yaml").and_then(|v| v.as_str()) else { return; };
+                let Some(array_index) = payload
+                    .get("array_index")
+                    .and_then(|v| v.as_u64()) else { return; };
+                let block_content = payload
+                    .get("block_content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let array_index = array_index as usize;
+                // Resolve which ```chartml fence in the editor source this
+                // came from by matching the full block content. If we can't
+                // identify the block (e.g. the user edited the source after
+                // rendering the WYSIWYG view), fall through with
+                // `edit_chart_target = None` so save-back appends rather
+                // than corrupting an unrelated block via a wrong splice.
+                let block_index = find_chartml_block_index(
+                    &editor_content.get_untracked(),
+                    block_content,
+                );
+                set_edit_chart_yaml.set(Some(yaml.trim().to_string()));
+                set_edit_chart_target
+                    .set(block_index.map(|bi| (bi, array_index)));
+                set_chart_builder_open.set(true);
             },
         );
 
@@ -822,15 +886,23 @@ fn DashboardEditorInner(
                                                         set_chart_info_yaml.set(yaml);
                                                         set_chart_info_open.set(true);
                                                     })
-                                                    on_edit_chart=Callback::new(move |(block_index, _array_index): (usize, usize)| {
-                                                        // Extract the YAML at block_index from editor content
+                                                    on_edit_chart=Callback::new(move |(block_index, array_index): (usize, usize)| {
+                                                        // Extract the YAML for the clicked chart. For a sequence block
+                                                        // (```chartml` containing `- type: chart` items), `array_index`
+                                                        // selects which item within the block was clicked. For a mapping
+                                                        // block it's always 0.
                                                         let content = editor_content.get_untracked();
-                                                        let re = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```").unwrap();
-                                                        if let Some(cap) = re.captures_iter(&content).nth(block_index) {
-                                                            let yaml = cap.get(1).map_or("", |m| m.as_str()).trim().to_string();
-                                                            set_edit_chart_yaml.set(Some(yaml));
-                                                            set_chart_builder_open.set(true);
-                                                        }
+                                                        let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
+                                                        let Some(cap) = re.captures_iter(&content).nth(block_index) else { return; };
+                                                        let block_content = cap.get(1).map_or("", |m| m.as_str());
+                                                        let items = split_chartml_block(block_content.trim());
+                                                        let item_yaml = items
+                                                            .get(array_index)
+                                                            .cloned()
+                                                            .unwrap_or_else(|| block_content.trim().to_string());
+                                                        set_edit_chart_yaml.set(Some(item_yaml));
+                                                        set_edit_chart_target.set(Some((block_index, array_index)));
+                                                        set_chart_builder_open.set(true);
                                                     })
                                                 />
                                             </DashboardChartProviders>
@@ -1001,23 +1073,66 @@ fn DashboardEditorInner(
                     let close_cb = Callback::new(move |()| {
                         set_chart_builder_open.set(false);
                         set_edit_chart_yaml.set(None);
+                        set_edit_chart_target.set(None);
                     });
+                    // Save-back: route through `splice_chartml_item` when we're
+                    // editing a known (block_index, array_index) target, so
+                    // sequence blocks (```chartml` with `- type: chart` items)
+                    // replace only the clicked item instead of blindly
+                    // string-replacing the whole block yaml. When there's no
+                    // target, we're in "add chart" mode — append at end.
                     let insert_cb = Callback::new(move |yaml: String| {
                         let current = editor_content.get_untracked();
-                        let new_fenced = format!("```chartml\n{yaml}\n```");
-
-                        let new_content = if let Some(old_yaml) = edit_chart_yaml.get_untracked() {
-                            let old_fenced = format!("```chartml\n{old_yaml}\n```");
-                            current.replace(&old_fenced, &new_fenced)
-                        } else {
-                            let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
-                            format!("{current}{separator}{new_fenced}\n")
+                        let new_content = match edit_chart_target.get_untracked() {
+                            Some((block_index, array_index)) => {
+                                let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
+                                let Some(m) = re.captures_iter(&current).nth(block_index) else { return; };
+                                let Some(inner) = m.get(1) else { return; };
+                                let old_block = inner.as_str();
+                                // Splice the per-item yaml back into the block.
+                                // Preserve the block's leading/trailing whitespace by
+                                // substituting only the captured inner span so the
+                                // fence lines remain untouched.
+                                let Some(new_block) = splice_chartml_item(
+                                    old_block.trim(),
+                                    array_index,
+                                    &yaml,
+                                ) else {
+                                    tracing::warn!(
+                                        block_index,
+                                        array_index,
+                                        "splice_chartml_item returned None; aborting save to avoid destroying sibling charts"
+                                    );
+                                    return;
+                                };
+                                // Re-wrap with a trailing newline so the closing ```
+                                // sits on its own line (matches the common authoring
+                                // style and the way we emit new blocks below).
+                                let new_block_with_newline = if new_block.ends_with('\n') {
+                                    new_block
+                                } else {
+                                    format!("{new_block}\n")
+                                };
+                                let mut out = String::with_capacity(
+                                    current.len() + new_block_with_newline.len(),
+                                );
+                                out.push_str(&current[..inner.start()]);
+                                out.push_str(&new_block_with_newline);
+                                out.push_str(&current[inner.end()..]);
+                                out
+                            }
+                            None => {
+                                let new_fenced = format!("```chartml\n{yaml}\n```");
+                                let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n\n" };
+                                format!("{current}{separator}{new_fenced}\n")
+                            }
                         };
 
                         set_editor_content.set(new_content.clone());
                         set_preview_content.set(new_content);
                         set_chart_builder_open.set(false);
                         set_edit_chart_yaml.set(None);
+                        set_edit_chart_target.set(None);
                     });
                     let open_sig = Signal::derive(move || chart_builder_open.get());
                     // Pass workspace_id so ChartBuilderModal can register its own
@@ -1201,3 +1316,51 @@ fn DashboardWysiwygEditor(
     }
 }
 
+#[cfg(test)]
+mod find_block_index_tests {
+    use super::find_chartml_block_index;
+
+    #[test]
+    fn finds_single_block() {
+        let src = "# Title\n\n```chartml\ntype: bar\ntitle: A\n```\n";
+        assert_eq!(
+            find_chartml_block_index(src, "type: bar\ntitle: A"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn finds_second_block_among_many() {
+        let src = "\
+```chartml
+type: bar
+title: A
+```
+
+```chartml
+- type: bar
+  title: B
+- type: line
+  title: C
+```
+
+```chartml
+type: pie
+title: D
+```
+";
+        let seq_block = "- type: bar\n  title: B\n- type: line\n  title: C";
+        assert_eq!(find_chartml_block_index(src, seq_block), Some(1));
+    }
+
+    #[test]
+    fn returns_none_when_content_not_present() {
+        let src = "```chartml\ntype: bar\n```\n";
+        assert_eq!(find_chartml_block_index(src, "type: line"), None);
+    }
+
+    #[test]
+    fn returns_none_when_no_chartml_fence() {
+        assert_eq!(find_chartml_block_index("# just markdown", "anything"), None);
+    }
+}

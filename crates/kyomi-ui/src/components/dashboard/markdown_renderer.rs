@@ -225,7 +225,7 @@ fn find_closing_fence(text: &str) -> Option<usize> {
 /// return each item re-serialized to its own YAML string. If it's a Mapping
 /// (or fails to parse), return a single-element vec containing the original
 /// block content unchanged.
-fn split_chartml_block(block_content: &str) -> Vec<String> {
+pub(crate) fn split_chartml_block(block_content: &str) -> Vec<String> {
     match serde_yaml::from_str::<serde_json::Value>(block_content) {
         Ok(serde_json::Value::Array(items)) => {
             let per_item: Vec<String> = items
@@ -239,6 +239,47 @@ fn split_chartml_block(block_content: &str) -> Vec<String> {
             }
         }
         _ => vec![block_content.to_string()],
+    }
+}
+
+/// Splice a single chart item back into a chartml block.
+///
+/// - If `block_content` is a single YAML mapping, `array_index` MUST be `0`
+///   and the block is replaced wholesale with `new_item_yaml`.
+/// - If `block_content` is a YAML sequence, the `array_index`-th entry is
+///   replaced with `new_item_yaml`'s parsed value and the sequence is
+///   re-serialized as YAML.
+/// - If `block_content` fails to parse, or the index is out of range for a
+///   sequence (or non-zero for a mapping), returns `None`.
+///
+/// The returned string is a YAML document ready to be substituted back into
+/// the text between the opening ```` ```chartml ```` fence and the closing
+/// ```` ``` ```` fence. It does NOT include fence lines.
+pub(crate) fn splice_chartml_item(
+    block_content: &str,
+    array_index: usize,
+    new_item_yaml: &str,
+) -> Option<String> {
+    let parsed: serde_json::Value = serde_yaml::from_str(block_content).ok()?;
+    match parsed {
+        serde_json::Value::Array(mut items) => {
+            if array_index >= items.len() {
+                return None;
+            }
+            let new_item: serde_json::Value =
+                serde_yaml::from_str(new_item_yaml).ok()?;
+            items[array_index] = new_item;
+            let replacement = serde_json::Value::Array(items);
+            serde_yaml::to_string(&replacement).ok()
+        }
+        serde_json::Value::Object(_) => {
+            if array_index != 0 {
+                return None;
+            }
+            Some(new_item_yaml.to_string())
+        }
+        // Null / scalar / etc. — not a valid chartml block shape.
+        _ => None,
     }
 }
 
@@ -1367,6 +1408,148 @@ mod tests {
                 extract_col_span(&val),
                 6,
                 "each chart's colSpan should parse as 6"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// split_chartml_block — focused coverage
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn mapping_returns_single_item() {
+        let block = "type: bar\ntitle: A\n";
+        let out = split_chartml_block(block);
+        assert_eq!(out.len(), 1);
+        // Mapping is preserved verbatim (split doesn't re-serialize it).
+        assert_eq!(out[0], block);
+    }
+
+    #[test]
+    fn sequence_returns_one_string_per_item() {
+        let block = "- type: bar\n  title: A\n- type: line\n  title: B\n- type: pie\n  title: C\n";
+        let out = split_chartml_block(block);
+        assert_eq!(out.len(), 3);
+        // Each item re-serialized as its own mapping (no leading `-`).
+        for item in &out {
+            assert!(!item.trim_start().starts_with('-'));
+        }
+        assert!(out[0].contains("title: A"));
+        assert!(out[1].contains("title: B"));
+        assert!(out[2].contains("title: C"));
+    }
+
+    #[test]
+    fn malformed_yaml_returns_original() {
+        let block = "type: [unclosed";
+        let out = split_chartml_block(block);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], block);
+    }
+
+    #[test]
+    fn empty_string_returns_original() {
+        // Empty string parses as null; fallback returns the original content.
+        let out = split_chartml_block("");
+        assert_eq!(out, vec!["".to_string()]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// splice_chartml_item — round-trip and edge cases
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod splice_tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> serde_json::Value {
+        serde_yaml::from_str(yaml).expect("yaml parses")
+    }
+
+    #[test]
+    fn mapping_index_zero_replaces_whole_block() {
+        let block = "type: bar\ntitle: Old\n";
+        let new_item = "type: line\ntitle: New\n";
+        let out = splice_chartml_item(block, 0, new_item).expect("mapping @ 0");
+        // The mapping case returns the new item verbatim.
+        assert_eq!(out, new_item);
+    }
+
+    #[test]
+    fn mapping_nonzero_index_returns_none() {
+        let block = "type: bar\ntitle: Old\n";
+        let new_item = "type: line\ntitle: New\n";
+        assert!(splice_chartml_item(block, 1, new_item).is_none());
+    }
+
+    #[test]
+    fn sequence_replaces_only_target_index() {
+        let block = "- type: bar\n  title: A\n- type: line\n  title: B\n- type: pie\n  title: C\n";
+        let new_item = "type: scatter\ntitle: B2\n";
+        let out = splice_chartml_item(block, 1, new_item).expect("seq @ 1");
+
+        // Re-parse and assert structurally — don't compare bytes.
+        let parsed = parse(&out);
+        let arr = parsed.as_array().expect("array");
+        assert_eq!(arr.len(), 3);
+
+        assert_eq!(arr[0]["title"].as_str(), Some("A"));
+        assert_eq!(arr[0]["type"].as_str(), Some("bar"));
+
+        assert_eq!(arr[1]["title"].as_str(), Some("B2"));
+        assert_eq!(arr[1]["type"].as_str(), Some("scatter"));
+
+        assert_eq!(arr[2]["title"].as_str(), Some("C"));
+        assert_eq!(arr[2]["type"].as_str(), Some("pie"));
+    }
+
+    #[test]
+    fn sequence_out_of_range_returns_none() {
+        let block = "- type: bar\n  title: A\n- type: line\n  title: B\n- type: pie\n  title: C\n";
+        let new_item = "type: scatter\ntitle: X\n";
+        assert!(splice_chartml_item(block, 5, new_item).is_none());
+    }
+
+    #[test]
+    fn malformed_block_returns_none() {
+        let block = "type: [unclosed";
+        let new_item = "type: bar\n";
+        assert!(splice_chartml_item(block, 0, new_item).is_none());
+    }
+
+    #[test]
+    fn malformed_new_item_in_sequence_returns_none() {
+        // Sequence + unparseable new item must fail, not corrupt the block.
+        let block = "- type: bar\n- type: line\n";
+        let malformed_new = "type: [unclosed";
+        assert!(splice_chartml_item(block, 0, malformed_new).is_none());
+    }
+
+    #[test]
+    fn round_trip_split_then_splice_preserves_structure() {
+        // Take a sequence, split it, splice each item back at its own index,
+        // and verify every intermediate parses to the same structure as the
+        // original. We re-parse rather than compare strings because YAML
+        // re-serialization may reorder keys or normalize whitespace.
+        let block = "- type: bar\n  title: A\n  version: 1\n- type: line\n  title: B\n  version: 1\n- type: pie\n  title: C\n  version: 1\n";
+        let items = split_chartml_block(block);
+        assert_eq!(items.len(), 3);
+
+        let original_parsed = parse(block);
+
+        for (i, item) in items.iter().enumerate() {
+            let spliced = splice_chartml_item(block, i, item)
+                .unwrap_or_else(|| panic!("splice @ {i}"));
+            let spliced_parsed = parse(&spliced);
+            assert_eq!(
+                spliced_parsed, original_parsed,
+                "round-trip at index {i} should parse identically",
             );
         }
     }
