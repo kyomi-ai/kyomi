@@ -99,7 +99,14 @@ fn ensure_root_mapping(ast: &mut Value) {
     }
 }
 
-/// Ensure `parent[key]` exists and is a mapping; create an empty one if missing.
+/// Ensure `parent[key]` exists and is a mapping, creating or **replacing** it if not.
+///
+/// Destructive: if `parent[key]` currently holds a scalar or sequence, it is
+/// silently replaced with an empty mapping rather than asserting. This is
+/// intentional — the chart builder edits an always-valid "in-progress" AST,
+/// and a single Visual-tab edit should never fail just because the previous
+/// YAML was malformed at this key. Callers relying on preserving a
+/// non-mapping value should check the shape themselves first.
 fn ensure_nested_mapping(parent: &mut Value, key: &str) {
     ensure_root_mapping(parent);
     let map = parent.as_mapping_mut().expect("ensured above");
