@@ -187,7 +187,7 @@ html {
  * Extracted from inline style= attrs per DESIGN.md "no inline styles
  * for color" rule — keeps theming greppable and theme-switchable. */
 .auth-brand-panel {
-  background-color: var(--color-foreground);
+  background-color: var(--color-sidebar);
 }
 
 .auth-brand-gradient-1 {
