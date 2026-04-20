@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::popover::{Placement, Popover};
@@ -23,6 +24,7 @@ use crate::components::{
     Spinner, Switch,
 };
 use crate::query_cache::{use_query, QueryCache};
+use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::{
     bulk_delete_alerts, bulk_mark_alerts_read, bulk_mark_alerts_unread, continue_alert_in_chat,
     delete_alert, get_alerts, list_watches, mark_alert_read, mark_alert_unread, restore_alert,
@@ -264,6 +266,26 @@ pub fn AlertsHistory(
     /// Called when user clicks "Continue in Chat" on an alert.
     on_continue_chat: Callback<String>,
 ) -> impl IntoView {
+    // ── Workspace id for chart provider wiring (KYO-119) ─────────────────
+    // Alerts can contain chartml blocks that resolve `data: { datasource,
+    // query }` via `KyomiDatasourceProvider`. The alerts inbox lives outside
+    // `DashboardChartProviders`, so we pass `workspace_id` into
+    // `MarkdownRenderer` which locally registers the provider the same way
+    // the dashboard root does. `None` skips registration — matches what the
+    // renderer did before this ticket for deployments without a workspace id.
+    //
+    // Derived the same way `dashboard_viewer.rs` does (minus the "default"
+    // fallback — per KYO-119, we skip provider registration when the user
+    // context lacks a workspace id rather than fabricating one).
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+    let workspace_id: Memo<Option<String>> = Memo::new(move |_| {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.workspace_id)
+    });
+
     // ── State ────────────────────────────────────────────────────────────
     let selected_watch_id = RwSignal::new(String::new());
     let expanded_alerts = RwSignal::new(HashSet::<i32>::new());
@@ -835,10 +857,21 @@ pub fn AlertsHistory(
                                                 {move || {
                                                     let agent_response = agent_response.clone();
                                                     expanded_alerts.get().contains(&alert_id).then(|| {
+                                                        // KYO-119: Pass workspace_id so `MarkdownRenderer`
+                                                        // can register `KyomiDatasourceProvider` on its
+                                                        // owner — the alerts inbox mounts outside
+                                                        // `DashboardChartProviders`, so chartml blocks
+                                                        // with `data: { datasource, query }` would
+                                                        // otherwise fail with "no provider registered
+                                                        // for kind 'datasource'". Empty string skips
+                                                        // registration when the user context hasn't
+                                                        // loaded a workspace yet.
+                                                        let ws_id = workspace_id.get().unwrap_or_default();
                                                         view! {
                                                             <div class="px-3 sm:px-4 py-3 border-t border-border bg-muted/30 overflow-x-auto">
                                                                 <MarkdownRenderer
                                                                     content=Signal::derive(move || agent_response.clone())
+                                                                    workspace_id=ws_id
                                                                 />
                                                             </div>
                                                         }

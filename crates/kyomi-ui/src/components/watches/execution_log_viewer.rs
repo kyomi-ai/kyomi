@@ -10,11 +10,13 @@
 //! - Error message display if execution errored
 
 use leptos::prelude::*;
+use leptos::server_fn::ServerFnError;
 use phosphor_leptos::Icon;
 use crate::components::chat::AgentThinking;
 use crate::components::chat::thinking::ThinkingEvent;
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{Badge, BadgeVariant, Spinner};
+use crate::server_fns::context::UserContext;
 use crate::server_fns::watches::get_thinking_events;
 use crate::types::WatchExecutionItem;
 
@@ -184,6 +186,27 @@ pub fn ExecutionLogViewer(
     let executions_len = executions.len();
     let executions_for_selector = executions.clone();
 
+    // ── Workspace id for chart provider wiring (KYO-119) ─────────────────
+    // Execution responses can contain chartml blocks that resolve
+    // `data: { datasource, query }` via `KyomiDatasourceProvider`. The
+    // execution-log modal mounts outside `DashboardChartProviders`, so we
+    // pass `workspace_id` into `MarkdownRenderer` which locally registers
+    // the provider the same way the dashboard root does. `None` skips
+    // registration — matches what the renderer did before this ticket for
+    // deployments without a workspace id.
+    //
+    // Derived the same way `dashboard_viewer.rs` does (minus the "default"
+    // fallback — per KYO-119, we skip provider registration when the user
+    // context lacks a workspace id rather than fabricating one).
+    let user_ctx_resource =
+        expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
+    let workspace_id: Memo<Option<String>> = Memo::new(move |_| {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.workspace_id)
+    });
+
     // No executions at all
     if executions.is_empty() {
         return view! {
@@ -339,9 +362,20 @@ pub fn ExecutionLogViewer(
                                         })
                                     }}
                                     {if let Some(response) = agent_response {
+                                        // KYO-119: Pass workspace_id so `MarkdownRenderer`
+                                        // can register `KyomiDatasourceProvider` on its
+                                        // owner — the execution-log modal mounts outside
+                                        // `DashboardChartProviders`, so chartml blocks
+                                        // with `data: { datasource, query }` would
+                                        // otherwise fail with "no provider registered
+                                        // for kind 'datasource'". Empty string skips
+                                        // registration when the user context hasn't
+                                        // loaded a workspace yet.
+                                        let ws_id = workspace_id.get().unwrap_or_default();
                                         view! {
                                             <MarkdownRenderer
                                                 content=Signal::derive(move || response.clone())
+                                                workspace_id=ws_id
                                             />
                                         }.into_any()
                                     } else if status == "running" {

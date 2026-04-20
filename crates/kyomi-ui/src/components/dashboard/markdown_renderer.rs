@@ -1006,7 +1006,44 @@ pub fn MarkdownRenderer(
     /// Additional CSS class(es) to apply to the prose wrapper div
     #[prop(optional, into)]
     class: Option<String>,
+    /// Optional workspace UUID. When non-empty and no
+    /// `chartml_leptos::ProviderRef` is already in Leptos context,
+    /// `MarkdownRenderer` installs a `KyomiDatasourceProvider` (and the
+    /// matching IndexedDB cache backend signal) scoped to that workspace via
+    /// [`crate::chartml_provider::provide_chart_context`]. Lets callers that
+    /// mount outside `DashboardChartProviders` (e.g. the Watches alerts +
+    /// execution-log viewers — KYO-119) render chartml blocks with
+    /// `data: { datasource, query }` without patching each callsite
+    /// individually. When the caller doesn't pass it, passes an empty
+    /// string, or a provider is already in context (the Dashboard
+    /// viewer/editor case), this prop is a no-op — preserving today's
+    /// behavior for every existing caller.
+    ///
+    /// Empty string is the "no id" sentinel because Leptos' `#[prop(optional,
+    /// into)]` on `String` already wraps the caller's value in `Some` for
+    /// the internal field, so we can't distinguish "caller passed nothing"
+    /// from "caller passed `None`" at runtime — treating `""` as "skip"
+    /// gives callers a single knob that matches `UserContext.workspace_id
+    /// .unwrap_or_default()` naturally.
+    #[prop(optional, into)]
+    workspace_id: String,
 ) -> impl IntoView {
+    // Register the chart provider + cache backend for this subtree when the
+    // caller asks for it and nothing higher up has already done so. Dashboards
+    // wire `DashboardChartProviders` above `MarkdownRenderer`, so they keep
+    // that single shared provider + cache. Watches/other hosts that mount the
+    // renderer in isolation pass `workspace_id` and we install the same
+    // context entries locally — same plumbing, just narrower scope.
+    //
+    // Called at component-body scope (before the view tree is built) so the
+    // `provide_context` entries are visible to every descendant
+    // `ChartMLChart` via `use_context`.
+    if !workspace_id.is_empty()
+        && use_context::<chartml_leptos::ProviderRef>().is_none()
+    {
+        crate::chartml_provider::provide_chart_context(&workspace_id);
+    }
+
     let palette_name = StoredValue::new(chart_palette.unwrap_or_else(|| "kyomi".to_string()));
     let extra_class = class.unwrap_or_default();
 
