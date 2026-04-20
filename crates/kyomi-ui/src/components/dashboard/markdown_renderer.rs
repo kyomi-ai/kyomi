@@ -19,6 +19,8 @@ use chartml_chart_metric::MetricRenderer;
 use chartml_chart_table::TableRenderer;
 use chartml_chart_pie::PieRenderer;
 use chartml_chart_scatter::ScatterRenderer;
+use chartml_core::spec::VisualizeSpec;
+use chartml_core::ChartRenderer;
 use chartml_datafusion::DataFusionTransform;
 use chartml_leptos::{use_chartml_configured, ChartMLChart, ChartMLRef};
 // `kyomi_palette` and `kyomi_theme` live in the tiny `kyomi-chart-theme`
@@ -361,14 +363,56 @@ pub(crate) fn extract_chart_mode(spec: &serde_json::Value) -> Option<String> {
 /// Extract the explicit chart height from `visualize.style.height` in the YAML spec.
 ///
 /// Returns `None` if the spec omits it — callers should fall back to the
-/// built-in renderer default (400px) so the loading placeholder reserves
-/// the same vertical space the rendered chart will occupy, preventing
-/// layout shift on data-arrival.
+/// per-type renderer default (via [`default_chart_height_for_type`]) so the
+/// loading placeholder reserves the same vertical space the rendered chart
+/// will occupy, preventing layout shift on data-arrival.
 fn extract_chart_height(spec: &serde_json::Value) -> Option<f64> {
     spec.get("visualize")
         .and_then(|v| v.get("style"))
         .and_then(|s| s.get("height"))
         .and_then(|h| h.as_f64())
+}
+
+/// Hard fallback when we can't look up a per-type default — matches the
+/// historical blanket default used before KYO-118 and the `height` returned
+/// by every non-metric built-in renderer today.
+const GENERIC_CHART_HEIGHT_PX: f64 = 400.0;
+
+/// Return the built-in default height (in pixels) for the given chart type
+/// by asking the matching concrete renderer. Used when the YAML spec omits
+/// an explicit `visualize.style.height` so the outer wrapper reserves the
+/// same height the rendered chart will occupy — metric cards are 150px,
+/// everything else is 400px.
+///
+/// TODO(KYO-109): The render-pipeline unification ticket should move this
+/// reserved-height calc into `chartml-core` (or a shared Kyomi helper) so
+/// the Leptos consumer doesn't have to know which concrete renderer backs
+/// each chart type. Today we mirror `configured_chartml`'s type → renderer
+/// mapping by hand.
+pub(crate) fn default_chart_height_for_type(chart_type: Option<&str>) -> f64 {
+    // Ask the concrete renderer for its own default. The renderers'
+    // `default_dimensions` currently ignores the spec arg, but we pass a
+    // minimal `VisualizeSpec` (typed to match the renderer) so future
+    // spec-aware defaults work without another round of wiring.
+    let chart_type = match chart_type {
+        Some(t) => t,
+        None => return GENERIC_CHART_HEIGHT_PX,
+    };
+    let viz: VisualizeSpec = match serde_json::from_value(serde_json::json!({
+        "type": chart_type,
+    })) {
+        Ok(v) => v,
+        Err(_) => return GENERIC_CHART_HEIGHT_PX,
+    };
+    let dims = match chart_type {
+        "bar" | "line" | "area" => CartesianRenderer::new().default_dimensions(&viz),
+        "pie" | "donut" | "doughnut" => PieRenderer::new().default_dimensions(&viz),
+        "scatter" => ScatterRenderer::new().default_dimensions(&viz),
+        "metric" => MetricRenderer::new().default_dimensions(&viz),
+        "table" => TableRenderer::new().default_dimensions(&viz),
+        _ => None,
+    };
+    dims.map(|d| d.height).unwrap_or(GENERIC_CHART_HEIGHT_PX)
 }
 
 /// Extract `layout.colSpan` (or snake_case `col_span`) from a parsed spec,
@@ -640,14 +684,15 @@ fn ChartBlock(
 
     // Reserve the rendered chart's height on the outer wrapper so the
     // ChartMLChart loading placeholder doesn't cause a layout shift when data
-    // arrives. Falls back to chartml's default of 400px when the spec omits an
-    // explicit height. (Preserves main commit 7adc7c5 intent after PR #129
-    // deleted the bespoke remote-fetch loading placeholder.)
-    const DEFAULT_CHART_HEIGHT_PX: f64 = 400.0;
+    // arrives. Falls back to chartml's per-type default (e.g. 150px for
+    // metric cards, 400px for cartesian / pie / scatter / table) when the
+    // spec omits an explicit height. (Preserves main commit 7adc7c5 intent
+    // after PR #129 deleted the bespoke remote-fetch loading placeholder;
+    // per-type lookup added by KYO-118 to fix metric-card layout shift.)
     let chart_height_px = parsed_spec
         .as_ref()
         .and_then(extract_chart_height)
-        .unwrap_or(DEFAULT_CHART_HEIGHT_PX);
+        .unwrap_or_else(|| default_chart_height_for_type(initial_chart_type.as_deref()));
 
     // -- Override signals (matches React's ChartWithChrome state) --
     let (type_override, set_type_override) = signal(None::<String>);
@@ -1448,6 +1493,35 @@ mod tests {
                 "each chart's colSpan should parse as 6"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// default_chart_height_for_type — guards metric-card layout shift (KYO-118)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod default_height_tests {
+    use super::*;
+
+    #[test]
+    fn metric_returns_150_not_generic_400() {
+        // Regression guard for KYO-118: metric cards were reserving 400px,
+        // then the MetricRenderer rendered into 150px, causing layout shift.
+        assert_eq!(default_chart_height_for_type(Some("metric")), 150.0);
+    }
+
+    #[test]
+    fn non_metric_types_return_400() {
+        for t in ["bar", "line", "area", "pie", "donut", "scatter", "table"] {
+            assert_eq!(default_chart_height_for_type(Some(t)), 400.0, "type: {t}");
+        }
+    }
+
+    #[test]
+    fn unknown_and_missing_types_fall_back_to_generic() {
+        assert_eq!(default_chart_height_for_type(None), 400.0);
+        assert_eq!(default_chart_height_for_type(Some("not-a-chart")), 400.0);
     }
 }
 
