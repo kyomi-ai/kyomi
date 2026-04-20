@@ -8,12 +8,6 @@
 //! - `POST /api/v1/datasources/{id}/connect/rotate-token` → `rotate_connect_token()`
 //!
 //! Calls the same service-layer code as `apps/server/src/routes/datasources.rs`.
-//!
-//! ## Server context requirement
-//!
-//! The `create_connect_datasource` and `rotate_connect_token` functions require
-//! `Arc<ConnectTokenService>` to be provided via `leptos::prelude::provide_context`
-//! in the server's router setup (alongside `ServerContext`).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -113,11 +107,15 @@ pub async fn create_connect_datasource(
         _ => {}
     }
 
-    // ConnectTokenService must be provided as context
-    let connect_token_service = leptos::prelude::use_context::<
-        std::sync::Arc<kyomi_auth::connect_token::ConnectTokenService>,
-    >()
-    .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
+    // Validate ConnectTokenService is present via ServerContext.connect_token
+    // before mutating the database. `None` means Kyomi Connect is not configured
+    // on this server — surface that up front so we don't create an orphan
+    // datasource row that we can't mint a token for.
+    if ctx.connect_token.is_none() {
+        return Err(ServerFnError::new(
+            "Kyomi Connect is not configured on this server",
+        ));
+    }
 
     let slug_ref = slug.as_deref().filter(|s| !s.is_empty());
 
@@ -142,9 +140,12 @@ pub async fn create_connect_datasource(
     })?;
 
     // Generate Connect JWT token and store the JTI for revocation
-    let (token, jti) = connect_token_service
-        .generate(&ds.id, ws_id, ds.datasource_type.as_ref())
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let (token, jti) = generate_connect_token(
+        ctx.connect_token.as_ref(),
+        &ds.id,
+        ws_id,
+        ds.datasource_type.as_ref(),
+    )?;
 
     kyomi_auth::datasource_service::update_connect_jti(&ctx.db, &ds.id, &jti)
         .await
@@ -188,14 +189,12 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
         ));
     }
 
-    let connect_token_service = leptos::prelude::use_context::<
-        std::sync::Arc<kyomi_auth::connect_token::ConnectTokenService>,
-    >()
-    .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
-
-    let (token, jti) = connect_token_service
-        .generate(&ds.id, ws_id, ds.datasource_type.as_ref())
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let (token, jti) = generate_connect_token(
+        ctx.connect_token.as_ref(),
+        &ds.id,
+        ws_id,
+        ds.datasource_type.as_ref(),
+    )?;
 
     kyomi_auth::datasource_service::update_connect_jti(&ctx.db, &ds.id, &jti)
         .await
@@ -304,4 +303,120 @@ fn require_workspace_admin(auth: &kyomi_auth::middleware::AuthUser) -> Result<()
         return Err(ServerFnError::new("Workspace admin access required"));
     }
     Ok(())
+}
+
+/// Mint a Connect JWT for a datasource using the server's `ConnectTokenService`.
+///
+/// Returns `(token, jti)` on success. This helper centralizes the `Option`
+/// handling for `ServerContext.connect_token`: when the service is absent
+/// (single-instance/no-Connect deployments), callers get a user-facing
+/// `"Kyomi Connect is not configured on this server"` error instead of a
+/// misleading 500.
+///
+/// The `Option<&Arc<...>>` signature is intentional — it lets callers pass
+/// `ctx.connect_token.as_ref()` without cloning the `Arc`, and it makes the
+/// Some/None contract explicit at every call site.
+#[cfg(feature = "ssr")]
+fn generate_connect_token(
+    connect_token: Option<&std::sync::Arc<kyomi_auth::connect_token::ConnectTokenService>>,
+    datasource_id: &str,
+    workspace_id: &str,
+    datasource_type: &str,
+) -> Result<(String, String), ServerFnError> {
+    let service = connect_token
+        .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
+    service
+        .generate(datasource_id, workspace_id, datasource_type)
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    //! Unit tests for the `ServerContext.connect_token` → `generate_connect_token`
+    //! plumbing. Regression coverage for KYO-115: the rotate/create Connect
+    //! flows were broken because they looked up `Arc<ConnectTokenService>` via
+    //! `leptos::use_context::<Arc<ConnectTokenService>>()`, which the server
+    //! never provides as a standalone context — the service lives on
+    //! `ServerContext.connect_token` instead.
+
+    use super::generate_connect_token;
+    use kyomi_auth::connect_token::ConnectTokenService;
+    use std::sync::Arc;
+
+    /// Generate a fresh P-256 PKCS#8 PEM key for tests — mirrors the
+    /// `generate_test_key_pem` helper in `kyomi-auth::connect_token::tests`.
+    /// We need our own copy here because that helper isn't exported.
+    fn test_private_key_pem() -> String {
+        use p256::elliptic_curve::rand_core::OsRng;
+        use p256::pkcs8::{EncodePrivateKey, LineEnding};
+
+        let secret_key = p256::SecretKey::random(&mut OsRng);
+        secret_key
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("encode test key as PKCS#8 PEM")
+            .to_string()
+    }
+
+    fn test_service() -> Arc<ConnectTokenService> {
+        Arc::new(
+            ConnectTokenService::new(&test_private_key_pem(), "wss://connect.test/v1")
+                .expect("construct test ConnectTokenService"),
+        )
+    }
+
+    #[test]
+    fn none_returns_not_configured_error() {
+        // This is the exact bug from KYO-115: the production server never
+        // provided `Arc<ConnectTokenService>` as a standalone Leptos context,
+        // so the lookup always returned `None` and every rotate/create call
+        // short-circuited with this error. The fix is to pull from
+        // `ServerContext.connect_token`, which the server *does* provide —
+        // but the `None` contract still matters for deployments that don't
+        // configure Kyomi Connect.
+        let err = generate_connect_token(None, "ds-1", "ws-1", "postgres")
+            .expect_err("None connect_token must yield an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Kyomi Connect is not configured on this server"),
+            "expected not-configured error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn some_generates_a_valid_token() {
+        let service = test_service();
+        let (token, jti) = generate_connect_token(
+            Some(&service),
+            "ds-abc",
+            "ws-xyz",
+            "postgres",
+        )
+        .expect("Some(service) must mint a token");
+
+        // Shape checks: non-empty JWT with 3 dot-separated parts, 22-char jti.
+        assert!(!token.is_empty(), "token must not be empty");
+        assert_eq!(token.matches('.').count(), 2, "JWT must have 3 parts");
+        assert_eq!(jti.len(), 22, "jti must be 22 base64url chars (16 bytes)");
+
+        // The minted token must verify under the same service — proving we
+        // actually reached the generate path, not a stubbed/faked success.
+        let claims = service.verify(&token).expect("minted token must verify");
+        assert_eq!(claims.jti, jti, "returned jti must match claim");
+        assert_eq!(claims.dsid, "ds-abc", "dsid must match input");
+        assert_eq!(claims.wid, "ws-xyz", "wid must match input");
+        assert_eq!(claims.db, "postgres", "db must match input");
+    }
+
+    #[test]
+    fn some_rotation_mints_distinct_jtis() {
+        // Rotating (generating twice for the same datasource) must produce
+        // different jtis — this is what makes the old token immediately
+        // unusable after a rotate.
+        let service = test_service();
+        let (_t1, jti1) =
+            generate_connect_token(Some(&service), "ds-rot", "ws-rot", "mysql").unwrap();
+        let (_t2, jti2) =
+            generate_connect_token(Some(&service), "ds-rot", "ws-rot", "mysql").unwrap();
+        assert_ne!(jti1, jti2, "rotated token must have a fresh jti");
+    }
 }

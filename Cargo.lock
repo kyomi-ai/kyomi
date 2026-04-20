@@ -6084,6 +6084,7 @@ dependencies = [
  "leptos_meta",
  "leptos_router",
  "libm",
+ "p256",
  "phosphor-leptos",
  "pulldown-cmark",
  "regex",

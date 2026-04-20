@@ -187,3 +187,6 @@ libm = "0.2"
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-auth = { workspace = true }
 tokio = { workspace = true }
+# P-256 key generation for Connect token unit tests — matches what
+# kyomi-auth::connect_token::tests uses to build an ephemeral signing key.
+p256 = { workspace = true }
