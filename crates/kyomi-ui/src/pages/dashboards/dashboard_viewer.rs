@@ -166,6 +166,12 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // back button and edit link keep the user inside the right section.
     let location = leptos_router::hooks::use_location();
     let is_knowledge = Memo::new(move |_| location.pathname.get().starts_with("/knowledge"));
+    // Knowledge documents don't participate in the default-dashboard system,
+    // so hide the "Set as My Default" / "Set Workspace Default" toggles there.
+    // Same pattern as `is_admin` below: read once into a plain bool captured by
+    // the view closures (the toolbar action closures are FnOnce, so reactive
+    // `move || ...` wrappers around them won't compile).
+    let show_default_toggles = Memo::new(move |_| !is_knowledge.get());
     let list_href = move || if is_knowledge.get() { "/knowledge" } else { "/dashboards" };
     let back_aria = move || if is_knowledge.get() { "Back to knowledge" } else { "Back to dashboards" };
     let not_found_label = move || if is_knowledge.get() { "Knowledge Document Not Found" } else { "Dashboard Not Found" };
@@ -316,6 +322,12 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 let is_admin = user_ctx.as_ref()
                     .map(|ctx| ctx.workspace_roles.contains(&"workspace_admin".to_string()))
                     .unwrap_or(false);
+
+                // Read the route-derived gate once so the non-reactive view
+                // closures below (several are FnOnce) can capture a plain bool.
+                // Route changes remount this component, so a one-shot read is
+                // correct here — same pattern as `is_admin`.
+                let show_default_toggles = show_default_toggles.get();
 
                 let pdf_export_enabled = user_ctx.as_ref()
                     .and_then(|ctx| ctx.capabilities.get("pdf_export_enabled"))
@@ -795,24 +807,26 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             </ToggleButton>
                                         </div>
 
-                                        // Set as My Default — visible when toolbar has room
-                                        <div class="hidden @3xl:flex">
-                                            <ToggleButton
-                                                variant=Signal::derive(move || if is_user_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
-                                                size=ButtonSize::Sm
-                                                aria_label=Signal::derive(move || if is_user_default.get() { "Remove as my default".to_string() } else { "Set as my default".to_string() })
-                                                disabled=Signal::derive(move || setting_user_default.get())
-                                                on:click=toggle_user_default
-                                            >
-                                                <Icon icon=phosphor_leptos::STAR size="14px" />
-                                                <span class="hidden @6xl:inline whitespace-nowrap">
-                                                    {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
-                                                </span>
-                                            </ToggleButton>
-                                        </div>
+                                        // Set as My Default — visible when toolbar has room, dashboards only
+                                        {show_default_toggles.then(|| view! {
+                                            <div class="hidden @3xl:flex">
+                                                <ToggleButton
+                                                    variant=Signal::derive(move || if is_user_default.get() { ButtonVariant::Active } else { ButtonVariant::Secondary })
+                                                    size=ButtonSize::Sm
+                                                    aria_label=Signal::derive(move || if is_user_default.get() { "Remove as my default".to_string() } else { "Set as my default".to_string() })
+                                                    disabled=Signal::derive(move || setting_user_default.get())
+                                                    on:click=toggle_user_default
+                                                >
+                                                    <Icon icon=phosphor_leptos::STAR size="14px" />
+                                                    <span class="hidden @6xl:inline whitespace-nowrap">
+                                                        {move || if is_user_default.get() { "My Default" } else { "Set as My Default" }}
+                                                    </span>
+                                                </ToggleButton>
+                                            </div>
+                                        })}
 
-                                        // Set Workspace Default — visible when toolbar has room, admin only
-                                        {is_admin.then(|| {
+                                        // Set Workspace Default — visible when toolbar has room, admin only, dashboards only
+                                        {(show_default_toggles && is_admin).then(|| {
                                             view! {
                                                 <div class="hidden @3xl:flex">
                                                     <ToggleButton
@@ -867,20 +881,23 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                             {move || if history_open.get() { "Close History" } else { "Version History" }}
                                                         </button>
 
-                                                        <div class="border-t border-border my-1" />
+                                                        // Set as My Default (mobile) — dashboards only.
+                                                        // The preceding divider separates History from the default-toggle
+                                                        // group, so we gate it alongside the toggle to avoid an orphan rule.
+                                                        {show_default_toggles.then(|| view! {
+                                                            <div class="border-t border-border my-1" />
+                                                            <button
+                                                                class="menu-item"
+                                                                disabled=move || setting_user_default.get()
+                                                                on:click=toggle_user_m
+                                                            >
+                                                                <Icon icon=phosphor_leptos::STAR size="14px" />
+                                                                {move || if is_user_default.get() { "Remove My Default" } else { "Set as My Default" }}
+                                                            </button>
+                                                        })}
 
-                                                        // Set as My Default (mobile)
-                                                        <button
-                                                            class="menu-item"
-                                                            disabled=move || setting_user_default.get()
-                                                            on:click=toggle_user_m
-                                                        >
-                                                            <Icon icon=phosphor_leptos::STAR size="14px" />
-                                                            {move || if is_user_default.get() { "Remove My Default" } else { "Set as My Default" }}
-                                                        </button>
-
-                                                        // Set Workspace Default (mobile, admin only)
-                                                        {is_admin.then(|| {
+                                                        // Set Workspace Default (mobile, admin only, dashboards only)
+                                                        {(show_default_toggles && is_admin).then(|| {
                                                             view! {
                                                                 <div class="border-t border-border my-1" />
                                                                 <button
