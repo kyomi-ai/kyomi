@@ -66,6 +66,7 @@ pub struct DatasourceTypeInfo {
 /// Combines the list and credential-status endpoints into a single call.
 /// Mirrors `GET /api/v1/datasources` + `GET /api/v1/datasources/credential-status`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -288,6 +289,7 @@ pub async fn get_datasource_types() -> Result<Vec<DatasourceTypeInfo>, ServerFnE
 ///
 /// Mirrors `POST /api/v1/datasources/{id}/toggle`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn toggle_datasource(
     datasource_id: String,
     enabled: bool,
@@ -641,6 +643,7 @@ pub async fn save_datasource_credentials(
 ///
 /// Mirrors `GET /api/v1/datasources/{id}/settings`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_datasource_settings(
     datasource_id: String,
 ) -> Result<DatasourceSettingsResult, ServerFnError> {

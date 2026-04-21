@@ -1669,6 +1669,7 @@ pub async fn search_catalog(
 /// catalog refresh service in [`super::catalog_refresh`] which handles all
 /// datasource types including BigQuery REST API indexing.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn refresh_catalog(
     datasource_slug: String,
 ) -> Result<(), ServerFnError> {

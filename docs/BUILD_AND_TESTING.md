@@ -410,6 +410,82 @@ Native `<select>` popups are rendered by the OS, not the DOM. Only custom `Style
 
 ---
 
+## Adding a feature that needs both a server_fn and a REST route
+
+**The rule**: orchestration lives in a shared service module (`apps/server/src/services/<module>.rs` for server-only logic, or a domain crate like `kyomi-auth`, `kyomi-knowledge` when the logic belongs to that domain). Both the `#[server]` function in `crates/kyomi-ui/src/server_fns/` and the REST handler in `apps/server/src/routes/` are thin wrappers (5-15 lines) that call the shared service.
+
+Why this matters: the KYO-70 (feedback notifications), KYO-72 (billing MCP invalidation), and KYO-115 (Connect token) regressions all had the same root cause — the server_fn and REST handler implemented the same operation independently and drifted. New behavior was added to one side and silently missing on the other. This section and the accompanying linter (`scripts/lint/check-server-fns.sh`) exist to make that class of bug hard to reintroduce.
+
+### Exemplars in the tree
+
+**Feedback** — post-KYO-70 template. Both sides delegate to the same service entry point:
+
+- Service: `kyomi-auth/src/feedback_service.rs` — `submit_feedback(db, config, auth, input)` does validation, persistence, Linear/Slack/email notifications, rate limiting.
+- Leptos: `crates/kyomi-ui/src/server_fns/feedback.rs` — 30 lines, constructs `FeedbackInput`, calls `feedback_service::submit_feedback`, maps the result. No `sqlx`, no notification logic, no Linear calls.
+- REST: `apps/server/src/routes/feedback.rs` — same shape, different framing (Axum extractors instead of Leptos context), same service call.
+
+**Connect** — post-KYO-115 template. DI comes through `ServerContext`, not a standalone `use_context::<Arc<Foo>>()`:
+
+- Context wiring: `crates/kyomi-ui/src/server_fns/mod.rs` — `ServerContext.connect_token: Option<Arc<ConnectTokenService>>`. The server populates it at startup; server_fns reach it via `ctx.connect_token`.
+- Leptos: `crates/kyomi-ui/src/server_fns/connect.rs` — pulls the service from `ctx.connect_token`. Never does `use_context::<Arc<ConnectTokenService>>()`, which was the original bug: that context was never provided.
+- REST: `apps/server/src/routes/datasources.rs` — pulls the same service from `AppState.connect_token`.
+
+Both exemplars keep the `#[server]` fn small enough that the linter is happy by construction.
+
+### The lint script — `scripts/lint/check-server-fns.sh`
+
+Runs in pre-commit (against staged `server_fns/*.rs`) and in CI (against the full tree). Pure bash + awk, no Rust toolchain required. Two rules:
+
+**Rule A — non-allowlisted context lookup**
+
+Any `use_context::<T>()` or `expect_context::<T>()` inside a `#[server]` fn where `T`'s base type isn't in the allowlist (default: `ServerContext`, `AuthUser`, `ResponseOptions`). Rationale: KYO-115 was a server_fn looking up `Arc<ConnectTokenService>` via a context the server never provided. Non-allowlisted lookups are almost always DI that should live in `ServerContext` (so it's obvious when the wiring is missing) or in a shared service function both sides call.
+
+**Rule B — too many service-layer callouts**
+
+Counts function-call invocations inside a `#[server]` fn body to `sqlx::query`, `kyomi_auth::`, `kyomi_knowledge::`, `services::`, and the `kyomi_core::db_*!` macros. If the count exceeds `SERVER_FN_CALLOUT_MAX` (default 3), the fn is flagged. Rationale: heavy-orchestration server_fns are empirically the ones that drift — a 10-callout server_fn is 10 places where the REST handler can silently miss something.
+
+### Escape hatches
+
+Both rules accept a justified comment if the linter is wrong for a given fn:
+
+```rust
+// Rule A — on the line immediately before the use_context call:
+// lint-allow: server-fn-context=WebSocketManager is request-scoped, not global
+let manager = use_context::<WebSocketManager>().unwrap();
+
+// Rule B — anywhere inside the fn body, or on the #[server] attribute line:
+#[server(prefix = "/leptos-api")]
+pub async fn deeply_orchestrated_fn(...) -> ... {
+    // lint-allow: server-fn-callouts=this fn is REST-less and intentionally owns the orchestration
+    ...
+}
+```
+
+**Justification is required** (≥5 non-whitespace characters after `=`). An empty hatch is treated as if it weren't there AND triggers a warning. Appropriate uses:
+
+- A server_fn that genuinely has no REST counterpart and needs specialized context (e.g. WebSocket-scoped or setup-wizard-scoped dependencies). The justification must explain why.
+- A function where the orchestration cannot reasonably be extracted without inventing a service layer for a single caller. Rare; prefer extraction.
+
+Inappropriate uses: silencing the linter because you don't feel like extracting the service. The code-review-architect enforces this — a PR that adds an escape hatch without a concrete extraction reason will get 🟡 MAJOR feedback.
+
+### Running the lint locally
+
+```bash
+# Full tree
+./scripts/lint/check-server-fns.sh
+
+# Only a specific file (matches the pre-commit hook's behavior)
+./scripts/lint/check-server-fns.sh crates/kyomi-ui/src/server_fns/feedback.rs
+
+# Tighten the Rule B threshold for stricter review
+SERVER_FN_CALLOUT_MAX=2 ./scripts/lint/check-server-fns.sh
+
+# Run the self-tests (asserts each fixture is correctly accepted/rejected)
+./scripts/lint/check-server-fns-test.sh
+```
+
+---
+
 ## Verification Checklist
 
 Before declaring any UI change "done":

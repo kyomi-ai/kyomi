@@ -79,6 +79,7 @@ pub async fn create_copilot_session(
 ///
 /// The component is responsible for prefixing content appropriately.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn send_copilot_message(
     session_id: String,
     message: String,

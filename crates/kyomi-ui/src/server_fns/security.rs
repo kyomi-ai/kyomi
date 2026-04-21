@@ -96,6 +96,7 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
 /// - New password must be at least 8 characters.
 /// - Current password must be verified first.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn change_password(
     current_password: String,
     new_password: String,
@@ -174,6 +175,7 @@ pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
 ///
 /// Mirrors `POST /auth/2fa/setup` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -209,6 +211,7 @@ pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
 ///
 /// Mirrors `POST /auth/2fa/enable` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -305,6 +308,7 @@ pub struct SessionEntry {
 /// Determines the current session by comparing the refresh token cookie's
 /// family_id against each session's family_id.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -396,6 +400,7 @@ pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
 /// Does NOT require `extract_auth()` — the token may already be invalid
 /// (e.g. if the access token expired) but we still want to clear cookies.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn logout() -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
@@ -512,6 +517,7 @@ pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
 ///
 /// Mirrors `POST /auth/passkeys/add/start` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn start_passkey_registration(
     device_name: String,
 ) -> Result<String, ServerFnError> {
@@ -612,6 +618,7 @@ pub async fn start_passkey_registration(
 ///
 /// Mirrors `POST /auth/passkeys/add/complete` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn complete_passkey_registration(
     credential_json: String,
 ) -> Result<String, ServerFnError> {

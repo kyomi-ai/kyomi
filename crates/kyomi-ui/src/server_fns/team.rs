@@ -150,6 +150,7 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
 ///
 /// Mirrors `DELETE /api/v1/workspaces/members/{id}` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -241,6 +242,7 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 ///
 /// Mirrors `POST /api/v1/workspaces/invitations` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -349,6 +351,7 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
 ///
 /// Mirrors `GET /api/v1/workspaces/ownership/transfers` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;

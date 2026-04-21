@@ -748,6 +748,7 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
 /// Mirrors `POST /watches/alerts/{execution_id}/continue-chat` in
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;

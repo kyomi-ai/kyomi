@@ -1,7 +1,9 @@
 #!/bin/bash
-# Pre-commit hook: blocks lint suppressions, clippy warnings, and unreviewed commits.
-# Order: fast checks first (lints, clippy), expensive check last (review signature).
-# This avoids wasting an LLM review cycle on code that fails basic linting.
+# Pre-commit hook: blocks lint suppressions, server_fn/REST divergence, clippy
+# warnings, and unreviewed commits.
+# Order: cheap checks first (grep-based lints), then clippy, then expensive
+# review signature check. This avoids wasting an LLM review cycle on code that
+# fails basic linting.
 
 set -e
 
@@ -28,7 +30,30 @@ fi
 
 echo "✅ No new lint suppressions."
 
-# --- Check 2: Cargo clippy (staged crates only) ---
+# --- Check 2: server_fn / REST divergence lint (KYO-122) ---
+# Runs before clippy because it is orders of magnitude faster (< 200ms)
+# and catches the class of bugs that triggered KYO-115. Only fires when
+# staged changes touch `crates/kyomi-ui/src/server_fns/*.rs`.
+echo "🔍 Checking server_fn / REST divergence..."
+
+staged_server_fns=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep '^crates/kyomi-ui/src/server_fns/.*\.rs$' || true)
+
+if [ -n "$staged_server_fns" ]; then
+    # shellcheck disable=SC2086  # word-splitting is intentional here
+    if ! ./scripts/lint/check-server-fns.sh $staged_server_fns; then
+        echo ""
+        echo "❌ server_fn lint failed — commit blocked."
+        echo "   Fix the reported violations or add a justified escape-hatch"
+        echo "   comment (see scripts/lint/check-server-fns.sh header)."
+        exit 1
+    fi
+    echo "✅ server_fn lint clean."
+else
+    echo "✅ server_fn lint skipped (no server_fns files staged)."
+fi
+
+# --- Check 3: Cargo clippy (staged crates only) ---
 # Only check crates that have staged .rs files, not the full workspace.
 # This prevents warnings in other crates (e.g. from parallel agents working
 # on the same branch) from blocking unrelated commits.
@@ -77,7 +102,7 @@ else
     fi
 fi
 
-# --- Check 3: Verify code review signature ---
+# --- Check 4: Verify code review signature ---
 echo "🔍 Verifying code review approval..."
 
 REVIEW_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----

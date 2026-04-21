@@ -3,7 +3,8 @@
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
 # Two jobs:
-#   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions
+#   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
+#      runs the server_fn/REST divergence linter across the full tree
 #   2. clippy (slow, ~2-5min) — full workspace clippy + compilation check
 # =============================================================================
 
@@ -42,6 +43,20 @@ jobs:
             exit 1
           fi
           echo "✅ No new lint suppressions."
+
+      # --------------------------------------------------------------------
+      # Server function / REST divergence lint (KYO-122).
+      #
+      # Blocks two patterns that caused the KYO-70, KYO-72, KYO-115
+      # outages:
+      #   A) server_fns pulling non-allowlisted DI via use_context::<T>()
+      #   B) server_fns doing heavy service-layer orchestration that
+      #      diverges from the REST handler
+      #
+      # Pure bash + awk, no Rust toolchain required (~200ms).
+      # --------------------------------------------------------------------
+      - name: Server function / REST divergence lint
+        run: ./scripts/lint/check-server-fns.sh
 
   # ---------------------------------------------------------------------------
   # Slow check: cargo clippy (compiles + lints the entire workspace)

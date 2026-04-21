@@ -138,6 +138,7 @@ pub async fn get_auth_config() -> Result<AuthConfig, ServerFnError> {
 /// 8. Set HTTPOnly cookies via `ResponseOptions`
 /// 9. Return `Success`
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn login_with_password(
     email: String,
     password: String,
@@ -308,6 +309,7 @@ pub async fn login_with_password(
 /// - **SaaS with SMTP**: Creates unverified user, sends verification email,
 ///   returns `VerificationRequired`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn signup_start(
     email: String,
     name: Option<String>,
@@ -716,6 +718,7 @@ pub async fn signup_start(
 /// Verifies the signup token, creates the user account with password,
 /// creates a workspace, sets auth cookies, and returns `Success`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn signup_complete(
     token: String,
     name: String,
@@ -907,6 +910,7 @@ pub async fn signup_complete(
 /// 5. If new user or user needs terms: store pending signup in KV, return `PendingTerms`
 /// 6. If existing user with terms accepted: create session, set cookies, return `Success`
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn google_oauth_callback(
     code: String,
     state: Option<String>,
@@ -1285,6 +1289,7 @@ pub enum RecoverySetPasswordResult {
 /// Always returns `Ok(())` to prevent email enumeration. If a verified account
 /// exists with the given email, a recovery link is sent in the background.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
@@ -1382,6 +1387,7 @@ pub async fn recovery_start(email: String) -> Result<(), ServerFnError> {
 /// On success, returns a `recovery_session_id` (stored in KV with 15 min TTL)
 /// and whether the user has passkeys registered.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn recovery_verify(
     token: String,
 ) -> Result<RecoveryVerifyResult, ServerFnError> {
@@ -1466,6 +1472,7 @@ pub async fn recovery_verify(
 /// 6. Disable TOTP if enabled
 /// 7. Create authenticated session and set cookies
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn recovery_set_password(
     recovery_session_id: String,
     new_password: String,
@@ -1691,6 +1698,7 @@ pub async fn passkey_login_start() -> Result<PasskeyLoginStartResult, ServerFnEr
 /// 7. Create authenticated session and set cookies
 /// 8. Return LoginResult::Success
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn passkey_login_complete(
     challenge_id: String,
     assertion_json: String,
@@ -1871,6 +1879,7 @@ pub async fn passkey_login_complete(
 /// For existing verified users: starts passkey registration directly.
 /// For existing unverified users: resends verification email.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn passkey_register_start(
     email: String,
     name: Option<String>,
@@ -2055,6 +2064,7 @@ pub async fn passkey_register_start(
 /// 5. Create authenticated session and set cookies (auto-login for signup)
 /// 6. Return LoginResult::Success
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn passkey_register_complete(
     challenge_id: String,
     credential_json: String,
@@ -2229,6 +2239,7 @@ pub enum PasskeyRecoveryVerifyResult {
 ///
 /// After this, the client calls `passkey_register_complete()` with the credential.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn passkey_signup_complete(
     token: String,
     name: String,
@@ -2421,6 +2432,7 @@ pub async fn passkey_signup_complete(
 ///
 /// After this, the client calls `passkey_register_complete()` with the credential.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn passkey_recovery_verify(
     token: String,
 ) -> Result<PasskeyRecoveryVerifyResult, ServerFnError> {

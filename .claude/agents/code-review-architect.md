@@ -412,6 +412,16 @@ These are the patterns agents most commonly introduce. Check every diff against 
 - Functions that return `Result<(), Error>` but can never actually fail
 - **Rule**: APIs should be hard to misuse. If a caller can pass invalid combinations, the interface is wrong.
 
+### 13. Server_fn / REST Divergence (KYO-122)
+
+The Leptos `#[server]` surface and the REST API surface are *two callers of the same orchestration*. They must never reimplement the same operation independently — that is how KYO-70 (feedback notifications missing on Leptos), KYO-72 (billing tier not invalidating MCP sessions), and KYO-115 (Connect DI unwired) all shipped broken.
+
+**Check 13a — duplicated orchestration in a `#[server]` fn.** If the diff adds or modifies a `#[server]` function, look at the REST handler in `apps/server/src/routes/<module>.rs` for the same operation. If both sides perform the same orchestration steps (DB reads/writes, validation, notifications, WebSocket broadcasts) inline, flag as 🟡 MAJOR unless the logic has been extracted into a shared `services::` / `kyomi_auth::` / `kyomi_knowledge::` function that both callers invoke. Reference `server_fns/feedback.rs` + `routes/feedback.rs` (post-KYO-70 template) as the correct shape. The lint script at `scripts/lint/check-server-fns.sh` (Rule B) catches the count-based heuristic, but architectural review is required to confirm that extraction is the right fix and that both callers exist where they're expected.
+
+**Check 13b — new `use_context::<T>()` / `expect_context::<T>()` in a server_fn.** If the diff adds a new context lookup in a `#[server]` fn where `T` is not `ServerContext`, `AuthUser`, or `ResponseOptions`, flag it — that's the exact KYO-115 pattern. The production server never `provide_context`s arbitrary types; the server_fn will compile and then fail at runtime with "not configured." Require either (a) a justified `// lint-allow: server-fn-context=<why>` escape hatch with a concrete reason (not "because we need it"), or (b) the DI moved into `ServerContext` as a new field so every server_fn gets it through the same channel the server already wires. Reference `ServerContext.connect_token` in `crates/kyomi-ui/src/server_fns/mod.rs` as the post-KYO-115 template.
+
+- **Rule**: One caller ≠ one implementation. If two entrypoints do the same thing, they call the same function. If the DI isn't in `ServerContext`, it won't be there at runtime.
+
 ## Critical Principles:
 
 - **Be Objective**: Base critiques on project standards (CLAUDE.md), not personal preferences

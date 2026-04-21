@@ -39,6 +39,7 @@ pub struct OwnershipTransfer {
 /// Mirrors the React flow: fetch all pending transfers for the user,
 /// find the one matching `transfer_id`, verify status == "pending".
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_ownership_transfer(
     transfer_id: String,
 ) -> Result<Option<OwnershipTransfer>, ServerFnError> {

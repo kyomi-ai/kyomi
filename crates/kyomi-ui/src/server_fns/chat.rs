@@ -478,6 +478,7 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
 ///
 /// The AI response is delivered asynchronously via WebSocket streaming events.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn send_chat_message(
     message: String,
     session_id: Option<String>,
@@ -1105,6 +1106,7 @@ pub async fn toggle_message_pin(
 /// Mirrors `PATCH /chat/sessions/{session_id}/messages/{message_id}` in
 /// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn update_message_content(
     session_id: String,
     message_id: String,

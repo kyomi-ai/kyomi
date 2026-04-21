@@ -48,6 +48,7 @@ pub enum AcceptTermsResult {
 /// Mirrors `POST /auth/accept-terms` in
 /// `apps/server/src/routes/auth_google_oauth.rs`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn accept_terms(
     temp_token: String,
     marketing_consent: bool,
@@ -329,6 +330,7 @@ pub struct OnboardingState {
 ///
 /// Mirrors the logic in `DatasourceOnboarding.jsx`'s `checkWorkspaceState()`.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
     use super::{extract_auth, extract_context, workspace_id};
 

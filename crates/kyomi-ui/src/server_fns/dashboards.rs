@@ -457,6 +457,7 @@ pub async fn get_version(
 /// `max_version + 1`, reads content from the live `dashboards` table
 /// instead of `dashboard_versions`. Matches the Python/REST API contract.
 #[server(prefix = "/leptos-api")]
+// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn diff_versions(
     dashboard_id: String,
     from_version: i32,
