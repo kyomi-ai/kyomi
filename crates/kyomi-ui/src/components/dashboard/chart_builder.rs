@@ -572,10 +572,6 @@ pub fn ChartBuilderModal(
     // synchronously.
     let initial_ast_val = initial_ast(existing_yaml.as_deref());
 
-    // Title used in the modal header — derived once at open time from the
-    // AST; the header doesn't need to track live edits.
-    let initial_title = ast_get_title(&initial_ast_val);
-
     let ast = RwSignal::new(initial_ast_val.clone());
 
     // ── Text buffer for the YAML editor ─────────────────────────────────
@@ -883,11 +879,19 @@ pub fn ChartBuilderModal(
 
     // ── View ────────────────────────────────────────────────────────────
 
-    let modal_title = if is_edit_mode {
-        format!("Chart Builder: {initial_title}")
-    } else {
-        "Chart Builder: New Chart".to_string()
-    };
+    // Derived so the header tracks Title-field edits live in both the Visual
+    // and YAML tabs — they both write through `ast`, so reading the current
+    // title here gives us reactive updates for free. Create-mode keeps the
+    // static "New Chart" label because there's no meaningful title yet.
+    let modal_title = Signal::derive(move || {
+        if is_edit_mode {
+            let t = ast.with(ast_get_title);
+            let display = if t.is_empty() { "(untitled)".to_string() } else { t };
+            format!("Chart Builder: {display}")
+        } else {
+            "Chart Builder: New Chart".to_string()
+        }
+    });
 
     // ── Tab state ──────────────────────────────────────────────────────
     let (active_tab, set_active_tab) = signal(

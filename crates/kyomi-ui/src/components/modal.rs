@@ -81,9 +81,11 @@ pub fn Modal(
     show: Signal<bool>,
     /// Called on backdrop click, close button click, or Escape key.
     on_close: Callback<()>,
-    /// Modal title displayed in the header.
+    /// Modal title displayed in the header. Accepts a string literal, owned
+    /// `String`, signal, or closure — rendered reactively so callers can
+    /// update the header live (e.g. while the user edits a title field).
     #[prop(into)]
-    title: String,
+    title: MaybeProp<String>,
     /// Modal size — controls max-width. Default: Lg (896px).
     #[prop(default = ModalSize::Lg)]
     size: ModalSize,
@@ -139,7 +141,7 @@ pub fn Modal(
                     <div class="px-4 sm:px-6 py-3 sm:py-4 border-b border-border flex items-center justify-between flex-shrink-0">
                         // React: `text-lg sm:text-xl font-semibold text-foreground`
                         <h2 class="text-lg sm:text-xl font-semibold text-foreground">
-                            {title.clone()}
+                            {move || title.get().unwrap_or_default()}
                         </h2>
                         // Close button
                         // React: Button variant="ghost" size="icon" → ghost icon button classes
