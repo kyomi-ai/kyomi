@@ -67,6 +67,80 @@ pub fn resolve_redirect_target(config: &LandingConfig) -> String {
     }
 }
 
+/// Compute the target URL for the sidebar "Dashboards" nav item.
+///
+/// Priority: personal default > workspace default > `/dashboards` list.
+/// This does NOT consult `landing_page` — the nav link goes to the user's
+/// dashboard regardless of whether dashboards is their configured landing
+/// page. Landing-page priority lives in [`resolve_redirect_target`].
+///
+/// Matches the `Some(_)` semantics used by [`resolve_redirect_target`] on
+/// the dashboard ID fields — both helpers treat *any* `Some` value as a
+/// valid ID (including `Some("")`), so their behaviour stays consistent.
+pub fn resolve_dashboards_nav_href(config: &LandingConfig) -> String {
+    if let Some(ref id) = config.user_default_dashboard_id {
+        format!("/dashboard/{id}")
+    } else if let Some(ref id) = config.workspace_default_dashboard_id {
+        format!("/dashboard/{id}")
+    } else {
+        "/dashboards".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(
+        user_default: Option<&str>,
+        workspace_default: Option<&str>,
+    ) -> LandingConfig {
+        LandingConfig {
+            landing_page: String::new(),
+            user_default_dashboard_id: user_default.map(String::from),
+            workspace_default_dashboard_id: workspace_default.map(String::from),
+            is_personal_mode: false,
+            llm_configured: true,
+        }
+    }
+
+    #[test]
+    fn nav_href_personal_only() {
+        let cfg = make_config(Some("user-abc"), None);
+        assert_eq!(resolve_dashboards_nav_href(&cfg), "/dashboard/user-abc");
+    }
+
+    #[test]
+    fn nav_href_workspace_only() {
+        let cfg = make_config(None, Some("ws-abc"));
+        assert_eq!(resolve_dashboards_nav_href(&cfg), "/dashboard/ws-abc");
+    }
+
+    #[test]
+    fn nav_href_both_set_personal_wins() {
+        let cfg = make_config(Some("user-abc"), Some("ws-def"));
+        assert_eq!(resolve_dashboards_nav_href(&cfg), "/dashboard/user-abc");
+    }
+
+    #[test]
+    fn nav_href_neither_falls_back_to_list() {
+        let cfg = make_config(None, None);
+        assert_eq!(resolve_dashboards_nav_href(&cfg), "/dashboards");
+    }
+
+    #[test]
+    fn nav_href_empty_string_personal_id_is_treated_as_some() {
+        // `resolve_redirect_target` uses plain `if let Some(ref id)` on the
+        // dashboard ID fields, so `Some("")` is accepted as an ID and produces
+        // a `/dashboard/` URL. This test pins that behaviour for the nav
+        // helper so the two resolvers stay in sync. If the server ever starts
+        // normalising empty IDs to `None`, both helpers should be updated
+        // together (and this test updated with them).
+        let cfg = make_config(Some(""), Some("ws-abc"));
+        assert_eq!(resolve_dashboards_nav_href(&cfg), "/dashboard/");
+    }
+}
+
 /// Home page component — fetches landing config and redirects.
 ///
 /// Shows a centered spinner during the server function call, then

@@ -539,6 +539,18 @@ fn Sidebar(
         // when no preference is set.
         Some(Err(_)) | None => "/chat".to_string(),
     });
+    // Dashboards nav href — personal default > workspace default > list.
+    // Independent of `landing_page`: even when the user's landing page is
+    // `chat`, the Dashboards nav item should still deep-link to their
+    // configured default dashboard. See `resolve_dashboards_nav_href` for
+    // the priority rationale.
+    let dashboards_href = Signal::derive(move || match landing_config.get() {
+        Some(Ok(cfg)) => crate::pages::home::resolve_dashboards_nav_href(&cfg),
+        // Fetch in flight or error — go to the list, same as if no default
+        // were configured. Do NOT fall back to `/chat` here (that's the
+        // landing-page fallback, wrong for a nav link).
+        Some(Err(_)) | None => "/dashboards".to_string(),
+    });
     let (user_menu_open, set_user_menu_open) = signal(false);
     let (feedback_open, set_feedback_open) = signal(false);
 
@@ -681,10 +693,17 @@ fn Sidebar(
                         </span>
                     </a>
 
-                    <NavItem href="/chats" icon=phosphor_leptos::CHATS label="Chats" collapsed=effective_collapsed also_matches="/chat/"/>
-                    <NavItem href="/dashboards" icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed also_matches="/dashboard/"/>
+                    <NavItem href=Signal::stored("/chats".to_string()) icon=phosphor_leptos::CHATS label="Chats" collapsed=effective_collapsed also_matches="/chat/"/>
+                    // `also_matches="/dashboard"` (no trailing slash) covers
+                    // the list `/dashboards`, detail `/dashboard/:id`, and
+                    // editor `/dashboard/:id/edit` in one prefix. Needed
+                    // because `href` is now dynamic — when it resolves to
+                    // `/dashboard/<user-default-id>` the list path no longer
+                    // satisfies `starts_with(href)`, so `also_matches` is the
+                    // one that keeps the nav item active on the list page.
+                    <NavItem href=dashboards_href icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed also_matches="/dashboard"/>
                     <NavItem
-                        href="/watches"
+                        href=Signal::stored("/watches".to_string())
                         icon=phosphor_leptos::EYE
                         label="Watches"
                         collapsed=effective_collapsed
@@ -696,8 +715,8 @@ fn Sidebar(
                             }
                         })
                     />
-                    <NavItem href="/knowledge" icon=phosphor_leptos::BOOK_OPEN label="Knowledge" collapsed=effective_collapsed/>
-                    <NavItem href="/sql-editor" icon=phosphor_leptos::DATABASE label="SQL Editor" collapsed=effective_collapsed/>
+                    <NavItem href=Signal::stored("/knowledge".to_string()) icon=phosphor_leptos::BOOK_OPEN label="Knowledge" collapsed=effective_collapsed/>
+                    <NavItem href=Signal::stored("/sql-editor".to_string()) icon=phosphor_leptos::DATABASE label="SQL Editor" collapsed=effective_collapsed/>
                 </div>
 
                 // ── Recent Chats ───────────────────────────────────────────
@@ -935,7 +954,10 @@ fn Sidebar(
 /// - Label: `text-sm font-medium whitespace-nowrap overflow-hidden transition-opacity duration-300`
 #[component]
 fn NavItem(
-    href: &'static str,
+    /// Destination URL. Reactive so nav items like "Dashboards" can track
+    /// per-user defaults (personal > workspace > list) from `landing_config`
+    /// without the Sidebar having to special-case each one.
+    href: Signal<String>,
     icon: phosphor_leptos::IconData,
     label: &'static str,
     collapsed: Signal<bool>,
@@ -954,7 +976,8 @@ fn NavItem(
 
     let is_active = Memo::new(move |_| {
         let path = pathname.get();
-        path.starts_with(href)
+        let h = href.get();
+        path.starts_with(h.as_str())
             || also_matches.is_some_and(|prefix| path.starts_with(prefix))
     });
 
@@ -967,7 +990,7 @@ fn NavItem(
 
     view! {
         <a
-            href=href
+            href=move || href.get()
             class=move || {
                 let active = is_active.get();
                 let spacing = if collapsed.get() { "gap-3 px-2.5" } else { "gap-3 pl-2.5 pr-3 py-2.5" };
