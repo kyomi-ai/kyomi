@@ -31,6 +31,7 @@ use phosphor_leptos::Icon;
 use crate::parser::parse_markdown_chartml;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+use crate::query_cache::QueryCache;
 use crate::server_fns::dashboards::{
     get_dashboard, get_user_default_dashboard, get_workspace_default_dashboard,
     set_user_default_dashboard, set_workspace_default_dashboard, update_dashboard,
@@ -244,6 +245,12 @@ pub fn DashboardViewerPage() -> impl IntoView {
     // ── Set user default action ─────────────────────────────────────────
     let (setting_user_default, set_setting_user_default) = signal(false);
     let (setting_ws_default, set_setting_ws_default) = signal(false);
+
+    // Layout-level QueryCache — toggling the per-user or per-workspace
+    // default dashboard must invalidate the `landing_config` entry so the
+    // home-page redirect and sidebar "Dashboards" link (KYO-111) pick up
+    // the new default without a full browser refresh (KYO-127).
+    let query_cache = expect_context::<QueryCache>();
 
     // ── WebSocket subscription: dashboard_update ─────────────────────────
     // When another user or agent updates/deletes the currently viewed
@@ -645,6 +652,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         leptos::logging::error!("Failed to set user default: {}", e);
                                     }
                                     user_default_resource.refetch();
+                                    query_cache.invalidate("landing_config");
                                     set_setting_user_default.set(false);
                                 });
                             }
@@ -666,6 +674,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         leptos::logging::error!("Failed to set user default: {}", e);
                                     }
                                     user_default_resource.refetch();
+                                    query_cache.invalidate("landing_config");
                                     set_setting_user_default.set(false);
                                 });
                             }
@@ -687,6 +696,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         leptos::logging::error!("Failed to set workspace default: {}", e);
                                     }
                                     workspace_default_resource.refetch();
+                                    query_cache.invalidate("landing_config");
                                     set_setting_ws_default.set(false);
                                 });
                             }
@@ -708,6 +718,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                         leptos::logging::error!("Failed to set workspace default: {}", e);
                                     }
                                     workspace_default_resource.refetch();
+                                    query_cache.invalidate("landing_config");
                                     set_setting_ws_default.set(false);
                                 });
                             }
