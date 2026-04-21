@@ -96,6 +96,13 @@ pub async fn update_workspace_name(
 }
 
 /// Update workspace settings JSON (full replace).
+///
+/// `workspaces.settings` is a Postgres `json` column. Binding `$1` as text
+/// and letting Postgres coerce it does NOT work — Postgres refuses the
+/// implicit text-to-json cast (`column "settings" is of type json but
+/// expression is of type text`). We keep the bind as text (sqlx serializes
+/// `String` to TEXT on both backends) and perform the cast in SQL on
+/// Postgres. SQLite stores JSON in TEXT columns, so no cast is needed.
 pub async fn update_workspace_settings(
     pool: &DbPool,
     workspace_id: &str,
@@ -105,9 +112,15 @@ pub async fn update_workspace_settings(
     let now = sql_compat::now(is_pg);
     let settings_str = serde_json::to_string(settings)
         .map_err(|e| kyomi_core::Error::Internal(format!("JSON serialization failed: {e}")))?;
-    let sql = format!(
-        "UPDATE workspaces SET settings = $1, updated_at = {now} WHERE workspace_id = $2"
-    );
+    let sql = if is_pg {
+        format!(
+            "UPDATE workspaces SET settings = $1::json, updated_at = {now} WHERE workspace_id = $2"
+        )
+    } else {
+        format!(
+            "UPDATE workspaces SET settings = $1, updated_at = {now} WHERE workspace_id = $2"
+        )
+    };
     let result = kyomi_core::db_execute!(pool, &sql, &settings_str, workspace_id)?;
     Ok(result.rows_affected() > 0)
 }
@@ -133,6 +146,9 @@ pub async fn get_workspace_full(
 ///
 /// Sets `catalog_onboarding_completed` and `catalog_indexed_projects` on the
 /// workspace. Called from the onboarding/catalog/complete endpoint.
+///
+/// `catalog_indexed_projects` is a Postgres `json` column, so we cast the
+/// text bind with `$2::json` (see `update_workspace_settings` for details).
 pub async fn update_catalog_onboarding(
     pool: &DbPool,
     workspace_id: &str,
@@ -143,13 +159,23 @@ pub async fn update_catalog_onboarding(
     let now = sql_compat::now(is_pg);
     let projects_str = serde_json::to_string(indexed_projects)
         .map_err(|e| kyomi_core::Error::Internal(format!("JSON serialization failed: {e}")))?;
-    let sql = format!(
-        "UPDATE workspaces SET \
-         catalog_onboarding_completed = $1, \
-         catalog_indexed_projects = $2, \
-         updated_at = {now} \
-         WHERE workspace_id = $3"
-    );
+    let sql = if is_pg {
+        format!(
+            "UPDATE workspaces SET \
+             catalog_onboarding_completed = $1, \
+             catalog_indexed_projects = $2::json, \
+             updated_at = {now} \
+             WHERE workspace_id = $3"
+        )
+    } else {
+        format!(
+            "UPDATE workspaces SET \
+             catalog_onboarding_completed = $1, \
+             catalog_indexed_projects = $2, \
+             updated_at = {now} \
+             WHERE workspace_id = $3"
+        )
+    };
     let result = kyomi_core::db_execute!(pool, &sql, completed, &projects_str, workspace_id)?;
     Ok(result.rows_affected() > 0)
 }
