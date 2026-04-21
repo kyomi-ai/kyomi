@@ -17,6 +17,8 @@ html {
   /* Container query breakpoints — adjusted for 15px root font size.
    * Tailwind defaults are rem-based (designed for 16px root), so we
    * override to hit the intended pixel widths at 15px root. */
+  --container-xs: 21.333rem;  /* 320px at 15px root */
+  --container-md: 29.867rem;  /* 448px at 15px root */
   --container-3xl: 51.2rem;   /* 768px at 15px root */
   --container-6xl: 85.333rem; /* 1280px at 15px root */
 

@@ -83,6 +83,8 @@ web-sys = { version = "0.3", features = [
     "Response", "Blob", "Url", "CustomEvent", "CustomEventInit",
     # IntersectionObserver (infinite scroll in query history)
     "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
+    # ResizeObserver (chart header narrow-tier detection — see chart_header_bar.rs)
+    "ResizeObserver", "ResizeObserverEntry", "DomRectReadOnly",
     # SQL Editor: crypto.randomUUID() and performance.now()
     "Crypto", "Performance",
     # Feedback modal: screenshot capture + file upload

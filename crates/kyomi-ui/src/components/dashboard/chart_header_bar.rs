@@ -172,21 +172,36 @@ fn ChartTypeSelector(
 }
 
 /// Toggle chip for orientation/mode modifiers.
+///
+/// Uses Tailwind v4 container queries (driven by the `@container` ancestor on
+/// `ChartHeaderBar`) so the chip and its label adapt to the chart card's
+/// width rather than the viewport:
+///
+/// - Below `@xs` (< 320px container): the whole chip is hidden.
+/// - `@xs`–`@md` (320–447px): the chip is visible with `short_label`.
+/// - `@md+` (448px+): the chip is visible with the full `label`.
 #[component]
 fn ModifierChip(
     label: &'static str,
     active: bool,
     on_toggle: Callback<()>,
+    /// Abbreviated label shown at the Compact tier (320–447px container).
+    /// Falls back to `label` when not supplied.
+    #[prop(optional, into)]
+    short_label: Option<&'static str>,
 ) -> impl IntoView {
     let class = if active {
-        "px-2 py-0.5 text-xs font-medium rounded-full bg-accent text-foreground border border-border cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        "hidden @xs:inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-accent text-foreground border border-border cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
     } else {
-        "px-2 py-0.5 text-xs font-medium rounded-full text-muted-foreground hover:bg-secondary/50 border border-transparent cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        "hidden @xs:inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full text-muted-foreground hover:bg-secondary/50 border border-transparent cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
     };
+
+    let short = short_label.unwrap_or(label);
 
     view! {
         <button class=class on:click=move |_| on_toggle.run(())>
-            {label}
+            <span class="hidden @md:inline">{label}</span>
+            <span class="@md:hidden">{short}</span>
         </button>
     }
 }
@@ -261,6 +276,19 @@ pub fn ChartHeaderBar(
     let (menu_open, set_menu_open) = signal(false);
     let menu_trigger_ref = NodeRef::<leptos::html::Div>::new();
 
+    // Outer `@container` div ref — observed by `ResizeObserver` below so the
+    // portalled overflow menu can gate its Narrow-tier-only items off a real
+    // signal instead of a container query. (Portals mount at `document.body`,
+    // so `@xs:hidden` inside them has no `@container` ancestor and evaluates
+    // against the viewport — which means it permanently hides those items on
+    // every real screen.)
+    let container_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Narrow tier = container width < 320px (`@xs` breakpoint). Starts `false`
+    // so the first paint / SSR mirrors the toolbar-side icon visibility; the
+    // ResizeObserver below corrects it synchronously after mount.
+    let (is_narrow, set_is_narrow) = signal(false);
+
     // Store optional values for use in closures
     let ct = StoredValue::new(chart_type.clone());
     let co = StoredValue::new(chart_orientation.clone());
@@ -310,23 +338,73 @@ pub fn ChartHeaderBar(
         });
     }
 
+    // ResizeObserver on the outer `@container` div — drives `is_narrow` so the
+    // portalled overflow menu can show Edit / Save to Dashboard / Ask about /
+    // Chart Info at the Narrow tier. Container queries don't work inside a
+    // portal (no `@container` ancestor once mounted at `document.body`), so
+    // these items need a real Leptos signal instead of a CSS class.
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::JsCast;
+
+        let Some(el) = container_ref.get() else {
+            return;
+        };
+        let el: web_sys::Element = el.into();
+
+        let closure = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+            if let Some(entry) = entries.get(0).dyn_ref::<web_sys::ResizeObserverEntry>() {
+                let width = entry.content_rect().width();
+                set_is_narrow.set(width < 320.0);
+            }
+        });
+
+        let Ok(observer) = web_sys::ResizeObserver::new(closure.as_ref().unchecked_ref()) else {
+            return;
+        };
+        observer.observe(&el);
+
+        let wrapper = send_wrapper::SendWrapper::new((closure, observer));
+        on_cleanup(move || {
+            let (_closure, observer) = wrapper.take();
+            observer.disconnect();
+        });
+    });
+
+    // Keep `container_ref` alive on non-wasm targets so SSR still compiles
+    // (the ref is attached to the outermost div below).
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (container_ref, set_is_narrow);
+
     // Determine which modifier chips to show based on chart type
     let show_orientation_chip = chart_type.as_deref() == Some("bar") && show_type_selector;
     let show_mode_chip = matches!(chart_type.as_deref(), Some("bar") | Some("area")) && show_type_selector;
 
-    // Overflow menu only for Delete (Edit is a direct icon button now).
-    // Escape + click-outside handling lives inside <Popover>.
-    let has_menu_items = show_delete;
+    // Overflow menu holds Delete plus any secondary actions that collapse into
+    // the kebab at the Narrow tier (< 320px container). Escape + click-outside
+    // handling lives inside <Popover>.
+    let has_menu_items =
+        show_delete || show_edit || show_save_to_dashboard || show_ask_about || show_info;
+
+    // Kebab wrapper visibility:
+    //  - Delete always needs the kebab (it lives there at every tier).
+    //  - Without Delete, the kebab only exists to hold the Narrow-tier overflow,
+    //    so it's hidden from `@xs` upward where the secondary icons are visible.
+    let kebab_wrapper_class = if show_delete { "flex" } else { "flex @xs:hidden" };
 
     view! {
-        <div class="flex items-center justify-between px-4 py-1 bg-secondary border-b border-border">
+        <div
+            node_ref=container_ref
+            class="@container flex items-center justify-between px-4 py-1 bg-secondary border-b border-border"
+        >
             // ── Left side: before slot + "Last refreshed ..." ──
             <div class="flex items-center gap-2 min-w-0">
                 {before.map(|children| children())}
 
-                // "Last refreshed ..." text
+                // "Last refreshed ..." text — hidden below @md (< 448px container).
                 {last_updated.map(|sig| view! {
-                    <span class="text-xs text-muted-foreground truncate">
+                    <span class="hidden @md:inline text-xs text-muted-foreground truncate">
                         {move || {
                             let now = now_ms.get();
                             let text = sig.get()
@@ -343,7 +421,7 @@ pub fn ChartHeaderBar(
             </div>
 
             // ── Right side: type selector + modifier chips + action icons + overflow menu ──
-            <div class="flex items-center gap-1 flex-shrink-0">
+            <div class="flex items-center gap-1 min-w-0">
                 // Type selector
                 {(show_type_selector && ct.get_value().is_some()).then(|| {
                     let current = ct.get_value().unwrap();
@@ -358,6 +436,7 @@ pub fn ChartHeaderBar(
                     view! {
                         <ModifierChip
                             label="Horizontal"
+                            short_label="Horiz"
                             active=is_horizontal
                             on_toggle=Callback::new(move |()| {
                                 if is_horizontal {
@@ -375,16 +454,17 @@ pub fn ChartHeaderBar(
                     let chart_type_val = ct.get_value().unwrap_or_default();
                     let current_mode = cm.get_value();
                     let on_m = on_mode_change.unwrap_or(Callback::new(|_| {}));
-                    let (label, mode_value) = if chart_type_val == "area" {
-                        ("Normalized", "normalized")
+                    let (label, short_label, mode_value) = if chart_type_val == "area" {
+                        ("Normalized", "Norm", "normalized")
                     } else {
-                        ("Grouped", "grouped")
+                        ("Grouped", "Grpd", "grouped")
                     };
                     let is_active = current_mode.as_deref() == Some(mode_value);
                     let mode_str = mode_value.to_string();
                     view! {
                         <ModifierChip
                             label=label
+                            short_label=short_label
                             active=is_active
                             on_toggle=Callback::new(move |()| {
                                 if is_active {
@@ -421,68 +501,84 @@ pub fn ChartHeaderBar(
                     }
                 })}
 
-                // Save to dashboard button (direct icon, not in overflow menu)
+                // Save to dashboard button — hidden at Narrow tier; available in the kebab.
                 {(show_save_to_dashboard && on_save_to_dashboard.is_some()).then(|| {
                     let cb = on_save_to_dashboard.unwrap();
                     view! {
-                        <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            title="Save to Dashboard"
-                            on:click=move |_| cb.run(())
-                        >
-                            <Icon icon=phosphor_leptos::PLUS_SQUARE size="16px" />
-                        </button>
+                        <div class="hidden @xs:flex">
+                            <button
+                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                title="Save to Dashboard"
+                                on:click=move |_| cb.run(())
+                            >
+                                <Icon icon=phosphor_leptos::PLUS_SQUARE size="16px" />
+                            </button>
+                        </div>
                     }
                 })}
 
-                // Ask about this chart button (direct icon, matches React)
+                // Ask about this chart — hidden at Narrow tier; available in the kebab.
                 {(show_ask_about && on_ask_about.is_some()).then(|| {
                     let cb = on_ask_about.unwrap();
                     view! {
-                        <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            title="Ask about this chart"
-                            on:click=move |_| cb.run(())
-                        >
-                            <Icon icon=phosphor_leptos::CHATS size="16px" />
-                        </button>
+                        <div class="hidden @xs:flex">
+                            <button
+                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                title="Ask about this chart"
+                                on:click=move |_| cb.run(())
+                            >
+                                <Icon icon=phosphor_leptos::CHATS size="16px" />
+                            </button>
+                        </div>
                     }
                 })}
 
-                // Info button (direct icon, not in overflow menu)
+                // Info button — hidden at Narrow tier; available in the kebab.
                 {(show_info && on_info.is_some()).then(|| {
                     let cb = on_info.unwrap();
                     view! {
-                        <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            title="Chart Info"
-                            on:click=move |_| cb.run(())
-                        >
-                            <Icon icon=phosphor_leptos::INFO size="16px" />
-                        </button>
+                        <div class="hidden @xs:flex">
+                            <button
+                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                title="Chart Info"
+                                on:click=move |_| cb.run(())
+                            >
+                                <Icon icon=phosphor_leptos::INFO size="16px" />
+                            </button>
+                        </div>
                     }
                 })}
 
-                // Edit button (direct icon, rightmost action)
+                // Edit button — hidden at Narrow tier; available in the kebab.
                 {(show_edit && on_edit.is_some()).then(|| {
                     let cb = on_edit.unwrap();
                     view! {
-                        <button
-                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            title="Edit Chart"
-                            on:click=move |_| cb.run(())
-                        >
-                            <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px" />
-                        </button>
+                        <div class="hidden @xs:flex">
+                            <button
+                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                title="Edit Chart"
+                                on:click=move |_| cb.run(())
+                            >
+                                <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px" />
+                            </button>
+                        </div>
                     }
                 })}
 
-                // Overflow menu (Delete only — shows kebab when delete is available)
+                // Overflow menu. Holds Delete at every tier (when available) and
+                // acts as the landing spot for Edit/Save/Ask/Info at the Narrow
+                // tier (< 320px container), where those icons are hidden from the
+                // toolbar. Secondary items are wrapped in `@xs:hidden` so they
+                // only appear in the menu when they've been hidden outside it.
                 {has_menu_items.then(|| {
+                    let edit_cb = StoredValue::new(on_edit);
+                    let save_cb = StoredValue::new(on_save_to_dashboard);
+                    let ask_cb = StoredValue::new(on_ask_about);
+                    let info_cb = StoredValue::new(on_info);
                     let delete_cb = StoredValue::new(on_delete);
 
                     view! {
-                        <div node_ref=menu_trigger_ref>
+                        <div node_ref=menu_trigger_ref class=kebab_wrapper_class>
                             <button
                                 class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                                 title="Actions"
@@ -498,9 +594,73 @@ pub fn ChartHeaderBar(
                                 placement=crate::components::popover::Placement::BOTTOM_END
                                 class="w-48 bg-popover border border-border rounded-md shadow-lg py-1 overflow-y-auto"
                             >
+                                // Edit — visible in menu only at Narrow tier.
+                                // `<Show>` gates on the `is_narrow` signal because
+                                // the popover renders inside a Portal (mounted at
+                                // `document.body`), so CSS container queries can't
+                                // reach the `@container` ancestor from here.
+                                {(show_edit).then(|| {
+                                    edit_cb.get_value().map(|cb| view! {
+                                        <Show when=move || is_narrow.get()>
+                                            <button
+                                                class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
+                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
+                                            >
+                                                <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
+                                                <span>"Edit Chart"</span>
+                                            </button>
+                                        </Show>
+                                    })
+                                })}
+
+                                // Save to Dashboard — visible in menu only at Narrow tier.
+                                {(show_save_to_dashboard).then(|| {
+                                    save_cb.get_value().map(|cb| view! {
+                                        <Show when=move || is_narrow.get()>
+                                            <button
+                                                class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
+                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
+                                            >
+                                                <Icon icon=phosphor_leptos::PLUS_SQUARE size="14px" />
+                                                <span>"Save to Dashboard"</span>
+                                            </button>
+                                        </Show>
+                                    })
+                                })}
+
+                                // Ask about this chart — visible in menu only at Narrow tier.
+                                {(show_ask_about).then(|| {
+                                    ask_cb.get_value().map(|cb| view! {
+                                        <Show when=move || is_narrow.get()>
+                                            <button
+                                                class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
+                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
+                                            >
+                                                <Icon icon=phosphor_leptos::CHATS size="14px" />
+                                                <span>"Ask about this chart"</span>
+                                            </button>
+                                        </Show>
+                                    })
+                                })}
+
+                                // Chart Info — visible in menu only at Narrow tier.
+                                {(show_info).then(|| {
+                                    info_cb.get_value().map(|cb| view! {
+                                        <Show when=move || is_narrow.get()>
+                                            <button
+                                                class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
+                                                on:click=move |_| { cb.run(()); set_menu_open.set(false); }
+                                            >
+                                                <Icon icon=phosphor_leptos::INFO size="14px" />
+                                                <span>"Chart Info"</span>
+                                            </button>
+                                        </Show>
+                                    })
+                                })}
+
+                                // Delete — always lives in the kebab when available.
                                 {show_delete.then(|| {
-                                    let cb = delete_cb.get_value();
-                                    cb.map(|cb| view! {
+                                    delete_cb.get_value().map(|cb| view! {
                                         <button
                                             class="w-full text-left px-3 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
                                             on:click=move |_| { cb.run(()); set_menu_open.set(false); }
