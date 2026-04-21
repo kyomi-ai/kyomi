@@ -463,8 +463,8 @@ fn DashboardsEmptyState(
                 view! {
                     <EmptyState
                         icon=Arc::new(|| view! { <DashboardChartIcon /> }.into_any())
-                        title="No dashboards yet"
-                        description="Get started by creating your first markdown dashboard with embedded charts"
+                        title="An empty dashboard is just a first draft."
+                        description="Write the one your team will actually read — markdown with charts inline."
                         action=Arc::new(move || view! {
                             <Button on:click=move |ev| on_create.run(ev)>
                                 <Icon icon=phosphor_leptos::PLUS size="14px" />
