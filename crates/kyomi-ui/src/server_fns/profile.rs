@@ -51,17 +51,8 @@ pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
         .and_then(|v| v.as_i64())
         .unwrap_or(30) as i32;
 
-    let chart_palette = user
-        .chartml_config
-        .as_ref()
-        .and_then(|config| {
-            config
-                .get("config")
-                .and_then(|c| c.get("style"))
-                .and_then(|s| s.as_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| "kyomi".to_string());
+    let chart_palette =
+        kyomi_auth::user_service::get_user_palette_name(&ctx.db, &auth.user_id).await;
 
     Ok(ProfileData {
         user_id: user.user_id,

@@ -100,26 +100,10 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     // Matches the Capabilities struct's billing_enabled field.
     let billing_enabled = capabilities.billing_enabled;
 
-    // Read user's chart palette preference from chartml_config JSON
-    let chart_palette = {
-        let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
-            .await
-            .ok()
-            .flatten();
-        user.and_then(|u| {
-            u.chartml_config
-                .as_ref()
-                .and_then(|config| {
-                    // DB stores flat: {"type":"config","style":"vibrant","version":1}
-                    // Try flat first, then nested (for backward compat with REST API format)
-                    config.get("style")
-                        .or_else(|| config.get("config").and_then(|c| c.get("style")))
-                        .and_then(|s| s.as_str())
-                        .map(String::from)
-                })
-        })
-        .unwrap_or_else(|| "kyomi".to_string())
-    };
+    // Read user's chart palette preference from chartml_config JSON.
+    // The shared helper accepts both legacy flat and current nested shapes.
+    // See kyomi_auth::user_service::get_user_palette_name.
+    let chart_palette = kyomi_auth::user_service::get_user_palette_name(&ctx.db, &auth.user_id).await;
 
     Ok(UserContext {
         user_id: auth.user_id,

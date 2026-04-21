@@ -826,6 +826,64 @@ pub async fn update_chartml_config(
     Ok(result.rows_affected() > 0)
 }
 
+// ---------------------------------------------------------------------------
+// Chart palette lookup (KYO-129)
+// ---------------------------------------------------------------------------
+
+/// Extract the palette style name from a `chartml_config` JSON value.
+///
+/// Accepts both storage shapes that exist in production data:
+///   - Flat (legacy REST writer):   `{"style": "vibrant", ...}`
+///   - Nested (Leptos writer):      `{"config": {"style": "vibrant", ...}}`
+///
+/// Flat-first lookup matches the order used in the pre-KYO-129 browser
+/// reader (`context.rs`) — both shapes are accepted so writers can change
+/// shape without breaking existing readers. Returns None when the value
+/// is missing a `style` string in either shape.
+pub fn extract_palette_style(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("style")
+        .or_else(|| value.get("config").and_then(|c| c.get("style")))
+        .and_then(|s| s.as_str())
+}
+
+/// Look up the user's preferred chart palette name from
+/// `users.chartml_config`.
+///
+/// Returns `"kyomi"` (the default) when the user has no stored preference,
+/// when `chartml_config` is null, when the `style` field is missing in both
+/// shapes, or when the DB query fails. The fallback behavior matches what
+/// every pre-KYO-129 reader did independently.
+pub async fn get_user_palette_name(pool: &DbPool, user_id: &str) -> String {
+    const DEFAULT_PALETTE: &str = "kyomi";
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        chartml_config: Option<serde_json::Value>,
+    }
+
+    match kyomi_core::db_fetch_optional!(
+        pool, Row,
+        "SELECT chartml_config FROM users WHERE user_id = $1",
+        user_id
+    ) {
+        Ok(Some(row)) => row
+            .chartml_config
+            .as_ref()
+            .and_then(extract_palette_style)
+            .map(String::from)
+            .unwrap_or_else(|| DEFAULT_PALETTE.to_string()),
+        Ok(None) => {
+            tracing::warn!(user_id = %user_id, "User not found when loading palette preference");
+            DEFAULT_PALETTE.to_string()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, user_id = %user_id, "Failed to query user palette preference");
+            DEFAULT_PALETTE.to_string()
+        }
+    }
+}
+
 /// Update user's knowledge text.
 pub async fn update_knowledge(
     pool: &DbPool,
@@ -1004,4 +1062,61 @@ pub async fn delete_user(pool: &DbPool, user_id: &str) -> kyomi_core::Result<boo
         pool, "DELETE FROM users WHERE user_id = $1", user_id
     )?;
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_palette_style_flat() {
+        let v = json!({"type": "config", "version": 1, "style": "vibrant"});
+        assert_eq!(extract_palette_style(&v), Some("vibrant"));
+    }
+
+    #[test]
+    fn extract_palette_style_nested() {
+        let v = json!({"config": {"type": "config", "version": 1, "style": "balanced"}});
+        assert_eq!(extract_palette_style(&v), Some("balanced"));
+    }
+
+    #[test]
+    fn extract_palette_style_prefers_flat_over_nested_when_both_present() {
+        // Defensive: if a future writer accidentally emits both, flat wins,
+        // mirroring the pre-KYO-129 reader order.
+        let v = json!({"style": "vibrant", "config": {"style": "balanced"}});
+        assert_eq!(extract_palette_style(&v), Some("vibrant"));
+    }
+
+    #[test]
+    fn extract_palette_style_missing_returns_none() {
+        let v = json!({"type": "config", "version": 1});
+        assert_eq!(extract_palette_style(&v), None);
+    }
+
+    #[test]
+    fn extract_palette_style_empty_object_returns_none() {
+        assert_eq!(extract_palette_style(&json!({})), None);
+    }
+
+    #[test]
+    fn extract_palette_style_null_returns_none() {
+        assert_eq!(extract_palette_style(&json!(null)), None);
+    }
+
+    #[test]
+    fn extract_palette_style_non_object_returns_none() {
+        // Malformed data — e.g. a bare string accidentally stored.
+        assert_eq!(extract_palette_style(&json!("vibrant")), None);
+        assert_eq!(extract_palette_style(&json!(42)), None);
+        assert_eq!(extract_palette_style(&json!([1, 2, 3])), None);
+    }
+
+    #[test]
+    fn extract_palette_style_style_not_a_string_returns_none() {
+        // If `style` is present but isn't a string, we should ignore it.
+        let v = json!({"style": 42});
+        assert_eq!(extract_palette_style(&v), None);
+    }
 }

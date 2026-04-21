@@ -102,9 +102,7 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
         .to_string();
 
     let chart_palette = custom_settings_get(&workspace.settings, "chartml_config")
-        .and_then(|v| v.get("config"))
-        .and_then(|c| c.get("style"))
-        .and_then(|s| s.as_str())
+        .and_then(kyomi_auth::user_service::extract_palette_style)
         .unwrap_or("kyomi")
         .to_string();
 
