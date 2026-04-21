@@ -339,7 +339,10 @@ async fn create_dashboard(
             kyomi_core::Error::Internal("Dashboard created but not found on read-back".into())
         })?;
 
-    // Notify workspace members about the new dashboard
+    // Notify workspace members about the new dashboard.
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
     let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
     ws_helpers::send_dashboard_update(
         &state.ws_manager,
@@ -348,7 +351,7 @@ async fn create_dashboard(
         "created",
         &user.user_id,
         changed_by_name,
-        Some(&user.user_id),
+        None,
     )
     .await;
 
@@ -484,7 +487,10 @@ async fn update_dashboard(
         kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
     })?;
 
-    // Notify workspace members about the update
+    // Notify workspace members about the update.
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
     let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
     ws_helpers::send_dashboard_update(
         &state.ws_manager,
@@ -493,7 +499,7 @@ async fn update_dashboard(
         "updated",
         &user.user_id,
         changed_by_name,
-        Some(&user.user_id),
+        None,
     )
     .await;
 
@@ -514,7 +520,10 @@ async fn delete_dashboard(
     dashboard_service::delete_dashboard(&state.db, &dashboard_id, workspace_id, &user.user_id)
         .await?;
 
-    // Notify workspace members about the deletion
+    // Notify workspace members about the deletion.
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
     let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
     ws_helpers::send_dashboard_update(
         &state.ws_manager,
@@ -523,7 +532,7 @@ async fn delete_dashboard(
         "deleted",
         &user.user_id,
         changed_by_name,
-        Some(&user.user_id),
+        None,
     )
     .await;
 
@@ -737,7 +746,10 @@ async fn restore_version(
         );
     }
 
-    // Notify workspace members about the restore (treated as an update)
+    // Notify workspace members about the restore (treated as an update).
+    // Broadcast to all workspace members including the actor's other tabs —
+    // same-user multi-tab sync requires this. QueryCache is stale-while-
+    // revalidate so the actor's own tab refetches silently (no flash).
     let changed_by_name = user.name.as_deref().unwrap_or(&user.email);
     ws_helpers::send_dashboard_update(
         &state.ws_manager,
@@ -746,7 +758,7 @@ async fn restore_version(
         "updated",
         &user.user_id,
         changed_by_name,
-        Some(&user.user_id),
+        None,
     )
     .await;
 

@@ -390,11 +390,8 @@ fn QueryCacheWsBridge() -> impl IntoView {
     #[cfg(target_arch = "wasm32")]
     {
         use crate::components::chat::websocket_client::WebSocketContext;
-        use crate::server_fns::context::UserContext;
 
         let query_cache = expect_context::<QueryCache>();
-        let user_ctx =
-            expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
         let ws_ctx = use_context::<WebSocketContext>();
 
         Effect::new(move |_| {
@@ -419,15 +416,6 @@ fn QueryCacheWsBridge() -> impl IntoView {
                     }
                     _ => {}
                 }
-            });
-
-            // Workspace membership / settings changes must refresh the
-            // Layout-level `user_ctx` resource so the sidebar, workspace
-            // switcher, and any consumer of `UserContext` see the new
-            // state without a full page reload. No action filter — any
-            // `workspace_update` should refetch.
-            let workspace_unsub = ws.subscribe("workspace_update", move |_msg| {
-                user_ctx.refetch();
             });
 
             // ── Recent sessions cache invalidation (KYO-23) ──────────
@@ -479,7 +467,6 @@ fn QueryCacheWsBridge() -> impl IntoView {
             });
 
             let dashboard_unsub = send_wrapper::SendWrapper::new(dashboard_unsub);
-            let workspace_unsub = send_wrapper::SendWrapper::new(workspace_unsub);
             let session_created_unsub = send_wrapper::SendWrapper::new(session_created_unsub);
             let title_update_unsub = send_wrapper::SendWrapper::new(title_update_unsub);
             let shared_activity_unsub = send_wrapper::SendWrapper::new(shared_activity_unsub);
@@ -489,7 +476,6 @@ fn QueryCacheWsBridge() -> impl IntoView {
             let datasource_update_unsub = send_wrapper::SendWrapper::new(datasource_update_unsub);
             on_cleanup(move || {
                 dashboard_unsub.take()();
-                workspace_unsub.take()();
                 session_created_unsub.take()();
                 title_update_unsub.take()();
                 shared_activity_unsub.take()();

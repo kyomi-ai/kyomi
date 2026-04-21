@@ -389,6 +389,9 @@ impl AgentTool for CreateDashboardTool {
         }
 
         // Broadcast dashboard creation to workspace members.
+        // Broadcast to all workspace members including the actor's other tabs —
+        // same-user multi-tab sync requires this. QueryCache is stale-while-
+        // revalidate so the actor's own tab refetches silently (no flash).
         ws_helpers::send_dashboard_update(
             &ctx.ws_manager,
             &ctx.workspace_id,
@@ -396,7 +399,7 @@ impl AgentTool for CreateDashboardTool {
             "created",
             &ctx.user_id,
             &ctx.user_display_name,
-            Some(&ctx.user_id),
+            None,
         )
         .await;
 
@@ -564,6 +567,9 @@ impl AgentTool for ModifyDashboardTool {
         }
 
         // Broadcast dashboard update to workspace members.
+        // Broadcast to all workspace members including the actor's other tabs —
+        // same-user multi-tab sync requires this. QueryCache is stale-while-
+        // revalidate so the actor's own tab refetches silently (no flash).
         ws_helpers::send_dashboard_update(
             &ctx.ws_manager,
             &ctx.workspace_id,
@@ -571,7 +577,7 @@ impl AgentTool for ModifyDashboardTool {
             "updated",
             &ctx.user_id,
             &ctx.user_display_name,
-            Some(&ctx.user_id),
+            None,
         )
         .await;
 
@@ -651,6 +657,9 @@ impl AgentTool for DeleteDashboardTool {
         {
             Ok(_) => {
                 // Broadcast dashboard deletion to workspace members.
+                // Broadcast to all workspace members including the actor's other tabs —
+                // same-user multi-tab sync requires this. QueryCache is stale-while-
+                // revalidate so the actor's own tab refetches silently (no flash).
                 ws_helpers::send_dashboard_update(
                     &ctx.ws_manager,
                     &ctx.workspace_id,
@@ -658,7 +667,7 @@ impl AgentTool for DeleteDashboardTool {
                     "deleted",
                     &ctx.user_id,
                     &ctx.user_display_name,
-                    Some(&ctx.user_id),
+                    None,
                 )
                 .await;
 

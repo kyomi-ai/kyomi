@@ -261,7 +261,26 @@ fn merge_custom_settings(
 #[derive(Deserialize)]
 struct UpdateSettingsRequest {
     name: Option<String>,
-    default_dashboard_id: Option<serde_json::Value>, // can be string or null
+    // Three-state field: absent vs null vs value. Plain `Option<Value>`
+    // collapses JSON null to `None` (verified — serde's default for
+    // `Option<T>` uses `deserialize_option`, which maps null to None
+    // regardless of whether T could represent null). The double-Option
+    // + `deserialize_some` trick preserves the distinction so the handler
+    // can tell "field absent → leave alone" apart from "field is null →
+    // clear the stored value".
+    #[serde(default, deserialize_with = "deserialize_some")]
+    default_dashboard_id: Option<Option<serde_json::Value>>,
+}
+
+/// Deserialize helper that preserves JSON null as `Some(None)` while a
+/// missing field becomes `None` (via `#[serde(default)]`). Used to make
+/// `Option<Option<T>>` behave as a three-state tag on PATCH payloads.
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -493,19 +512,35 @@ async fn update_settings(
         );
     }
 
-    // Update default_dashboard_id if provided
-    if let Some(ref dashboard_value) = data.default_dashboard_id {
-        // Value can be a string (dashboard ID) or null (clear default)
+    // Update default_dashboard_id if provided.
+    //
+    // Three cases after three-state deserialization:
+    //   None                  → field absent, leave stored value untouched
+    //   Some(None)            → field is JSON null, clear stored value
+    //   Some(Some(value))     → field has a value, validate + store
+    if let Some(inner) = &data.default_dashboard_id {
+        let to_store = match inner {
+            // JSON null deserialized to None via Option<T>'s null-to-None mapping;
+            // Some(Value::Null) is not reachable here.
+            None => serde_json::Value::Null,
+            Some(serde_json::Value::String(id)) if !id.is_empty() => {
+                if uuid::Uuid::parse_str(id).is_err() {
+                    return Err(kyomi_core::Error::BadRequest(
+                        "default_dashboard_id must be a valid UUID.".into(),
+                    ));
+                }
+                serde_json::Value::String(id.clone())
+            }
+            _ => {
+                return Err(kyomi_core::Error::BadRequest(
+                    "default_dashboard_id must be a non-empty string or null.".into(),
+                ));
+            }
+        };
+        tracing::info!("Updated default_dashboard_id to: {}", &to_store);
         if let Some(obj) = current_settings.as_object_mut() {
-            obj.insert(
-                "default_dashboard_id".to_string(),
-                dashboard_value.clone(),
-            );
+            obj.insert("default_dashboard_id".to_string(), to_store);
         }
-        tracing::info!(
-            "Updated default_dashboard_id to: {}",
-            dashboard_value
-        );
     }
 
     // Write updated settings back to DB

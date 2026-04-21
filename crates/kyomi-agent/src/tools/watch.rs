@@ -249,6 +249,9 @@ impl AgentTool for CreateWatchTool {
         };
 
         // Broadcast watch creation to workspace members.
+        // Broadcast to all workspace members including the actor's other tabs —
+        // same-user multi-tab sync requires this. QueryCache is stale-while-
+        // revalidate so the actor's own tab refetches silently (no flash).
         ws_helpers::send_watch_update(
             &ctx.ws_manager,
             &ctx.workspace_id,
@@ -256,7 +259,7 @@ impl AgentTool for CreateWatchTool {
             "created",
             &ctx.user_id,
             &ctx.user_display_name,
-            Some(&ctx.user_id),
+            None,
         )
         .await;
 
@@ -554,6 +557,9 @@ impl AgentTool for UpdateWatchTool {
         };
 
         // Broadcast watch update to workspace members.
+        // Broadcast to all workspace members including the actor's other tabs —
+        // same-user multi-tab sync requires this. QueryCache is stale-while-
+        // revalidate so the actor's own tab refetches silently (no flash).
         ws_helpers::send_watch_update(
             &ctx.ws_manager,
             &ctx.workspace_id,
@@ -561,7 +567,7 @@ impl AgentTool for UpdateWatchTool {
             "updated",
             &ctx.user_id,
             &ctx.user_display_name,
-            Some(&ctx.user_id),
+            None,
         )
         .await;
 
@@ -768,6 +774,9 @@ impl AgentTool for DeleteWatchTool {
         {
             Ok(()) => {
                 // Broadcast watch deletion to workspace members.
+                // Broadcast to all workspace members including the actor's other tabs —
+                // same-user multi-tab sync requires this. QueryCache is stale-while-
+                // revalidate so the actor's own tab refetches silently (no flash).
                 ws_helpers::send_watch_update(
                     &ctx.ws_manager,
                     &ctx.workspace_id,
@@ -775,7 +784,7 @@ impl AgentTool for DeleteWatchTool {
                     "deleted",
                     &ctx.user_id,
                     &ctx.user_display_name,
-                    Some(&ctx.user_id),
+                    None,
                 )
                 .await;
 
