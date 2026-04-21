@@ -860,22 +860,7 @@ pub fn ChartBuilderModal(
                             Ok(ipc_bytes) => {
                                 match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                     Ok(data_table) => {
-                                        let is_dark = initial_is_dark;
-                                        let colors = kyomi_palette("kyomi", is_dark);
-                                        let theme = kyomi_theme(is_dark);
-                                        let mut chartml_inst = chartml_core::ChartML::new();
-                                        chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
-                                        chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
-                                        chartml_inst.register_renderer("area", chartml_chart_cartesian::CartesianRenderer::new());
-                                        chartml_inst.register_renderer("pie", chartml_chart_pie::PieRenderer::new());
-                                        chartml_inst.register_renderer("doughnut", chartml_chart_pie::PieRenderer::new());
-                                        chartml_inst.register_renderer("scatter", chartml_chart_scatter::ScatterRenderer::new());
-                                        chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
-                                        chartml_inst.register_renderer("table", chartml_chart_table::TableRenderer::new());
-                                        chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
-                                        chartml_inst.set_default_palette(colors);
-                                        chartml_inst.set_theme(theme);
-                                        chartml_inst.register_source("_remote", data_table);
+                                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
                                         set_preview_chartml.set(Some(send_wrapper::SendWrapper::new(
                                             chartml_leptos::ChartMLRef::new(chartml_inst),
                                         )));
@@ -1576,25 +1561,10 @@ pub fn ChartBuilderModal(
                                                             Ok(ipc_bytes) => {
                                                                 match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
                                                                     Ok(data_table) => {
-                                                                        let is_dark = initial_is_dark;
-                                                                        let colors = kyomi_palette("kyomi", is_dark);
-                                                                        let theme = kyomi_theme(is_dark);
-                                                                        let mut chartml_inst = chartml_core::ChartML::new();
-                                                                        chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
-                                                                        chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
-                                                                        chartml_inst.register_renderer("area", chartml_chart_cartesian::CartesianRenderer::new());
-                                                                        chartml_inst.register_renderer("pie", chartml_chart_pie::PieRenderer::new());
-                                                                        chartml_inst.register_renderer("doughnut", chartml_chart_pie::PieRenderer::new());
-                                                                        chartml_inst.register_renderer("scatter", chartml_chart_scatter::ScatterRenderer::new());
-                                                                        chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
-                                                                        chartml_inst.register_renderer("table", chartml_chart_table::TableRenderer::new());
-                                                                        chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
-                                                                        chartml_inst.set_default_palette(colors);
-                                                                        chartml_inst.set_theme(theme);
-                                                                        chartml_inst.register_source("_remote", data_table);
+                                                                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
                                                                         set_preview_chartml.set(Some(send_wrapper::SendWrapper::new(
-                                            chartml_leptos::ChartMLRef::new(chartml_inst),
-                                        )));
+                                                                            chartml_leptos::ChartMLRef::new(chartml_inst),
+                                                                        )));
                                                                     }
                                                                     Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
                                                                 }
@@ -1691,6 +1661,42 @@ pub fn ChartBuilderModal(
             </div>
         </Modal>
     }
+}
+
+// ─── Helper: build a ChartML instance pre-loaded with a `_remote` source ───
+
+/// Builds a fully-configured [`chartml_core::ChartML`] instance with all
+/// renderers + transform + palette + theme registered, then binds the given
+/// [`DataTable`](chartml_core::data::DataTable) as the named `_remote` source.
+///
+/// Used by the two preview-fetch paths in `ChartBuilderModal` (auto-fetch on
+/// open, and the Refresh Preview button) which both build identical setups
+/// before handing the result to `ChartMLChart` via `ChartMLRef`.
+///
+/// Note: `configured_chartml` in `markdown_renderer.rs` solves the same
+/// "register all renderers" problem but does not expose post-construction
+/// source registration, so this helper keeps its own small duplication of the
+/// renderer list rather than reshape that API.
+fn build_remote_chartml(
+    data_table: chartml_core::data::DataTable,
+    is_dark: bool,
+) -> chartml_core::ChartML {
+    let colors = kyomi_palette("kyomi", is_dark);
+    let theme = kyomi_theme(is_dark);
+    let mut chartml_inst = chartml_core::ChartML::new();
+    chartml_inst.register_renderer("bar", chartml_chart_cartesian::CartesianRenderer::new());
+    chartml_inst.register_renderer("line", chartml_chart_cartesian::CartesianRenderer::new());
+    chartml_inst.register_renderer("area", chartml_chart_cartesian::CartesianRenderer::new());
+    chartml_inst.register_renderer("pie", chartml_chart_pie::PieRenderer::new());
+    chartml_inst.register_renderer("doughnut", chartml_chart_pie::PieRenderer::new());
+    chartml_inst.register_renderer("scatter", chartml_chart_scatter::ScatterRenderer::new());
+    chartml_inst.register_renderer("metric", chartml_chart_metric::MetricRenderer::new());
+    chartml_inst.register_renderer("table", chartml_chart_table::TableRenderer::new());
+    chartml_inst.register_transform(chartml_datafusion::DataFusionTransform);
+    chartml_inst.set_default_palette(colors);
+    chartml_inst.set_theme(theme);
+    chartml_inst.register_source("_remote", data_table);
+    chartml_inst
 }
 
 // ─── Helper: rewrite YAML spec to use _remote data source ──────────────────
