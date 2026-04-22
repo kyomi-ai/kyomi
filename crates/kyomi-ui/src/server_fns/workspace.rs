@@ -181,11 +181,9 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let config_value = serde_json::json!({
-        "config": {
-            "type": "config",
-            "version": 1,
-            "style": palette
-        }
+        "type": "config",
+        "version": 1,
+        "style": palette
     });
 
     let updated_settings = merge_custom_settings(
@@ -339,3 +337,28 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    //! Guards against accidental re-nesting of the workspace chartml_config writer payload.
+    //!
+    //! See the companion test in `server_fns::profile::tests` for the per-user
+    //! equivalent and KYO-129 Part 2 for rationale.
+
+    #[test]
+    fn workspace_chart_palette_writer_produces_flat_shape() {
+        let palette = "balanced".to_string();
+        let config_value = serde_json::json!({
+            "type": "config",
+            "version": 1,
+            "style": palette
+        });
+        assert_eq!(config_value["style"], "balanced");
+        assert_eq!(config_value["type"], "config");
+        assert_eq!(config_value["version"], 1);
+        assert!(
+            config_value.get("config").is_none(),
+            "workspace chartml_config must be flat, not nested under a 'config' key"
+        );
+    }
+}

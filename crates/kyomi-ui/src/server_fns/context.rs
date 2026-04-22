@@ -101,7 +101,9 @@ pub async fn get_user_context() -> Result<UserContext, ServerFnError> {
     let billing_enabled = capabilities.billing_enabled;
 
     // Read user's chart palette preference from chartml_config JSON.
-    // The shared helper accepts both legacy flat and current nested shapes.
+    // Post-KYO-129 Part 2 migration the DB stores the flat shape; legacy
+    // rows predating the migration may still be nested, and the shared
+    // extractor handles both for defence in depth.
     // See kyomi_auth::user_service::get_user_palette_name.
     let chart_palette = kyomi_auth::user_service::get_user_palette_name(&ctx.db, &auth.user_id).await;
 

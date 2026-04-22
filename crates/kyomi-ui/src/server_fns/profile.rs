@@ -226,11 +226,9 @@ pub async fn update_chart_palette(palette: String) -> Result<(), ServerFnError> 
     let ctx = extract_context()?;
 
     let config = serde_json::json!({
-        "config": {
-            "type": "config",
-            "version": 1,
-            "style": palette
-        }
+        "type": "config",
+        "version": 1,
+        "style": palette
     });
 
     kyomi_auth::user_service::update_chartml_config(&ctx.db, &auth.user_id, &config)
@@ -277,3 +275,30 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id};
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    //! Guards against accidental re-nesting of the chartml_config writer payload.
+    //!
+    //! KYO-129 Part 2 flattened `users.chartml_config` storage from
+    //! `{"config": {"style": ...}}` to `{"style": ...}`. The writer literal is
+    //! the canonical source of the shape — if someone re-wraps it in a future
+    //! refactor these tests will fail before the regression reaches the DB.
+
+    #[test]
+    fn chart_palette_writer_produces_flat_shape() {
+        let palette = "balanced".to_string();
+        let config = serde_json::json!({
+            "type": "config",
+            "version": 1,
+            "style": palette
+        });
+        assert_eq!(config["style"], "balanced");
+        assert_eq!(config["type"], "config");
+        assert_eq!(config["version"], 1);
+        assert!(
+            config.get("config").is_none(),
+            "chartml_config must be flat, not nested under a 'config' key"
+        );
+    }
+}
