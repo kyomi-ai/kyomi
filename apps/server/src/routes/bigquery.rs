@@ -37,6 +37,147 @@ use kyomi_core::models::table_cache::DatasourceTableCache;
 
 use crate::state::AppState;
 
+// ===========================================================================
+// Catalog refresh — shared by the generic refresh endpoint and project-add
+// ===========================================================================
+
+/// Response returned by catalog refresh operations.
+#[derive(Serialize)]
+pub(crate) struct CatalogRefreshResponse {
+    pub status: String,
+    pub message: String,
+    pub datasource_id: String,
+}
+
+/// Build a `UserContext` for BigQuery provider creation.
+///
+/// Uses centralized token resolution: reads DB, checks expiry, refreshes, persists.
+/// If the user has no Google OAuth data (e.g. service_account auth), returns None —
+/// that's fine, BigQuery will use other auth modes.
+async fn build_user_context(
+    state: &AppState,
+    user: &AuthUser,
+) -> Result<Option<kyomi_datasource_server::UserContext>, kyomi_core::Error> {
+    let oauth_data = if let (Some(client_id), Some(client_secret)) = (
+        state.config.google_oauth_client_id.as_deref(),
+        state.config.google_oauth_client_secret.as_deref(),
+    ) {
+        match kyomi_auth::google_oauth::ensure_valid_google_token(
+            &state.db,
+            &user.user_id,
+            &state.encryption_key,
+            client_id,
+            client_secret,
+        )
+        .await
+        {
+            Ok(tokens) => {
+                let data = kyomi_auth::google_oauth::OAuthData {
+                    google_oauth_tokens: Some(tokens),
+                    ..Default::default()
+                };
+                serde_json::to_value(data).ok()
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(kyomi_datasource_server::UserContext {
+        oauth_data,
+        user_email: user.email.clone(),
+        workspace_id: user
+            .workspace
+            .workspace_id
+            .clone()
+            .unwrap_or_default(),
+    }))
+}
+
+/// Core catalog refresh logic — delegates to `kyomi_ui::server_fns::catalog_refresh`.
+///
+/// Resolves and decrypts credentials, refreshes OAuth tokens if needed, then
+/// dispatches to the shared server-fn implementation which is the single source
+/// of truth for catalog refresh orchestration.
+pub(crate) async fn execute_catalog_refresh(
+    state: &AppState,
+    user: &AuthUser,
+    datasource: kyomi_core::models::datasource::DatasourceConfig,
+    workspace_id: &str,
+    force: bool,
+) -> Result<CatalogRefreshResponse, kyomi_core::Error> {
+    use kyomi_core::datasource_registry;
+    use serde_json::json;
+
+    // Resolve and decrypt user credentials.
+    let user_cred =
+        kyomi_auth::datasource_service::get_user_credential(&state.db, &user.user_id, &datasource.id)
+            .await?;
+
+    let credentials = if let Some(ref cred) = user_cred {
+        kyomi_auth::credential_service::decrypt_credentials(&cred.credentials, &state.encryption_key)
+            .unwrap_or(json!({}))
+    } else {
+        json!({})
+    };
+
+    let ds_type: datasource_registry::DatasourceType = datasource.datasource_type.into();
+
+    // Refresh OAuth credentials if needed.
+    let credentials = match kyomi_datasource_server::ensure_valid_oauth_credentials(
+        &credentials,
+        &datasource.connection_config,
+        &ds_type,
+    )
+    .await
+    {
+        Ok(refreshed) if refreshed != credentials => {
+            // Persist refreshed token.
+            if let Some(ref cred) = user_cred {
+                let _ = kyomi_auth::datasource_service::save_user_credential(
+                    &state.db,
+                    &state.encryption_key,
+                    &user.user_id,
+                    &datasource.id,
+                    &cred.workspace_id,
+                    &refreshed,
+                )
+                .await;
+            }
+            refreshed
+        }
+        Ok(unchanged) => unchanged,
+        Err(_) => credentials,
+    };
+
+    let user_context = build_user_context(state, user).await?;
+
+    let embedding = state.embedding.wait_ready().await?;
+
+    let params = kyomi_ui::server_fns::catalog_refresh::CatalogRefreshParams {
+        db: &state.db,
+        embedding,
+        encryption_key: &state.encryption_key,
+        datasource,
+        workspace_id,
+        user_id: &user.user_id,
+        force,
+        connect_registry: Some(&state.connect_registry),
+        user_context,
+        credentials,
+    };
+
+    let result =
+        kyomi_ui::server_fns::catalog_refresh::execute_catalog_refresh(params).await?;
+
+    Ok(CatalogRefreshResponse {
+        status: result.status,
+        message: result.message,
+        datasource_id: result.datasource_id,
+    })
+}
+
 /// Build the `/bigquery` router.
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -930,7 +1071,7 @@ async fn catalog_refresh(
 
     // Delegate to the shared catalog refresh logic
     let result =
-        super::catalog::execute_catalog_refresh(&state, &user, bq_ds, workspace_id, force)
+        execute_catalog_refresh(&state, &user, bq_ds, workspace_id, force)
             .await?;
 
     Ok(Json(json!({
@@ -1036,7 +1177,7 @@ async fn catalog_projects_add(
     let bg_user = user.clone();
     let bg_workspace_id = workspace_id.to_string();
     tokio::spawn(async move {
-        match super::catalog::execute_catalog_refresh(
+        match execute_catalog_refresh(
             &bg_state,
             &bg_user,
             updated_ds,

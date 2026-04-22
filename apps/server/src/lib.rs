@@ -126,13 +126,10 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .nest("/api/v1/auth/oauth", routes::auth_datasource_oauth::routes())
         .nest("/api/v1/users", routes::users::routes())
         .nest("/api/v1/workspaces", routes::workspaces::routes())
-        .nest(
-            "/api/v1/datasources",
-            routes::datasources::routes().merge(routes::catalog::routes()),
-        )
+        .nest("/api/v1/datasources", routes::datasources::routes())
+        .nest("/api/v1/dashboards", routes::dashboard_export::routes())
         .nest("/api/v1/chat", routes::chat::routes())
         .nest("/api/v1/chat/copilot", routes::copilot::routes())
-        .nest("/api/v1/sql", routes::sql_history::routes())
         .nest("/api/v1/bigquery", routes::bigquery::routes())
         .nest("/api/v1/billing", routes::billing::routes())
         .nest("/api/v1/integrations", routes::integrations::routes())
@@ -141,7 +138,6 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         // OAuth well-known discovery at root level (RFC 8414, RFC 9728, OpenID)
         .merge(routes::oauth::well_known_routes())
         .nest("/api/v1/oauth", routes::oauth::routes())
-        .nest("/api/v1/dashboards", routes::dashboards::routes())
         .nest("/api/v1/chart-context", routes::chart_context::routes())
         .nest("/api/v1/chart", routes::chart_generate::routes())
         .nest("/api/v1/chartml", routes::chartml::routes())
