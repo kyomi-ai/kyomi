@@ -126,7 +126,6 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .nest("/api/v1/auth/oauth", routes::auth_datasource_oauth::routes())
         .nest("/api/v1/users", routes::users::routes())
         .nest("/api/v1/workspaces", routes::workspaces::routes())
-        .nest("/api/v1/workspaces", routes::learnings::routes())
         .nest(
             "/api/v1/datasources",
             routes::datasources::routes().merge(routes::catalog::routes()),
@@ -135,7 +134,6 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .nest("/api/v1/chat/copilot", routes::copilot::routes())
         .nest("/api/v1/sql", routes::sql_history::routes())
         .nest("/api/v1/bigquery", routes::bigquery::routes())
-        .nest("/api/v1/watches", routes::watches::routes())
         .nest("/api/v1/billing", routes::billing::routes())
         .nest("/api/v1/integrations", routes::integrations::routes())
         .nest("/api/v1/push", routes::push::routes())
@@ -144,18 +142,15 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .merge(routes::oauth::well_known_routes())
         .nest("/api/v1/oauth", routes::oauth::routes())
         .nest("/api/v1/dashboards", routes::dashboards::routes())
-        .nest("/api/v1/collections", routes::collections::routes())
         .nest("/api/v1/chart-context", routes::chart_context::routes())
         .nest("/api/v1/chart", routes::chart_generate::routes())
         .nest("/api/v1/chartml", routes::chartml::routes())
-        .nest("/api/v1/usage", routes::usage::routes())
         .nest("/api/v1/analytics/sites", routes::analytics_sites::routes())
         .nest("/api/v1/analytics/usage", routes::analytics_sites::usage_routes())
         // Subscribe routes (public, no auth required)
         .nest("/api/v1", routes::subscribe::routes())
         // System config route (public, no auth required — frontend needs this before login)
         .nest("/api/v1/system", routes::system_config::routes())
-        .nest("/api/v1/feedback", routes::feedback::routes())
         // JWKS endpoint for Kyomi Connect token verification (public, no auth)
         .route("/.well-known/jwks.json", axum::routing::get(jwks_handler))
         // Glama MCP directory — server ownership claim
