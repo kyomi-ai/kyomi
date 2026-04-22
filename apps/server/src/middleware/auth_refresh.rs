@@ -56,7 +56,7 @@ pub async fn auth_refresh_middleware(
     let refresh_cookie = extract_cookie(req.headers(), refresh_cookie_name);
 
     let refreshed = if let Some(refresh_value) = refresh_cookie {
-        let device = crate::routes::auth::extract_device_info(req.headers());
+        let device = crate::helpers::extract_device_info(req.headers());
         match kyomi_auth::token_refresh::refresh_tokens(
             &state.db,
             &state.config.jwt_secret,
