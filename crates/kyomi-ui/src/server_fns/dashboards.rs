@@ -457,7 +457,6 @@ pub async fn get_version(
 /// `max_version + 1`, reads content from the live `dashboards` table
 /// instead of `dashboard_versions`. Matches the Python/REST API contract.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn diff_versions(
     dashboard_id: String,
     from_version: i32,
@@ -467,64 +466,29 @@ pub async fn diff_versions(
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // Fetch live dashboard (also verifies workspace ownership)
-    let dashboard = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-        .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
-
-    // Compute the current version number (max + 1)
-    let version_count = kyomi_auth::dashboard_service::get_version_count(&ctx.db, &dashboard_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))? as i32;
-    let current_version_number = version_count + 1;
-
-    // Get content for each version, handling "current" by reading from dashboards table
-    let from_content = if from_version == current_version_number {
-        dashboard.content.clone()
-    } else {
-        kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, from_version)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| ServerFnError::new(format!("Version {from_version} not found")))?
-            .content
-    };
-
-    let to_content = if to_version == current_version_number {
-        dashboard.content.clone()
-    } else {
-        kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, to_version)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| ServerFnError::new(format!("Version {to_version} not found")))?
-            .content
-    };
-
-    // Proper line-based diff using the `similar` crate (Myers algorithm)
-    let diff = similar::TextDiff::from_lines(&from_content, &to_content);
-    let mut diff_lines = Vec::new();
-
-    for change in diff.iter_all_changes() {
-        let line_type = match change.tag() {
-            similar::ChangeTag::Insert => "add",
-            similar::ChangeTag::Delete => "delete",
-            similar::ChangeTag::Equal => "context",
-        };
-        diff_lines.push(DiffLine {
-            line_type: line_type.to_string(),
-            content: change.value().trim_end_matches('\n').to_string(),
-        });
-    }
-
-    let additions = diff_lines.iter().filter(|l| l.line_type == "add").count() as i32;
-    let deletions = diff_lines.iter().filter(|l| l.line_type == "delete").count() as i32;
-
-    Ok(VersionDiff {
+    let result = kyomi_auth::dashboard_service::diff_versions(
+        &ctx.db,
+        &dashboard_id,
+        ws_id,
         from_version,
         to_version,
-        additions,
-        deletions,
-        diff_lines,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(VersionDiff {
+        from_version: result.from_version,
+        to_version: result.to_version,
+        additions: result.additions,
+        deletions: result.deletions,
+        diff_lines: result
+            .diff_lines
+            .into_iter()
+            .map(|l| DiffLine {
+                line_type: l.line_type,
+                content: l.content,
+            })
+            .collect(),
     })
 }
 

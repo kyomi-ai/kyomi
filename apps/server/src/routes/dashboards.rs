@@ -617,68 +617,27 @@ async fn diff_versions(
 ) -> Result<Json<Value>, kyomi_core::Error> {
     let workspace_id = get_workspace_id(&user)?;
 
-    // Fetch live dashboard (also verifies existence + ownership)
-    let dashboard =
-        dashboard_service::get_dashboard(&state.db, &dashboard_id, workspace_id).await?;
-    let dashboard = dashboard.ok_or_else(|| {
-        kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
-    })?;
-
-    // Compute current version number (max + 1) for live content
-    let version_count =
-        dashboard_service::get_version_count(&state.db, &dashboard_id).await? as i32;
-    let current_version_number = version_count + 1;
-
-    // Get content for each version, handling "current" by reading from dashboards table
-    let (from_content, from_title) = if params.from_version == current_version_number {
-        (dashboard.content.clone(), dashboard.title.clone())
-    } else {
-        let v = dashboard_service::get_version(&state.db, &dashboard_id, params.from_version)
-            .await?
-            .ok_or_else(|| {
-                kyomi_core::Error::NotFound(format!("Version {} not found", params.from_version))
-            })?;
-        (v.content, v.title)
-    };
-
-    let (to_content, to_title) = if params.to_version == current_version_number {
-        (dashboard.content.clone(), dashboard.title.clone())
-    } else {
-        let v = dashboard_service::get_version(&state.db, &dashboard_id, params.to_version)
-            .await?
-            .ok_or_else(|| {
-                kyomi_core::Error::NotFound(format!("Version {} not found", params.to_version))
-            })?;
-        (v.content, v.title)
-    };
-
-    // Proper line-based diff using the `similar` crate (Myers algorithm)
-    let diff = similar::TextDiff::from_lines(&from_content, &to_content);
-    let mut additions = 0i32;
-    let mut deletions = 0i32;
-    let mut diff_lines = Vec::new();
-
-    for change in diff.iter_all_changes() {
-        let (line_type, content) = match change.tag() {
-            similar::ChangeTag::Insert => { additions += 1; ("add", change.value()) }
-            similar::ChangeTag::Delete => { deletions += 1; ("delete", change.value()) }
-            similar::ChangeTag::Equal => ("context", change.value()),
-        };
-        diff_lines.push(json!({
-            "type": line_type,
-            "content": content.trim_end_matches('\n'),
-        }));
-    }
+    let result = dashboard_service::diff_versions(
+        &state.db,
+        &dashboard_id,
+        workspace_id,
+        params.from_version,
+        params.to_version,
+    )
+    .await?;
 
     Ok(Json(json!({
-        "dashboard_id": dashboard_id,
-        "from_version": params.from_version,
-        "to_version": params.to_version,
-        "from_title": from_title,
-        "to_title": to_title,
-        "additions": additions,
-        "deletions": deletions,
-        "diff_lines": diff_lines,
+        "dashboard_id": result.dashboard_id,
+        "from_version": result.from_version,
+        "to_version": result.to_version,
+        "from_title": result.from_title,
+        "to_title": result.to_title,
+        "additions": result.additions,
+        "deletions": result.deletions,
+        "diff_lines": result.diff_lines.iter().map(|l| json!({
+            "type": l.line_type,
+            "content": l.content,
+        })).collect::<Vec<_>>(),
     })))
 }
 

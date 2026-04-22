@@ -1249,6 +1249,139 @@ pub async fn get_version_count(db: &DbPool, dashboard_id: &str) -> Result<i64> {
     Ok(count)
 }
 
+// ---------------------------------------------------------------------------
+// Version diff (KYO-124)
+// ---------------------------------------------------------------------------
+
+/// A single line of a dashboard version diff.
+///
+/// `line_type` is one of `"add"`, `"delete"`, or `"context"` (unchanged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardDiffLine {
+    pub line_type: String,
+    pub content: String,
+}
+
+/// The full result of diffing two versions of a dashboard.
+///
+/// Returned by [`diff_versions`]. Both the Leptos server_fn and the REST
+/// handler map this into their own response shapes — the service function
+/// owns the underlying algorithm and the "current version" short-circuit.
+#[derive(Debug, Clone)]
+pub struct DashboardVersionDiff {
+    pub dashboard_id: String,
+    pub from_version: i32,
+    pub to_version: i32,
+    pub from_title: String,
+    pub to_title: String,
+    pub additions: i32,
+    pub deletions: i32,
+    pub diff_lines: Vec<DashboardDiffLine>,
+}
+
+/// Compute a line-based diff between two strings using the Myers algorithm.
+///
+/// Returns `(additions, deletions, diff_lines)`. Trailing newlines on each
+/// line are stripped so callers don't double up on line-breaks when
+/// rendering. Pure function — no I/O, safe to unit-test in isolation.
+fn compute_line_diff(
+    from_content: &str,
+    to_content: &str,
+) -> (i32, i32, Vec<DashboardDiffLine>) {
+    let diff = similar::TextDiff::from_lines(from_content, to_content);
+    let mut additions = 0i32;
+    let mut deletions = 0i32;
+    let mut diff_lines = Vec::new();
+
+    for change in diff.iter_all_changes() {
+        let line_type = match change.tag() {
+            similar::ChangeTag::Insert => {
+                additions += 1;
+                "add"
+            }
+            similar::ChangeTag::Delete => {
+                deletions += 1;
+                "delete"
+            }
+            similar::ChangeTag::Equal => "context",
+        };
+        diff_lines.push(DashboardDiffLine {
+            line_type: line_type.to_string(),
+            content: change.value().trim_end_matches('\n').to_string(),
+        });
+    }
+
+    (additions, deletions, diff_lines)
+}
+
+/// Diff two versions of a dashboard.
+///
+/// Fetches the live dashboard (also verifies workspace ownership) and, for
+/// each side, pulls the matching version's content — or the live content
+/// when the version number is `max_version + 1` (the "current" sentinel).
+/// Runs a Myers line diff and returns the aggregated result.
+///
+/// Returns `Error::NotFound` if the dashboard doesn't exist or belongs to
+/// another workspace, or if either version number isn't on disk (and isn't
+/// the current sentinel).
+///
+/// This is the single source of truth for the dashboard version-diff
+/// orchestration. The Leptos `server_fn` at
+/// `crates/kyomi-ui/src/server_fns/dashboards.rs::diff_versions` and the
+/// REST handler at `apps/server/src/routes/dashboards.rs::diff_versions`
+/// both delegate here.
+pub async fn diff_versions(
+    pool: &DbPool,
+    dashboard_id: &str,
+    workspace_id: &str,
+    from_version: i32,
+    to_version: i32,
+) -> Result<DashboardVersionDiff> {
+    let dashboard = get_dashboard(pool, dashboard_id, workspace_id)
+        .await?
+        .ok_or_else(|| {
+            kyomi_core::Error::NotFound(format!("Dashboard {dashboard_id} not found"))
+        })?;
+
+    let version_count = get_version_count(pool, dashboard_id).await? as i32;
+    let current_version_number = version_count + 1;
+
+    let (from_content, from_title) = if from_version == current_version_number {
+        (dashboard.content.clone(), dashboard.title.clone())
+    } else {
+        let v = get_version(pool, dashboard_id, from_version)
+            .await?
+            .ok_or_else(|| {
+                kyomi_core::Error::NotFound(format!("Version {from_version} not found"))
+            })?;
+        (v.content, v.title)
+    };
+
+    let (to_content, to_title) = if to_version == current_version_number {
+        (dashboard.content.clone(), dashboard.title.clone())
+    } else {
+        let v = get_version(pool, dashboard_id, to_version)
+            .await?
+            .ok_or_else(|| {
+                kyomi_core::Error::NotFound(format!("Version {to_version} not found"))
+            })?;
+        (v.content, v.title)
+    };
+
+    let (additions, deletions, diff_lines) = compute_line_diff(&from_content, &to_content);
+
+    Ok(DashboardVersionDiff {
+        dashboard_id: dashboard_id.to_string(),
+        from_version,
+        to_version,
+        from_title,
+        to_title,
+        additions,
+        deletions,
+        diff_lines,
+    })
+}
+
 /// Restore a dashboard to a previous version.
 ///
 /// Creates a version of the current state before restoring, then updates
@@ -1590,6 +1723,73 @@ visualize:
         let h = hash_content("hello");
         assert_eq!(h.len(), 16);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ── compute_line_diff (KYO-124) ──────────────────────────────────────
+
+    #[test]
+    fn test_compute_line_diff_identical_content() {
+        // Identical inputs yield zero additions, zero deletions, and every
+        // emitted line is tagged as "context".
+        let content = "line one\nline two\nline three\n";
+        let (additions, deletions, lines) = compute_line_diff(content, content);
+
+        assert_eq!(additions, 0, "identical content should report 0 additions");
+        assert_eq!(deletions, 0, "identical content should report 0 deletions");
+        assert!(
+            !lines.is_empty(),
+            "diff should still emit context lines for identical content"
+        );
+        assert!(
+            lines.iter().all(|l| l.line_type == "context"),
+            "every line should be `context` when content is identical"
+        );
+    }
+
+    #[test]
+    fn test_compute_line_diff_disjoint_content() {
+        // Completely disjoint inputs — every line on the left side is a
+        // delete, every line on the right side is an add, and nothing is
+        // shared as context.
+        let from = "old line 1\nold line 2\nold line 3\n";
+        let to = "new line A\nnew line B\n";
+        let (additions, deletions, lines) = compute_line_diff(from, to);
+
+        assert_eq!(additions, 2, "expected 2 new-side lines to be tagged add");
+        assert_eq!(deletions, 3, "expected 3 old-side lines to be tagged delete");
+        assert!(
+            lines.iter().all(|l| l.line_type == "add" || l.line_type == "delete"),
+            "disjoint content should produce no context lines, got: {lines:?}"
+        );
+        // Sanity check: content is trimmed of trailing newlines.
+        assert!(
+            lines.iter().all(|l| !l.content.ends_with('\n')),
+            "diff line content must not retain trailing newline"
+        );
+    }
+
+    #[test]
+    fn test_compute_line_diff_mixed_changes() {
+        // A shared prefix, one modified line, one added line on the new side.
+        // Confirms the Myers output interleaves context / delete / add tags
+        // and that counts match the number of tagged lines.
+        let from = "keep 1\nchange me\nkeep 2\n";
+        let to = "keep 1\nchanged!\nkeep 2\nbrand new\n";
+        let (additions, deletions, lines) = compute_line_diff(from, to);
+
+        // Tags must tally with the returned counts exactly.
+        let add_count = lines.iter().filter(|l| l.line_type == "add").count() as i32;
+        let del_count = lines.iter().filter(|l| l.line_type == "delete").count() as i32;
+        let ctx_count = lines.iter().filter(|l| l.line_type == "context").count();
+
+        assert_eq!(additions, add_count, "additions must match tagged `add` lines");
+        assert_eq!(deletions, del_count, "deletions must match tagged `delete` lines");
+        assert!(
+            ctx_count >= 2,
+            "shared `keep 1` and `keep 2` lines should be emitted as context (got {ctx_count})"
+        );
+        assert!(additions >= 2, "expected at least 2 additions (modified + appended)");
+        assert!(deletions >= 1, "expected at least 1 deletion (the modified line)");
     }
 }
 

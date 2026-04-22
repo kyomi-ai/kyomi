@@ -36,6 +36,7 @@ futures-util = { workspace = true }
 lettre = { workspace = true }
 regex = { workspace = true }
 serde_yaml = { workspace = true }
+similar = { workspace = true }
 cron = { workspace = true }
 async-stripe = { workspace = true }
 async-stripe-webhook = { workspace = true }
