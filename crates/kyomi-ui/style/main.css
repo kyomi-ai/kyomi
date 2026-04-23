@@ -1,4 +1,9 @@
-@import "tailwindcss";
+/* Tailwind v4 removed --content from the CLI (silently ignored). Source
+   detection is CSS-only: source(none) disables CWD auto-scan, @source
+   directives list what to scan explicitly. Do NOT add --content to Trunk.toml. */
+@import "tailwindcss" source(none);
+@source "../src";
+@source "../../kyomi-ui-components/src";
 @plugin "@tailwindcss/typography";
 
 /* Enable class-based dark mode (Tailwind v4 syntax) */

@@ -10,6 +10,8 @@ use std::rc::Rc;
 
 use leptos::prelude::Set;
 use serde::Deserialize;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::app::AppState;
 use crate::mcp_transport::{self, McpTransport};
@@ -149,5 +151,50 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
         mcp_transport::apply_host_styles(styles);
     }
 
+    setup_size_notifications(transport);
+
     Ok(())
+}
+
+/// Observe document size changes and notify the host so it can resize the iframe.
+fn setup_size_notifications(transport: Rc<McpTransport>) {
+    transport.send_size_changed();
+
+    let throttled = Rc::new(RefCell::new(false));
+    let callback = {
+        let throttled = throttled.clone();
+        Closure::<dyn Fn(js_sys::Array)>::new(move |_entries: js_sys::Array| {
+            if *throttled.borrow() {
+                return;
+            }
+            *throttled.borrow_mut() = true;
+
+            let throttled = throttled.clone();
+            let cb = Closure::once(move || {
+                *throttled.borrow_mut() = false;
+                with_transport(|t| t.send_size_changed());
+            });
+            if let Some(w) = web_sys::window() {
+                let _ = w.request_animation_frame(cb.as_ref().unchecked_ref());
+            }
+            cb.forget();
+        })
+    };
+
+    if let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) {
+        if let Some(root) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            observer.observe(&root);
+        }
+        if let Some(body) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.body())
+        {
+            observer.observe(body.as_ref());
+        }
+        Box::leak(Box::new(observer));
+    }
+    callback.forget();
 }

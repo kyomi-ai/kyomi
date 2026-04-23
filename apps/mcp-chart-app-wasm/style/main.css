@@ -65,6 +65,20 @@ chart-header-bar {
     border-radius: 0 0 8px 8px !important;
 }
 
+/* --- Panel slide-down animation --- */
+@keyframes panel-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    max-height: 600px;
+  }
+}
+
 /* --- Chart Info Panel --- */
 .chart-info-panel {
     border-left: 1px solid rgba(217, 119, 6, 0.15);
@@ -74,6 +88,8 @@ chart-header-bar {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    animation: panel-slide-down 0.22s ease;
+    overflow: hidden;
 }
 .dark .chart-info-panel,
 [data-theme="dark"] .chart-info-panel {
@@ -184,6 +200,8 @@ chart-header-bar {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    animation: panel-slide-down 0.22s ease;
+    overflow: hidden;
 }
 .dark .dashboard-panel,
 [data-theme="dark"] .dashboard-panel {
@@ -415,4 +433,12 @@ chart-header-bar {
 .dark .dashboard-success-message,
 [data-theme="dark"] .dashboard-success-message {
     color: #4ade80;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

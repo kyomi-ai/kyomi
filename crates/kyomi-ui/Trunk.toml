@@ -13,7 +13,6 @@ command = "tailwindcss"
 command_arguments = [
     "--input", "style/main.css",
     "--output", "style/output.css",
-    "--content", "src/**/*.rs",
 ]
 
 # Precompress content-hashed assets (WASM, JS, CSS) at max quality so the

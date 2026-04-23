@@ -19,11 +19,12 @@ chartml-leptos = { path = "../../../chartml-rs/crates/chartml-leptos" }
 
 leptos = { version = "0.8", features = ["csr"] }
 web-sys = { version = "0.3", features = [
-    "HtmlElement", "HtmlInputElement", "Document", "Window", "Element",
+    "HtmlElement", "HtmlInputElement", "HtmlBodyElement", "Document", "Window", "Element",
     "CustomEvent", "CustomEventInit", "Event", "EventTarget",
-    "CssStyleDeclaration", "DomTokenList",
+    "CssStyleDeclaration", "DomTokenList", "DomRectReadOnly",
     "Navigator", "Clipboard",
     "MessageEvent",
+    "ResizeObserver", "ResizeObserverEntry",
 ] }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 wasm-bindgen = "0.2"

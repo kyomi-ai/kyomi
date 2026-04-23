@@ -28,6 +28,7 @@ const METHOD_INITIALIZE: &str = "ui/initialize";
 const METHOD_INITIALIZED: &str = "ui/notifications/initialized";
 const METHOD_TOOLS_CALL: &str = "tools/call";
 const METHOD_OPEN_LINK: &str = "ui/open-link";
+const METHOD_SIZE_CHANGED: &str = "ui/notifications/size-changed";
 
 // Methods: Host → App (notifications)
 const METHOD_TOOL_RESULT: &str = "ui/notifications/tool-result";
@@ -219,6 +220,46 @@ impl McpTransport {
     pub fn open_link(&self, url: &str) {
         let params = serde_json::json!({ "url": url });
         self.send_notification(METHOD_OPEN_LINK, params);
+    }
+
+    /// Measure content size and notify the host so it can resize the iframe.
+    ///
+    /// Mirrors the JS SDK's `setupSizeChangedNotifications()`: temporarily sets
+    /// documentElement to fit-content, measures getBoundingClientRect, restores,
+    /// and posts `ui/notifications/size-changed` with `{ width, height }`.
+    pub fn send_size_changed(&self) {
+        let Some(window) = web_sys::window() else { return };
+        let Some(document) = window.document() else { return };
+        let Some(root) = document.document_element() else { return };
+        let Some(html_el) = root.clone().dyn_into::<web_sys::HtmlElement>().ok() else { return };
+
+        let style = html_el.style();
+        let saved_w = style.get_property_value("width").unwrap_or_default();
+        let saved_h = style.get_property_value("height").unwrap_or_default();
+
+        let _ = style.set_property("width", "fit-content");
+        let _ = style.set_property("height", "max-content");
+
+        let rect = root.get_bounding_client_rect();
+        let content_width = rect.width();
+        let content_height = rect.height();
+
+        let _ = style.set_property("width", &saved_w);
+        let _ = style.set_property("height", &saved_h);
+
+        let scrollbar_w = window
+            .inner_width()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(content_width)
+            - root.client_width() as f64;
+        let width = (content_width + scrollbar_w).ceil() as u32;
+        let height = content_height.ceil() as u32;
+
+        self.send_notification(
+            METHOD_SIZE_CHANGED,
+            serde_json::json!({ "width": width, "height": height }),
+        );
     }
 
     // -----------------------------------------------------------------------
