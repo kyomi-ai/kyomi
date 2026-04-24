@@ -1250,10 +1250,13 @@ fn DashboardWysiwygEditor(
         let editor_theme = crate::pages::sql_editor::code_editor::use_editor_theme();
 
         let palette = palette_name.as_deref().unwrap_or("kyomi");
-        let is_dark = crate::components::theme::use_theme()
-            .map(|s| s.effective.get_untracked() == "dark")
-            .unwrap_or(false);
-        let extension = ChartMLExtension::new(palette, is_dark);
+        let theme_state = crate::components::theme::use_theme();
+        let is_dark_memo = Memo::new(move |_| {
+            theme_state
+                .map(|s| s.effective.get() == "dark")
+                .unwrap_or(false)
+        });
+        let extension = ChartMLExtension::new(palette, is_dark_memo);
         let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![
             Arc::new(extension),
         ];

@@ -20,34 +20,32 @@ use crate::components::dashboard::markdown_renderer::{
 };
 
 /// Kode extension that renders `chartml` code blocks as live charts.
+///
+/// Stores the palette name and a reactive `is_dark` memo rather than a
+/// pre-built `ChartMLRef`. Each rendered chart block creates its own
+/// `ChartMLRef` inside a reactive closure, so charts re-mount with the
+/// correct palette when the system theme changes.
 pub struct ChartMLExtension {
-    /// `ChartMLRef` is `Rc<ChartML>` on WASM (!Send + !Sync), but the
-    /// `Extension: Send + Sync` supertrait requires the impl type be both.
-    /// `SendWrapper` provides the bound by panicking if accessed from a
-    /// different thread, which never happens on the single-threaded
-    /// wasm32-unknown-unknown runtime.
-    chartml: send_wrapper::SendWrapper<chartml_leptos::ChartMLRef>,
+    palette: String,
+    is_dark: send_wrapper::SendWrapper<Memo<bool>>,
 }
 
 impl ChartMLExtension {
-    /// Create the extension with the named palette and dark-mode flag.
+    /// Create the extension with the named palette and a reactive dark-mode memo.
     ///
-    /// Delegates to [`configured_chartml`] — the shared factory that registers
-    /// all 9 Kyomi renderers, the DataFusion transform, the palette, the Kyomi
-    /// editorial theme, and tracing-based resolver hooks. The two render paths
-    /// (markdown-renderer and WYSIWYG extension) are guaranteed in sync because
-    /// they both call the same factory.
+    /// Charts are rendered lazily inside reactive closures that call
+    /// [`configured_chartml`] — the shared factory that registers all 9 Kyomi
+    /// renderers, the DataFusion transform, the palette, the Kyomi editorial
+    /// theme, and tracing-based resolver hooks.
     ///
     /// # Arguments
     ///
-    /// * `palette_name` — Kyomi palette name (e.g. `"kyomi"`). Read from the
-    ///   user's `UserContext.chart_palette` preference; pass `"kyomi"` as the
-    ///   default when no preference exists.
-    /// * `is_dark` — whether the UI is in dark mode. Read from
-    ///   `crate::components::theme::use_theme()` at the construction site.
-    pub fn new(palette_name: &str, is_dark: bool) -> Self {
+    /// * `palette_name` — Kyomi palette name (e.g. `"kyomi"`).
+    /// * `is_dark` — reactive memo that tracks whether the UI is in dark mode.
+    pub fn new(palette_name: &str, is_dark: Memo<bool>) -> Self {
         Self {
-            chartml: send_wrapper::SendWrapper::new(configured_chartml(palette_name, is_dark)),
+            palette: palette_name.to_string(),
+            is_dark: send_wrapper::SendWrapper::new(is_dark),
         }
     }
 }
@@ -82,9 +80,8 @@ impl Extension for ChartMLExtension {
             return None;
         }
 
-        // Unwrap the SendWrapper to get the inner `ChartMLRef`. Safe on the
-        // wasm32 main thread where this is always called.
-        let chartml: chartml_leptos::ChartMLRef = (*self.chartml).clone();
+        let palette = self.palette.clone();
+        let is_dark = *self.is_dark;
 
         // The full block content is used by the edit-request listener in the
         // dashboard editor to locate which fence in the source was clicked
@@ -101,12 +98,17 @@ impl Extension for ChartMLExtension {
                     .map(extract_col_span)
                     .unwrap_or(12);
                 let col_class = chart_col_span_class(col_span);
-                let chart_view = render_one_chart(
-                    item_yaml,
-                    array_index,
-                    full_block_content.clone(),
-                    chartml.clone(),
-                );
+                let palette_clone = palette.clone();
+                let block_content = full_block_content.clone();
+                let chart_view = move || {
+                    let chartml = configured_chartml(&palette_clone, is_dark.get());
+                    render_one_chart(
+                        item_yaml.clone(),
+                        array_index,
+                        block_content.clone(),
+                        chartml,
+                    )
+                };
                 view! { <div class=col_class>{chart_view}</div> }.into_any()
             })
             .collect();

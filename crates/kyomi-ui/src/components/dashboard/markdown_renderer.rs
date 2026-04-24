@@ -683,14 +683,16 @@ pub fn MarkdownRenderer(
     }
 
     let palette_name = chart_palette.unwrap_or_else(|| "kyomi".to_string());
-    let is_dark = crate::components::theme::use_theme()
-        .map(|s| s.effective.get_untracked() == "dark")
-        .unwrap_or(false);
-    // Build a single configured ChartMLRef for all charts in this renderer.
-    // Renderers, palette, theme, and tracing hooks are all resolved once here
-    // rather than once per chart — the ChartMLRef is an Arc/Rc wrapper so
-    // cloning it per chart is cheap.
-    let chartml_stored = StoredValue::new_local(configured_chartml(&palette_name, is_dark));
+    let theme_state = crate::components::theme::use_theme();
+    // Reactive memo so charts re-render when the system theme changes.
+    // `ChartMLRef` is not `PartialEq`, so we cannot memo the chartml instance
+    // directly — instead we memo `is_dark` and create a fresh chartml inside
+    // each reactive closure, which forces a chart re-mount on theme toggle.
+    let is_dark_memo = Memo::new(move |_| {
+        theme_state
+            .map(|s| s.effective.get() == "dark")
+            .unwrap_or(false)
+    });
     let extra_class = class.unwrap_or_default();
 
     let segments = Memo::new(move |_| {
@@ -754,6 +756,7 @@ pub fn MarkdownRenderer(
                             // Emit each chart as its own grid item directly into the
                             // outer grid (no nested `grid grid-cols-12` wrapper) so
                             // siblings from different ChartML segments can share rows.
+                            let palette_for_charts = palette_name.clone();
                             yamls
                                 .into_iter()
                                 .enumerate()
@@ -764,20 +767,26 @@ pub fn MarkdownRenderer(
                                         .map(extract_col_span)
                                         .unwrap_or(12);
                                     let col_class = chart_col_span_class(col_span);
+                                    let palette_clone = palette_for_charts.clone();
                                     view! {
                                         <div class=col_class>
-                                            <KyomiChart
-                                                yaml=chart_yaml
-                                                block_index=block_index
-                                                array_index=array_index
-                                                parameters=parameters
-                                                chartml=chartml_stored.get_value()
-                                                on_edit_chart=edit
-                                                on_delete_chart=delete
-                                                on_save_to_dashboard=save
-                                                on_chart_info=info
-                                                on_ask_about_chart=ask
-                                            />
+                                            {move || {
+                                                let chartml = configured_chartml(&palette_clone, is_dark_memo.get());
+                                                view! {
+                                                    <KyomiChart
+                                                        yaml=chart_yaml.clone()
+                                                        block_index=block_index
+                                                        array_index=array_index
+                                                        parameters=parameters
+                                                        chartml=chartml
+                                                        on_edit_chart=edit
+                                                        on_delete_chart=delete
+                                                        on_save_to_dashboard=save
+                                                        on_chart_info=info
+                                                        on_ask_about_chart=ask
+                                                    />
+                                                }
+                                            }}
                                         </div>
                                     }
                                 })
