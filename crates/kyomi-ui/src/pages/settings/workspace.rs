@@ -10,7 +10,6 @@ use leptos::prelude::*;
 use crate::components::{
     ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton, INPUT_CLASS,
 };
-#[cfg(feature = "slack")]
 use crate::components::{Alert, AlertDescription, AlertVariant, Button, ButtonVariant};
 use crate::server_fns::workspace::*;
 use crate::types::WorkspaceSettingsData;
@@ -129,19 +128,11 @@ fn WorkspaceNameCard(data: WorkspaceSettingsData) -> impl IntoView {
 // Slack section — feature-gated wrapper to avoid cfg inside view! macro
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(feature = "slack")]
 #[component]
 fn WorkspaceSlackSection() -> impl IntoView {
     view! { <WorkspaceSlackCard/> }
 }
 
-#[cfg(not(feature = "slack"))]
-#[component]
-fn WorkspaceSlackSection() -> impl IntoView {
-    view! { <span></span> }
-}
-
-#[cfg(feature = "slack")]
 #[component]
 fn WorkspaceSlackCard() -> impl IntoView {
     let slack_status = Resource::new(|| (), |_| get_workspace_slack_status());
@@ -318,11 +309,11 @@ fn WorkspaceSlackCard() -> impl IntoView {
                             Err(e) => {
                                 let msg = e.to_string();
                                 // If the error is about tier, show upgrade prompt
-                                if msg.contains("Team and Enterprise") {
+                                if msg.contains("Kyomi Cloud subscription") {
                                     view! {
                                         <Alert variant=AlertVariant::Info>
                                             <AlertDescription>
-                                                "Slack integration is available on Team and Enterprise plans. "
+                                                "Slack integration requires an active Kyomi Cloud subscription. "
                                                 <a href="/settings/billing" class="text-primary font-medium hover:underline">
                                                     "Upgrade to enable"
                                                 </a>

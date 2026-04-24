@@ -848,7 +848,6 @@ fn InvitationsCard(invitations: Vec<crate::types::InvitationData>) -> impl IntoV
 // Slack section — feature-gated wrapper to avoid cfg inside view! macro
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(feature = "slack")]
 #[component]
 fn SlackSection(is_personal: bool) -> impl IntoView {
     if !is_personal {
@@ -856,13 +855,6 @@ fn SlackSection(is_personal: bool) -> impl IntoView {
     } else {
         view! { <span></span> }.into_any()
     }
-}
-
-#[cfg(not(feature = "slack"))]
-#[component]
-fn SlackSection(is_personal: bool) -> impl IntoView {
-    let _ = is_personal;
-    view! { <span></span> }
 }
 
 #[cfg(all(test, feature = "ssr"))]

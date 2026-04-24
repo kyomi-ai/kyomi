@@ -34,7 +34,6 @@ pub mod profile;
 pub mod security;
 pub mod setup;
 pub mod sidebar;
-#[cfg(feature = "slack")]
 pub mod slack;
 pub mod sql_editor;
 pub mod team;

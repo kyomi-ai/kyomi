@@ -71,7 +71,7 @@ pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
         "slack_integration",
     ) {
         return Err(ServerFnError::new(
-            "Slack integration is only available on Team and Enterprise plans. Please upgrade to access this feature.",
+            "Slack integration requires an active Kyomi Cloud subscription.",
         ));
     }
 
@@ -224,7 +224,7 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
         "slack_integration",
     ) {
         return Err(ServerFnError::new(
-            "Slack integration is only available on Team and Enterprise plans. Please upgrade to access this feature.",
+            "Slack integration requires an active Kyomi Cloud subscription.",
         ));
     }
 

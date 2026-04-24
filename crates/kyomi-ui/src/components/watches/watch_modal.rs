@@ -24,7 +24,6 @@ use crate::types::WatchListItem;
 use super::ScheduleSelector;
 use crate::components::dashboard::shared::{BTN_BASE, BTN_OUTLINE};
 
-#[cfg(feature = "slack")]
 use crate::server_fns::slack::SlackChannel;
 
 // ---------------------------------------------------------------------------
@@ -943,12 +942,11 @@ fn WatchCopilot(
 // Slack Notifications sub-component — feature-gated
 // ---------------------------------------------------------------------------
 
-/// Slack notifications section when the `slack` feature is enabled.
+/// Slack notifications section.
 ///
 /// Fetches Slack status and channel list, then renders the appropriate UI
 /// state: not installed, user not connected, loading, no channels, or the
 /// channel selector dropdown. Matches the React WatchModal.jsx Slack section.
-#[cfg(feature = "slack")]
 #[component]
 fn SlackNotificationsSection(
     /// Whether the parent modal is open (drives resource fetches).
@@ -1102,36 +1100,3 @@ fn SlackNotificationsSection(
     }
 }
 
-/// Slack notifications section when the `slack` feature is NOT enabled.
-///
-/// Shows the static "not installed" message since Slack functions are
-/// unavailable without the feature flag.
-#[cfg(not(feature = "slack"))]
-#[component]
-fn SlackNotificationsSection(
-    #[prop(into)]
-    open: Signal<bool>,
-    #[prop(into)]
-    mode: Signal<String>,
-    #[prop(into)]
-    slack_channel_id: Signal<String>,
-    set_slack_channel_id: WriteSignal<String>,
-) -> impl IntoView {
-    let _ = (open, mode, slack_channel_id, set_slack_channel_id);
-    view! {
-        <div class="space-y-2">
-            <Label>
-                <span class="flex items-center gap-2">
-                    <Icon icon=phosphor_leptos::CHAT attr:class="h-4 w-4"/>
-                    "Slack Notifications"
-                </span>
-            </Label>
-            <div class="flex items-start gap-2 p-3 bg-muted/50 rounded-lg text-sm text-muted-foreground">
-                <Icon icon=phosphor_leptos::WARNING attr:class="h-4 w-4 text-warning-foreground mt-0.5 shrink-0"/>
-                <span>
-                    "Slack is not installed. Ask your workspace admin to connect Slack in Settings."
-                </span>
-            </div>
-        </div>
-    }
-}

@@ -141,7 +141,7 @@ struct ConnectInitiateQuery {
 fn require_slack_capability(user: &AuthUser) -> Result<(), kyomi_core::Error> {
     if !capability::has_capability(user.workspace.subscription_tier, "slack_integration") {
         return Err(kyomi_core::Error::Forbidden(
-            "Slack integration is only available on Team and Enterprise plans. Please upgrade to access this feature.".into(),
+            "Slack integration requires an active Kyomi Cloud subscription.".into(),
         ));
     }
     Ok(())
@@ -1490,7 +1490,7 @@ async fn handle_app_mention(
             &ctx.bot_token,
             channel_id,
             slack_user_id,
-            "Slack integration requires a Team or Enterprise plan.",
+            "Slack integration requires an active Kyomi Cloud subscription.",
             &state.slack_client,
         )
         .await;
@@ -1680,7 +1680,7 @@ async fn handle_direct_message(
             &ctx.bot_token,
             channel_id,
             slack_user_id,
-            "Slack integration requires a Team or Enterprise plan.",
+            "Slack integration requires an active Kyomi Cloud subscription.",
             &state.slack_client,
         )
         .await;

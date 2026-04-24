@@ -211,7 +211,6 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
 ///
 /// Returns whether the Kyomi Slack app is installed in the workspace,
 /// along with the Slack team name and ID if installed.
-#[cfg(feature = "slack")]
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlackStatus, ServerFnError> {
     let auth = extract_auth().await?;
@@ -247,7 +246,6 @@ pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlack
 /// Returns the OAuth authorization URL. The frontend redirects the user
 /// to this URL to complete the Slack app installation.
 /// Requires workspace admin role.
-#[cfg(feature = "slack")]
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
@@ -303,7 +301,6 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
 ///
 /// Removes the workspace integration record from the database.
 /// Requires workspace admin role.
-#[cfg(feature = "slack")]
 #[server(prefix = "/leptos-api")]
 pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
