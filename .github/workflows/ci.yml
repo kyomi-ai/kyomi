@@ -101,5 +101,8 @@ jobs:
       - name: Ensure kyomi-ui/dist/ exists for RustEmbed
         run: mkdir -p crates/kyomi-ui/dist
 
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace -- -D warnings
