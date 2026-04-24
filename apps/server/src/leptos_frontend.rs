@@ -15,6 +15,8 @@
 //! - `/leptos/*` → serves WASM, JS, and CSS assets
 //! - Fallback → serves index.html (SPA routing) or static assets
 
+use std::sync::OnceLock;
+
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use rust_embed::Embed;
@@ -292,6 +294,106 @@ fn file_response(
         file.data.to_vec(),
     )
         .into_response()
+}
+
+// ─── SSR for login page ─────────────────────────────────────────────────
+
+struct TemplateParts {
+    prefix: String,
+    suffix: String,
+}
+
+static TEMPLATE_PARTS: OnceLock<Option<TemplateParts>> = OnceLock::new();
+
+fn get_template_parts() -> Option<&'static TemplateParts> {
+    TEMPLATE_PARTS
+        .get_or_init(|| {
+            let file = LeptosAssets::get("index.html")?;
+            let html = String::from_utf8_lossy(&file.data);
+
+            // Search for <body after </head> to avoid false matches inside
+            // CSS comments or style blocks that contain the string "<body".
+            let head_end = html.find("</head>")?;
+            let body_start = head_end + html[head_end..].find("<body")?;
+            let body_tag_end = html[body_start..].find('>')? + body_start + 1;
+
+            let body_tag = &html[body_start..body_tag_end];
+            let modified_body_tag = body_tag.replacen("<body", "<body data-ssr", 1);
+
+            let prefix = format!(
+                "{}{}",
+                &html[..body_start],
+                modified_body_tag,
+            );
+            let suffix = "\n</body>\n</html>".to_string();
+
+            Some(TemplateParts { prefix, suffix })
+        })
+        .as_ref()
+}
+
+/// Build an axum handler that SSR-renders the login page.
+///
+/// Uses `render_app_to_stream_with_context` to render `<App/>` server-side,
+/// then wraps the output in the Trunk-built `index.html` template (which has
+/// the CSS, fonts, and WASM script tags). The `<body>` gets a `data-ssr`
+/// attribute so the WASM entry point hydrates instead of mounting fresh.
+///
+/// Falls back to the static CSR shell if the template can't be parsed.
+pub fn login_ssr_handler(
+    server_ctx: kyomi_ui::server_fns::ServerContext,
+) -> impl FnMut(
+    axum::http::Request<axum::body::Body>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Response> + Send>,
+> + Clone
+       + Send
+       + 'static {
+    use kyomi_ui::app::App;
+    use leptos::prelude::*;
+
+    // Leptos reactive Effects call spawn_local(), which in tokio requires a
+    // LocalSet (!Send). Since axum handlers must produce Send futures, we
+    // register a custom executor: spawn → tokio::spawn, spawn_local → no-op.
+    // Effects are client-side behaviour and don't need to run during SSR.
+    struct SsrExecutor;
+    impl any_spawner::CustomExecutor for SsrExecutor {
+        fn spawn(&self, fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>) {
+            tokio::spawn(fut);
+        }
+        fn spawn_local(&self, _fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>) {}
+        fn poll_local(&self) {}
+    }
+    _ = any_spawner::Executor::init_custom_executor(SsrExecutor);
+
+    let renderer = leptos_axum::render_app_to_stream_with_context(
+        move || {
+            provide_context(server_ctx.clone());
+        },
+        App,
+    );
+
+    move |req| {
+        let renderer = renderer.clone();
+        Box::pin(async move {
+            let Some(tpl) = get_template_parts() else {
+                return serve_leptos_shell().await;
+            };
+
+            let ssr_response = renderer(req).await;
+
+            let Ok(body_bytes) =
+                axum::body::to_bytes(ssr_response.into_body(), 2 * 1024 * 1024).await
+            else {
+                return serve_leptos_shell().await;
+            };
+
+            let ssr_html = String::from_utf8_lossy(&body_bytes);
+            let full = format!("{}{ssr_html}{}", tpl.prefix, tpl.suffix);
+
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], full).into_response()
+        })
+    }
 }
 
 fn mime_from_path(path: &str) -> HeaderValue {

@@ -57,6 +57,15 @@ PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
 
 **NEVER run `tailwindcss` manually.** Trunk runs it as a pre-build hook. Running it separately breaks content hashes in `index.html`.
 
+## SSR + Hydration
+
+Some pages are server-side rendered for instant load. **Read `docs/SSR_HYDRATION_GUIDE.md` before touching SSR code.**
+
+Critical rules (violations cause silent hydration panics):
+- **Never use `Resource::new()` inside `#[cfg(target_arch = "wasm32")]` blocks** — it desyncs serialized resource IDs between server and client. Use `spawn_local` or `Effect::new` instead.
+- **Never inject DOM elements into `<body>` outside the `<App/>` tree** — tachys walks body children and the virtual DOM in lockstep; an extra element causes an immediate panic. Use CSS pseudo-elements for visual indicators.
+- **Template splitting must find `<body` after `</head>`** — the string `<body` can appear in CSS comments/selectors. Always search after `</head>`.
+
 ## Browser Testing — Verifying UI Changes
 
 **Use Playwright, not the browse/gstack tool.** The browse tool doesn't work reliably with Leptos inputs and can't load debug WASM (253MB, 8-15s load time).

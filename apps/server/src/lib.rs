@@ -147,8 +147,34 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .route("/api/v1/connect/info", axum::routing::get(connect::info::connect_info))
         // WebSocket routes at root level (not under /api/v1)
         .route("/ws/{user_id}", axum::routing::get(routes::websocket::ws_handler))
+        // ── Shared server-function context ──────────────────────────────
+        // Used by both the /leptos-api/* RPC handler and the login SSR renderer.
+        // Constructed once, cloned into each handler.
+        //
         // Leptos frontend routes — auth pages
-        .route("/login", axum::routing::get(leptos_frontend::serve_leptos_shell))
+        .route("/login", axum::routing::get({
+            let server_ctx = kyomi_ui::server_fns::ServerContext {
+                db: state.db.clone(),
+                config: state.config.clone(),
+                auth_state: kyomi_auth::middleware::AuthState::from_ref(&state),
+                encryption_key: Some(state.encryption_key.clone()),
+                kv: Some(state.kv.clone()),
+                redis: state.redis.clone(),
+                webauthn: Some(state.webauthn.clone()),
+                embedding: state.embedding.clone(),
+                connect_registry: Some(state.connect_registry.clone()),
+                ws_manager: Some(state.ws_manager.clone()),
+                cancel_registry: Some(kyomi_ui::server_fns::CancelRegistry::from_shared(
+                    state.cancel_registry.tokens.clone(),
+                )),
+                platforms: Some(state.platforms.clone()),
+                connect_token: state.connect_token.clone(),
+                mcp_sessions: Some(state.mcp_sessions.clone()),
+                #[cfg(feature = "slack")]
+                slack_client: extras.slack_client.clone(),
+            };
+            leptos_frontend::login_ssr_handler(server_ctx)
+        }))
         .route("/signup/complete", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/auth/google/callback", axum::routing::get(leptos_frontend::serve_leptos_shell))
         .route("/account/recover", axum::routing::get(leptos_frontend::serve_leptos_shell))

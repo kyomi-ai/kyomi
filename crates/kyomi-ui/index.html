@@ -89,6 +89,32 @@
             0%, 100% { opacity: 0.6; transform: scale(1); }
             50% { opacity: 1; transform: scale(1.15); }
         }
+
+        /* SSR hydration gap — disable buttons and show progress bar until
+           WASM removes the data-ssr attribute from <body>. Inputs stay
+           enabled (typing works without JS). Links stay clickable. */
+        body[data-ssr] button {
+            pointer-events: none;
+            opacity: 0.5;
+        }
+        /* Progress bar via pseudo-element so no DOM node is injected into
+           <body> — a real element would break Leptos hydration (DOM/vdom
+           mismatch). The ::before disappears automatically when data-ssr
+           is removed from <body>. */
+        body[data-ssr]::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 2px;
+            background: var(--color-primary, #d97706);
+            z-index: 99999;
+            animation: ssr-bar 2.5s ease-out forwards;
+        }
+        @keyframes ssr-bar {
+            0%   { width: 0; }
+            100% { width: 90%; }
+        }
     </style>
 
     <script type="module">

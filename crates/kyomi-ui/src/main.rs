@@ -10,13 +10,33 @@ use leptos::prelude::*;
 
 fn main() {
     console_error_panic_hook::set_once();
-    mount_to_body(App);
 
-    // Remove the loading screen now that the app has mounted.
-    if let Some(window) = web_sys::window()
-        && let Some(document) = window.document()
-        && let Some(loading) = document.get_element_by_id("kyomi-loading")
+    #[cfg(feature = "hydrate")]
     {
-        loading.remove();
+        let document = web_sys::window()
+            .and_then(|w| w.document())
+            .expect("document");
+        let body = document.body().expect("body");
+
+        if body.get_attribute("data-ssr").is_some() {
+            leptos::mount::hydrate_body(App);
+            let _ = body.remove_attribute("data-ssr");
+        } else {
+            mount_to_body(App);
+            if let Some(loading) = document.get_element_by_id("kyomi-loading") {
+                loading.remove();
+            }
+        }
+    }
+
+    #[cfg(not(feature = "hydrate"))]
+    {
+        mount_to_body(App);
+        if let Some(window) = web_sys::window()
+            && let Some(document) = window.document()
+            && let Some(loading) = document.get_element_by_id("kyomi-loading")
+        {
+            loading.remove();
+        }
     }
 }

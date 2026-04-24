@@ -121,17 +121,18 @@ pub fn LoginPage(
 
     // ── Already authenticated? Redirect away from login page ──────────
     // Matches React: Login.jsx line 124 — `if (isAuthenticated) { navigate(redirect) }`
+    //
+    // Uses spawn_local (not Resource::new) so it doesn't consume a serialized
+    // resource ID. Resource IDs must be identical between SSR and client or
+    // hydration markers will be misaligned, causing a tachys panic.
     #[cfg(target_arch = "wasm32")]
     {
         use crate::server_fns::sidebar::get_sidebar_user;
-        let auth_check = Resource::new(|| (), |_| get_sidebar_user());
         let redirect_for_check = redirect_url;
-        Effect::new(move || {
-            if let Some(Ok(_)) = auth_check.get() {
-                // Already authenticated — redirect to intended page
+        leptos::task::spawn_local(async move {
+            if get_sidebar_user().await.is_ok() {
                 if let Some(window) = web_sys::window() {
-                    let target = redirect_for_check();
-                    let _ = window.location().set_href(&target);
+                    let _ = window.location().set_href(&redirect_for_check());
                 }
             }
         });
