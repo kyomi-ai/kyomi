@@ -481,28 +481,16 @@ html {
  * - Amber accent used sparingly for emphasis (links, blockquote rules,
  *   list markers, horizontal rules).
  * - Warm neutrals for surfaces and separators.
- * - Body text max-width 72ch for readability; charts, tables, code,
- *   and blockquotes break out to full container width.
+ * - Charts, tables, code, and blockquotes span full container width.
  * - Horizontal rules and ruled spacing for editorial rhythm. No
  *   gradients, no drop shadows, no rounded corners on content blocks.
  */
 
 .prose-kyomi {
-  /* Container — body text is capped for readability, nested breakout
-   * blocks (charts, tables, code blocks, blockquotes) override this
-   * with `margin-left/right: auto` + explicit wider width. */
   color: var(--color-foreground);
   font-family: 'DM Sans', system-ui, sans-serif;
   font-size: 15px;
   line-height: 1.60;
-  max-width: 72ch;
-  margin: 0 auto;
-}
-
-/* Chat context — bubble constrains width, no additional max-width needed */
-.prose-kyomi-chat {
-  max-width: none;
-  margin: 0;
 }
 
 /* ── Headings ──────────────────────────────────────────────────── */
@@ -784,9 +772,7 @@ html {
   line-height: 1.4;
 }
 
-/* ── Breakout blocks — charts, tables, code, blockquotes span wider
- *    than the 72ch body text cap. Uses negative margins so blocks
- *    remain centered in the container while text stays narrow. */
+/* ── Breakout blocks — charts, tables, code, blockquotes */
 
 .prose-kyomi > figure,
 .prose-kyomi > pre,
