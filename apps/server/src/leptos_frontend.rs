@@ -18,7 +18,7 @@
 use std::sync::OnceLock;
 
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use rust_embed::Embed;
 
 #[derive(Embed)]
@@ -84,7 +84,14 @@ pub async fn serve_leptos_shell() -> Response {
     match LeptosAssets::get("index.html") {
         Some(file) => {
             let html = String::from_utf8_lossy(&file.data);
-            Html(html.into_owned()).into_response()
+            (
+                [
+                    (header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8")),
+                    (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+                ],
+                html.into_owned(),
+            )
+                .into_response()
         }
         None => (
             StatusCode::NOT_FOUND,
@@ -391,7 +398,14 @@ pub fn login_ssr_handler(
             let ssr_html = String::from_utf8_lossy(&body_bytes);
             let full = format!("{}{ssr_html}{}", tpl.prefix, tpl.suffix);
 
-            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], full).into_response()
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                full,
+            )
+                .into_response()
         })
     }
 }
