@@ -1026,6 +1026,10 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   --kode-code-block-font-size: 13px;
   --kode-code-block-line-height: 1.55;
 
+  /* Block gap between adjacent chart/code blocks in the visual editor */
+  --kode-block-gap-height: 12px;
+  --kode-block-gap-hover-bg: var(--color-accent);
+
   /* Thematic break — editorial section rule */
   --kode-hr-border-width: 1px;
   --kode-hr-border-color: var(--color-border-strong);
