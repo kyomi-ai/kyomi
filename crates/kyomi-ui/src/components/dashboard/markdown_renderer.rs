@@ -690,7 +690,7 @@ pub fn MarkdownRenderer(
     // Renderers, palette, theme, and tracing hooks are all resolved once here
     // rather than once per chart — the ChartMLRef is an Arc/Rc wrapper so
     // cloning it per chart is cheap.
-    let chartml_stored = StoredValue::new(configured_chartml(&palette_name, is_dark));
+    let chartml_stored = StoredValue::new_local(configured_chartml(&palette_name, is_dark));
     let extra_class = class.unwrap_or_default();
 
     let segments = Memo::new(move |_| {

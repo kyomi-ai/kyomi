@@ -54,7 +54,8 @@ pub fn SaveDashboardModal(
     #[prop(into)]
     open: Signal<bool>,
     /// The chart YAML to save
-    chart_yaml: String,
+    #[prop(into)]
+    chart_yaml: Signal<String>,
     /// Callback to close the modal
     on_close: Callback<()>,
     /// Callback after successful save (passes dashboard_id)
@@ -67,8 +68,8 @@ pub fn SaveDashboardModal(
     let (is_saving, set_is_saving) = signal(false);
     let (error, set_error) = signal(Option::<String>::None);
 
-    // Clone chart_yaml for use in closures
-    let chart_yaml_stored = StoredValue::new(chart_yaml);
+    // Hold the signal directly — no need for StoredValue since Signal<String> is Copy
+    let chart_yaml_signal = chart_yaml;
 
     // ── Load dashboards when modal opens ─────────────────────────────────
     // React: useEffect on isOpen → loadDashboards()
@@ -104,7 +105,7 @@ pub fn SaveDashboardModal(
             if title.trim().is_empty() {
                 return;
             }
-            let chart_yaml = chart_yaml_stored.get_value();
+            let chart_yaml = chart_yaml_signal.get_untracked();
 
             set_is_saving.set(true);
             set_error.set(None);
@@ -127,7 +128,7 @@ pub fn SaveDashboardModal(
             let Some(dashboard_id) = selected_dashboard_id.get_untracked() else {
                 return;
             };
-            let chart_yaml = chart_yaml_stored.get_value();
+            let chart_yaml = chart_yaml_signal.get_untracked();
 
             set_is_saving.set(true);
             set_error.set(None);

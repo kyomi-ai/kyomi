@@ -180,7 +180,7 @@ pub(crate) fn DashboardListEntry(
         <div
             on:click=move |_| on_select_clone(id_for_click.clone())
             class=move || {
-                let selected = selected_dashboard_id.get().as_deref() == Some(&*id_for_class);
+                let selected = selected_dashboard_id.try_get().as_ref().and_then(|v| v.as_deref()) == Some(&*id_for_class);
                 if selected {
                     "border-2 rounded-lg p-4 cursor-pointer transition-colors border-primary bg-primary/10"
                 } else {
@@ -191,7 +191,7 @@ pub(crate) fn DashboardListEntry(
             <div class="flex items-center gap-3">
                 // Icon container
                 <div class=move || {
-                    let selected = selected_dashboard_id.get().as_deref() == Some(&*id_for_icon_class);
+                    let selected = selected_dashboard_id.try_get().as_ref().and_then(|v| v.as_deref()) == Some(&*id_for_icon_class);
                     if selected {
                         "flex-shrink-0 w-10 h-10 rounded-lg flex items-center justify-center bg-primary"
                     } else {
@@ -199,7 +199,7 @@ pub(crate) fn DashboardListEntry(
                     }
                 }>
                     {move || {
-                        let selected = selected_dashboard_id.get().as_deref() == Some(&*id_for_icon_text);
+                        let selected = selected_dashboard_id.try_get().as_ref().and_then(|v| v.as_deref()) == Some(&*id_for_icon_text);
                         let class = if selected {
                             "w-5 h-5 text-primary-foreground"
                         } else {
@@ -221,7 +221,7 @@ pub(crate) fn DashboardListEntry(
 
                 // Checkmark when selected
                 {move || {
-                    let selected = selected_dashboard_id.get().as_deref() == Some(&*id_for_check);
+                    let selected = selected_dashboard_id.try_get().as_ref().and_then(|v| v.as_deref()) == Some(&*id_for_check);
                     if selected {
                         Some(check_circle_icon("w-5 h-5 text-primary flex-shrink-0"))
                     } else {

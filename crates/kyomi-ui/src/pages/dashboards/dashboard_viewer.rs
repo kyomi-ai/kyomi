@@ -1067,7 +1067,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                 // ─── Modals ─────────────────────────────
                                 <SaveDashboardModal
                                     open=Signal::derive(move || save_modal_open.get())
-                                    chart_yaml=save_modal_yaml.get_untracked()
+                                    chart_yaml=save_modal_yaml
                                     on_close=on_save_modal_close
                                     on_saved=on_save_modal_saved
                                 />

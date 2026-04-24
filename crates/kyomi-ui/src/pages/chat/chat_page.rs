@@ -1730,19 +1730,14 @@ pub fn ChatPage() -> impl IntoView {
 
         // Save to Dashboard modal
         // Matches React: Chat.jsx lines 1803-1809
-        {move || {
-            let content = dashboard_modal_content.get();
-            view! {
-                <SaveDashboardModal
-                    open=Signal::derive(move || dashboard_modal_open.get())
-                    chart_yaml=content
-                    on_close=Callback::new(move |()| set_dashboard_modal_open.set(false))
-                    on_saved=Callback::new(move |_dashboard_id: String| {
-                        set_dashboard_modal_open.set(false);
-                    })
-                />
-            }
-        }}
+        <SaveDashboardModal
+            open=Signal::derive(move || dashboard_modal_open.get())
+            chart_yaml=dashboard_modal_content
+            on_close=Callback::new(move |()| set_dashboard_modal_open.set(false))
+            on_saved=Callback::new(move |_dashboard_id: String| {
+                set_dashboard_modal_open.set(false);
+            })
+        />
 
         // Chart info modal — shown when user clicks chart info button in MarkdownRenderer.
         // Matches React: <ChartInfoModal open={chartInfoModal.isOpen} spec={chartInfoModal.spec} onClose={...} />
