@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -325,18 +325,11 @@ impl McpTransport {
         let parent = Self::get_parent_window();
 
         let handler = Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            // Validate source — only accept messages from parent window
             if let Some(ref expected_parent) = parent {
-                let source = event.source();
-                match source {
-                    Some(source) => {
-                        // Compare the source Window to our expected parent
-                        let source_window: Result<web_sys::Window, _> = source.dyn_into();
-                        if source_window.is_err() {
-                            return; // Not from a window
-                        }
-                    }
-                    None => return, // No source
+                let Some(source) = event.source() else { return };
+                let Ok(source_window) = source.dyn_into::<web_sys::Window>() else { return };
+                if !js_sys::Object::is(source_window.as_ref(), expected_parent.as_ref()) {
+                    return;
                 }
             }
 

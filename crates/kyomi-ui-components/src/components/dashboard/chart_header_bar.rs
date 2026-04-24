@@ -424,7 +424,7 @@ pub fn ChartHeaderBar(
             <div class="flex items-center gap-1 min-w-0">
                 // Type selector
                 {(show_type_selector && ct.get_value().is_some()).then(|| {
-                    let current = ct.get_value().unwrap();
+                    let current = ct.get_value().unwrap_or_default();
                     let on_type = on_type_change.unwrap_or(Callback::new(|_| {}));
                     view! { <ChartTypeSelector current_type=current on_select=on_type /> }
                 })}
@@ -478,8 +478,7 @@ pub fn ChartHeaderBar(
                 })}
 
                 // Refresh button
-                {(show_refresh && on_refresh.is_some()).then(|| {
-                    let on_ref = on_refresh.unwrap();
+                {show_refresh.then_some(on_refresh).flatten().map(|on_ref| {
                     let spin_class = move || {
                         let spinning = is_refreshing
                             .map(|s| s.get())
@@ -502,8 +501,7 @@ pub fn ChartHeaderBar(
                 })}
 
                 // Save to dashboard button — hidden at Narrow tier; available in the kebab.
-                {(show_save_to_dashboard && on_save_to_dashboard.is_some()).then(|| {
-                    let cb = on_save_to_dashboard.unwrap();
+                {show_save_to_dashboard.then_some(on_save_to_dashboard).flatten().map(|cb| {
                     view! {
                         <div class="hidden @xs:flex">
                             <button
@@ -518,8 +516,7 @@ pub fn ChartHeaderBar(
                 })}
 
                 // Ask about this chart — hidden at Narrow tier; available in the kebab.
-                {(show_ask_about && on_ask_about.is_some()).then(|| {
-                    let cb = on_ask_about.unwrap();
+                {show_ask_about.then_some(on_ask_about).flatten().map(|cb| {
                     view! {
                         <div class="hidden @xs:flex">
                             <button
@@ -534,8 +531,7 @@ pub fn ChartHeaderBar(
                 })}
 
                 // Info button — hidden at Narrow tier; available in the kebab.
-                {(show_info && on_info.is_some()).then(|| {
-                    let cb = on_info.unwrap();
+                {show_info.then_some(on_info).flatten().map(|cb| {
                     view! {
                         <div class="hidden @xs:flex">
                             <button
@@ -550,8 +546,7 @@ pub fn ChartHeaderBar(
                 })}
 
                 // Edit button — hidden at Narrow tier; available in the kebab.
-                {(show_edit && on_edit.is_some()).then(|| {
-                    let cb = on_edit.unwrap();
+                {show_edit.then_some(on_edit).flatten().map(|cb| {
                     view! {
                         <div class="hidden @xs:flex">
                             <button

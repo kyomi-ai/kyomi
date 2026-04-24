@@ -9,14 +9,14 @@
 #
 # No Node.js, npm, or esbuild required.
 #
-# Output: ../mcp-chart-app/chart_app.html (consumed by include_str! in mcp.rs)
+# Output: chart_app.html (consumed by include_str! in mcp.rs)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-OUTPUT_PATH="../mcp-chart-app/chart_app.html"
+OUTPUT_PATH="chart_app.html"
 
 echo "==> Step 1: Build WASM via Trunk"
 rm -rf dist
@@ -29,9 +29,6 @@ from pathlib import Path
 
 dist = Path("dist")
 output_path = sys.argv[1]
-
-# Read the built index.html
-html = (dist / "index.html").read_text()
 
 # Read and base64-encode the WASM binary
 wasm_file = next(dist.glob("*.wasm"))

@@ -9,12 +9,10 @@
 //! - All UI is Leptos components (ChartHeaderBar, info panel, dashboard panel)
 
 mod app;
-mod chart_header;
 mod dashboard_panel;
 mod info_panel;
 mod mcp_interop;
 pub mod mcp_transport;
-mod theme;
 mod type_convert;
 
 fn main() {

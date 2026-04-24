@@ -84,7 +84,7 @@ RUN sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
 
 # Copy files needed for include_str!/include_bytes! paths
 COPY data/ ./data/
-COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
+COPY apps/mcp-chart-app-wasm/chart_app.html ./apps/mcp-chart-app-wasm/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 
 # All SQL queries use runtime string-based sqlx::query() — no compile-time

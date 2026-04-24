@@ -11,6 +11,7 @@ members = [
     "apps/desktop",
     "enterprise/kyomi-slack",
     "crates/kyomi-ui",
+    "crates/kyomi-ui-components",
     "crates/kyomi-test-harness",
 ]
 resolver = "3"

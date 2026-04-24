@@ -72,7 +72,7 @@ const MCP_APP_MIME_TYPE: &str = "text/html;profile=mcp-app";
 
 /// Chart UI HTML embedded at compile time — build fails if file is missing.
 const CHART_UI_HTML: &str =
-    include_str!("../../../../apps/mcp-chart-app/chart_app.html");
+    include_str!("../../../../apps/mcp-chart-app-wasm/chart_app.html");
 
 /// Header name for MCP session ID (Streamable HTTP spec).
 const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";

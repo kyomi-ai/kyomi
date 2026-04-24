@@ -79,13 +79,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
 
-      - name: Build mcp-chart-app (required by kyomi-server include_str!)
-        working-directory: apps/mcp-chart-app
-        run: npm install && npm run build
+      - name: Install tailwindcss
+        run: |
+          curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.2/tailwindcss-linux-x64
+          chmod +x tailwindcss-linux-x64
+          sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
+
+      - name: Build MCP chart app WASM (required by kyomi-server include_str!)
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
 
       # Strip the local-dev [patch.crates-io] block before clippy. The block
       # points at /home/jason/repos/* paths that only exist on Jason's laptop;

@@ -75,8 +75,9 @@ backups/
 # Secrets
 kyomi-secrets-backup-*.yaml
 
-# MCP chart app build output (built at deploy time)
-apps/mcp-chart-app/chart_app.html
+# MCP chart app WASM build output (built at deploy time)
+apps/mcp-chart-app-wasm/chart_app.html
+apps/mcp-chart-app-wasm/dist/
 
 # FastEmbed model cache (downloaded at runtime)
 .fastembed_cache/

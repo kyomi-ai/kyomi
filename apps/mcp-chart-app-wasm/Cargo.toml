@@ -17,6 +17,8 @@ chartml-chart-metric = { path = "../../../chartml-rs/crates/chartml-chart-metric
 chartml-leptos = { path = "../../../chartml-rs/crates/chartml-leptos" }
 # No chartml-datafusion — MCP app receives pre-resolved data, no transforms needed
 
+kyomi-ui-components = { path = "../../crates/kyomi-ui-components" }
+
 leptos = { version = "0.8", features = ["csr"] }
 web-sys = { version = "0.3", features = [
     "HtmlElement", "HtmlInputElement", "HtmlBodyElement", "Document", "Window", "Element",

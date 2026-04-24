@@ -6132,6 +6132,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kyomi-ui-components"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "leptos",
+ "phosphor-leptos",
+ "send_wrapper",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
