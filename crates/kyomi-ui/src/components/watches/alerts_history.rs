@@ -85,6 +85,7 @@ fn AlertDropdownMenu(
                 leptos::logging::error!("Failed to mark unread: {e}");
             }
             query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
         });
     };
 
@@ -96,6 +97,7 @@ fn AlertDropdownMenu(
                 leptos::logging::error!("Failed to delete alert: {e}");
             }
             query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
         });
     };
 
@@ -107,6 +109,7 @@ fn AlertDropdownMenu(
                 leptos::logging::error!("Failed to restore alert: {e}");
             }
             query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
         });
     };
 
@@ -395,6 +398,7 @@ pub fn AlertsHistory(
                     leptos::task::spawn_local(async move {
                         let _ = mark_alert_read(target_id).await;
                         query_cache.invalidate("alerts");
+                        query_cache.invalidate("unread_alerts");
                     });
                 }
             }
@@ -416,6 +420,7 @@ pub fn AlertsHistory(
                         leptos::task::spawn_local(async move {
                             let _ = mark_alert_read(alert_id).await;
                             query_cache.invalidate("alerts");
+                            query_cache.invalidate("unread_alerts");
                         });
                     }
                 }
@@ -464,6 +469,7 @@ pub fn AlertsHistory(
             selected_alerts.set(HashSet::new());
             set_bulk_action_pending.set(false);
             query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
         });
     };
 
@@ -480,6 +486,7 @@ pub fn AlertsHistory(
             selected_alerts.set(HashSet::new());
             set_bulk_action_pending.set(false);
             query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
         });
     };
 
@@ -516,6 +523,7 @@ pub fn AlertsHistory(
             selected_alerts.set(HashSet::new());
             set_bulk_action_pending.set(false);
             query_cache.invalidate("alerts");
+            query_cache.invalidate("unread_alerts");
         });
     };
 
