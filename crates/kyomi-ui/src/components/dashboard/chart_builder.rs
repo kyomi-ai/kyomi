@@ -600,7 +600,7 @@ pub fn ChartBuilderModal(
 
     // ── Reset state when the modal opens with new yaml ──────────────────
     Effect::new(move || {
-        if open.get() {
+        if open.try_get().unwrap_or(false) {
             let yaml = existing_yaml_stored.get_value();
             let new_ast = initial_ast(yaml.as_deref());
 
@@ -608,7 +608,7 @@ pub fn ChartBuilderModal(
             // and re-seed the id counter so new rows never collide with the
             // ones we just loaded.
             let new_visual_series = visual_series_from_ast(&new_ast);
-            set_next_series_id.set(next_id_after(&new_visual_series));
+            let _ = set_next_series_id.try_set(next_id_after(&new_visual_series));
 
             // Text buffer: prefer the raw existing YAML so the user sees
             // exactly what was saved (preserves formatting/comments the AST
@@ -618,10 +618,10 @@ pub fn ChartBuilderModal(
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| serialize_ast(&new_ast));
 
-            ast.set(new_ast);
-            visual_series.set(new_visual_series);
-            yaml_text.set(text);
-            yaml_parse_error.set(None);
+            let _ = ast.try_set(new_ast);
+            let _ = visual_series.try_set(new_visual_series);
+            let _ = yaml_text.try_set(text);
+            let _ = yaml_parse_error.try_set(None);
         }
     });
 
@@ -653,13 +653,15 @@ pub fn ChartBuilderModal(
     // ── Derived signals for Visual-tab inputs ───────────────────────────
     // Each getter reads only the slice of the AST it needs, so an edit to
     // e.g. the title doesn't invalidate the chart-type <DynSelect>.
-    let title_sig = Signal::derive(move || ast.with(ast_get_title));
-    let datasource_slug_sig = Signal::derive(move || ast.with(ast_get_datasource));
-    let sql_sig = Signal::derive(move || ast.with(ast_get_query));
-    let chart_type_sig = Signal::derive(move || ast.with(ast_get_chart_type));
-    let x_field_sig = Signal::derive(move || ast.with(ast_get_x_field));
-    let orientation_sig = Signal::derive(move || ast.with(ast_get_orientation));
-    let mode_sig = Signal::derive(move || ast.with(ast_get_mode));
+    // Use try_with so these Signal::derive closures gracefully handle
+    // disposal — they can fire during the <Show> teardown cascade.
+    let title_sig = Signal::derive(move || ast.try_with(ast_get_title).unwrap_or_default());
+    let datasource_slug_sig = Signal::derive(move || ast.try_with(ast_get_datasource).unwrap_or_default());
+    let sql_sig = Signal::derive(move || ast.try_with(ast_get_query).unwrap_or_default());
+    let chart_type_sig = Signal::derive(move || ast.try_with(ast_get_chart_type).unwrap_or_else(|| "bar".to_string()));
+    let x_field_sig = Signal::derive(move || ast.try_with(ast_get_x_field).unwrap_or_default());
+    let orientation_sig = Signal::derive(move || ast.try_with(ast_get_orientation).unwrap_or_default());
+    let mode_sig = Signal::derive(move || ast.try_with(ast_get_mode).unwrap_or_default());
 
     // ── Helper: mutate AST and refresh the YAML text buffer atomically ──
     // Used by every Visual-tab / AI-tab handler that touches the AST. Keeping
@@ -713,11 +715,15 @@ pub fn ChartBuilderModal(
     };
 
     // ── Save handler ────────────────────────────────────────────────────
+    // Use try_get_untracked so a disposal race (insert_cb closes the <Show>
+    // before this closure completes) returns the last-known AST instead of
+    // panicking. on_close is omitted here — insert_cb already sets
+    // chart_builder_open to false, which closes the modal.
     let handle_insert = Callback::new(move |()| {
+        let ast_val = ast.try_get_untracked().unwrap_or_default();
         let yaml =
-            serde_yaml::to_string(&wrap_as_sequence(&ast.get_untracked())).unwrap_or_default();
+            serde_yaml::to_string(&wrap_as_sequence(&ast_val)).unwrap_or_default();
         on_insert.run(yaml);
-        on_close.run(());
     });
 
     // ── Footer ──────────────────────────────────────────────────────────
@@ -737,10 +743,12 @@ pub fn ChartBuilderModal(
 
         // Disable insert: inline charts are always saveable, but remote charts
         // (datasource selected) require SQL to be useful.
-        let is_disabled = if datasource_slug_sig.get().is_empty() {
+        // Use try_get so this ChildrenFn gracefully handles disposal — it can
+        // be called by Modal during the <Show> teardown cascade.
+        let is_disabled = if datasource_slug_sig.try_get().unwrap_or_default().is_empty() {
             false // inline chart — no SQL required
         } else {
-            sql_sig.get().trim().is_empty() // remote chart — SQL is required
+            sql_sig.try_get().unwrap_or_default().trim().is_empty() // remote chart — SQL is required
         };
 
         view! {
@@ -886,7 +894,9 @@ pub fn ChartBuilderModal(
     // static "New Chart" label because there's no meaningful title yet.
     let modal_title = Signal::derive(move || {
         if is_edit_mode {
-            let t = ast.with(ast_get_title);
+            // Use try_with to gracefully handle disposal — this Signal::derive
+            // can be evaluated by Modal during the <Show> teardown cascade.
+            let t = ast.try_with(ast_get_title).unwrap_or_default();
             let display = if t.is_empty() { "(untitled)".to_string() } else { t };
             format!("Chart Builder: {display}")
         } else {
@@ -928,7 +938,8 @@ pub fn ChartBuilderModal(
     // ── Preview YAML — derived from the AST ─────────────────────────────
     // The preview pane renders the current AST serialization, not the raw
     // text buffer, so invalid YAML in the editor doesn't blank the preview.
-    let preview_yaml = Signal::derive(move || ast.with(serialize_ast));
+    // Use try_with so this Signal::derive gracefully handles disposal.
+    let preview_yaml = Signal::derive(move || ast.try_with(serialize_ast).unwrap_or_default());
 
     view! {
         <Modal
@@ -1413,7 +1424,7 @@ pub fn ChartBuilderModal(
                                                     // contains at least one (possibly blank) entry
                                                     // thanks to `visual_series_from_ast` seeding,
                                                     // so no ghost-row fallback is needed.
-                                                    each=move || visual_series.get()
+                                                    each=move || visual_series.try_get().unwrap_or_default()
                                                     key=|entry| entry.id
                                                     let:entry
                                                 >
@@ -1424,7 +1435,7 @@ pub fn ChartBuilderModal(
                                                         let entry_id = entry.id;
                                                         let y_val = entry.y_field.clone();
                                                         let label_val = entry.label.clone();
-                                                        let show_remove = move || visual_series.with(|s| s.len() > 1);
+                                                        let show_remove = move || visual_series.try_with(|s| s.len() > 1).unwrap_or(false);
 
                                                         view! {
                                                             <div class="flex items-start gap-2">
