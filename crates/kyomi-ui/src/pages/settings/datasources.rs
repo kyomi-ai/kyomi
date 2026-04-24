@@ -1306,17 +1306,13 @@ pub fn DatasourceModal(
         });
 
     view! {
-        // Wrap in a reactive block so the modal title updates when name changes
-        {move || {
-            let title = modal_title.get();
-            view! {
-                <Modal
-                    show=open
-                    on_close=on_close
-                    title=title
-                    size=ModalSize::Lg
-                    footer=footer.clone()
-                >
+        <Modal
+            show=open
+            on_close=on_close
+            title=modal_title
+            size=ModalSize::Lg
+            footer=footer.clone()
+        >
 
             {move || {
                 let do_test_and_discover = do_test_and_discover;
@@ -1884,9 +1880,7 @@ pub fn DatasourceModal(
                     </Show>
                 }
             }}
-                </Modal>
-            }
-        }}
+        </Modal>
     }
 }
 
