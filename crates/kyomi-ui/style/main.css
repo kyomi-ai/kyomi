@@ -1060,6 +1060,13 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
  * that lived here previously has been moved above into
  * `.wysiwyg-container` where it belongs. */
 
+.wysiwyg-scroll-container > .wysiwyg-paragraph:first-child:last-of-type:empty::before {
+    content: "Start writing...";
+    color: var(--color-muted-foreground);
+    pointer-events: none;
+    font-style: italic;
+}
+
 .kode-toolbar { overflow-y: hidden; }
 
 
