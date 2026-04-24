@@ -2,12 +2,13 @@
 
 //! Server functions for the onboarding flow.
 //!
-//! These are public server functions (no `extract_auth()` call) used by the
-//! welcome and onboarding pages:
-//! - `accept_terms` — validates temp token, creates user/session, sets cookies
+//! These are thin wrappers around [`kyomi_auth::onboarding_service`] — they
+//! extract HTTP context (cookies, headers) and delegate all business logic to
+//! the shared service layer so the same orchestration can be used by both the
+//! Leptos server_fn path and the REST route handlers.
 //!
-//! Mirrors `POST /auth/accept-terms` in
-//! `apps/server/src/routes/auth_google_oauth.rs`.
+//! - `accept_terms` — validates temp token, creates user/session, sets cookies
+//! - `get_onboarding_state` — queries state needed to render the onboarding page
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,264 +27,6 @@ pub enum AcceptTermsResult {
     /// Error — display message to the user and allow retry.
     Error { message: String },
 }
-
-/// Accept terms of service, completing the signup or re-acceptance flow.
-///
-/// Public endpoint — no authentication required. The user is identified
-/// by a temporary token stored in Redis during the OAuth callback flow.
-///
-/// Flow:
-/// 1. Try pending signup (new user via Google OAuth):
-///    - Create user account (verified)
-///    - Store OAuth data
-///    - Update terms acceptance
-///    - Register `google_oauth` auth method
-///    - Create personal workspace
-///    - Create authenticated session, set cookies
-/// 2. Try pending terms (existing user needing re-acceptance):
-///    - Update terms acceptance
-///    - Create authenticated session, set cookies
-/// 3. If neither found, return error (expired/invalid token)
-///
-/// Mirrors `POST /auth/accept-terms` in
-/// `apps/server/src/routes/auth_google_oauth.rs`.
-#[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
-pub async fn accept_terms(
-    temp_token: String,
-    marketing_consent: bool,
-) -> Result<AcceptTermsResult, ServerFnError> {
-    let ctx = extract_context()?;
-
-    let headers: axum::http::HeaderMap = leptos_axum::extract()
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
-
-    let kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-
-    let encryption_key = ctx
-        .encryption_key
-        .clone()
-        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
-
-    // ── Try pending signup first (new user via Google OAuth) ─────────────
-    if let Some(signup_data) =
-        kyomi_auth::redis_ops::get_pending_signup(&kv, &temp_token)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to get pending signup");
-                ServerFnError::new("Internal server error")
-            })?
-    {
-        let email = signup_data["email"]
-            .as_str()
-            .ok_or_else(|| ServerFnError::new("Missing email in signup data"))?;
-        let name = signup_data["name"].as_str().unwrap_or("");
-
-        // Create user (verified = true — OAuth means email is verified by Google)
-        let user = kyomi_auth::user_service::create_user(&ctx.db, email, Some(name), true)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to create user");
-                ServerFnError::new("Internal server error")
-            })?;
-
-        // Admin notification (Slack + email) — fire-and-forget
-        let notify_webhook = ctx.config.slack_feedback_webhook_url.clone();
-        let notify_support = ctx.config.support_email.clone();
-        let notify_email = email.to_string();
-        let notify_name = name.to_string();
-        let notify_user_id = user.user_id.clone();
-        tokio::spawn(async move {
-            kyomi_auth::notifications::notify_signup(
-                notify_webhook.as_deref(),
-                &notify_support,
-                &notify_email,
-                &notify_name,
-                &notify_user_id,
-            )
-            .await;
-        });
-
-        // Store OAuth data
-        if let Some(oauth_data_json) = signup_data.get("oauth_data") {
-            let oauth = kyomi_auth::google_oauth::OAuthData {
-                google_id: oauth_data_json
-                    .get("google_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                oauth_provider: oauth_data_json
-                    .get("oauth_provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                picture: oauth_data_json
-                    .get("picture")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                last_oauth_login: Some(chrono::Utc::now().to_rfc3339()),
-                ..Default::default()
-            };
-            let encrypted =
-                kyomi_auth::google_oauth::build_oauth_data(&oauth, &encryption_key).map_err(
-                    |e| {
-                        tracing::error!(error = %e, "Failed to encrypt OAuth data");
-                        ServerFnError::new("Internal server error")
-                    },
-                )?;
-            kyomi_auth::user_service::update_user_oauth_data(
-                &ctx.db,
-                &user.user_id,
-                Some(&encrypted),
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to store OAuth data");
-                ServerFnError::new("Internal server error")
-            })?;
-        }
-
-        // Update terms acceptance
-        kyomi_auth::user_service::update_terms_acceptance(
-            &ctx.db,
-            &user.user_id,
-            kyomi_core::TERMS_VERSION,
-            marketing_consent,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to update terms acceptance");
-            ServerFnError::new("Internal server error")
-        })?;
-
-        // Register google_oauth auth method
-        let auth_data = serde_json::json!({
-            "linked_at": chrono::Utc::now().to_rfc3339(),
-        });
-        kyomi_auth::user_service::upsert_auth_method(
-            &ctx.db,
-            &user.user_id,
-            "google_oauth",
-            &auth_data,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to register auth method");
-            ServerFnError::new("Internal server error")
-        })?;
-
-        // Create personal workspace
-        kyomi_auth::user_service::create_workspace_for_user(
-            &ctx.db,
-            &user.user_id,
-            Some(name),
-            email,
-            Some(&ctx.config),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to create workspace");
-            ServerFnError::new("Internal server error")
-        })?;
-
-        // Create authenticated session
-        let device = super::auth::extract_device_info(&headers);
-        let sess = kyomi_auth::session::create_authenticated_session(
-            &ctx.db,
-            &kv,
-            &ctx.config.jwt_secret,
-            &user,
-            &device,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to create session");
-            ServerFnError::new("Internal server error")
-        })?;
-
-        // Set HTTPOnly cookies via ResponseOptions
-        let response_options = expect_context::<leptos_axum::ResponseOptions>();
-        for (name, value) in sess.cookie_headers.iter() {
-            if name == axum::http::header::SET_COOKIE {
-                response_options.append_header(name.clone(), value.clone());
-            }
-        }
-
-        return Ok(AcceptTermsResult::Success);
-    }
-
-    // ── Try pending terms (existing user) ────────────────────────────────
-    if let Some(terms_data) =
-        kyomi_auth::redis_ops::get_pending_terms(&kv, &temp_token)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to get pending terms");
-                ServerFnError::new("Internal server error")
-            })?
-    {
-        let user_id = terms_data["user_id"]
-            .as_str()
-            .ok_or_else(|| ServerFnError::new("Missing user_id in terms data"))?;
-
-        // Update terms acceptance
-        kyomi_auth::user_service::update_terms_acceptance(
-            &ctx.db,
-            user_id,
-            kyomi_core::TERMS_VERSION,
-            marketing_consent,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to update terms acceptance");
-            ServerFnError::new("Internal server error")
-        })?;
-
-        // Get fresh user for session creation
-        let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to get user");
-                ServerFnError::new("Internal server error")
-            })?
-            .ok_or_else(|| ServerFnError::new("User not found"))?;
-
-        // Create authenticated session
-        let device = super::auth::extract_device_info(&headers);
-        let sess = kyomi_auth::session::create_authenticated_session(
-            &ctx.db,
-            &kv,
-            &ctx.config.jwt_secret,
-            &user,
-            &device,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to create session");
-            ServerFnError::new("Internal server error")
-        })?;
-
-        // Set HTTPOnly cookies via ResponseOptions
-        let response_options = expect_context::<leptos_axum::ResponseOptions>();
-        for (name, value) in sess.cookie_headers.iter() {
-            if name == axum::http::header::SET_COOKIE {
-                response_options.append_header(name.clone(), value.clone());
-            }
-        }
-
-        return Ok(AcceptTermsResult::Success);
-    }
-
-    // ── Neither found — token expired or invalid ─────────────────────────
-    Ok(AcceptTermsResult::Error {
-        message: "Invalid or expired token. Please try signing up again.".to_string(),
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Onboarding state — datasource setup flow
-// ---------------------------------------------------------------------------
 
 /// Status of a single datasource's credentials for the current user.
 ///
@@ -323,14 +66,116 @@ pub struct OnboardingState {
     pub credential_status: Vec<CredentialStatusItem>,
 }
 
+// ---------------------------------------------------------------------------
+// From conversions — service types → server_fn types (ssr only)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ssr")]
+impl From<kyomi_auth::onboarding_service::CredentialStatusItem> for CredentialStatusItem {
+    fn from(s: kyomi_auth::onboarding_service::CredentialStatusItem) -> Self {
+        Self {
+            datasource_id: s.datasource_id,
+            datasource_name: s.datasource_name,
+            datasource_type: s.datasource_type,
+            slug: s.slug,
+            status: s.status,
+            auth_method: s.auth_method,
+            oauth_provider: s.oauth_provider,
+            auth_mode: s.auth_mode,
+            needs_action: s.needs_action,
+        }
+    }
+}
+
+#[cfg(feature = "ssr")]
+impl From<kyomi_auth::onboarding_service::OnboardingState> for OnboardingState {
+    fn from(s: kyomi_auth::onboarding_service::OnboardingState) -> Self {
+        Self {
+            has_datasources: s.has_datasources,
+            is_admin: s.is_admin,
+            sample_available: s.sample_available,
+            needs_credentials: s.needs_credentials,
+            total_datasources: s.total_datasources,
+            credential_status: s.credential_status.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Accept terms of service, completing the signup or re-acceptance flow.
+///
+/// Public endpoint — no authentication required. The user is identified
+/// by a temporary token stored in Redis during the OAuth callback flow.
+/// All business logic is delegated to
+/// [`kyomi_auth::onboarding_service::accept_terms`].
+///
+/// Mirrors `POST /auth/accept-terms` in
+/// `apps/server/src/routes/auth_google_oauth.rs`.
+#[server(prefix = "/leptos-api")]
+pub async fn accept_terms(
+    temp_token: String,
+    marketing_consent: bool,
+) -> Result<AcceptTermsResult, ServerFnError> {
+    let ctx = extract_context()?;
+
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let encryption_key = ctx
+        .encryption_key
+        .as_deref()
+        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+
+    let device = super::auth::extract_device_info(&headers);
+
+    let outcome = kyomi_auth::onboarding_service::accept_terms(
+        &ctx.db,
+        &kv,
+        encryption_key,
+        &ctx.config,
+        &device,
+        &temp_token,
+        marketing_consent,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "accept_terms orchestration failed");
+        ServerFnError::new("Internal server error")
+    })?;
+
+    match outcome {
+        kyomi_auth::onboarding_service::AcceptTermsOutcome::Success { cookie_headers } => {
+            let response_options = expect_context::<leptos_axum::ResponseOptions>();
+            for (name, value) in cookie_headers.iter() {
+                if name == axum::http::header::SET_COOKIE {
+                    response_options.append_header(name.clone(), value.clone());
+                }
+            }
+            Ok(AcceptTermsResult::Success)
+        }
+        kyomi_auth::onboarding_service::AcceptTermsOutcome::InvalidToken => {
+            Ok(AcceptTermsResult::Error {
+                message: "Invalid or expired token. Please try signing up again.".to_string(),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding state — datasource setup flow
+// ---------------------------------------------------------------------------
+
 /// Get the combined onboarding state for the current user.
 ///
-/// Combines: list datasources, check credential status, check sample availability,
-/// and determine admin status — all in one server call.
-///
+/// Delegates all business logic to
+/// [`kyomi_auth::onboarding_service::get_onboarding_state`].
 /// Mirrors the logic in `DatasourceOnboarding.jsx`'s `checkWorkspaceState()`.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
     use super::{extract_auth, extract_context, workspace_id};
 
@@ -338,144 +183,21 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // Check if user is admin or owner
     let is_admin = auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
         || auth.workspace.is_owner;
 
-    // Fetch active datasources
-    let datasources =
-        kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, false)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let has_datasources = !datasources.is_empty();
-
-    if !has_datasources {
-        // No datasources — check sample availability for admins.
-        // We already know `datasources` is empty, so no sample exists yet.
-        let sample_available = if is_admin {
-            std::env::var("SAMPLE_CLICKHOUSE_HOST").is_ok()
-        } else {
-            false
-        };
-
-        return Ok(OnboardingState {
-            has_datasources: false,
-            is_admin,
-            sample_available,
-            needs_credentials: false,
-            total_datasources: 0,
-            credential_status: Vec::new(),
-        });
-    }
-
-    // Datasources exist — check credential status for the current user
     let encryption_key = ctx
         .encryption_key
         .as_deref()
         .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
 
-    // Fetch user credentials in bulk
-    let user_credentials = kyomi_core::db_fetch_all!(
-        &ctx.db,
-        kyomi_core::models::datasource::UserDatasourceCredential,
-        "SELECT id, user_id, datasource_config_id, workspace_id, credentials, \
-         enabled, created_at, updated_at \
-         FROM user_datasource_credentials \
-         WHERE user_id = $1 AND workspace_id = $2",
-        &auth.user_id,
-        ws_id
-    )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let creds_by_ds: std::collections::HashMap<&str, &kyomi_core::models::datasource::UserDatasourceCredential> =
-        user_credentials
-            .iter()
-            .map(|c| (c.datasource_config_id.as_str(), c))
-            .collect();
-
-    // Fetch user preferences for shared-auth datasources
-    let user_preferences = kyomi_core::db_fetch_all!(
-        &ctx.db,
-        kyomi_core::models::datasource::UserDatasourcePreference,
-        "SELECT id, user_id, datasource_config_id, enabled, \
-         created_at, updated_at \
-         FROM user_datasource_preferences \
-         WHERE user_id = $1",
-        &auth.user_id
-    )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let prefs_by_ds: std::collections::HashMap<&str, &kyomi_core::models::datasource::UserDatasourcePreference> =
-        user_preferences
-            .iter()
-            .map(|p| (p.datasource_config_id.as_str(), p))
-            .collect();
-
-    let mut credential_items = Vec::new();
-    let mut needs_credentials = false;
-
-    for ds in &datasources {
-        let connection_config = &ds.connection_config;
-        let is_connect = ds.connection_type == "connect";
-
-        let result = if is_connect {
-            let pref = prefs_by_ds.get(ds.id.as_str()).copied();
-            let _enabled = pref.is_none_or(|p| p.enabled);
-            kyomi_auth::datasource_auth_service::CredentialStatusResult {
-                credential_status: "shared".to_string(),
-                auth_method: "connect".to_string(),
-                oauth_provider: None,
-            }
-        } else {
-            let user_cred = creds_by_ds.get(ds.id.as_str()).copied();
-            kyomi_auth::datasource_auth_service::check_credential_status(
-                ds.datasource_type.as_ref(),
-                connection_config,
-                user_cred,
-                encryption_key,
-            )
-        };
-
-        let needs_action =
-            result.credential_status == "missing" || result.credential_status == "expired";
-        if needs_action {
-            needs_credentials = true;
-        }
-
-        // Extract auth_mode from connection_config (non-secret config field).
-        // Needed by the frontend to route BigQuery to the correct OAuth endpoint.
-        let auth_mode = connection_config
-            .get("auth_mode")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        credential_items.push(CredentialStatusItem {
-            datasource_id: ds.id.clone(),
-            datasource_name: ds.name.clone(),
-            datasource_type: ds.datasource_type.to_string(),
-            slug: ds.slug.clone(),
-            status: result.credential_status,
-            auth_method: result.auth_method,
-            oauth_provider: result.oauth_provider,
-            auth_mode,
-            needs_action,
-        });
-    }
-
-    let total_datasources = datasources.len();
-
-    Ok(OnboardingState {
-        has_datasources: true,
-        is_admin,
-        sample_available: false,
-        needs_credentials,
-        total_datasources,
-        credential_status: credential_items,
-    })
+    kyomi_auth::onboarding_service::get_onboarding_state(&ctx.db, ws_id, &auth.user_id, is_admin, encryption_key)
+        .await
+        .map(Into::into)
+        .map_err(|e| ServerFnError::new(e.to_string()))
 }
 
 /// Create the sample datasource for the workspace (admin only).

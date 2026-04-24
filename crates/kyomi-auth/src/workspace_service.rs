@@ -6,11 +6,14 @@
 //! workspace context. Complements `user_service.rs` which already has
 //! `get_workspace` and `get_workspace_user` for single-record lookups.
 
+use chrono::{DateTime, Utc};
+use kyomi_core::enums::TransferStatus;
 use kyomi_core::models::{
     OwnershipTransfer, Workspace, WorkspaceInvitation, WorkspaceUser,
 };
 use kyomi_core::sql_compat;
 use kyomi_core::DbPool;
+use serde::{Deserialize, Serialize};
 
 /// Get all active workspace user memberships for a workspace.
 ///
@@ -661,4 +664,230 @@ pub async fn update_workspace_owner(
     );
     let result = kyomi_core::db_execute!(pool, &sql, new_owner_id, workspace_id)?;
     Ok(result.rows_affected() > 0)
+}
+
+// ─── Orchestration ─────────────────────────────────────────────────────────
+
+/// Enriched ownership transfer for display on the accept-ownership page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnershipTransferDetail {
+    pub transfer_id: String,
+    pub workspace_name: String,
+    pub from_user_email: String,
+    pub expires_at: DateTime<Utc>,
+    pub status: TransferStatus,
+}
+
+/// Fetch an ownership transfer for a specific recipient, auto-expiring if past
+/// its deadline.
+///
+/// Returns `None` if the transfer doesn't exist, isn't pending, is expired, or
+/// `recipient_id` doesn't match `to_user_id`.
+pub async fn get_transfer_for_recipient(
+    pool: &DbPool,
+    transfer_id: &str,
+    recipient_id: &str,
+) -> kyomi_core::Result<Option<OwnershipTransferDetail>> {
+    let Some(transfer) = get_ownership_transfer(pool, transfer_id).await? else {
+        return Ok(None);
+    };
+
+    if transfer.to_user_id != recipient_id {
+        return Ok(None);
+    }
+
+    if transfer.status != TransferStatus::Pending {
+        return Ok(None);
+    }
+
+    if transfer.expires_at < Utc::now() {
+        let _ = update_transfer_status(pool, transfer_id, "expired").await;
+        return Ok(None);
+    }
+
+    let workspace = get_workspace_full(pool, &transfer.workspace_id).await?;
+    let workspace_name = workspace
+        .and_then(|w| w.name)
+        .unwrap_or_else(|| "Unnamed Workspace".to_string());
+
+    let from_user =
+        crate::user_service::get_user_by_id(pool, &transfer.from_user_id).await?;
+    let from_user_email = from_user.map(|u| u.email).unwrap_or_default();
+
+    Ok(Some(OwnershipTransferDetail {
+        transfer_id: transfer.transfer_id,
+        workspace_name,
+        from_user_email,
+        expires_at: transfer.expires_at,
+        status: transfer.status,
+    }))
+}
+
+/// Remove a member from a workspace, enforcing all business rules.
+///
+/// Returns an `Err` with a user-facing message on any rule violation.
+pub async fn remove_workspace_member(
+    pool: &DbPool,
+    workspace_id: &str,
+    owner_user_id: &str,
+    requesting_user_id: &str,
+    target_user_id: &str,
+) -> kyomi_core::Result<()> {
+    if target_user_id == owner_user_id {
+        return Err(kyomi_core::Error::BadRequest(
+            "Cannot remove workspace owner. Transfer ownership first.".into(),
+        ));
+    }
+
+    if target_user_id == requesting_user_id {
+        let admin_count = count_admins(pool, workspace_id).await?;
+        if admin_count < 2 {
+            return Err(kyomi_core::Error::BadRequest(
+                "Cannot remove yourself: you are the only admin".into(),
+            ));
+        }
+    }
+
+    let target = get_workspace_user(pool, workspace_id, target_user_id).await?;
+    if target.is_none() {
+        return Err(kyomi_core::Error::NotFound(
+            "Member not found in workspace".into(),
+        ));
+    }
+
+    kyomi_core::db_execute!(
+        pool,
+        "UPDATE chat_sessions SET user_id = $1 \
+         WHERE user_id = $2 AND workspace_id = $3 AND shared = true",
+        owner_user_id,
+        target_user_id,
+        workspace_id
+    )?;
+
+    remove_member(pool, workspace_id, target_user_id).await?;
+    Ok(())
+}
+
+/// Parameters for `invite_workspace_member`.
+pub struct InviteWorkspaceMemberParams<'a> {
+    pub pool: &'a DbPool,
+    pub workspace_id: &'a str,
+    pub email: &'a str,
+    pub db_role: &'a str,
+    pub invited_by: &'a str,
+    pub invitation_id: &'a str,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub user_limit: Option<i64>,
+}
+
+/// Create a workspace invitation, enforcing duplicate and user-limit checks.
+///
+/// `email` is expected to be already trimmed and lowercased by the caller.
+pub async fn invite_workspace_member(
+    params: InviteWorkspaceMemberParams<'_>,
+) -> kyomi_core::Result<()> {
+    let InviteWorkspaceMemberParams {
+        pool, workspace_id, email, db_role, invited_by, invitation_id, expires_at, user_limit,
+    } = params;
+    let is_member = check_existing_member_by_email(pool, workspace_id, email).await?;
+    if is_member {
+        return Err(kyomi_core::Error::BadRequest(
+            "User is already a member of this workspace".into(),
+        ));
+    }
+
+    let has_pending = check_pending_invitation(pool, workspace_id, email).await?;
+    if has_pending {
+        return Err(kyomi_core::Error::BadRequest(
+            "Invitation already pending for this email".into(),
+        ));
+    }
+
+    if let Some(limit) = user_limit {
+        let current_users = count_workspace_users(pool, workspace_id).await?;
+        let pending = count_pending_invitations(pool, workspace_id).await?;
+        if current_users + pending >= limit {
+            return Err(kyomi_core::Error::BadRequest(
+                "Workspace user limit reached. Upgrade your plan to add more users."
+                    .into(),
+            ));
+        }
+    }
+
+    create_invitation(
+        pool,
+        invitation_id,
+        workspace_id,
+        email,
+        db_role,
+        invited_by,
+        expires_at,
+    )
+    .await?;
+    Ok(())
+}
+
+/// A resolved ownership transfer with sender and recipient emails.
+#[derive(Debug, Clone)]
+pub struct ResolvedTransfer {
+    pub transfer_id: String,
+    pub from_user_id: String,
+    pub from_user_email: String,
+    pub to_user_id: String,
+    pub to_user_email: String,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub is_initiator: bool,
+    pub is_recipient: bool,
+}
+
+/// List all pending ownership transfers relevant to a user.
+///
+/// Combines transfers where the user is the recipient with any transfer they
+/// initiated as workspace owner, deduplicates, and resolves email addresses.
+pub async fn list_ownership_transfers_for_user(
+    pool: &DbPool,
+    workspace_id: &str,
+    user_id: &str,
+) -> kyomi_core::Result<Vec<ResolvedTransfer>> {
+    let mut transfers = get_pending_transfers_for_user(pool, user_id).await?;
+
+    if let Some(initiated) =
+        get_pending_transfer_for_workspace(pool, workspace_id).await?
+        && !transfers
+            .iter()
+            .any(|t| t.transfer_id == initiated.transfer_id)
+        {
+            transfers.push(initiated);
+        }
+
+    let mut result = Vec::with_capacity(transfers.len());
+    for transfer in &transfers {
+        let from_email =
+            crate::user_service::get_user_by_id(pool, &transfer.from_user_id)
+                .await?
+                .map(|u| u.email)
+                .unwrap_or_default();
+
+        let to_email =
+            crate::user_service::get_user_by_id(pool, &transfer.to_user_id)
+                .await?
+                .map(|u| u.email)
+                .unwrap_or_default();
+
+        result.push(ResolvedTransfer {
+            transfer_id: transfer.transfer_id.clone(),
+            from_user_id: transfer.from_user_id.clone(),
+            from_user_email: from_email,
+            to_user_id: transfer.to_user_id.clone(),
+            to_user_email: to_email,
+            status: transfer.status.to_string(),
+            created_at: transfer.created_at,
+            expires_at: transfer.expires_at,
+            is_initiator: transfer.from_user_id == user_id,
+            is_recipient: transfer.to_user_id == user_id,
+        });
+    }
+    Ok(result)
 }

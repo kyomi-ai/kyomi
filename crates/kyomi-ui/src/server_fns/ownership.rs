@@ -39,65 +39,26 @@ pub struct OwnershipTransfer {
 /// Mirrors the React flow: fetch all pending transfers for the user,
 /// find the one matching `transfer_id`, verify status == "pending".
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_ownership_transfer(
     transfer_id: String,
 ) -> Result<Option<OwnershipTransfer>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    // Look up the transfer directly
-    let transfer = kyomi_auth::workspace_service::get_ownership_transfer(&ctx.db, &transfer_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let detail = kyomi_auth::workspace_service::get_transfer_for_recipient(
+        &ctx.db,
+        &transfer_id,
+        &auth.user_id,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let Some(transfer) = transfer else {
-        return Ok(None);
-    };
-
-    // Only the recipient can view/accept
-    if transfer.to_user_id != auth.user_id {
-        return Ok(None);
-    }
-
-    // Check status
-    if transfer.status != kyomi_core::enums::TransferStatus::Pending {
-        return Ok(None);
-    }
-
-    // Check expiry
-    if transfer.expires_at < chrono::Utc::now() {
-        let _ = kyomi_auth::workspace_service::update_transfer_status(
-            &ctx.db,
-            &transfer_id,
-            "expired",
-        )
-        .await;
-        return Ok(None);
-    }
-
-    // Resolve workspace name
-    let workspace =
-        kyomi_auth::workspace_service::get_workspace_full(&ctx.db, &transfer.workspace_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let workspace_name = workspace
-        .and_then(|w| w.name)
-        .unwrap_or_else(|| "Unnamed Workspace".to_string());
-
-    // Resolve sender email
-    let from_user =
-        kyomi_auth::user_service::get_user_by_id(&ctx.db, &transfer.from_user_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let from_user_email = from_user.map(|u| u.email).unwrap_or_default();
-
-    Ok(Some(OwnershipTransfer {
-        transfer_id: transfer.transfer_id,
-        workspace_name,
-        from_user_email,
-        expires_at: transfer.expires_at.to_rfc3339(),
-        status: transfer.status.to_string(),
+    Ok(detail.map(|d| OwnershipTransfer {
+        transfer_id: d.transfer_id,
+        workspace_name: d.workspace_name,
+        from_user_email: d.from_user_email,
+        expires_at: d.expires_at.to_rfc3339(),
+        status: d.status.to_string(),
     }))
 }
 

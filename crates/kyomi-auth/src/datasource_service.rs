@@ -18,6 +18,7 @@ use kyomi_core::models::datasource::{
 };
 use kyomi_core::sql_compat;
 use kyomi_core::DbPool;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::credential_service;
@@ -847,6 +848,501 @@ pub async fn get_credential_timestamps(
 ) -> kyomi_core::Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
     let cred = get_user_credential(pool, user_id, datasource_config_id).await?;
     Ok(cred.map(|c| (c.created_at, c.updated_at)))
+}
+
+/// Fetch and decrypt user credentials for a datasource in one step.
+///
+/// Returns `(raw_record, decrypted_value)`:
+/// - `raw_record` is `None` when no credential row exists for this user+datasource.
+/// - `decrypted_value` is `serde_json::json!({})` when `raw_record` is `None`.
+pub async fn get_decrypted_user_credentials(
+    pool: &DbPool,
+    user_id: &str,
+    datasource_config_id: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<(Option<UserDatasourceCredential>, Value)> {
+    let user_cred = get_user_credential(pool, user_id, datasource_config_id).await?;
+    let credentials = if let Some(ref cred) = user_cred {
+        credential_service::decrypt_credentials(&cred.credentials, encryption_key)
+            .unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    Ok((user_cred, credentials))
+}
+
+// ---------------------------------------------------------------------------
+// Enriched view types (used by list/settings orchestration below)
+// ---------------------------------------------------------------------------
+
+/// A datasource with its per-user credential status.
+///
+/// Returned by [`list_datasources_with_status`]. Combines the datasource
+/// config with credential and catalog information so the UI can render
+/// everything in one pass.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DatasourceInfo {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub datasource_type: String,
+    pub type_display_name: String,
+    pub active: bool,
+    pub connection_type: String,
+    /// User's credential status: "valid", "shared", "missing", "expired"
+    pub credential_status: String,
+    /// Auth method: "oauth", "password", "connect"
+    pub auth_method: String,
+    /// Whether the user has this datasource enabled
+    pub user_enabled: bool,
+    /// Whether the user can enable this datasource
+    pub can_enable: bool,
+    /// Whether this is a sample datasource
+    pub is_sample: bool,
+    /// Whether the catalog needs attention (no tables, no index, or stale)
+    pub needs_catalog_attention: bool,
+}
+
+/// Full datasource settings for the edit modal.
+///
+/// Returned by [`get_datasource_settings_detail`]. Combines the datasource
+/// config with per-user credential details.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DatasourceSettingsDetail {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub datasource_type: String,
+    /// `"direct"` for standard provider connections, `"connect"` for Kyomi
+    /// Connect agent datasources.
+    pub connection_type: String,
+    pub connection_config: Value,
+    pub user_settings: Value,
+    pub has_oauth: bool,
+    pub oauth_email: Option<String>,
+    pub has_bigquery_scopes: bool,
+    pub needs_bigquery_connect: bool,
+    pub auth_mode: Option<String>,
+    pub service_account_email: Option<String>,
+    pub shared_credentials: bool,
+    pub credential_status: String,
+    pub has_username: bool,
+    pub has_password: bool,
+}
+
+// ---------------------------------------------------------------------------
+// List datasources with per-user credential + catalog status
+// ---------------------------------------------------------------------------
+
+/// List all active datasources for a workspace, enriched with per-user
+/// credential status and catalog attention flags.
+///
+/// Mirrors the combined logic of `GET /api/v1/datasources` +
+/// `GET /api/v1/datasources/credential-status` as previously inlined in the
+/// `list_datasources` server_fn.
+pub async fn list_datasources_with_status(
+    pool: &DbPool,
+    workspace_id: &str,
+    user_id: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<Vec<DatasourceInfo>> {
+    // Fetch active datasources
+    let datasources = list_datasources(pool, workspace_id, false).await?;
+
+    // Fetch all user credentials in one query
+    let user_credentials = kyomi_core::db_fetch_all!(
+        pool,
+        UserDatasourceCredential,
+        "SELECT id, user_id, datasource_config_id, workspace_id, credentials, \
+         enabled, created_at, updated_at \
+         FROM user_datasource_credentials \
+         WHERE user_id = $1 AND workspace_id = $2",
+        user_id,
+        workspace_id
+    )?;
+
+    let creds_by_ds: std::collections::HashMap<&str, &UserDatasourceCredential> =
+        user_credentials
+            .iter()
+            .map(|c| (c.datasource_config_id.as_str(), c))
+            .collect();
+
+    // Fetch user preferences for shared-auth datasources
+    let user_preferences = kyomi_core::db_fetch_all!(
+        pool,
+        UserDatasourcePreference,
+        "SELECT id, user_id, datasource_config_id, enabled, \
+         created_at, updated_at \
+         FROM user_datasource_preferences \
+         WHERE user_id = $1",
+        user_id
+    )?;
+
+    let prefs_by_ds: std::collections::HashMap<&str, &UserDatasourcePreference> =
+        user_preferences
+            .iter()
+            .map(|p| (p.datasource_config_id.as_str(), p))
+            .collect();
+
+    // Fetch catalog status for each datasource
+    let catalog_statuses = fetch_catalog_statuses(pool, &datasources).await;
+
+    let mut result = Vec::with_capacity(datasources.len());
+
+    for ds in &datasources {
+        let connection_config = &ds.connection_config;
+        let is_connect = ds.connection_type == "connect";
+
+        // Compute credential status (mirrors REST handler logic)
+        let (cred_result, user_enabled, can_enable) = if is_connect {
+            let pref = prefs_by_ds.get(ds.id.as_str()).copied();
+            let enabled = pref.is_none_or(|p| p.enabled);
+            let status = crate::datasource_auth_service::CredentialStatusResult {
+                credential_status: "shared".to_string(),
+                auth_method: "connect".to_string(),
+                oauth_provider: None,
+            };
+            (status, enabled, true)
+        } else {
+            let user_cred = creds_by_ds.get(ds.id.as_str()).copied();
+            let cred_result = crate::datasource_auth_service::check_credential_status(
+                ds.datasource_type.as_ref(),
+                connection_config,
+                user_cred,
+                encryption_key,
+            );
+
+            let user_enabled = crate::datasource_auth_service::get_user_enabled(
+                ds.datasource_type.as_ref(),
+                connection_config,
+                user_cred,
+                prefs_by_ds.get(ds.id.as_str()).copied(),
+            );
+
+            let has_credentials = cred_result.credential_status == "valid"
+                || cred_result.credential_status == "shared";
+            let can_enable = has_credentials || user_enabled;
+            (cred_result, user_enabled, can_enable)
+        };
+
+        // Look up display name from registry
+        let type_display_name = kyomi_core::datasource_registry::get_metadata_by_str(
+            ds.datasource_type.as_ref(),
+        )
+        .map(|m| m.display_name.to_string())
+        .unwrap_or_else(|| ds.datasource_type.to_string());
+
+        let is_sample = ds
+            .connection_config
+            .get("is_sample")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let needs_catalog_attention = ds_catalog_needs_attention(&catalog_statuses, &ds.id);
+
+        result.push(DatasourceInfo {
+            id: ds.id.clone(),
+            name: ds.name.clone(),
+            slug: ds.slug.clone(),
+            datasource_type: ds.datasource_type.to_string(),
+            type_display_name,
+            active: ds.active,
+            connection_type: ds.connection_type.clone(),
+            credential_status: cred_result.credential_status,
+            auth_method: cred_result.auth_method,
+            user_enabled,
+            can_enable,
+            is_sample,
+            needs_catalog_attention,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Fetch catalog status (table count + last indexed) for all datasources.
+async fn fetch_catalog_statuses(
+    db: &DbPool,
+    datasources: &[DatasourceConfig],
+) -> std::collections::HashMap<String, (i64, Option<DateTime<Utc>>)> {
+    let mut result = std::collections::HashMap::new();
+
+    let is_pg = db.is_postgres();
+    let bf = sql_compat::bool_false(is_pg);
+
+    for ds in datasources {
+        let sql = format!(
+            "SELECT COUNT(*) FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bf}"
+        );
+        let table_count: i64 = match kyomi_core::db_fetch_scalar!(db, i64, &sql, &ds.id) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    datasource_id = %ds.id,
+                    error = %e,
+                    "failed to count cached tables for datasource; defaulting to 0"
+                );
+                0
+            }
+        };
+
+        result.insert(ds.id.clone(), (table_count, ds.last_catalog_refresh));
+    }
+
+    result
+}
+
+/// Check if a datasource's catalog needs attention.
+///
+/// Returns `true` when:
+/// - No tables are indexed
+/// - No `last_indexed` timestamp exists
+/// - Last indexed more than 7 days ago
+fn ds_catalog_needs_attention(
+    catalog_statuses: &std::collections::HashMap<String, (i64, Option<DateTime<Utc>>)>,
+    ds_id: &str,
+) -> bool {
+    let Some((table_count, last_indexed)) = catalog_statuses.get(ds_id) else {
+        return false;
+    };
+    if *table_count == 0 {
+        return true;
+    }
+    let Some(last_indexed) = last_indexed else {
+        return true;
+    };
+    let days_since = (chrono::Utc::now() - *last_indexed).num_days();
+    days_since > 7
+}
+
+// ---------------------------------------------------------------------------
+// Toggle datasource enabled/disabled for a user
+// ---------------------------------------------------------------------------
+
+/// Toggle a datasource enabled or disabled for a specific user.
+///
+/// Handles all auth-mode branches:
+/// - Shared auth / Connect datasources → upsert user preference
+/// - Personal auth (enable) → validates credential status before enabling,
+///   then sets `user_datasource_credentials.enabled = true`
+/// - Personal auth (disable) → sets `user_datasource_credentials.enabled = false`
+///
+/// Returns `Err` if the datasource is inactive or the user lacks credentials
+/// required to enable it.
+pub async fn toggle_datasource_enabled(
+    pool: &DbPool,
+    datasource_id: &str,
+    workspace_id: &str,
+    user_id: &str,
+    enabled: bool,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<()> {
+    let ds = get_datasource(pool, datasource_id, workspace_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("Datasource not found".into()))?;
+
+    if !ds.active {
+        return Err(kyomi_core::Error::BadRequest(
+            "Datasource is not active".into(),
+        ));
+    }
+
+    let connection_config = &ds.connection_config;
+    let ds_type_str = ds.datasource_type.as_ref();
+    let is_shared =
+        crate::datasource_auth_service::is_shared_auth(ds_type_str, connection_config);
+    let is_connect = ds.connection_type == "connect";
+
+    let user_cred = get_user_credential(pool, user_id, &ds.id).await?;
+
+    if enabled {
+        if is_shared || is_connect {
+            // Shared auth or Connect — always allow enabling via preference
+            upsert_user_preference(pool, user_id, &ds.id, true).await?;
+        } else {
+            // Personal auth — check credential status before enabling
+            let result = crate::datasource_auth_service::check_credential_status(
+                ds_type_str,
+                connection_config,
+                user_cred.as_ref(),
+                encryption_key,
+            );
+
+            if result.credential_status != "valid" && result.credential_status != "shared" {
+                return Err(kyomi_core::Error::BadRequest(
+                    "Connect your credentials first to enable this datasource".into(),
+                ));
+            }
+
+            // Update credential enabled flag
+            if let Some(cred) = &user_cred {
+                let sql = format!(
+                    "UPDATE user_datasource_credentials \
+                     SET enabled = true, updated_at = {} \
+                     WHERE id = $1",
+                    sql_compat::now(pool.is_postgres())
+                );
+                kyomi_core::db_execute!(pool, &sql, &cred.id)?;
+            }
+        }
+    } else {
+        // Disabling — always allowed
+        if is_shared || is_connect {
+            upsert_user_preference(pool, user_id, &ds.id, false).await?;
+        } else if let Some(cred) = &user_cred {
+            let sql = format!(
+                "UPDATE user_datasource_credentials \
+                 SET enabled = false, updated_at = {} \
+                 WHERE id = $1",
+                sql_compat::now(pool.is_postgres())
+            );
+            kyomi_core::db_execute!(pool, &sql, &cred.id)?;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Get datasource settings detail for the edit modal
+// ---------------------------------------------------------------------------
+
+/// Load full datasource settings for the edit modal.
+///
+/// Combines the datasource config with the user's decrypted credential data
+/// and BigQuery OAuth status. Non-admins receive a `NotFound` error for
+/// inactive datasources.
+///
+/// Mirrors `GET /api/v1/datasources/{id}/settings` as previously inlined in
+/// the `get_datasource_settings` server_fn.
+pub async fn get_datasource_settings_detail(
+    pool: &DbPool,
+    datasource_id: &str,
+    workspace_id: &str,
+    user_id: &str,
+    is_admin: bool,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<DatasourceSettingsDetail> {
+    let ds = get_datasource(pool, datasource_id, workspace_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("Datasource not found".into()))?;
+
+    // Non-admins can only view active datasources
+    if !is_admin && !ds.active {
+        return Err(kyomi_core::Error::NotFound("Datasource not found".into()));
+    }
+
+    let user_cred = get_user_credential(pool, user_id, &ds.id).await?;
+
+    let user_settings = match &user_cred {
+        Some(cred) => {
+            credential_service::decrypt_credentials(&cred.credentials, encryption_key)
+                .unwrap_or(serde_json::json!({}))
+        }
+        None => serde_json::json!({}),
+    };
+
+    let connection_config = &ds.connection_config;
+    let cred_result = crate::datasource_auth_service::check_credential_status(
+        ds.datasource_type.as_ref(),
+        connection_config,
+        user_cred.as_ref(),
+        encryption_key,
+    );
+
+    let shared_credentials = connection_config
+        .get("shared_credentials")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let has_username = user_settings
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let has_password = user_settings
+        .get("password")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let auth_mode = connection_config
+        .get("auth_mode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let service_account_email = if auth_mode.as_deref() == Some("service_account") {
+        connection_config
+            .get("service_account_json")
+            .and_then(|v| v.as_str())
+            .and_then(|json_str| serde_json::from_str::<Value>(json_str).ok())
+            .and_then(|v| {
+                v.get("client_email")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string())
+            })
+    } else {
+        None
+    };
+
+    // BigQuery OAuth status
+    let (has_oauth, oauth_email, has_bigquery_scopes, needs_bigquery_connect) =
+        if ds.datasource_type.as_ref() == "bigquery" {
+            match auth_mode.as_deref() {
+                Some("service_account") => (true, None, true, false),
+                Some("enterprise_oauth") => {
+                    let has_o = user_settings
+                        .get("auth_type")
+                        .and_then(|v| v.as_str())
+                        == Some("oauth");
+                    let o_email = if has_o {
+                        user_settings
+                            .get("oauth_email")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    };
+                    (has_o, o_email, has_o, !has_o)
+                }
+                _ => {
+                    // kyomi_oauth — use global OAuth status from cred_result
+                    let has_o = cred_result.credential_status == "valid"
+                        || cred_result.credential_status == "shared";
+                    (has_o, None, has_o, !has_o)
+                }
+            }
+        } else {
+            (false, None, false, false)
+        };
+
+    // Mask connection config (don't return secrets)
+    let masked_config = credential_service::mask_connection_config(
+        connection_config,
+        ds.datasource_type.as_ref(),
+    );
+
+    Ok(DatasourceSettingsDetail {
+        id: ds.id,
+        name: ds.name,
+        slug: ds.slug,
+        datasource_type: ds.datasource_type.to_string(),
+        connection_type: ds.connection_type.clone(),
+        connection_config: masked_config,
+        user_settings,
+        has_oauth,
+        oauth_email,
+        has_bigquery_scopes,
+        needs_bigquery_connect,
+        auth_mode,
+        service_account_email,
+        shared_credentials,
+        credential_status: cred_result.credential_status,
+        has_username,
+        has_password,
+    })
 }
 
 // ---------------------------------------------------------------------------

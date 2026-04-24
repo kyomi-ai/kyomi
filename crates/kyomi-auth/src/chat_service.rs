@@ -1405,6 +1405,306 @@ pub async fn get_agent_messages(
 }
 
 // ---------------------------------------------------------------------------
+// Orchestration — send_chat_message dispatch
+// ---------------------------------------------------------------------------
+
+/// Outcome returned by [`prepare_chat_dispatch`].
+///
+/// `SkippedAi` means the user message was stored and no AI agent should be
+/// spawned. `Ready` means the caller should build an [`AgentExecutionConfig`]
+/// and spawn the agent.
+pub enum ChatDispatchOutcome {
+    /// AI was skipped (`skip_ai = true`). The user message has been stored.
+    SkippedAi {
+        session_id: String,
+        user_message_id: String,
+    },
+    /// AI agent spawn is required. User message has NOT been stored yet (the
+    /// agent executor handles storage). Shared-session user message broadcast
+    /// has already been sent.
+    Ready {
+        session_id: String,
+        is_new_session: bool,
+        user_message_id: String,
+        assistant_message_id: String,
+        is_shared: bool,
+    },
+}
+
+/// Parameters for [`prepare_chat_dispatch`].
+pub struct ChatDispatchParams<'a> {
+    pub db: &'a DbPool,
+    pub encryption_key: &'a [u8; 32],
+    /// `None` when WebSocket is not configured (standalone mode without WS).
+    pub ws_manager: Option<&'a crate::websocket::WebSocketManager>,
+    pub user_id: &'a str,
+    pub workspace_id: &'a str,
+    /// Display name used for shared-session user broadcast.
+    pub user_display_name: &'a str,
+    pub session_id: Option<&'a str>,
+    pub message: &'a str,
+    pub current_time_user_tz: Option<&'a str>,
+    pub skip_ai: bool,
+    /// Optimistic client message ID for deduplication.
+    pub client_msg_id: Option<&'a str>,
+}
+
+/// Find-or-create session, optionally store user message (skip_ai path), and
+/// optionally broadcast the user message to shared-session observers.
+///
+/// On success returns [`ChatDispatchOutcome`] describing what the caller should
+/// do next.
+///
+/// This consolidates the pre-spawn orchestration from `send_chat_message` so
+/// the server_fn remains a thin wrapper.
+pub async fn prepare_chat_dispatch(
+    p: ChatDispatchParams<'_>,
+) -> kyomi_core::Result<ChatDispatchOutcome> {
+    // ── Find or create session ─────────────────────────────────────────────
+    let is_new_session = p.session_id.is_none();
+    let (session_id, is_shared) = if let Some(sid) = p.session_id {
+        let session = get_session_info(p.db, p.user_id, sid, Some(p.workspace_id)).await?;
+        match session {
+            Some(s) => (sid.to_string(), s.shared),
+            None => {
+                return Err(kyomi_core::Error::Internal(
+                    "Session not found or access denied".to_string(),
+                ));
+            }
+        }
+    } else {
+        let new_sid = create_session(p.db, p.user_id, p.workspace_id).await?;
+
+        // Notify the frontend so the sidebar updates immediately.
+        if let Some(ws_manager) = p.ws_manager
+            && let Ok(Some(session_info)) =
+                get_session_info(p.db, p.user_id, &new_sid, Some(p.workspace_id)).await
+                && let Ok(data) = serde_json::to_value(&session_info) {
+                    crate::websocket::helpers::send_session_created(
+                        ws_manager,
+                        p.user_id,
+                        &new_sid,
+                        data,
+                    )
+                    .await;
+                }
+
+        (new_sid, false) // New sessions are always private
+    };
+
+    // ── Generate message IDs ───────────────────────────────────────────────
+    let user_message_id = uuid::Uuid::new_v4().to_string();
+
+    // ── skip_ai fast path ──────────────────────────────────────────────────
+    if p.skip_ai {
+        let saved_id = add_message(
+            p.db,
+            p.encryption_key,
+            &session_id,
+            "user",
+            p.message,
+            None,
+            Some(&user_message_id),
+            p.current_time_user_tz,
+            Some(p.user_id),
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!("Failed to store message: {e}"))
+        })?;
+
+        tracing::info!(
+            session_id = %session_id,
+            message_id = %saved_id,
+            "Stored user message (skip_ai=true)"
+        );
+
+        return Ok(ChatDispatchOutcome::SkippedAi {
+            session_id,
+            user_message_id: saved_id,
+        });
+    }
+
+    // ── Generate assistant placeholder ID ─────────────────────────────────
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+
+    // ── Broadcast user message to shared-session observers ────────────────
+    if is_shared
+        && let Some(ws_manager) = p.ws_manager {
+            crate::websocket::helpers::send_shared_chat_message(
+                ws_manager,
+                p.workspace_id,
+                &session_id,
+                &user_message_id,
+                "user",
+                p.message,
+                &chrono::Utc::now().to_rfc3339(),
+                Some(p.user_display_name),
+                Some(p.user_id),
+                p.client_msg_id,
+            )
+            .await;
+        }
+
+    Ok(ChatDispatchOutcome::Ready {
+        session_id,
+        is_new_session,
+        user_message_id,
+        assistant_message_id,
+        is_shared,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration — agent error persistence
+// ---------------------------------------------------------------------------
+
+/// Parameters for `save_agent_error`.
+pub struct SaveAgentErrorParams<'a> {
+    pub db: &'a DbPool,
+    pub encryption_key: &'a [u8; 32],
+    pub ws_manager: &'a crate::websocket::WebSocketManager,
+    pub session_id: &'a str,
+    pub user_id: &'a str,
+    pub assistant_message_id: &'a str,
+    pub context_type: &'a str,
+    pub error: &'a str,
+}
+
+/// Store an agent execution error as an assistant message and send a WebSocket
+/// error notification.
+///
+/// Tries to update the existing placeholder message first. If no placeholder
+/// exists (e.g. agent crashed before persisting), inserts a new one. Always
+/// sends a `send_error` WebSocket event to the user.
+///
+/// This consolidates the error-handling block inside the `tokio::spawn` in
+/// `send_chat_message` so the spawn closure remains a thin wrapper.
+pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
+    let SaveAgentErrorParams {
+        db, encryption_key, ws_manager, session_id, user_id, assistant_message_id, context_type, error,
+    } = params;
+    let error_text = format!("I encountered an error while processing your request: {error}");
+    let error_metadata = serde_json::json!({
+        "status": "error",
+        "error": error,
+    });
+
+    // Try update first (persist may have already saved the placeholder).
+    let updated = update_message(
+        db,
+        encryption_key,
+        assistant_message_id,
+        Some(&error_text),
+        Some(&error_metadata),
+    )
+    .await
+    .unwrap_or(false);
+
+    // If no placeholder existed, insert a new message so the user sees the
+    // error in the conversation.
+    if !updated {
+        let _ = add_message(
+            db,
+            encryption_key,
+            session_id,
+            "assistant",
+            &error_text,
+            Some(&error_metadata),
+            Some(assistant_message_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+
+    crate::websocket::helpers::send_error(
+        ws_manager,
+        user_id,
+        Some(session_id),
+        &format!("AI processing failed: {error}"),
+        Some("agent_error"),
+        Some(context_type),
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration — update_message_content
+// ---------------------------------------------------------------------------
+
+/// Verify session ownership, verify message membership, re-encrypt, and
+/// persist updated content.
+///
+/// Returns `Err` if the session is not found, the caller is not the owner,
+/// or the message does not belong to the session.
+///
+/// This consolidates the orchestration from `update_message_content` server_fn.
+pub async fn update_message_content_owned(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    user_id: &str,
+    workspace_id: &str,
+    session_id: &str,
+    message_id: &str,
+    content: &str,
+) -> kyomi_core::Result<()> {
+    // Verify session ownership (only owner can edit messages).
+    let session = get_session_info(db, user_id, session_id, Some(workspace_id)).await?;
+    match session {
+        Some(ref s) if s.user_id == user_id => {}
+        Some(_) => {
+            return Err(kyomi_core::Error::Internal(
+                "Only the session owner can edit messages".to_string(),
+            ));
+        }
+        None => {
+            return Err(kyomi_core::Error::Internal(
+                "Session not found or access denied".to_string(),
+            ));
+        }
+    }
+
+    // Verify the message belongs to this session.
+    let msg_exists = kyomi_core::db_fetch_optional!(
+        db,
+        ExistsRow,
+        "SELECT 1 as _n FROM chat_messages \
+         WHERE message_id = $1 AND session_id = $2",
+        message_id,
+        session_id
+    )?;
+
+    if msg_exists.is_none() {
+        return Err(kyomi_core::Error::Internal(
+            "Message not found".to_string(),
+        ));
+    }
+
+    // Update and re-encrypt.
+    let updated = update_message(db, encryption_key, message_id, Some(content), None).await?;
+    if !updated {
+        return Err(kyomi_core::Error::Internal(
+            "Message not found".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Minimal row for existence checks.
+#[derive(Debug, sqlx::FromRow)]
+struct ExistsRow {
+    _n: i32,
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

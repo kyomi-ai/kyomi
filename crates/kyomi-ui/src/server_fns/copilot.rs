@@ -79,7 +79,6 @@ pub async fn create_copilot_session(
 ///
 /// The component is responsible for prefixing content appropriately.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn send_copilot_message(
     session_id: String,
     message: String,
@@ -105,83 +104,28 @@ pub async fn send_copilot_message(
     // Normalize context type.
     let context_type = kyomi_agent::copilot::normalize_context_type(&context_type);
 
-    // Check AI capability.
-    if !ctx.config.llm_configured() {
-        return Err(ServerFnError::new(
-            "No LLM provider configured. Add ANTHROPIC_API_KEY or LLM_API_KEY to your environment.",
-        ));
-    }
-
-    let workspace =
-        kyomi_auth::workspace_service::get_workspace_full(&ctx.db, workspace_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
-
-    let capabilities = if ctx.config.self_hosted {
-        kyomi_core::capability::compute_capabilities_self_hosted()
-    } else {
-        kyomi_core::capability::compute_capabilities(&workspace)
-    };
-
-    if !capabilities.ai_chat_enabled {
-        return Err(ServerFnError::new(
-            "AI features are not available. Your budget may be exhausted or your plan \
-             doesn't include this feature.",
-        ));
-    }
-
-    // Verify session access.
-    let session = kyomi_auth::chat_service::get_session_info(
-        &ctx.db,
-        &auth.user_id,
-        &session_id,
-        Some(workspace_id),
-    )
-    .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    if session.is_none() {
-        return Err(ServerFnError::new(
-            "Session not found or access denied",
-        ));
-    }
-
-    // Build user message with content context injection.
-    let user_message = if let Some(ref ctx_content) = content {
-        format!("{ctx_content}\n\n{message}")
-    } else {
-        message.clone()
-    };
-
     let encryption_key = ctx
         .encryption_key
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
 
-    // Store user message.
-    let _user_message_id = kyomi_auth::chat_service::add_message(
-        &ctx.db,
-        encryption_key,
-        &session_id,
-        "user",
-        &user_message,
-        None, None, current_time_user_tz.as_deref(), Some(&auth.user_id), None, None, None,
+    // Validate capabilities, verify session access, store user message and
+    // assistant placeholder — all via the shared service layer.
+    let prep = kyomi_auth::copilot_service::prepare_copilot_message(
+        kyomi_auth::copilot_service::CopilotMessageInputs {
+            db: &ctx.db,
+            encryption_key,
+            config: &ctx.config,
+            workspace_id,
+            user_id: &auth.user_id,
+            session_id: &session_id,
+            message: &message,
+            content: content.as_deref(),
+            current_time_user_tz: current_time_user_tz.as_deref(),
+        },
     )
     .await
-    .map_err(|e| ServerFnError::new(format!("Failed to store message: {e}")))?;
-
-    // Create assistant placeholder.
-    let assistant_message_id = kyomi_auth::chat_service::add_message(
-        &ctx.db,
-        encryption_key,
-        &session_id,
-        "assistant",
-        "",
-        None, None, None, None, None, None, None,
-    )
-    .await
-    .map_err(|e| ServerFnError::new(format!("Failed to create assistant message: {e}")))?;
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // ── Spawn AI agent execution ────────────────────────────────────────
     // Follows the same pattern as send_chat_message in chat.rs.
@@ -217,7 +161,7 @@ pub async fn send_copilot_message(
         session_id: session_id.clone(),
         user_id: auth.user_id.clone(),
         workspace_id: workspace_id.to_string(),
-        message: user_message,
+        message: prep.user_message,
         model_name: Some("claude-haiku-4-5-20251001".to_string()),
         temperature: 0.1,
         is_shared_conversation: false,
@@ -231,7 +175,7 @@ pub async fn send_copilot_message(
         max_iterations: 20,
         component: context_type.to_string(),
         user_message_id: None,
-        assistant_message_id: Some(assistant_message_id.clone()),
+        assistant_message_id: Some(prep.assistant_message_id.clone()),
         conversation_history: None,
         user_display_name: auth.name.clone().unwrap_or_else(|| auth.email.clone()),
     };
@@ -250,7 +194,7 @@ pub async fn send_copilot_message(
     let connect_registry = ctx.connect_registry.clone();
     let spawn_user_id = auth.user_id.clone();
     let spawn_session_id = session_id.clone();
-    let spawn_assistant_message_id = assistant_message_id.clone();
+    let spawn_assistant_message_id = prep.assistant_message_id.clone();
     let spawn_context_type = context_type.to_string();
     let spawn_cancel_registry = cancel_registry;
 
@@ -296,30 +240,17 @@ pub async fn send_copilot_message(
                     "Copilot agent execution failed"
                 );
 
-                let error_text = format!(
-                    "I encountered an error while processing your request: {e}"
-                );
-                let error_metadata = serde_json::json!({
-                    "status": "error",
-                    "error": e.to_string(),
-                });
-                let _ = kyomi_auth::chat_service::update_message(
-                    &db,
-                    &encryption_key,
-                    &spawn_assistant_message_id,
-                    Some(&error_text),
-                    Some(&error_metadata),
-                )
-                .await;
-
-                // Send error event (not deliver_response) — matches chat.rs pattern.
-                kyomi_auth::websocket::helpers::send_error(
-                    &ws_manager,
-                    &spawn_user_id,
-                    Some(&spawn_session_id),
-                    &format!("AI processing failed: {e}"),
-                    Some("agent_error"),
-                    Some(&spawn_context_type),
+                kyomi_auth::copilot_service::handle_copilot_agent_error(
+                    kyomi_auth::copilot_service::CopilotAgentErrorParams {
+                        db: &db,
+                        encryption_key: &encryption_key,
+                        ws_manager: &ws_manager,
+                        user_id: &spawn_user_id,
+                        session_id: &spawn_session_id,
+                        assistant_message_id: &spawn_assistant_message_id,
+                        context_type: &spawn_context_type,
+                        error: &e.to_string(),
+                    },
                 )
                 .await;
             }

@@ -96,7 +96,6 @@ pub async fn set_password(new_password: String) -> Result<String, ServerFnError>
 /// - New password must be at least 8 characters.
 /// - Current password must be verified first.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn change_password(
     current_password: String,
     new_password: String,
@@ -104,47 +103,20 @@ pub async fn change_password(
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    // Validate new password length
     if new_password.len() < 8 {
         return Err(ServerFnError::new(
             "New password must be at least 8 characters",
         ));
     }
 
-    // Get existing password auth method
-    let password_method =
-        kyomi_auth::user_service::get_auth_method(&ctx.db, &auth.user_id, "password")
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let Some(password_method) = password_method else {
-        return Err(ServerFnError::new(
-            "No password set. Use set-password to create one.",
-        ));
-    };
-
-    // Extract and verify current password
-    let Some(hash) = password_method
-        .auth_data
-        .get("hash")
-        .and_then(|v| v.as_str())
-    else {
-        return Err(ServerFnError::new("Password auth method corrupted"));
-    };
-
-    let valid = kyomi_auth::password::verify_password(&current_password, hash)
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    if !valid {
-        return Err(ServerFnError::new("Current password is incorrect"));
-    }
-
-    // Hash new password and upsert
-    let new_hash = kyomi_auth::password::hash_password(&new_password)
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let auth_data = serde_json::json!({"hash": new_hash});
-    kyomi_auth::user_service::upsert_auth_method(&ctx.db, &auth.user_id, "password", &auth_data)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    kyomi_auth::security_service::change_password(
+        &ctx.db,
+        &auth.user_id,
+        &current_password,
+        &new_password,
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok("Password changed successfully".to_string())
 }
@@ -175,33 +147,24 @@ pub async fn get_totp_status() -> Result<TotpStatus, ServerFnError> {
 ///
 /// Mirrors `POST /auth/2fa/setup` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    // Check not already enabled
-    let enabled = kyomi_auth::user_service::has_totp_enabled(&ctx.db, &auth.user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    if enabled {
-        return Err(ServerFnError::new("2FA is already enabled"));
-    }
-
-    let secret = kyomi_auth::totp::generate_secret();
-    let qr_uri = kyomi_auth::totp::generate_qr_code(&secret, &auth.email)
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Store pending secret in Redis (10 min TTL)
     let kv = ctx
         .kv
         .as_ref()
         .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-    kyomi_auth::redis_ops::store_pending_totp(kv, &auth.user_id, &secret)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(TotpSetup { secret, qr_uri })
+    let result =
+        kyomi_auth::security_service::setup_totp(&ctx.db, kv, &auth.user_id, &auth.email)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(TotpSetup {
+        secret: result.secret,
+        qr_uri: result.qr_uri,
+    })
 }
 
 /// Confirm 2FA setup by verifying a TOTP code against the pending secret.
@@ -211,7 +174,6 @@ pub async fn setup_totp() -> Result<TotpSetup, ServerFnError> {
 ///
 /// Mirrors `POST /auth/2fa/enable` in `apps/server/src/routes/auth_totp.rs`.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -221,35 +183,7 @@ pub async fn enable_totp(code: String) -> Result<String, ServerFnError> {
         .as_ref()
         .ok_or_else(|| ServerFnError::new("KV store not available"))?;
 
-    // Get pending secret from Redis (atomic get+delete)
-    let secret = kyomi_auth::redis_ops::get_pending_totp(kv, &auth.user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let Some(secret) = secret else {
-        return Err(ServerFnError::new(
-            "No pending 2FA setup found. Please start the setup process again.",
-        ));
-    };
-
-    // Verify the code
-    if !kyomi_auth::totp::verify_code(&secret, &code) {
-        // Re-store secret so user can retry
-        kyomi_auth::redis_ops::store_pending_totp(kv, &auth.user_id, &secret)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        return Err(ServerFnError::new(
-            "Invalid verification code. Please try again.",
-        ));
-    }
-
-    // Persist TOTP auth method
-    let now = chrono::Utc::now().to_rfc3339();
-    let auth_data = serde_json::json!({
-        "secret": secret,
-        "enabled_at": now,
-    });
-    kyomi_auth::user_service::upsert_auth_method(&ctx.db, &auth.user_id, "totp", &auth_data)
+    kyomi_auth::security_service::enable_totp(&ctx.db, kv, &auth.user_id, &code)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
@@ -308,44 +242,21 @@ pub struct SessionEntry {
 /// Determines the current session by comparing the refresh token cookie's
 /// family_id against each session's family_id.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn get_sessions() -> Result<Vec<SessionEntry>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
-    let sessions =
-        kyomi_auth::token_service::get_user_sessions(&ctx.db, &auth.user_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Determine current session by looking up the family_id of the cookie's
-    // refresh token — same approach as the REST handler in auth.rs.
-    let headers: axum::http::HeaderMap = leptos_axum::extract().await
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
         .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
 
     let refresh_token_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+    let raw_token = kyomi_auth::cookies::get_cookie_value(&headers, refresh_token_name);
 
-    #[derive(sqlx::FromRow)]
-    struct FamilyIdRow {
-        family_id: String,
-    }
-
-    let current_family_id: Option<String> =
-        if let Some(raw_token) = kyomi_auth::cookies::get_cookie_value(&headers, refresh_token_name)
-        {
-            let hash = kyomi_auth::token_service::hash_refresh_token(raw_token);
-            kyomi_core::db_fetch_optional!(
-                &ctx.db,
-                FamilyIdRow,
-                "SELECT family_id FROM refresh_tokens WHERE token_hash = $1 AND is_active = true",
-                &hash
-            )
-            .ok()
-            .flatten()
-            .map(|r| r.family_id)
-        } else {
-            None
-        };
+    let (sessions, current_family_id) =
+        kyomi_auth::security_service::get_sessions(&ctx.db, &auth.user_id, raw_token)
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let entries = sessions
         .iter()
@@ -400,39 +311,22 @@ pub async fn revoke_session(token_id: String) -> Result<String, ServerFnError> {
 /// Does NOT require `extract_auth()` — the token may already be invalid
 /// (e.g. if the access token expired) but we still want to clear cookies.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn logout() -> Result<(), ServerFnError> {
     let ctx = extract_context()?;
 
-    // Extract the raw request headers to read the refresh token cookie.
     let headers: axum::http::HeaderMap = leptos_axum::extract()
         .await
         .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
 
     let refresh_token_name = &kyomi_core::constants::get().cookies.refresh_token_name;
+    let raw_token = kyomi_auth::cookies::get_cookie_value(&headers, refresh_token_name);
 
-    // Revoke the token family if we can find a valid refresh token.
-    if let Some(raw_token) =
-        kyomi_auth::cookies::get_cookie_value(&headers, refresh_token_name)
-    {
-        match kyomi_auth::token_service::verify_refresh_token(&ctx.db, raw_token).await {
-            Ok(
-                kyomi_auth::token_service::RefreshTokenVerifyResult::Valid(data)
-                | kyomi_auth::token_service::RefreshTokenVerifyResult::GracePeriod(data),
-            ) => {
-                let _ =
-                    kyomi_auth::token_service::revoke_token_family(&ctx.db, &data.family_id)
-                        .await;
-            }
-            _ => {
-                // Token invalid or theft-detected — already revoked, nothing to do.
-            }
-        }
-    }
+    kyomi_auth::security_service::logout(&ctx.db, raw_token)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Clear both HTTPOnly cookies so the browser forgets the session.
-    let response_options =
-        leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
     let mut cookie_headers = axum::http::HeaderMap::new();
     kyomi_auth::cookies::clear_token_cookies(&mut cookie_headers);
     for (name, value) in cookie_headers.iter() {
@@ -517,14 +411,9 @@ pub async fn list_passkeys() -> Result<Vec<PasskeyInfo>, ServerFnError> {
 ///
 /// Mirrors `POST /auth/passkeys/add/start` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn start_passkey_registration(
     device_name: String,
 ) -> Result<String, ServerFnError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use sha2::{Digest, Sha256};
-    use webauthn_rs::prelude::*;
-
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
 
@@ -544,65 +433,16 @@ pub async fn start_passkey_registration(
         device_name.trim().to_string()
     };
 
-    let db_user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-        .ok_or_else(|| ServerFnError::new("User not found"))?;
-
-    let email = &db_user.email;
-    let display_name = db_user.name.as_deref().unwrap_or(email);
-
-    // Generate deterministic user handle from email (same as auth_passkeys.rs)
-    let user_unique_id = {
-        let mut hasher = Sha256::new();
-        hasher.update(email.as_bytes());
-        let hash = hasher.finalize();
-        let bytes: [u8; 16] = hash[..16].try_into().expect("16 bytes");
-        Uuid::from_bytes(bytes)
-    };
-
-    // Get existing credential IDs to exclude
-    let creds = kyomi_auth::user_service::get_passkey_credentials(&ctx.db, &auth.user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let mut exclude_ids = Vec::new();
-    for (cred_id_b64, _) in &creds {
-        if let Ok(bytes) = URL_SAFE_NO_PAD.decode(cred_id_b64) {
-            exclude_ids.push(CredentialID::from(bytes));
-        }
-    }
-    let exclude_opt = if exclude_ids.is_empty() {
-        None
-    } else {
-        Some(exclude_ids)
-    };
-
-    let (ccr, reg_state) = kyomi_auth::webauthn::start_registration(
+    let (ccr, challenge_id) = kyomi_auth::security_service::start_passkey_registration(
+        &ctx.db,
+        kv,
         webauthn,
-        user_unique_id,
-        email,
-        display_name,
-        exclude_opt,
+        &auth.user_id,
+        &device_name,
     )
+    .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    let challenge_id = kyomi_auth::redis_ops::generate_token();
-    let reg_state_json = serde_json::to_value(&reg_state)
-        .map_err(|e| ServerFnError::new(format!("Serialize reg state: {e}")))?;
-
-    let challenge_data = serde_json::json!({
-        "registration_state": reg_state_json,
-        "email": email,
-        "user_name": display_name,
-        "user_id": auth.user_id,
-        "device_name": device_name,
-    });
-    kyomi_auth::redis_ops::store_webauthn_challenge(kv, &challenge_id, &challenge_data)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Return JSON with challenge_id and options for the browser
     let result = serde_json::json!({
         "challenge_id": challenge_id,
         "options": ccr,
@@ -618,12 +458,10 @@ pub async fn start_passkey_registration(
 ///
 /// Mirrors `POST /auth/passkeys/add/complete` in `apps/server/src/routes/auth_passkeys.rs`.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn complete_passkey_registration(
     credential_json: String,
 ) -> Result<String, ServerFnError> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    use webauthn_rs::prelude::*;
+    use webauthn_rs::prelude::RegisterPublicKeyCredential;
 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -638,7 +476,6 @@ pub async fn complete_passkey_registration(
         .as_ref()
         .ok_or_else(|| ServerFnError::new("KV store not available"))?;
 
-    // Parse the incoming JSON which contains challenge_id and credential
     let data: serde_json::Value = serde_json::from_str(&credential_json)
         .map_err(|e| ServerFnError::new(format!("Invalid credential JSON: {e}")))?;
 
@@ -650,64 +487,13 @@ pub async fn complete_passkey_registration(
         serde_json::from_value(data["credential"].clone())
             .map_err(|e| ServerFnError::new(format!("Invalid credential: {e}")))?;
 
-    // Get challenge from KV
-    let challenge_data =
-        kyomi_auth::redis_ops::get_webauthn_challenge(kv, challenge_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
-            .ok_or_else(|| ServerFnError::new("Invalid or expired challenge"))?;
-
-    // Delete challenge (prevent replay)
-    kyomi_auth::redis_ops::delete_webauthn_challenge(kv, challenge_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Verify the registration state matches this user
-    let challenge_user_id = challenge_data["user_id"].as_str().unwrap_or("");
-    if challenge_user_id != auth.user_id {
-        return Err(ServerFnError::new(
-            "Challenge does not match authenticated user",
-        ));
-    }
-
-    let reg_state: PasskeyRegistration =
-        serde_json::from_value(challenge_data["registration_state"].clone())
-            .map_err(|e| ServerFnError::new(format!("Deserialize reg state: {e}")))?;
-
-    let device_name = challenge_data["device_name"]
-        .as_str()
-        .unwrap_or("Unknown Device");
-
-    // Verify credential
-    let passkey = kyomi_auth::webauthn::finish_registration(webauthn, &credential, &reg_state)
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let cred_id_bytes: &[u8] = passkey.cred_id().as_ref();
-    let credential_id_b64 = URL_SAFE_NO_PAD.encode(cred_id_bytes);
-
-    let passkey_json = serde_json::to_value(&passkey)
-        .map_err(|e| ServerFnError::new(format!("Serialize passkey: {e}")))?;
-
-    let public_key_b64 = URL_SAFE_NO_PAD.encode(
-        serde_json::to_vec(&passkey)
-            .map_err(|e| ServerFnError::new(format!("Serialize passkey bytes: {e}")))?,
-    );
-
-    let initial_counter = passkey_json
-        .get("cred")
-        .and_then(|c| c.get("counter"))
-        .and_then(|c| c.as_u64())
-        .unwrap_or(0) as u32;
-
-    // Store credential
-    kyomi_auth::user_service::add_passkey_to_user(
+    let device_name = kyomi_auth::security_service::complete_passkey_registration(
         &ctx.db,
+        kv,
+        webauthn,
         &auth.user_id,
-        &credential_id_b64,
-        &public_key_b64,
-        initial_counter,
-        device_name,
-        &passkey_json,
+        challenge_id,
+        &credential,
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;

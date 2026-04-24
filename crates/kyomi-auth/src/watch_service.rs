@@ -20,6 +20,8 @@ use kyomi_core::{DbPool, Result};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+use crate::chat_service;
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum watches per workspace, uniform across all subscription tiers.
@@ -1783,6 +1785,227 @@ pub async fn bulk_mark_alerts_unread(
     let count = result.rows_affected();
     tracing::info!(count, "Bulk marked alerts as unread");
     Ok(count)
+}
+
+// ─── Alert → Chat orchestration ───────────────────────────────────────────────
+
+/// Create a new chat session seeded with the context and results from a watch
+/// alert execution.
+///
+/// Extracts watch metadata, thinking events, and agent state from the execution
+/// record, creates a new `"chat"` session, stores the user/assistant message
+/// pair, and persists the restored agent state so the user can continue the
+/// conversation where the watch left off.
+///
+/// Returns the new `session_id`.
+pub async fn create_chat_session_from_alert(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    user_id: &str,
+    workspace_id: &str,
+    execution_id: i32,
+) -> Result<String> {
+    // 1. Get the execution (works even if the watch has been deleted).
+    let execution = get_execution_by_id_only(db, execution_id, workspace_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("Alert not found".into()))?;
+
+    if !execution.alert_triggered {
+        return Err(kyomi_core::Error::BadRequest(
+            "This execution did not trigger an alert".into(),
+        ));
+    }
+
+    // 2. Extract watch context from the execution trace.
+    let watch_name = execution
+        .watch_name
+        .as_deref()
+        .unwrap_or("Deleted Watch");
+
+    let mut watch_prompt: Option<String> = None;
+    let mut alert_title: Option<String> = None;
+
+    if let Some(obj) = execution
+        .execution_trace
+        .as_ref()
+        .and_then(|t| t.as_object())
+    {
+        watch_prompt = obj
+            .get("watch_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        alert_title = obj
+            .get("alert_title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+
+    // 3. Fallback: fetch from the live watch when the trace lacks a prompt.
+    if let (None, Some(wid)) = (&watch_prompt, &execution.watch_id) {
+        let watch = get_watch(db, wid, workspace_id).await?;
+        watch_prompt = watch.map(|w| w.prompt);
+    }
+
+    let watch_prompt = watch_prompt.unwrap_or_else(|| "(Watch has been deleted)".to_string());
+
+    // 4. Load thinking events from the execution's session messages.
+    let mut thinking_events: Option<serde_json::Value> = None;
+
+    if let Some(ref session_id) = execution.session_id {
+        match chat_service::get_session_messages(db, encryption_key, session_id, 1000).await {
+            Ok(messages) => {
+                for msg in &messages {
+                    if msg.message_type == "assistant" && !msg.thinking_events.is_empty() {
+                        thinking_events =
+                            Some(serde_json::Value::Array(msg.thinking_events.clone()));
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load thinking events from session: {e}");
+            }
+        }
+    }
+
+    // 5. Load agent_state from the execution trace.
+    let mut agent_state: Option<serde_json::Value> = None;
+    if let Some(obj) = execution
+        .execution_trace
+        .as_ref()
+        .and_then(|t| t.as_object())
+    {
+        agent_state = obj.get("agent_state").cloned();
+
+        // Fallback for old executions that stored events in execution_trace.
+        if thinking_events.is_none()
+            && let Some(events) = obj.get("events").filter(|e| e.is_array())
+        {
+            thinking_events = Some(events.clone());
+        }
+    }
+
+    // 6. Create the new chat session.
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let title = format!(
+        "Alert: {}",
+        alert_title.as_deref().unwrap_or(watch_name)
+    );
+
+    chat_service::create_session_with_id(
+        db,
+        user_id,
+        workspace_id,
+        &session_id,
+        Some(&title),
+        "chat",
+    )
+    .await?;
+
+    // 7. Add the "user" message representing the monitored prompt.
+    let user_message = format!("Monitor: {watch_name}\n\n{watch_prompt}");
+    chat_service::add_message(
+        db,
+        encryption_key,
+        &session_id,
+        "user",
+        &user_message,
+        None,
+        None,
+        None,
+        Some(user_id),
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // 8. Add the "assistant" message with the alert response and thinking events.
+    let metadata = thinking_events
+        .as_ref()
+        .map(|events| serde_json::json!({ "thinking_events": events }));
+
+    chat_service::add_message(
+        db,
+        encryption_key,
+        &session_id,
+        "assistant",
+        execution.agent_response.as_deref().unwrap_or(""),
+        metadata.as_ref(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    // 9. Persist agent state so the user can continue where the watch left off.
+    if let Some(mut state_val) = agent_state {
+        // Remove the watch-specific system prompt from the carried-over agent state.
+        if let Some(messages) = state_val.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            let is_system = messages
+                .first()
+                .and_then(|f| f.get("role"))
+                .and_then(|r| r.as_str())
+                == Some("system");
+
+            if is_system {
+                messages.remove(0);
+
+                // Adjust compaction index after system prompt removal.
+                if let Some(idx_val) = state_val
+                    .get("messages_since_compaction_index")
+                    .and_then(|v| v.as_i64())
+                    .filter(|&v| v > 0)
+                {
+                    state_val["messages_since_compaction_index"] =
+                        serde_json::json!(std::cmp::max(0, idx_val - 1));
+                }
+            }
+        }
+
+        state_val["timestamp"] = serde_json::json!(Utc::now().to_rfc3339());
+
+        let config = serde_json::json!({ "agent_state": state_val });
+        if let Err(e) = chat_service::update_session(db, &session_id, None, None, Some(&config))
+            .await
+        {
+            tracing::error!(
+                "Failed to save agent_state for session {session_id}: {e}"
+            );
+        }
+    } else {
+        // Fallback for old executions without agent_state.
+        let fallback_state = serde_json::json!({
+            "version": "2.0",
+            "timestamp": Utc::now().to_rfc3339(),
+            "messages": [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": execution.agent_response.as_deref().unwrap_or("")},
+            ],
+            "global_iteration": 1,
+            "compacted_summary": null,
+            "messages_since_compaction_index": 0,
+            "last_input_tokens": 0,
+            "config": {
+                "max_iterations": 25,
+                "temperature": 0.1,
+            }
+        });
+
+        let config = serde_json::json!({ "agent_state": fallback_state });
+        if let Err(e) = chat_service::update_session(db, &session_id, None, None, Some(&config))
+            .await
+        {
+            tracing::error!(
+                "Failed to save fallback agent_state for session {session_id}: {e}"
+            );
+        }
+    }
+
+    Ok(session_id)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

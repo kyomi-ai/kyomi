@@ -150,7 +150,6 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
 ///
 /// Mirrors `DELETE /api/v1/workspaces/members/{id}` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -159,47 +158,15 @@ pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
     let ws_id = workspace_id(&auth)?;
     let workspace = get_current_workspace(&ctx.db, ws_id).await?;
 
-    // Cannot remove workspace owner
-    if user_id == workspace.owner_user_id {
-        return Err(ServerFnError::new(
-            "Cannot remove workspace owner. Transfer ownership first.",
-        ));
-    }
-
-    // Self-removal guard
-    if user_id == auth.user_id {
-        let admin_count =
-            kyomi_auth::workspace_service::count_admins(&ctx.db, ws_id)
-                .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
-        if admin_count < 2 {
-            return Err(ServerFnError::new(
-                "Cannot remove yourself: you are the only admin",
-            ));
-        }
-    }
-
-    // Verify member exists
-    let target = kyomi_auth::workspace_service::get_workspace_user(&ctx.db, ws_id, &user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    if target.is_none() {
-        return Err(ServerFnError::new("Member not found in workspace"));
-    }
-
-    // Auto-transfer shared conversations to workspace owner
-    let _ = kyomi_core::db_execute!(
+    kyomi_auth::workspace_service::remove_workspace_member(
         &ctx.db,
-        "UPDATE chat_sessions SET user_id = $1 \
-         WHERE user_id = $2 AND workspace_id = $3 AND shared = true",
+        ws_id,
         &workspace.owner_user_id,
+        &auth.user_id,
         &user_id,
-        ws_id
-    );
-
-    kyomi_auth::workspace_service::remove_member(&ctx.db, ws_id, &user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     Ok(())
 }
@@ -242,7 +209,6 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 ///
 /// Mirrors `POST /api/v1/workspaces/invitations` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -255,60 +221,29 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
         return Err(ServerFnError::new("Invalid email address"));
     }
 
-    // Check if already a member
-    let is_member =
-        kyomi_auth::workspace_service::check_existing_member_by_email(&ctx.db, ws_id, &email)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-    if is_member {
-        return Err(ServerFnError::new(
-            "User is already a member of this workspace",
-        ));
-    }
-
-    // Check for existing pending invitation
-    let has_pending =
-        kyomi_auth::workspace_service::check_pending_invitation(&ctx.db, ws_id, &email)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-    if has_pending {
-        return Err(ServerFnError::new(
-            "Invitation already pending for this email",
-        ));
-    }
-
-    // User limit check (skip for self-hosted)
-    if !ctx.config.self_hosted {
+    // Resolve the per-plan user limit (None = self-hosted, no limit enforced).
+    let user_limit = if ctx.config.self_hosted {
+        None
+    } else {
         let workspace = get_current_workspace(&ctx.db, ws_id).await?;
-        let current_users =
-            kyomi_auth::workspace_service::count_workspace_users(&ctx.db, ws_id)
-                .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
-        let pending_invitations =
-            kyomi_auth::workspace_service::count_pending_invitations(&ctx.db, ws_id)
-                .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
-        let user_limit = workspace.user_limit.unwrap_or(1) as i64;
-
-        if current_users + pending_invitations >= user_limit {
-            return Err(ServerFnError::new(
-                "Workspace user limit reached. Upgrade your plan to add more users.",
-            ));
-        }
-    }
+        Some(workspace.user_limit.unwrap_or(1) as i64)
+    };
 
     let invitation_id = generate_invitation_id();
     let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
     let db_role = map_role_to_db(&role);
 
-    kyomi_auth::workspace_service::create_invitation(
-        &ctx.db,
-        &invitation_id,
-        ws_id,
-        &email,
-        db_role,
-        &auth.user_id,
-        expires_at,
+    kyomi_auth::workspace_service::invite_workspace_member(
+        kyomi_auth::workspace_service::InviteWorkspaceMemberParams {
+            pool: &ctx.db,
+            workspace_id: ws_id,
+            email: &email,
+            db_role,
+            invited_by: &auth.user_id,
+            invitation_id: &invitation_id,
+            expires_at,
+            user_limit,
+        },
     )
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -351,57 +286,31 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
 ///
 /// Mirrors `GET /api/v1/workspaces/ownership/transfers` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
     let ws_id = workspace_id(&auth)?;
 
-    // Get transfers where user is recipient
-    let received =
-        kyomi_auth::workspace_service::get_pending_transfers_for_user(&ctx.db, &auth.user_id)
+    let transfers =
+        kyomi_auth::workspace_service::list_ownership_transfers_for_user(&ctx.db, ws_id, &auth.user_id)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    // Also get initiated transfers (as workspace owner)
-    let initiated =
-        kyomi_auth::workspace_service::get_pending_transfer_for_workspace(&ctx.db, ws_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    // Merge and deduplicate
-    let mut all_transfers = received;
-    if let Some(t) = initiated
-        && !all_transfers.iter().any(|existing| existing.transfer_id == t.transfer_id)
-    {
-        all_transfers.push(t);
-    }
-
-    let mut result = Vec::new();
-    for transfer in &all_transfers {
-        let from_user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &transfer.from_user_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        let from_email = from_user.map(|u| u.email).unwrap_or_default();
-
-        let to_user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &transfer.to_user_id)
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
-        let to_email = to_user.map(|u| u.email).unwrap_or_default();
-
-        result.push(OwnershipTransferData {
-            transfer_id: transfer.transfer_id.clone(),
-            from_user_id: transfer.from_user_id.clone(),
-            from_user_email: from_email,
-            to_user_id: transfer.to_user_id.clone(),
-            to_user_email: to_email,
-            status: transfer.status.to_string(),
-            created_at: transfer.created_at.to_rfc3339(),
-            expires_at: transfer.expires_at.to_rfc3339(),
-            is_initiator: transfer.from_user_id == auth.user_id,
-            is_recipient: transfer.to_user_id == auth.user_id,
-        });
-    }
+    let result = transfers
+        .into_iter()
+        .map(|t| OwnershipTransferData {
+            transfer_id: t.transfer_id,
+            from_user_id: t.from_user_id,
+            from_user_email: t.from_user_email,
+            to_user_id: t.to_user_id,
+            to_user_email: t.to_user_email,
+            status: t.status,
+            created_at: t.created_at.to_rfc3339(),
+            expires_at: t.expires_at.to_rfc3339(),
+            is_initiator: t.is_initiator,
+            is_recipient: t.is_recipient,
+        })
+        .collect();
 
     Ok(result)
 }

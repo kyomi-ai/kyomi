@@ -463,22 +463,13 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
 
 /// Send a user message and trigger AI agent execution.
 ///
-/// This is the most complex server function. It replicates the logic from
-/// `POST /chat/message/websocket` in `apps/server/src/routes/chat.rs`:
-///
-/// 1. Validate message (non-empty, <100KB)
-/// 2. Check AI capability (LLM configured)
-/// 3. Find or create session
-/// 4. Generate `user_message_id` and `assistant_message_id`
-/// 5. Create `AgentExecutionConfig` with cancel token
-/// 6. Register cancel token in cancel registry
-/// 7. Spawn async agent execution task (fire-and-forget)
-/// 8. Fire-and-forget title generation for new sessions
-/// 9. Return immediately with IDs and status
+/// Thin wrapper around `chat_service::prepare_chat_dispatch` + agent spawn.
+/// Pre-spawn orchestration (find/create session, skip_ai store, shared
+/// broadcast) lives in the service layer. This function handles only the
+/// Leptos-specific context extraction, agent config construction, and spawn.
 ///
 /// The AI response is delivered asynchronously via WebSocket streaming events.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn send_chat_message(
     message: String,
     session_id: Option<String>,
@@ -510,130 +501,63 @@ pub async fn send_chat_message(
         ));
     }
 
-    // 3. Find or create session.
-    let is_new_session = session_id.is_none();
-    let (session_id, existing_session_shared) = if let Some(ref sid) = session_id {
-        // Verify user has access to this session.
-        let session = kyomi_auth::chat_service::get_session_info(
-            &ctx.db,
-            &auth.user_id,
-            sid,
-            Some(ws_id),
-        )
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let encryption_key = ctx
+        .encryption_key
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?
+        .clone();
 
-        match session {
-            Some(s) => (sid.clone(), s.shared),
-            None => {
-                return Err(ServerFnError::new(
-                    "Session not found or access denied",
-                ));
+    let user_display_name = auth
+        .name
+        .as_deref()
+        .unwrap_or(&auth.email)
+        .to_string();
+
+    // 3–5. Find/create session, handle skip_ai, broadcast user message.
+    // Callout 1 of 3.
+    let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
+        kyomi_auth::chat_service::ChatDispatchParams {
+            db: &ctx.db,
+            encryption_key: &encryption_key,
+            ws_manager: ctx.ws_manager.as_ref(),
+            user_id: &auth.user_id,
+            workspace_id: ws_id,
+            user_display_name: &user_display_name,
+            session_id: session_id.as_deref(),
+            message: &message,
+            current_time_user_tz: current_time_user_tz.as_deref(),
+            skip_ai,
+            client_msg_id: client_msg_id.as_deref(),
+        },
+    )
+    .await
+    .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    // Early return for skip_ai path (service handled storage).
+    let (session_id, is_new_session, user_message_id, assistant_message_id, is_shared) =
+        match outcome {
+            kyomi_auth::chat_service::ChatDispatchOutcome::SkippedAi {
+                session_id,
+                user_message_id,
+            } => {
+                return Ok(SendMessageResponse {
+                    session_id,
+                    user_message_id,
+                    assistant_message_id: String::new(),
+                    status: "skipped".to_string(),
+                    thinking_events: Vec::new(),
+                    token_usage: None,
+                    skip_ai: true,
+                });
             }
-        }
-    } else {
-        // Create a new session.
-        let new_sid =
-            kyomi_auth::chat_service::create_session(&ctx.db, &auth.user_id, ws_id)
-                .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-        // Notify the frontend so the sidebar updates immediately.
-        if let Some(ref ws_manager) = ctx.ws_manager
-            && let Ok(Some(session_info)) = kyomi_auth::chat_service::get_session_info(
-                &ctx.db,
-                &auth.user_id,
-                &new_sid,
-                Some(ws_id),
-            )
-            .await
-            && let Ok(data) = serde_json::to_value(&session_info)
-        {
-            kyomi_auth::websocket::helpers::send_session_created(
-                ws_manager,
-                &auth.user_id,
-                &new_sid,
-                data,
-            )
-            .await;
-        }
-
-        (new_sid, false) // New sessions are always private
-    };
-
-    // 4. Generate user message ID.
-    let user_message_id = uuid::Uuid::new_v4().to_string();
-
-    // Handle skip_ai: save message directly and return.
-    if skip_ai {
-        let encryption_key = ctx
-            .encryption_key
-            .as_ref()
-            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-
-        let saved_id = kyomi_auth::chat_service::add_message(
-            &ctx.db,
-            encryption_key,
-            &session_id,
-            "user",
-            &message,
-            None,
-            Some(&user_message_id),
-            current_time_user_tz.as_deref(),
-            Some(&auth.user_id),
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| ServerFnError::new(format!("Failed to store message: {e}")))?;
-
-        tracing::info!(
-            session_id = %session_id,
-            message_id = %saved_id,
-            "Stored user message (skip_ai=true)"
-        );
-
-        return Ok(SendMessageResponse {
-            session_id,
-            user_message_id: saved_id,
-            assistant_message_id: String::new(),
-            status: "skipped".to_string(),
-            thinking_events: Vec::new(),
-            token_usage: None,
-            skip_ai: true,
-        });
-    }
-
-    // 5. Generate assistant message ID.
-    let assistant_message_id = uuid::Uuid::new_v4().to_string();
-
-    // Shared status from the session lookup in step 3 (no extra DB query).
-    // KNOWN: snapshot at dispatch — concurrent share/unshare during agent execution may diverge.
-    let is_shared = existing_session_shared;
-
-    // Broadcast user message to other workspace members if session is shared.
-    if is_shared
-        && let Some(ref ws_manager) = ctx.ws_manager
-    {
-        let display_name = auth
-            .name
-            .as_deref()
-            .unwrap_or(&auth.email);
-        kyomi_auth::websocket::helpers::send_shared_chat_message(
-            ws_manager,
-            ws_id,
-            &session_id,
-            &user_message_id,
-            "user",
-            &message,
-            &chrono::Utc::now().to_rfc3339(),
-            Some(display_name),
-            Some(&auth.user_id),
-            client_msg_id.as_deref(),
-        )
-        .await;
-    }
+            kyomi_auth::chat_service::ChatDispatchOutcome::Ready {
+                session_id,
+                is_new_session,
+                user_message_id,
+                assistant_message_id,
+                is_shared,
+            } => (session_id, is_new_session, user_message_id, assistant_message_id, is_shared),
+        };
 
     // 6. Build execution config and spawn agent task.
     // Requires ws_manager and cancel_registry to be provided in ServerContext.
@@ -691,11 +615,6 @@ pub async fn send_chat_message(
         .ok_or_else(|| ServerFnError::new("KV store not configured"))?
         .clone();
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?
-        .clone();
     let embedding = ctx.embedding.clone();
     let app_config = ctx.config.clone();
     let connect_registry = ctx.connect_registry.clone();
@@ -743,6 +662,7 @@ pub async fn send_chat_message(
                 .await;
 
                 // Broadcast assistant message to shared conversation members.
+                // Callout 2 of 3.
                 if spawn_is_shared {
                     kyomi_auth::websocket::helpers::send_shared_chat_message(
                         &ws_manager,
@@ -766,52 +686,18 @@ pub async fn send_chat_message(
                     "Agent execution failed"
                 );
 
-                // Save error as an assistant message so the user sees it.
-                let error_text = format!(
-                    "I encountered an error while processing your request: {e}"
-                );
-                let error_metadata = serde_json::json!({
-                    "status": "error",
-                    "error": e.to_string(),
-                });
-
-                // Try update first (persist may have saved the message).
-                let updated = kyomi_auth::chat_service::update_message(
-                    &db,
-                    &encryption_key,
-                    &spawn_assistant_message_id,
-                    Some(&error_text),
-                    Some(&error_metadata),
-                )
-                .await
-                .unwrap_or(false);
-
-                // If no message existed to update, create one.
-                if !updated {
-                    let _ = kyomi_auth::chat_service::add_message(
-                        &db,
-                        &encryption_key,
-                        &spawn_session_id,
-                        "assistant",
-                        &error_text,
-                        Some(&error_metadata),
-                        Some(&spawn_assistant_message_id),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-
-                kyomi_auth::websocket::helpers::send_error(
-                    &ws_manager,
-                    &spawn_user_id,
-                    Some(&spawn_session_id),
-                    &format!("AI processing failed: {e}"),
-                    Some("agent_error"),
-                    Some(&context_type),
+                // Persist error message and notify the user. Callout 3 of 3.
+                kyomi_auth::chat_service::save_agent_error(
+                    kyomi_auth::chat_service::SaveAgentErrorParams {
+                        db: &db,
+                        encryption_key: &encryption_key,
+                        ws_manager: &ws_manager,
+                        session_id: &spawn_session_id,
+                        user_id: &spawn_user_id,
+                        assistant_message_id: &spawn_assistant_message_id,
+                        context_type: &context_type,
+                        error: &e.to_string(),
+                    },
                 )
                 .await;
             }
@@ -1101,12 +987,11 @@ pub async fn toggle_message_pin(
 /// Update the content of a message.
 ///
 /// Only the session owner can edit messages. Re-encrypts the content before
-/// storing.
+/// storing. Thin wrapper around `chat_service::update_message_content_owned`.
 ///
 /// Mirrors `PATCH /chat/sessions/{session_id}/messages/{message_id}` in
 /// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn update_message_content(
     session_id: String,
     message_id: String,
@@ -1122,68 +1007,23 @@ pub async fn update_message_content(
         ));
     }
 
-    // Verify session ownership (only owner can edit messages).
-    let session = kyomi_auth::chat_service::get_session_info(
-        &ctx.db,
-        &auth.user_id,
-        &session_id,
-        Some(ws_id),
-    )
-    .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    match session {
-        Some(s) if s.user_id == auth.user_id => {}
-        Some(_) => {
-            return Err(ServerFnError::new(
-                "Only the session owner can edit messages",
-            ));
-        }
-        None => {
-            return Err(ServerFnError::new("Session not found or access denied"));
-        }
-    }
-
-    // Verify the message belongs to this session.
-    #[derive(sqlx::FromRow)]
-    struct ExistsRow {
-        _n: i32,
-    }
-    let msg_exists = kyomi_core::db_fetch_optional!(
-        &ctx.db,
-        ExistsRow,
-        "SELECT 1 as _n FROM chat_messages \
-         WHERE message_id = $1 AND session_id = $2",
-        &message_id,
-        &session_id
-    )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    if msg_exists.is_none() {
-        return Err(ServerFnError::new("Message not found"));
-    }
-
-    // Re-encrypt and update.
     let encryption_key = ctx
         .encryption_key
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
 
-    let encrypted_content =
-        kyomi_auth::encryption::encrypt(&content, encryption_key)
-            .map_err(|e| ServerFnError::new(format!("Encryption failed: {e}")))?;
-
-    let result = kyomi_core::db_execute!(
+    // Verify ownership, verify message membership, re-encrypt, and persist.
+    kyomi_auth::chat_service::update_message_content_owned(
         &ctx.db,
-        "UPDATE chat_messages SET content = $1 WHERE message_id = $2",
-        &encrypted_content,
-        &message_id
+        encryption_key,
+        &auth.user_id,
+        ws_id,
+        &session_id,
+        &message_id,
+        &content,
     )
+    .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    if result.rows_affected() == 0 {
-        return Err(ServerFnError::new("Message not found"));
-    }
 
     tracing::info!(
         session_id = %session_id,

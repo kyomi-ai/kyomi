@@ -1669,7 +1669,6 @@ pub async fn search_catalog(
 /// catalog refresh service in [`super::catalog_refresh`] which handles all
 /// datasource types including BigQuery REST API indexing.
 #[server(prefix = "/leptos-api")]
-// lint-allow: server-fn-callouts=pre-existing orchestration drift tracked in KYO-124
 pub async fn refresh_catalog(
     datasource_slug: String,
 ) -> Result<(), ServerFnError> {
@@ -1712,21 +1711,16 @@ pub async fn refresh_catalog(
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
         datasource.datasource_type.into();
 
-    // Resolve and decrypt user credentials.
-    let user_cred = kyomi_auth::datasource_service::get_user_credential(
-        &ctx.db,
-        &auth.user_id,
-        &datasource.id,
-    )
-    .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
-
-    let credentials = if let Some(ref cred) = user_cred {
-        kyomi_auth::credential_service::decrypt_credentials(&cred.credentials, encryption_key)
-            .unwrap_or(serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
+    // Fetch and decrypt credentials in one service call.
+    let (user_cred, credentials) =
+        kyomi_auth::datasource_service::get_decrypted_user_credentials(
+            &ctx.db,
+            &auth.user_id,
+            &datasource.id,
+            encryption_key,
+        )
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     // Refresh OAuth credentials if needed.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
