@@ -133,7 +133,10 @@ pub fn compute_position(
         Side::Bottom => space_below,
         Side::Top => space_above,
     };
-    let max_height = content_h.min(available_height.max(0.0));
+    let max_height = match side {
+        Side::Bottom => available_height.max(0.0),
+        Side::Top => content_h.min(available_height.max(0.0)),
+    };
 
     // ── Top coordinate based on side ──
     let top = match side {
@@ -233,8 +236,8 @@ pub fn Popover(
             // Measure content natural size by reading scrollWidth/scrollHeight —
             // these are the intrinsic dimensions including overflow, which
             // matches Floating UI's measurement strategy.
-            let content_w = content_el.scroll_width() as f64;
-            let content_h = content_el.scroll_height() as f64;
+            let content_w = content_el.scroll_width() as f64 + content_el.client_left() as f64 * 2.0;
+            let content_h = content_el.scroll_height() as f64 + content_el.client_top() as f64 * 2.0;
 
             let vw = window.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
             let vh = window.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -495,7 +498,7 @@ mod tests {
         assert_eq!(pos.placement.side, Side::Bottom);
         assert_eq!(pos.top, 136.0); // trigger.bottom() + 4 offset
         assert_eq!(pos.left, 200.0); // aligned to trigger.left
-        assert_eq!(pos.max_height, 200.0); // fits fully
+        assert_eq!(pos.max_height, 576.0); // available viewport space below
     }
 
     #[test]
@@ -533,7 +536,7 @@ mod tests {
         );
         // space_below = 500 - 232 - 4 - 8 = 256
         // space_above = 200 - 4 - 8 = 188
-        // Bottom wins (larger than above), max_height = min(400, 256) = 256
+        // Bottom wins (larger than above), max_height = available_height = 256
         assert_eq!(pos.placement.side, Side::Bottom);
         assert_eq!(pos.max_height, 256.0);
         assert_eq!(pos.top, 236.0);

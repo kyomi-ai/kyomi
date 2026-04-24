@@ -33,7 +33,7 @@ const TRIGGER_CLASS: &str = "flex h-9 w-full items-center justify-between whites
 /// SelectContent classes — visual chrome only. Positioning is handled by
 /// the shared `Popover` helper, which portals the content to `document.body`
 /// and flips/shifts to stay inside the viewport.
-const CONTENT_CLASS: &str = "max-h-96 min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1 animate-slide-fade-in";
+const CONTENT_CLASS: &str = "max-h-[min(40vh,25rem)] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1 animate-slide-fade-in";
 
 /// SelectItem classes from React source.
 const ITEM_CLASS: &str = "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground";
