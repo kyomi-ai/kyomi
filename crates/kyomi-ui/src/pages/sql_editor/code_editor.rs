@@ -27,11 +27,10 @@ use super::status_bar::{DryRunStatus, StatusBar};
 
 // ─── Kyomi editor themes ────────────────────────────────────────────────────
 
-/// Kyomi editor theme — uses CSS custom properties from the active design system
-/// so the editor automatically adapts when colors change. Only `selection`,
-/// `current_line`, and `syntax` differ between dark/light.
-
 /// Apply Kyomi design system overrides to a kode theme.
+/// Uses CSS custom properties from the active design system so the editor
+/// automatically adapts when colors change. Only `selection`, `current_line`,
+/// and `syntax` differ between dark/light.
 /// Sets CSS custom property references for colors, typography, toolbar, and headings.
 #[cfg(target_arch = "wasm32")]
 fn apply_kyomi_overrides(theme: &mut kode_leptos::Theme) {

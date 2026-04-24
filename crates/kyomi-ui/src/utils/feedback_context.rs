@@ -131,7 +131,7 @@ pub fn clear() {
 
 /// Extract browser name + version from user agent string.
 #[cfg(target_arch = "wasm32")]
-fn extract_browser(ua: &str) -> String {
+pub fn extract_browser(ua: &str) -> String {
     // Edge (must check before Chrome since Edge also contains "Chrome")
     if let Some(pos) = ua.find("Edg/") {
         let version = &ua[pos + 4..];
@@ -163,7 +163,7 @@ fn extract_browser(ua: &str) -> String {
 
 /// Extract OS name from user agent string.
 #[cfg(target_arch = "wasm32")]
-fn extract_os(ua: &str) -> String {
+pub fn extract_os(ua: &str) -> String {
     if ua.contains("Mac OS X") {
         if let Some(pos) = ua.find("Mac OS X ") {
             let rest = &ua[pos + 9..];
@@ -206,7 +206,7 @@ fn extract_os(ua: &str) -> String {
 
 /// Minimal JSON string escaper (for embedding values in hand-built JSON).
 #[cfg(target_arch = "wasm32")]
-fn escape_json_string(s: &str) -> String {
+pub fn escape_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

@@ -9,6 +9,13 @@ use kyomi_ui::app::App;
 use leptos::prelude::*;
 
 fn main() {
+    #[cfg(target_arch = "wasm32")]
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        let msg = info.to_string();
+        kyomi_ui::panic_overlay::show_panic_recovery_overlay(&msg);
+    }));
+    #[cfg(not(target_arch = "wasm32"))]
     console_error_panic_hook::set_once();
 
     #[cfg(feature = "hydrate")]

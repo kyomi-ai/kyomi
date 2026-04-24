@@ -21,6 +21,9 @@ pub mod utils;
 #[cfg(target_arch = "wasm32")]
 mod wasm_math_shims;
 
+#[cfg(target_arch = "wasm32")]
+pub mod panic_overlay;
+
 pub use app::App;
 
 /// Register all server functions with the Leptos runtime.
@@ -256,6 +259,9 @@ pub fn register_server_functions() {
     register_explicit::<ListConnectDatasources>();
     register_explicit::<CreateConnectDatasource>();
     register_explicit::<RotateConnectToken>();
+
+    use server_fns::feedback::*;
+    register_explicit::<SubmitFeedback>();
 
     #[cfg(feature = "slack")]
     {

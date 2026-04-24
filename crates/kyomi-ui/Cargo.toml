@@ -81,6 +81,8 @@ web-sys = { version = "0.3", features = [
     "CredentialCreationOptions", "CredentialRequestOptions",
     # PDF export (fetch → blob → download)
     "Response", "Blob", "Url", "CustomEvent", "CustomEventInit",
+    # Panic overlay: raw fetch request for bug reports
+    "Request",
     # IntersectionObserver (infinite scroll in query history)
     "IntersectionObserver", "IntersectionObserverInit", "IntersectionObserverEntry",
     # ResizeObserver (chart header narrow-tier detection — see chart_header_bar.rs)

@@ -24,7 +24,7 @@ pub struct FeedbackResponse {
 /// Mirrors the REST handler at `POST /api/v1/feedback` by delegating to the
 /// same `kyomi_auth::feedback_service::submit_feedback` entry point. Produces
 /// the same persistence, rate limiting, and notification side effects.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", endpoint = "submit_feedback")]
 pub async fn submit_feedback(
     feedback_type: String,
     description: String,
