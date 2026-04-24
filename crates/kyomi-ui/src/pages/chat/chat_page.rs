@@ -58,6 +58,7 @@ use crate::server_fns::chat::{
     ChatMessageItem, SessionDetail,
 };
 use crate::server_fns::context::UserContext;
+use crate::chartml_provider::provide_chart_context;
 
 // ─── Greetings ──────────────────────────────────────────────────────────────
 
@@ -213,6 +214,17 @@ pub fn ChatPage() -> impl IntoView {
             })
             .unwrap_or_else(|| "there".to_string())
     });
+
+    // Must be at the component top level (not in an Effect) so provide_context
+    // registers in this owner scope, visible to descendant ChartBlock components.
+    {
+        let workspace_id = user_ctx_resource
+            .get()
+            .and_then(|res| res.ok())
+            .and_then(|ctx| ctx.workspace_id)
+            .unwrap_or_else(|| "default".to_string());
+        provide_chart_context(&workspace_id);
+    }
 
     // ── Query parameters (for chart exploration and watch creation) ──────
     // The location is used on WASM for query parameter parsing (Phase 11).
