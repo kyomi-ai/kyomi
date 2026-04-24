@@ -41,7 +41,7 @@ jobs:
   # Extract version from tag
   # ---------------------------------------------------------------------------
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -55,29 +55,10 @@ jobs:
   # builds the linux/amd64 image. arm64 deferred (QEMU + cargo is too slow).
   docker:
     needs: [prepare]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      # The workspace release profile uses lto=true + codegen-units=1 + opt-level=z
-      # for smallest-possible binary. The final LTO link uses ~10-12 GB RAM, more
-      # than the 7 GB on ubuntu-latest → OOM during `cargo build --release`.
-      # Free ~20 GB of disk and add a 10 GB swapfile so the link step can page.
-      - name: Free disk space and add swap
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af || true
-          sudo swapoff -a || true
-          sudo rm -f /swapfile
-          sudo fallocate -l 10G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile >/dev/null
-          sudo swapon /swapfile
-          echo "--- memory ---"
-          free -h
-          echo "--- disk ---"
-          df -h /
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -109,11 +90,8 @@ jobs:
       - name: Strip local-dev patch.crates-io block
         run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
 
-      # brotli is used by Trunk.toml's post_build hook to precompress dist/
-      # assets (.br + .gz) so the server can serve them with Content-Encoding.
-      # Without it, first-load WASM transfer is ~11MB instead of ~6.2MB.
       - name: Install brotli (Trunk post_build hook dependency)
-        run: sudo apt-get install -y --no-install-recommends brotli
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
 
       # Trunk resolves wasm-opt from $HOME/.cache/trunk/... — on the runner
       # that's /home/runner/.cache, which differs from apps/server/Dockerfile
@@ -168,7 +146,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     needs: [prepare, docker]
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
