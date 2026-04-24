@@ -343,9 +343,7 @@ pub fn WatchModal(
                         toast_success("Watch created successfully");
                     }
                     on_saved.run(());
-                    if !is_editing {
-                        on_close.run(());
-                    }
+                    on_close.run(());
                 }
                 Err(e) => {
                     let msg = e
