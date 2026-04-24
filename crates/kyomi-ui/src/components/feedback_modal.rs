@@ -9,6 +9,7 @@
 //! - "Include technical context" checkbox
 //! - Console error / failed request context collection
 
+use leptos::ev;
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 
@@ -94,6 +95,7 @@ pub fn FeedbackModal(
     let (capturing, set_capturing) = signal(false);
     let (error, set_error) = signal(Option::<String>::None);
     let (success, set_success) = signal(false);
+    let (reopening_after_capture, set_reopening_after_capture) = signal(false);
 
     // Dynamic placeholder based on feedback type — matches React getPlaceholder()
     let placeholder = Memo::new(move |_| {
@@ -114,6 +116,10 @@ pub fn FeedbackModal(
     // Reset form state when modal opens
     Effect::new(move |_| {
         if open.get() {
+            if reopening_after_capture.get_untracked() {
+                set_reopening_after_capture.set(false);
+                return;
+            }
             set_feedback_type.set("bug".to_string());
             set_description.set(String::new());
             set_include_context.set(true);
@@ -169,12 +175,14 @@ pub fn FeedbackModal(
         on_open_change.run(false);
     });
 
-    // Screen capture handler — WASM only
-    let handle_capture = move |_| {
+    // Screen capture logic — extracted so it can be called from both the initial
+    // capture button and the retake button. All captured bindings are Copy signals.
+    let trigger_capture = move || {
         #[cfg(target_arch = "wasm32")]
         {
             set_capturing.set(true);
             set_error.set(None);
+            set_reopening_after_capture.set(true);
 
             // Close modal temporarily so user can select what to capture
             on_open_change.run(false);
@@ -212,8 +220,12 @@ pub fn FeedbackModal(
                 on_open_change.run(true);
             });
         }
+    };
+
+    let handle_capture = move |_: ev::MouseEvent| {
+        trigger_capture();
         #[cfg(not(target_arch = "wasm32"))]
-        let _ = set_capturing; // suppress unused warning
+        let _ = set_capturing;
     };
 
     // File upload handler — uses a hidden input element (WASM only)
@@ -395,17 +407,27 @@ pub fn FeedbackModal(
                                         <Icon icon=phosphor_leptos::CHECK_CIRCLE weight=IconWeight::Fill size="16px"/>
                                         "Screenshot attached"
                                     </div>
-                                    <Button
-                                        variant=ButtonVariant::Outline
-                                        size=ButtonSize::Sm
-                                        on:click=move |_| {
-                                            set_screenshot_data.set(None);
-                                            set_screenshot_preview.set(None);
-                                        }
-                                    >
-                                        <Icon icon=phosphor_leptos::X weight=IconWeight::Regular size="14px"/>
-                                        "Remove"
-                                    </Button>
+                                    <div class="flex gap-2">
+                                        <Button
+                                            variant=ButtonVariant::Outline
+                                            size=ButtonSize::Sm
+                                            on:click=move |_| { trigger_capture(); }
+                                        >
+                                            <Icon icon=phosphor_leptos::CAMERA weight=IconWeight::Regular size="14px"/>
+                                            "Retake"
+                                        </Button>
+                                        <Button
+                                            variant=ButtonVariant::Outline
+                                            size=ButtonSize::Sm
+                                            on:click=move |_| {
+                                                set_screenshot_data.set(None);
+                                                set_screenshot_preview.set(None);
+                                            }
+                                        >
+                                            <Icon icon=phosphor_leptos::X weight=IconWeight::Regular size="14px"/>
+                                            "Remove"
+                                        </Button>
+                                    </div>
                                 </div>
                             </div>
                         </Show>
