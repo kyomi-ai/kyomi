@@ -66,6 +66,7 @@ pub fn CopilotSidebar(
             max_width=MAX_WIDTH
             title="Copilot".to_string()
             close_label="Close copilot".to_string()
+            flex_body=true
         >
             <CopilotChat
                 context_type="dashboard_copilot"

@@ -86,6 +86,8 @@ pub fn RightPanel(
     /// Accessible label for the close button. Default: "Close panel".
     #[prop(default = "Close panel".to_string())]
     close_label: String,
+    #[prop(default = false)]
+    flex_body: bool,
 ) -> impl IntoView {
     let is_mobile = use_is_mobile();
     let (is_resizing, set_is_resizing) = signal(false);
@@ -317,7 +319,7 @@ pub fn RightPanel(
                     </Button>
                 </div>
                 // Body — flex-1 scroll region
-                <div class="flex-1 overflow-y-auto min-h-0">
+                <div class=if flex_body { "flex-1 min-h-0 flex flex-col" } else { "flex-1 overflow-y-auto min-h-0" }>
                     {children_fn()}
                 </div>
                 {render_footer()}
