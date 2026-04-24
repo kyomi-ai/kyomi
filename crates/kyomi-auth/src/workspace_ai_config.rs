@@ -319,17 +319,18 @@ pub async fn update(
 
     // Single UPDATE covering all four columns, run inside a transaction so
     // the settings JSON and the dedicated columns commit atomically.
-    let update_sql = "UPDATE workspaces SET \
-         ai_provider = $1, \
-         ai_api_key_encrypted = $2, \
-         ai_base_url = $3, \
-         settings = COALESCE($4, settings) \
-         WHERE workspace_id = $5";
-
+    // Postgres needs an explicit cast ($4::jsonb) because $4 binds as text
+    // and the `settings` column is jsonb — COALESCE requires matching types.
     match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
+            let pg_sql = "UPDATE workspaces SET \
+                 ai_provider = $1, \
+                 ai_api_key_encrypted = $2, \
+                 ai_base_url = $3, \
+                 settings = COALESCE($4::json, settings) \
+                 WHERE workspace_id = $5";
             let mut tx = pg.begin().await?;
-            let result = sqlx::query(update_sql)
+            let result = sqlx::query(pg_sql)
                 .bind(provider_str)
                 .bind(new_encrypted_key.as_deref())
                 .bind(new_base_url.as_deref())
@@ -345,8 +346,14 @@ pub async fn update(
             tx.commit().await?;
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
+            let sq_sql = "UPDATE workspaces SET \
+                 ai_provider = $1, \
+                 ai_api_key_encrypted = $2, \
+                 ai_base_url = $3, \
+                 settings = COALESCE($4, settings) \
+                 WHERE workspace_id = $5";
             let mut tx = sq.begin().await?;
-            let result = sqlx::query(update_sql)
+            let result = sqlx::query(sq_sql)
                 .bind(provider_str)
                 .bind(new_encrypted_key.as_deref())
                 .bind(new_base_url.as_deref())

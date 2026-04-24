@@ -400,10 +400,7 @@ fn KyomiModelPanel(
         .filter(|m| KYOMI_CREDITS_MODELS.iter().any(|opt| opt.id == m))
         .unwrap_or_else(|| DEFAULT_KYOMI_MODEL.to_string());
 
-    let (selected_model, set_selected_model) = signal(initial_model.clone());
-    let baseline = initial_model;
-
-    let dirty = Signal::derive(move || selected_model.get() != baseline);
+    let (selected_model, set_selected_model) = signal(initial_model);
 
     let save_action = Action::new(move |model: &String| {
         let model = model.clone();
@@ -434,7 +431,11 @@ fn KyomiModelPanel(
                     style=CHEVRON_STYLE
                     disabled=!is_admin
                     prop:value=move || selected_model.get()
-                    on:change=move |ev| set_selected_model.set(event_target_value(&ev))
+                    on:change=move |ev| {
+                        let new_val = event_target_value(&ev);
+                        set_selected_model.set(new_val.clone());
+                        save_action.dispatch(new_val);
+                    }
                 >
                     {KYOMI_CREDITS_MODELS.iter().map(|m| view! {
                         <option value=m.id>{m.label}</option>
@@ -444,19 +445,6 @@ fn KyomiModelPanel(
                     "Kyomi provides the LLM infrastructure. Your admin picks the model; all workspace members use it."
                 </p>
             </div>
-
-            <Show when=move || is_admin && dirty.get()>
-                <div>
-                    <Button
-                        on:click=move |_| {
-                            save_action.dispatch(selected_model.get_untracked());
-                        }
-                        disabled=Signal::derive(move || save_action.pending().get())
-                    >
-                        {move || if save_action.pending().get() { "Saving..." } else { "Save" }}
-                    </Button>
-                </div>
-            </Show>
         </div>
     }
 }
