@@ -40,7 +40,7 @@ use leptos::prelude::*;
 // ---------------------------------------------------------------------------
 
 /// A segment of dashboard content.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 enum ContentSegment {
     /// Plain markdown text to be rendered as HTML.
     Markdown(String),
@@ -723,7 +723,13 @@ pub fn MarkdownRenderer(
                 each=move || {
                     segments.get().into_iter().enumerate().collect::<Vec<_>>()
                 }
-                key=|(i, _)| *i
+                key=|(i, seg)| {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    i.hash(&mut hasher);
+                    seg.hash(&mut hasher);
+                    hasher.finish()
+                }
                 children=move |(_, segment)| {
                     match segment {
                         ContentSegment::Markdown(md) => {
