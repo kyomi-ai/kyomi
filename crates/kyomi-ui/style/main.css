@@ -272,6 +272,14 @@ html {
   padding: 0;
 }
 
+/* Chart title — prevent long titles from overflowing their container at
+ * narrow card widths. Rendered by chartml-leptos inside the chart area. */
+.chart-card .chart-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Table styling ──────────────────────────────────────────────────
  * Tables in dashboard prose get card treatment + design system fonts. */
 

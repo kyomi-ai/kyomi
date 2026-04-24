@@ -385,18 +385,25 @@ pub fn ChartHeaderBar(
     // the kebab at the Narrow tier (< 320px container). Escape + click-outside
     // handling lives inside <Popover>.
     let has_menu_items =
-        show_delete || show_edit || show_save_to_dashboard || show_ask_about || show_info;
+        show_delete || show_edit || show_save_to_dashboard || show_ask_about || show_info || show_type_selector;
 
     // Kebab wrapper visibility:
     //  - Delete always needs the kebab (it lives there at every tier).
-    //  - Without Delete, the kebab only exists to hold the Narrow-tier overflow,
-    //    so it's hidden from `@xs` upward where the secondary icons are visible.
-    let kebab_wrapper_class = if show_delete { "flex" } else { "flex @xs:hidden" };
+    //  - Without Delete, the kebab only exists to hold the Narrow-tier overflow
+    //    (type selector + secondary action icons), so it is hidden from `@xs`
+    //    upward where those items are visible in the toolbar.
+    let kebab_wrapper_class = if show_delete {
+        "flex"
+    } else if show_type_selector || show_edit || show_save_to_dashboard || show_ask_about || show_info {
+        "flex @xs:hidden"
+    } else {
+        "hidden"
+    };
 
     view! {
         <div
             node_ref=container_ref
-            class="@container flex items-center justify-between px-4 py-1 bg-secondary border-b border-border"
+            class="@container flex items-center justify-between px-4 py-1 bg-secondary border-b border-border overflow-hidden"
         >
             // ── Left side: before slot + "Last refreshed ..." ──
             <div class="flex items-center gap-2 min-w-0">
@@ -422,11 +429,16 @@ pub fn ChartHeaderBar(
 
             // ── Right side: type selector + modifier chips + action icons + overflow menu ──
             <div class="flex items-center gap-1 min-w-0">
-                // Type selector
+                // Type selector — hidden below @xs (< 320px); visible from @xs up.
+                // At narrow tier the user changes type via the overflow menu instead.
                 {if show_type_selector {
                     ct.get_value().map(|current| {
                         let on_type = on_type_change.unwrap_or(Callback::new(|_| {}));
-                        view! { <ChartTypeSelector current_type=current on_select=on_type /> }
+                        view! {
+                            <div class="hidden @xs:flex">
+                                <ChartTypeSelector current_type=current on_select=on_type />
+                            </div>
+                        }
                     })
                 } else {
                     None
@@ -570,6 +582,7 @@ pub fn ChartHeaderBar(
                     let ask_cb = StoredValue::new(on_ask_about);
                     let info_cb = StoredValue::new(on_info);
                     let delete_cb = StoredValue::new(on_delete);
+                    let type_cb = StoredValue::new(on_type_change);
 
                     view! {
                         <div node_ref=menu_trigger_ref class=kebab_wrapper_class>
@@ -588,6 +601,46 @@ pub fn ChartHeaderBar(
                                 placement=crate::components::popover::Placement::BOTTOM_END
                                 class="w-48 bg-popover border border-border rounded-md shadow-lg py-1 overflow-y-auto"
                             >
+                                // Chart type list — visible in menu only at Narrow tier
+                                // (< 320px), where the type selector is hidden in the toolbar.
+                                // A separator below the list divides it from the action items.
+                                {show_type_selector.then(|| {
+                                    let current_ct = ct.get_value().unwrap_or_default();
+                                    view! {
+                                        <Show when=move || is_narrow.get()>
+                                            {CHART_TYPES.iter().map(|(t, label)| {
+                                                let chart_type = t.to_string();
+                                                let ct_for_click = chart_type.clone();
+                                                let ct_for_class = chart_type.clone();
+                                                let is_active = current_ct == chart_type;
+                                                let cb = type_cb.get_value();
+                                                view! {
+                                                    <button
+                                                        class=if is_active {
+                                                            "w-full flex items-center gap-2 px-3 py-2 text-sm text-foreground bg-accent"
+                                                        } else {
+                                                            "w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
+                                                        }
+                                                        on:click=move |_| {
+                                                            if let Some(cb) = cb {
+                                                                cb.run(ct_for_click.clone());
+                                                            }
+                                                            set_menu_open.set(false);
+                                                        }
+                                                    >
+                                                        {icons::chart_type_icon(&ct_for_class)}
+                                                        <span>{*label}</span>
+                                                    </button>
+                                                }
+                                            }).collect_view()}
+                                            // Separator between type items and action items
+                                            {(show_edit || show_save_to_dashboard || show_ask_about || show_info || show_delete).then(|| view! {
+                                                <div class="border-t border-border my-1" />
+                                            })}
+                                        </Show>
+                                    }
+                                })}
+
                                 // Edit — visible in menu only at Narrow tier.
                                 // `<Show>` gates on the `is_narrow` signal because
                                 // the popover renders inside a Portal (mounted at
