@@ -74,6 +74,7 @@ pub fn App() -> impl IntoView {
     provide_meta_context();
 
     let (is_routing, set_is_routing) = signal(false);
+    provide_context(is_routing);
 
     view! {
         <ThemeProvider initial_preference="system">

@@ -20,8 +20,8 @@ use crate::components::toast::{toast_error, toast_success};
 use crate::components::watches::{AlertsHistory, ExecutionLogViewer, WatchModal};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Card,
-    CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, Modal, ModalSize, Spinner,
-    StatusBadge, StatusBadgeVariant, Switch,
+    CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, ListPageSkeleton, Modal,
+    ModalSize, Spinner, StatusBadge, StatusBadgeVariant, Switch,
 };
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::context::UserContext;
@@ -656,11 +656,7 @@ pub fn WatchesPage() -> impl IntoView {
                         if active_view.get() == "watches" {
                             // Watches list view
                             view! {
-                                <Transition fallback=move || view! {
-                                    <div class="flex items-center justify-center py-12">
-                                        <Spinner />
-                                    </div>
-                                }>
+                                <Transition fallback=move || view! { <ListPageSkeleton /> }>
                                     {move || {
                                         watches_resource.get().map(|result| {
                                             match result {

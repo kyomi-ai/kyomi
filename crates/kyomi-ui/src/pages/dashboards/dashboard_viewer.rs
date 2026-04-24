@@ -24,7 +24,7 @@ use crate::components::dashboard::{
     ChartInfoModal, HistoryPanel, MarkdownRenderer, DashboardParameters,
     SaveDashboardModal,
 };
-use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner, Skeleton};
+use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Skeleton};
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_error;
 use phosphor_leptos::Icon;
@@ -308,11 +308,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
     }
 
     view! {
-        <Transition fallback=move || view! {
-            <div class="flex h-full items-center justify-center bg-background">
-                <Spinner class="h-8 w-8 text-muted-foreground" />
-            </div>
-        }>
+        <Transition fallback=move || view! { <DetailPageSkeleton /> }>
             {move || {
                 let dashboard_result = dashboard_resource.get();
                 let user_ctx_result = user_ctx_resource.get();

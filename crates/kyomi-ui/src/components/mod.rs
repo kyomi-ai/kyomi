@@ -56,7 +56,7 @@ pub use navigation_progress::NavigationProgress;
 pub use right_panel::RightPanel;
 pub use search_input::SearchInput;
 pub use select::{DynSelect, StyledSelect};
-pub use skeleton::Skeleton;
+pub use skeleton::{DetailPageSkeleton, ListPageSkeleton, SettingsPageSkeleton, Skeleton};
 pub use spinner::Spinner;
 pub use status_badge::{StatusBadge, StatusBadgeVariant};
 pub use switch::Switch;

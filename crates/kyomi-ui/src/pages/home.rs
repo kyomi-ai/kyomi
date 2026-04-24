@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Home page — smart redirect based on user's landing page preference.
-//!
-//! This page acts as a routing hub: it fetches the user's configured
-//! landing page preference and redirects to the appropriate route.
-//! It never renders persistent content — only a loading spinner while
-//! the server function resolves.
-//!
-//! Mirrors `apps/frontend/src/components/LandingRedirect.jsx`.
 
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use leptos_router::NavigateOptions;
 
-use crate::components::spinner::Spinner;
 use crate::server_fns::home::{LandingConfig, get_landing_config};
 
 /// Resolve the redirect target URL from the landing configuration.
@@ -143,9 +135,7 @@ mod tests {
 
 /// Home page component — fetches landing config and redirects.
 ///
-/// Shows a centered spinner during the server function call, then
-/// navigates with `replace: true` so the home page doesn't appear
-/// in browser history.
+/// Redirect hub — fetches landing config, navigates to the target route.
 #[component]
 pub fn HomePage() -> impl IntoView {
     let config_resource = Resource::new(|| (), |_| get_landing_config());
@@ -166,13 +156,10 @@ pub fn HomePage() -> impl IntoView {
         }
     });
 
-    // Show a centered spinner while loading.
-    // On error, show a minimal message — this should rarely happen since
-    // the auth middleware would have already redirected unauthenticated users.
     view! {
-        <Suspense fallback=move || view! {
+        <Transition fallback=move || view! {
             <div class="flex items-center justify-center min-h-[60vh]">
-                <Spinner class="h-8 w-8 text-muted-foreground" />
+                <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12" />
             </div>
         }>
             {move || {
@@ -188,15 +175,14 @@ pub fn HomePage() -> impl IntoView {
                     }
                     Ok(_) => {
                         // Config loaded — Effect above handles navigation.
-                        // Show spinner briefly while the navigation takes effect.
                         view! {
                             <div class="flex items-center justify-center min-h-[60vh]">
-                                <Spinner class="h-8 w-8 text-muted-foreground" />
+                                <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12" />
                             </div>
                         }.into_any()
                     }
                 })
             }}
-        </Suspense>
+        </Transition>
     }
 }

@@ -8,8 +8,8 @@
 use leptos::prelude::*;
 
 use crate::components::{
-    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label, StyledSelect,
-    INPUT_CLASS,
+    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label,
+    SettingsPageSkeleton, StyledSelect, INPUT_CLASS,
 };
 use crate::pages::settings::push_notifications::PushNotificationsCard;
 use crate::server_fns::context::UserContext;
@@ -79,11 +79,7 @@ pub fn ProfilePage() -> impl IntoView {
         <div class="p-4 sm:p-6">
             <h2 class="text-xl font-display text-foreground mb-6">"Profile Settings"</h2>
 
-            <Transition fallback=move || view! {
-                <div class="flex items-center justify-center py-12">
-                    <p class="text-muted-foreground">"Loading settings..."</p>
-                </div>
-            }>
+            <Transition fallback=move || view! { <SettingsPageSkeleton /> }>
                 {move || {
                     let profile_result = profile.get();
                     let dashboards_result = dashboards.get();

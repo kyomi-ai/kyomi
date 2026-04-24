@@ -180,6 +180,8 @@ pub fn Layout(children: Children) -> impl IntoView {
             .and_then(|u| u.workspace_id)
     });
 
+    let is_routing = expect_context::<ReadSignal<bool>>();
+
     // Persist collapsed state to localStorage whenever it changes.
     #[cfg(target_arch = "wasm32")]
     {
@@ -349,7 +351,10 @@ pub fn Layout(children: Children) -> impl IntoView {
                             mobile_open=mobile_open
                         />
                         <main
-                            class="flex-1 overflow-y-auto transition-[margin] duration-300 ease-in-out"
+                            class=move || format!(
+                                "flex-1 overflow-y-auto transition-[margin,opacity] duration-300 ease-in-out {}",
+                                if is_routing.get() { "opacity-60 pointer-events-none" } else { "" }
+                            )
                             style=move || {
                                 if is_mobile.get() {
                                     // Mobile: no sidebar margin, top padding for the fixed header

@@ -128,12 +128,11 @@ fn OnboardingRouter(
 // State 1: Loading
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Centered loading spinner shown while the onboarding state is being fetched.
 #[component]
 fn LoadingState() -> impl IntoView {
     view! {
         <div class="min-h-screen bg-background flex items-center justify-center">
-            <Spinner class="h-8 w-8 text-muted-foreground"/>
+            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12" />
         </div>
     }
 }

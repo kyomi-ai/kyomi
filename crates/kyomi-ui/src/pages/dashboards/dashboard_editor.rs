@@ -33,7 +33,7 @@ use crate::components::dashboard::{
     InsertDashboardLinkModal, MarkdownRenderer,
     markdown_renderer::{split_chartml_block, splice_chartml_item},
 };
-use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
+use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
 use crate::server_fns::dashboards::{create_dashboard, get_dashboard, update_dashboard};
 
@@ -118,13 +118,7 @@ pub fn DashboardEditorPage() -> impl IntoView {
             } else {
                 // Existing dashboard: fetch then render
                 view! {
-                    <Transition fallback=move || {
-                        view! {
-                            <div class="flex h-full items-center justify-center bg-background">
-                                <Spinner class="h-8 w-8 text-muted-foreground" />
-                            </div>
-                        }
-                    }>
+                    <Transition fallback=move || view! { <DetailPageSkeleton /> }>
                         {move || {
                             dashboard_resource
                                 .get()
