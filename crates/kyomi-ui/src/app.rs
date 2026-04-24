@@ -17,6 +17,7 @@ use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
 use crate::pages::auth::google_callback::GoogleCallbackPage;
 use crate::pages::auth::login::LoginPage;
 use crate::pages::auth::passkey_recovery::PasskeyRecoveryPage;
+use crate::pages::auth::oauth_complete::OAuthCompletePage;
 use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
 use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
@@ -94,7 +95,7 @@ pub fn App() -> impl IntoView {
                     // Auth pages — not yet implemented
                     <Route path=path!("/verify-email") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
                     <Route path=path!("/verify") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
-                    <Route path=path!("/oauth-complete") view=|| view! { <NotImplementedPage name="OAuth Complete"/> }/>
+                    <Route path=path!("/oauth-complete") view=OAuthCompletePage/>
                     <Route path=path!("/auth/slack-connect") view=|| view! { <NotImplementedPage name="Slack Connect"/> }/>
                     <Route path=path!("/auth/google/link-callback") view=|| view! { <NotImplementedPage name="Google Account Link"/> }/>
                     <Route path=path!("/auth/oauth/:provider/callback") view=|| view! { <NotImplementedPage name="OAuth Callback"/> }/>
