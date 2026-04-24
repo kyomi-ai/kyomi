@@ -31,7 +31,7 @@ use leptos_router::hooks::use_params_map;
 use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer,
-    markdown_renderer::{kyomi_palette, split_chartml_block, splice_chartml_item},
+    markdown_renderer::{split_chartml_block, splice_chartml_item},
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
@@ -1014,12 +1014,7 @@ fn DashboardEditorInner(
                                     <DashboardWysiwygEditor
                                         content=effective_editor_content
                                         on_change=on_editor_change.clone()
-                                        chart_colors={
-                                            let is_dark = crate::components::theme::use_theme()
-                                                .map(|s| s.effective.get() == "dark")
-                                                .unwrap_or(false);
-                                            kyomi_palette(&chart_palette.get().unwrap_or_else(|| "kyomi".to_string()), is_dark)
-                                        }
+                                        palette_name=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
                                         toolbar_items=items
                                         inject=inject
                                     />
@@ -1244,8 +1239,12 @@ fn DashboardWysiwygEditor(
     #[prop(into)]
     content: Signal<String>,
     on_change: Arc<dyn Fn(String) + Send + Sync>,
-    #[prop(optional)]
-    chart_colors: Option<Vec<String>>,
+    /// Kyomi palette name (e.g. `"kyomi"`). Forwarded to
+    /// [`ChartMLExtension::new`] which calls [`configured_chartml`] so visual-mode
+    /// charts use the same palette as source-mode preview. Defaults to `"kyomi"`
+    /// when the user has no preference.
+    #[prop(into, optional)]
+    palette_name: Option<String>,
     #[prop(optional)]
     toolbar_items: Option<Vec<kode_leptos::ToolbarItem>>,
     /// Signal for injecting text at the cursor position from outside the editor.
@@ -1260,17 +1259,11 @@ fn DashboardWysiwygEditor(
 
         let editor_theme = crate::pages::sql_editor::code_editor::use_editor_theme();
 
+        let palette = palette_name.as_deref().unwrap_or("kyomi");
         let is_dark = crate::components::theme::use_theme()
             .map(|s| s.effective.get_untracked() == "dark")
             .unwrap_or(false);
-        let kyomi_chart_theme =
-            crate::components::dashboard::markdown_renderer::kyomi_theme(is_dark);
-        let extension = match chart_colors {
-            Some(colors) => {
-                ChartMLExtension::with_colors_and_theme(colors, kyomi_chart_theme)
-            }
-            None => ChartMLExtension::new(),
-        };
+        let extension = ChartMLExtension::new(palette, is_dark);
         let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![
             Arc::new(extension),
         ];
@@ -1311,7 +1304,7 @@ fn DashboardWysiwygEditor(
     {
         let _ = content;
         let _ = on_change;
-        let _ = chart_colors;
+        let _ = palette_name;
         let _ = toolbar_items;
         let _ = inject;
 

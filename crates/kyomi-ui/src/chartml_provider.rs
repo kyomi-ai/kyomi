@@ -47,9 +47,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chartml_chart_cartesian::CartesianRenderer;
+use chartml_chart_metric::MetricRenderer;
+use chartml_chart_pie::PieRenderer;
+use chartml_chart_scatter::ScatterRenderer;
+use chartml_chart_table::TableRenderer;
 use chartml_core::data::DataTable;
 use chartml_core::{DataSourceProvider, FetchError, FetchRequest, FetchResult};
-use chartml_leptos::{HooksRef, ProviderRef};
+use chartml_datafusion::DataFusionTransform;
+use chartml_leptos::{use_chartml_configured, ChartMLRef, HooksRef, ProviderRef};
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 
@@ -267,6 +273,69 @@ pub const KYOMI_CHARTML_CACHE_DB: &str = "kyomi-chartml-cache";
 /// have a destination — phase 6.x can wire them to Kyomi's analytics
 /// backend or browser-console logging without changing the trait shape).
 pub struct TracingHooks;
+
+/// Create a fully configured [`ChartMLRef`] with all Kyomi chart renderers
+/// registered, the named palette applied, the Kyomi editorial theme wired in,
+/// and tracing-based resolver hooks installed.
+///
+/// This is the **single shared factory** used by both the markdown-renderer
+/// path (`ChartBlock` in `markdown_renderer.rs`) and the WYSIWYG extension
+/// path (`ChartMLExtension` in `chartml_extension.rs`). All renderer
+/// registrations, palette choices, and hook installation happen here so the
+/// two render paths are guaranteed to be in sync.
+///
+/// # Arguments
+///
+/// * `palette_name` — Kyomi palette name (e.g. `"kyomi"`). Passed to
+///   `kyomi_palette(palette_name, is_dark)`. Use `"kyomi"` as the default
+///   when no user preference exists.
+/// * `is_dark` — selects dark-mode palette slots and chrome colors. Read
+///   from `use_theme()` at the construction site.
+///
+/// # What is configured here
+///
+/// 1. **Renderers**: `bar`, `line`, `area` (Cartesian); `pie`, `donut`,
+///    `doughnut` (Pie); `scatter` (Scatter); `metric` (Metric); `table` (Table).
+/// 2. **Transform**: [`DataFusionTransform`] for `transform:` pipeline steps.
+/// 3. **Palette**: [`kyomi_chart_theme::kyomi_palette`] — per-mode color slots.
+/// 4. **Theme**: [`kyomi_chart_theme::kyomi_theme`] — Kyomi editorial chrome.
+/// 5. **Hooks**: [`tracing_hooks_ref`] installed on the resolver so every
+///    fetch/transform phase is observable via `tracing::`.
+///
+/// # What is NOT configured here
+///
+/// Provider (`ProviderRef`) and persistent cache backend (`CacheBackendRef`)
+/// are pulled from Leptos context inside `chartml_leptos::ChartMLChart`, so
+/// they are not part of this factory. Hooks are installed here (point 5)
+/// because `HooksRef` is `Rc<dyn ResolverHooks>` on wasm32 — it is
+/// `!Send + !Sync` and cannot travel through Leptos context.
+pub(crate) fn configured_chartml(
+    palette_name: &str,
+    is_dark: bool,
+) -> ChartMLRef {
+    let colors = kyomi_chart_theme::kyomi_palette(palette_name, is_dark);
+    let theme = kyomi_chart_theme::kyomi_theme(is_dark);
+    let chartml = use_chartml_configured(|c| {
+        c.register_renderer("bar", CartesianRenderer::new());
+        c.register_renderer("line", CartesianRenderer::new());
+        c.register_renderer("area", CartesianRenderer::new());
+        c.register_renderer("pie", PieRenderer::new());
+        c.register_renderer("donut", PieRenderer::new());
+        c.register_renderer("doughnut", PieRenderer::new());
+        c.register_renderer("scatter", ScatterRenderer::new());
+        c.register_renderer("metric", MetricRenderer::new());
+        c.register_renderer("table", TableRenderer::new());
+        c.register_transform(DataFusionTransform);
+        c.set_default_palette(colors);
+        c.set_theme(theme);
+    });
+    // Install tracing hooks on the resolver directly — `HooksRef` is
+    // `Rc<dyn ResolverHooks>` on wasm32 (`!Send + !Sync`), so it cannot
+    // travel through `provide_context`. Allocating a fresh unit-struct
+    // `Rc` here is cheap (one allocation per chart construction).
+    chartml.resolver().set_hooks(tracing_hooks_ref());
+    chartml
+}
 
 /// Build a fresh [`HooksRef`] pointing at [`TracingHooks`]. Used by
 /// `ChartBlock` to install the hook impl directly on each chart's resolver

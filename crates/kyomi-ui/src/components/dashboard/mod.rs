@@ -10,6 +10,7 @@ pub mod chartml_extension;
 pub mod copilot_sidebar;
 pub mod history_panel;
 pub mod insert_link_modal;
+pub mod kyomi_chart;
 pub mod markdown_renderer;
 pub mod parameters;
 pub mod save_dashboard_modal;

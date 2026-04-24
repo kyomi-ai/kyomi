@@ -41,7 +41,8 @@ use crate::pages::sql_editor::types::QueryResult;
 use crate::server_fns::datasources::{list_datasources, query_datasource_arrow};
 use crate::server_fns::sql_editor::execute_sql_query;
 
-use super::markdown_renderer::{configured_chartml, kyomi_palette, kyomi_theme};
+use crate::chartml_provider::configured_chartml;
+use super::markdown_renderer::{kyomi_palette, kyomi_theme};
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 
 /// Label classes — matches the design system (uppercase tracking-wide like React).
@@ -1677,10 +1678,11 @@ pub fn ChartBuilderModal(
 /// open, and the Refresh Preview button) which both build identical setups
 /// before handing the result to `ChartMLChart` via `ChartMLRef`.
 ///
-/// Note: `configured_chartml` in `markdown_renderer.rs` solves the same
-/// "register all renderers" problem but does not expose post-construction
-/// source registration, so this helper keeps its own small duplication of the
-/// renderer list rather than reshape that API.
+/// Note: [`crate::chartml_provider::configured_chartml`] solves the same
+/// "register all renderers" problem but returns a [`chartml_leptos::ChartMLRef`]
+/// with hooks installed. This helper returns a raw [`chartml_core::ChartML`]
+/// so the caller can register an inline data source before wrapping it —
+/// that post-construction step doesn't fit the shared-factory model.
 fn build_remote_chartml(
     data_table: chartml_core::data::DataTable,
     is_dark: bool,
