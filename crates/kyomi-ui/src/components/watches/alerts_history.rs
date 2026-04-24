@@ -305,15 +305,29 @@ pub fn AlertsHistory(
         set_chart_info_open.set(false);
     });
 
-    // Navigate to the chat page with the chart YAML as context — matches
-    // the canonical flow in `dashboard_viewer.rs::on_ask_about_chart` so the
-    // chat page's existing `/chat?chart=...` handler picks it up unchanged.
+    // Store the chart YAML in KV and navigate to chat with the returned UUID.
+    // Using `store_chart_context_for_ask` instead of passing raw YAML in the URL
+    // so the chat page's `get_chart_context` lookup succeeds (it expects a UUID key).
     let on_ask_about_chart = Callback::new(move |chart_md: String| {
         let nav = leptos_router::hooks::use_navigate();
-        nav(
-            &format!("/chat?chart={}", js_sys::encode_uri_component(&chart_md)),
-            leptos_router::NavigateOptions::default(),
-        );
+        leptos::task::spawn_local(async move {
+            match crate::server_fns::chat::store_chart_context_for_ask(
+                chart_md,
+                "Chart Exploration".to_string(),
+            )
+            .await
+            {
+                Ok(chart_id) => {
+                    nav(
+                        &format!("/chat?chart={chart_id}"),
+                        leptos_router::NavigateOptions::default(),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to store chart context for ask");
+                }
+            }
+        });
     });
 
     // ── State ────────────────────────────────────────────────────────────

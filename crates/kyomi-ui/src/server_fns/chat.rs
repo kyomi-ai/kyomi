@@ -171,6 +171,48 @@ pub async fn get_chart_context(chart_id: String) -> Result<Option<ChartContext>,
     }
 }
 
+/// Store chart YAML from a dashboard widget so the user can ask about it in chat.
+///
+/// The "Ask about this chart" button in the dashboard viewer calls this to write
+/// the raw ChartML markdown into KV with a fresh UUID key, then navigates to
+/// `/chat?chart=<uuid>`. The chat page's existing `get_chart_context` call then
+/// finds the entry by UUID and injects it as context — exactly the same path
+/// used by MCP "Continue in Kyomi" deep-links.
+///
+/// Uses a 30-day TTL matching `CHART_CONTEXT_TTL_SECS` in `kyomi-agent`.
+#[server(prefix = "/leptos-api")]
+pub async fn store_chart_context_for_ask(
+    chart_markdown: String,
+    title: String,
+) -> Result<String, ServerFnError> {
+    let _auth = super::extract_auth().await?;
+    let ctx = super::extract_context()?;
+
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+
+    let chart_context_id = uuid::Uuid::new_v4().to_string();
+
+    let context = ChartContext {
+        title,
+        chart_markdown,
+        spec: serde_json::Value::Null,
+    };
+
+    let context_json = serde_json::to_string(&context)
+        .map_err(|e| ServerFnError::new(format!("Failed to serialize chart context: {e}")))?;
+
+    let kv_key = format!("chart:context:{chart_context_id}");
+    // 30-day TTL — same as CHART_CONTEXT_TTL_SECS in kyomi-agent
+    kv.set(&kv_key, &context_json, Some(30 * 24 * 60 * 60))
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to store chart context: {e}")))?;
+
+    Ok(chart_context_id)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Config (existing)
 // ─────────────────────────────────────────────────────────────────────────────

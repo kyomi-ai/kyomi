@@ -598,12 +598,25 @@ pub fn DashboardViewerPage() -> impl IntoView {
                         });
 
                         let on_ask_about_chart = Callback::new(move |chart_md: String| {
-                            // Navigate to chat with chart context — matches React's handleAskAboutChart
                             let nav = leptos_router::hooks::use_navigate();
-                            nav(
-                                &format!("/chat?chart={}", js_sys::encode_uri_component(&chart_md)),
-                                leptos_router::NavigateOptions::default(),
-                            );
+                            leptos::task::spawn_local(async move {
+                                match crate::server_fns::chat::store_chart_context_for_ask(
+                                    chart_md,
+                                    "Chart Exploration".to_string(),
+                                )
+                                .await
+                                {
+                                    Ok(chart_id) => {
+                                        nav(
+                                            &format!("/chat?chart={chart_id}"),
+                                            leptos_router::NavigateOptions::default(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "Failed to store chart context for ask");
+                                    }
+                                }
+                            });
                         });
 
                         // ── Default dashboard toggle handlers ──────────

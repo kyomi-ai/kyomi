@@ -115,6 +115,7 @@ pub fn register_server_functions() {
 
     use server_fns::chat::*;
     register_explicit::<GetChartContext>();
+    register_explicit::<StoreChartContextForAsk>();
     register_explicit::<GetWebsocketConfig>();
     register_explicit::<ListChatSessions>();
     register_explicit::<GetSessionMessages>();
