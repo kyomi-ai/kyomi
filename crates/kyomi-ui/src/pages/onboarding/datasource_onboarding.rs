@@ -658,8 +658,8 @@ fn WaitingForSetup(
 
         // Watch for state changes — redirect when datasources appear
         Effect::new(move |_| {
-            if let Some(Ok(state)) = state_resource.get() {
-                if state.has_datasources {
+            if let Some(Ok(state)) = state_resource.get()
+                && state.has_datasources {
                     nav(
                         "/onboarding",
                         NavigateOptions {
@@ -668,7 +668,6 @@ fn WaitingForSetup(
                         },
                     );
                 }
-            }
         });
     }
 
@@ -758,7 +757,8 @@ fn open_oauth_popup(
 
                 // Use shared state so the closure can clear its own interval
                 // and drop itself (no leak via forget).
-                let state: std::rc::Rc<std::cell::RefCell<Option<(i32, Closure<dyn Fn()>)>>> =
+                type PopupMonitorState = std::rc::Rc<std::cell::RefCell<Option<(i32, Closure<dyn Fn()>)>>>;
+                let state: PopupMonitorState =
                     std::rc::Rc::new(std::cell::RefCell::new(None));
                 let state_inner = state.clone();
 
@@ -772,11 +772,10 @@ fn open_oauth_popup(
                             }
                         });
                         // Self-clear the interval and drop the closure
-                        if let Some((interval_id, _)) = state_inner.borrow().as_ref() {
-                            if let Some(win) = web_sys::window() {
+                        if let Some((interval_id, _)) = state_inner.borrow().as_ref()
+                            && let Some(win) = web_sys::window() {
                                 win.clear_interval_with_handle(*interval_id);
                             }
-                        }
                         state_inner.borrow_mut().take();
                     }
                 });

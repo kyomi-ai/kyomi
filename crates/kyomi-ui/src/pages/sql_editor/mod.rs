@@ -202,7 +202,8 @@ pub fn SqlEditorPage() -> impl IntoView {
         })));
 
         // Global mousemove + mouseup listeners when resizing.
-        Effect::new(move |prev: Option<Option<(Closure<dyn FnMut(web_sys::MouseEvent)>, Closure<dyn FnMut(web_sys::MouseEvent)>)>>| {
+        type ResizeClosures = Option<(Closure<dyn FnMut(web_sys::MouseEvent)>, Closure<dyn FnMut(web_sys::MouseEvent)>)>;
+        Effect::new(move |prev: Option<ResizeClosures>| {
             // Clean up previous listeners.
             if let Some(Some((ref move_cb, ref up_cb))) = prev {
                 if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
@@ -225,9 +226,7 @@ pub fn SqlEditorPage() -> impl IntoView {
                 return None;
             }
 
-            let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
-                return None;
-            };
+            let doc = web_sys::window().and_then(|w| w.document())?;
 
             // Set cursor.
             if let Some(body) = doc.body() {

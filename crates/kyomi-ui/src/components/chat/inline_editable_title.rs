@@ -48,18 +48,16 @@ pub fn InlineEditableTitle(
     // Focus and select input when entering edit mode
     #[cfg(target_arch = "wasm32")]
     {
-        let input_ref = input_ref;
         Effect::new(move |_| {
             if is_editing.get() {
                 let input_ref = input_ref;
                 // Small delay to ensure DOM is updated
                 gloo_timers::callback::Timeout::new(10, move || {
-                    if let Some(guard) = input_ref.try_read_untracked() {
-                        if let Some(el) = guard.as_ref() {
+                    if let Some(guard) = input_ref.try_read_untracked()
+                        && let Some(el) = guard.as_ref() {
                             el.focus().ok();
                             el.select();
                         }
-                    }
                 })
                 .forget();
             }
@@ -129,11 +127,10 @@ pub fn InlineEditableTitle(
                         #[cfg(target_arch = "wasm32")]
                         {
                             use wasm_bindgen::JsCast;
-                            if let Some(target) = ev.target() {
-                                if let Some(input) = target.dyn_ref::<web_sys::HtmlInputElement>() {
+                            if let Some(target) = ev.target()
+                                && let Some(input) = target.dyn_ref::<web_sys::HtmlInputElement>() {
                                     set_edit_value.set(input.value());
                                 }
-                            }
                         }
                         #[cfg(not(target_arch = "wasm32"))]
                         {

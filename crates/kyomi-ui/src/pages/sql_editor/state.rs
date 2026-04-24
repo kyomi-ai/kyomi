@@ -438,14 +438,13 @@ impl SqlEditorState {
             let pending = pending.clone();
             pending.set(None); // drop previous timeout
             let timeout = Timeout::new(100, move || {
-                if let Ok(json) = serde_json::to_string(&persisted) {
-                    if let Some(storage) = web_sys::window()
+                if let Ok(json) = serde_json::to_string(&persisted)
+                    && let Some(storage) = web_sys::window()
                         .and_then(|w| w.local_storage().ok())
                         .flatten()
                     {
                         let _ = storage.set_item(STORAGE_KEY, &json);
                     }
-                }
             });
             pending.set(Some(SendWrapper::new(timeout)));
         });

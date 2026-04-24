@@ -34,7 +34,7 @@ use wasm_bindgen::JsCast;
 /// - `var(--color-secondary-foreground)` — secondary button text
 /// - `var(--color-overlay)` — full-screen backdrop
 pub fn show_panic_recovery_overlay(panic_message: &str) {
-    if let Err(_) = try_show_panic_recovery_overlay(panic_message) {
+    if try_show_panic_recovery_overlay(panic_message).is_err() {
         // Best-effort: if we cannot even build the DOM overlay there is nothing
         // safe to do — the browser's built-in "page stopped responding" UI will
         // have to serve as the error surface.

@@ -212,19 +212,20 @@ fn DocumentCard(
                     </CardTitle>
                     <div class="flex gap-1">
                         // Add to Collection — only when collections are available and callback provided
-                        {if has_available_collections && on_add_to_collection.is_some() {
-                            let dashboard_for_add = dashboard_for_add.clone();
-                            let cb = on_add_to_collection.unwrap();
-                            Some(view! {
-                                <Button
-                                    variant=ButtonVariant::Ghost
-                                    size=ButtonSize::Icon
-                                    aria_label="Add to collection"
-                                    class="flex-shrink-0"
-                                    on:click=move |_| cb.run(dashboard_for_add.clone())
-                                >
-                                    <Icon icon=phosphor_leptos::PLUS size="14px" />
-                                </Button>
+                        {if has_available_collections {
+                            on_add_to_collection.map(|cb| {
+                                let dashboard_for_add = dashboard_for_add.clone();
+                                view! {
+                                    <Button
+                                        variant=ButtonVariant::Ghost
+                                        size=ButtonSize::Icon
+                                        aria_label="Add to collection"
+                                        class="flex-shrink-0"
+                                        on:click=move |_| cb.run(dashboard_for_add.clone())
+                                    >
+                                        <Icon icon=phosphor_leptos::PLUS size="14px" />
+                                    </Button>
+                                }
                             })
                         } else {
                             None

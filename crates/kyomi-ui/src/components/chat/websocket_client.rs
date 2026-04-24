@@ -169,6 +169,9 @@ mod wasm {
     use crate::server_fns::chat::get_websocket_config;
     use crate::utils::websocket::build_ws_url;
 
+    /// Subscriber map: message_type → list of (id, callback) pairs.
+    type SubscriberMap = HashMap<String, Vec<(usize, Box<dyn Fn(WebSocketMessage)>)>>;
+
     /// Maximum reconnect attempts before giving up — matches React.
     const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
@@ -185,7 +188,7 @@ mod wasm {
         /// Event handler closures — stored to prevent GC.
         _closures: Vec<SendWrapper<JsValue>>,
         /// Subscribers: message_type -> list of callbacks.
-        subscribers: HashMap<String, Vec<(usize, Box<dyn Fn(WebSocketMessage)>)>>,
+        subscribers: SubscriberMap,
         /// Monotonic subscriber ID counter for unsubscribe.
         next_sub_id: usize,
         /// Set of seen message keys for deduplication.
@@ -313,13 +316,11 @@ mod wasm {
         let send_state = state.clone();
         let send_fn: Box<dyn Fn(serde_json::Value) -> bool> = Box::new(move |message| {
             let s = send_state.borrow();
-            if let Some(ref ws) = s.ws {
-                if ws.ready_state() == WebSocket::OPEN {
-                    if let Ok(json) = serde_json::to_string(&message) {
+            if let Some(ref ws) = s.ws
+                && ws.ready_state() == WebSocket::OPEN
+                    && let Ok(json) = serde_json::to_string(&message) {
                         return ws.send_with_str(&json).is_ok();
                     }
-                }
-            }
             false
         });
 

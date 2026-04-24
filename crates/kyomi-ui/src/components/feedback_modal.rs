@@ -222,11 +222,10 @@ pub fn FeedbackModal(
         {
             use wasm_bindgen::prelude::*;
 
-            let document = web_sys::window().unwrap().document().unwrap();
-            let input: web_sys::HtmlInputElement = document
-                .create_element("input")
-                .unwrap()
-                .unchecked_into();
+            let Some(window) = web_sys::window() else { return };
+            let Some(document) = window.document() else { return };
+            let Ok(el) = document.create_element("input") else { return };
+            let input: web_sys::HtmlInputElement = el.unchecked_into();
             input.set_type("file");
             input.set_accept("image/*");
 
@@ -234,58 +233,51 @@ pub fn FeedbackModal(
             let set_data = set_screenshot_data;
             let set_err = set_error;
 
-            let closure = Closure::<dyn Fn(web_sys::Event)>::new(move |_: web_sys::Event| {
-                let input_el: web_sys::HtmlInputElement =
-                    web_sys::window()
-                        .unwrap()
-                        .document()
-                        .unwrap()
-                        .query_selector("input[type='file'][data-feedback-upload]")
-                        .unwrap()
-                        .unwrap()
-                        .unchecked_into();
-                if let Some(files) = input_el.files() {
-                    if let Some(file) = files.get(0) {
+            let closure = Closure::<dyn Fn(web_sys::Event)>::new(move |ev: web_sys::Event| {
+                let Some(input_el) = ev
+                    .target()
+                    .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                else {
+                    return;
+                };
+                if let Some(files) = input_el.files()
+                    && let Some(file) = files.get(0) {
                         // Validate size: 2MB decoded ~ 2.67MB base64 (matching REST route MAX_SCREENSHOT_BYTES)
                         if file.size() > 2.67 * 1024.0 * 1024.0 {
                             set_err.set(Some("Image must be less than 2MB".to_string()));
                             return;
                         }
-                        let reader = web_sys::FileReader::new().unwrap();
+                        let Ok(reader) = web_sys::FileReader::new() else { return };
                         let reader_clone = reader.clone();
                         let onload = Closure::<dyn Fn(web_sys::Event)>::new(
                             move |_: web_sys::Event| {
-                                if let Ok(result) = reader_clone.result() {
-                                    if let Some(data_url) = result.as_string() {
+                                if let Ok(result) = reader_clone.result()
+                                    && let Some(data_url) = result.as_string() {
                                         set_preview.set(Some(data_url.clone()));
                                         set_data.set(Some(data_url));
                                     }
-                                }
                             },
                         );
                         reader.set_onload(Some(onload.as_ref().unchecked_ref()));
                         onload.forget(); // prevent GC
                         let _ = reader.read_as_data_url(&file);
                     }
-                }
                 // Clean up the hidden input
                 if let Some(el) = web_sys::window()
-                    .unwrap()
-                    .document()
-                    .unwrap()
-                    .query_selector("input[data-feedback-upload]")
-                    .ok()
-                    .flatten()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.query_selector("input[data-feedback-upload]").ok().flatten())
                 {
                     el.remove();
                 }
             });
 
-            input.set_attribute("data-feedback-upload", "").unwrap();
-            input.set_attribute("style", "display:none").unwrap();
-            input.add_event_listener_with_callback("change", closure.as_ref().unchecked_ref()).unwrap();
+            let _ = input.set_attribute("data-feedback-upload", "");
+            let _ = input.set_attribute("style", "display:none");
+            let _ = input.add_event_listener_with_callback("change", closure.as_ref().unchecked_ref());
             closure.forget(); // prevent GC
-            document.body().unwrap().append_child(&input).unwrap();
+            if let Some(body) = document.body() {
+                let _ = body.append_child(&input);
+            }
             input.click();
         }
     };

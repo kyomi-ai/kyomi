@@ -26,6 +26,24 @@ use crate::components::{Button, ButtonSize, ButtonVariant};
 const DEFAULT_MIN_WIDTH: f64 = 280.0;
 const DEFAULT_MAX_WIDTH: f64 = 600.0;
 
+// ─── Type aliases ────────────────────────────────────────────────────────────
+
+/// A `StoredValue` holding an optional once-callable teardown function,
+/// wrapped in `SendWrapper` for cross-thread Leptos storage.
+#[cfg(feature = "hydrate")]
+type CleanupSlot = StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>>;
+
+/// Pair of WASM closures kept alive until the drag interaction completes.
+#[cfg(feature = "hydrate")]
+type DragClosures = std::rc::Rc<
+    std::cell::RefCell<
+        Option<(
+            wasm_bindgen::closure::Closure<dyn FnMut(web_sys::MouseEvent)>,
+            wasm_bindgen::closure::Closure<dyn FnMut()>,
+        )>,
+    >,
+>;
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 /// Right-side docked panel with Editorial Margin styling.
@@ -87,8 +105,7 @@ pub fn RightPanel(
     {
         use send_wrapper::SendWrapper;
         use wasm_bindgen::closure::Closure;
-        let escape_cleanup: StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>> =
-            StoredValue::new(None);
+        let escape_cleanup: CleanupSlot = StoredValue::new(None);
 
         Effect::new(move |_| {
             // Re-bind the listener whenever `open` flips so we don't leak.
@@ -142,8 +159,7 @@ pub fn RightPanel(
 
     // ── Resize drag (desktop) ─────────────────────────────────────────────
     #[cfg(feature = "hydrate")]
-    let drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>> =
-        StoredValue::new(None);
+    let drag_cleanup: CleanupSlot = StoredValue::new(None);
 
     let handle_resize_start = move |ev: web_sys::MouseEvent| {
         ev.prevent_default();
@@ -182,14 +198,7 @@ pub fn RightPanel(
             let document_for_up = document.clone();
             let move_fn_for_up = move_ref.clone();
 
-            let closures: Rc<
-                RefCell<
-                    Option<(
-                        Closure<dyn FnMut(web_sys::MouseEvent)>,
-                        Closure<dyn FnMut()>,
-                    )>,
-                >,
-            > = Rc::new(RefCell::new(None));
+            let closures: DragClosures = Rc::new(RefCell::new(None));
             let closures_for_up = closures.clone();
 
             let up_handler = Closure::<dyn FnMut()>::new(move || {

@@ -314,10 +314,9 @@ pub fn BillingPage() -> impl IntoView {
                 Ok(_redirect) => {
                     #[cfg(target_arch = "wasm32")]
                     {
-                        let _ = web_sys::window()
-                            .unwrap()
-                            .location()
-                            .set_href(&_redirect.url);
+                        if let Some(window) = web_sys::window() {
+                            let _ = window.location().set_href(&_redirect.url);
+                        }
                     }
                 }
                 Err(e) => {

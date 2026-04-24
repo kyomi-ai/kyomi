@@ -172,8 +172,9 @@ fn MultiSelectDropdown(
         use send_wrapper::SendWrapper;
         use wasm_bindgen::prelude::*;
 
-        let cleanup: StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>> =
-            StoredValue::new(None);
+        type CleanupValue = StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>>;
+
+        let cleanup: CleanupValue = StoredValue::new(None);
 
         Effect::new(move |_| {
             if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {

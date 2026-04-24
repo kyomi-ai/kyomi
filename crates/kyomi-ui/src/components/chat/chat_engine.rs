@@ -217,11 +217,13 @@ impl ChatEngine {
 
                 setup_ws_subscriptions(
                     &ws,
-                    session_id,
-                    messages,
-                    &chat_state_ws,
-                    &thinking_ws,
-                    context_type,
+                    EngineSignals {
+                        session_id,
+                        messages,
+                        chat_state: &chat_state_ws,
+                        thinking: &thinking_ws,
+                        context_type,
+                    },
                     &custom_events,
                     on_custom_event,
                 );
@@ -478,6 +480,17 @@ impl ChatEngine {
 
 // ─── WebSocket subscription setup ──────────────────────────────────────────
 
+/// Reactive signals owned by the engine — passed as a unit to `setup_ws_subscriptions`
+/// to avoid exceeding the function argument limit.
+#[cfg(target_arch = "wasm32")]
+struct EngineSignals<'a> {
+    session_id: RwSignal<Option<String>>,
+    messages: RwSignal<Vec<ChatMessageItem>>,
+    chat_state: &'a ChatStateMachine,
+    thinking: &'a ThinkingManager,
+    context_type: StoredValue<Option<String>>,
+}
+
 /// Set up all WebSocket subscriptions for the chat engine.
 ///
 /// Extracted to a standalone function so it can be conditionally compiled
@@ -485,14 +498,11 @@ impl ChatEngine {
 #[cfg(target_arch = "wasm32")]
 fn setup_ws_subscriptions(
     ws: &WebSocketContext,
-    session_id: RwSignal<Option<String>>,
-    messages: RwSignal<Vec<ChatMessageItem>>,
-    chat_state: &ChatStateMachine,
-    thinking: &ThinkingManager,
-    context_type: StoredValue<Option<String>>,
+    signals: EngineSignals<'_>,
     custom_events: &[String],
     on_custom_event: Option<Callback<(String, serde_json::Value)>>,
 ) {
+    let EngineSignals { session_id, messages, chat_state, thinking, context_type } = signals;
     use super::{ThinkingEvent, TokenUsage};
 
     // Helper: check if an event belongs to this engine instance.
@@ -505,23 +515,20 @@ fn setup_ws_subscriptions(
         let ctx_type = context_type.get_value();
 
         // If we have a context_type filter, the event must match it.
-        if let Some(ref expected_ctx) = ctx_type {
-            if event_context_type != Some(expected_ctx.as_str()) {
+        if let Some(ref expected_ctx) = ctx_type
+            && event_context_type != Some(expected_ctx.as_str()) {
                 return false;
             }
-        }
 
         // Session ID check: if we have a current session, the event must match.
         // If we don't have a session yet (new chat race condition in External mode),
         // allow the event through.
         let current_sid = session_id.get_untracked();
-        if let Some(sid) = &current_sid {
-            if let Some(msg_sid) = msg_session_id {
-                if msg_sid != sid.as_str() {
+        if let Some(sid) = &current_sid
+            && let Some(msg_sid) = msg_session_id
+                && msg_sid != sid.as_str() {
                     return false;
                 }
-            }
-        }
 
         true
     };
@@ -688,11 +695,10 @@ fn setup_ws_subscriptions(
         // Update message with full content.
         messages.update(|msgs| {
             for m in msgs.iter_mut() {
-                if m.message_id == msg_message_id && m.message_type == "assistant" {
-                    if let Some(ref content) = full_content {
+                if m.message_id == msg_message_id && m.message_type == "assistant"
+                    && let Some(ref content) = full_content {
                         m.content = content.clone();
                     }
-                }
             }
         });
 
@@ -730,11 +736,10 @@ fn setup_ws_subscriptions(
 
         // Filter by session_id (no context_type filter for token updates).
         let current_sid = session_id.get_untracked();
-        if let Some(sid) = &current_sid {
-            if msg.session_id.as_deref() != Some(sid.as_str()) {
+        if let Some(sid) = &current_sid
+            && msg.session_id.as_deref() != Some(sid.as_str()) {
                 return;
             }
-        }
 
         thinking_for_token.update_token_usage(&msg_message_id, token_update);
     });
@@ -817,17 +822,15 @@ fn setup_ws_subscriptions(
 
             // Filter by session_id.
             let current_sid = session_id.get_untracked();
-            if let Some(sid) = &current_sid {
-                if msg.session_id.as_deref() != Some(sid.as_str()) {
+            if let Some(sid) = &current_sid
+                && msg.session_id.as_deref() != Some(sid.as_str()) {
                     return;
                 }
-            }
 
-            if let Some(data) = msg.data {
-                if let Some(cb) = on_custom_event {
+            if let Some(data) = msg.data
+                && let Some(cb) = on_custom_event {
                     cb.run((event_name_clone.clone(), data));
                 }
-            }
         });
         custom_unsubs.push(send_wrapper::SendWrapper::new(unsub));
     }

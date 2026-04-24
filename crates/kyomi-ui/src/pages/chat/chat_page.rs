@@ -546,20 +546,18 @@ pub fn ChatPage() -> impl IntoView {
                 let state = chat_state_session.state().get_untracked();
 
                 // Skip if this session was just created by on_send — metadata is already set
-                if let Some(msg_sid) = &msg.session_id {
-                    if just_created_session.get_untracked().as_deref() == Some(msg_sid.as_str()) {
+                if let Some(msg_sid) = &msg.session_id
+                    && just_created_session.get_untracked().as_deref() == Some(msg_sid.as_str()) {
                         return;
                     }
-                }
 
                 // Only process if we don't have a session ID yet AND we're in SENDING state
                 if current_sid.is_none()
-                    && msg.session_id.is_some()
-                    && msg.data.is_some()
                     && state == crate::components::chat::ChatState::Sending
+                    && let (Some(session_id_ref), Some(data)) =
+                        (msg.session_id.as_ref(), msg.data.as_ref())
                 {
-                    let session_id = msg.session_id.as_ref().unwrap().clone();
-                    let data = msg.data.as_ref().unwrap();
+                    let session_id = session_id_ref.clone();
 
                     // Mark as just-created BEFORE navigating so the URL change Effect
                     // sees is_just_created=true and does NOT reset chat_state.
@@ -603,14 +601,13 @@ pub fn ChatPage() -> impl IntoView {
             // ── title_update ────────────────────────────────────────────
             // Matches React: Chat.jsx lines 376-383
             let unsub_title_update = ws.subscribe("title_update", move |msg| {
-                if let (Some(sid), Some(data)) = (&msg.session_id, &msg.data) {
-                    if let Some(title) = data.get("title").and_then(|v| v.as_str()) {
+                if let (Some(sid), Some(data)) = (&msg.session_id, &msg.data)
+                    && let Some(title) = data.get("title").and_then(|v| v.as_str()) {
                         let current_sid = current_session_id.get_untracked();
                         if current_sid.as_deref() == Some(sid.as_str()) {
                             set_session_title.set(title.to_string());
                         }
                     }
-                }
             });
 
             // ── error (page-specific addition) ─────────────────────────
@@ -673,12 +670,11 @@ pub fn ChatPage() -> impl IntoView {
 
                 // Dedup by client_msg_id (optimistic message from this user)
                 let mut deduped = false;
-                if let Some(ref cid) = client_msg_id {
-                    if let Some(existing) = msgs.iter_mut().find(|m| m.message_id == *cid) {
+                if let Some(ref cid) = client_msg_id
+                    && let Some(existing) = msgs.iter_mut().find(|m| m.message_id == *cid) {
                         existing.message_id = message_id.clone();
                         deduped = true;
                     }
-                }
 
                 if !deduped {
                     // Dedup by message_id
@@ -746,7 +742,7 @@ pub fn ChatPage() -> impl IntoView {
     // Matches React: Chat.jsx lines 835-886.
     #[cfg(target_arch = "wasm32")]
     {
-        let location_search_chart = _location.search.clone();
+        let location_search_chart = _location.search;
         let navigate_chart = navigate.clone();
         let engine_for_chart = engine.clone();
         Effect::new(move |_| {
@@ -840,14 +836,13 @@ pub fn ChatPage() -> impl IntoView {
                 }
 
                 // Clear the query parameter to prevent re-triggering on refresh
-                if let Some(window) = web_sys::window() {
-                    if let Ok(pathname) = window.location().pathname() {
+                if let Some(window) = web_sys::window()
+                    && let Ok(pathname) = window.location().pathname() {
                         navigate_inner(&pathname, leptos_router::NavigateOptions {
                             replace: true,
                             ..Default::default()
                         });
                     }
-                }
             });
         });
     }
@@ -859,7 +854,7 @@ pub fn ChatPage() -> impl IntoView {
     // Matches React: Chat.jsx lines 806-833, 888-916.
     #[cfg(target_arch = "wasm32")]
     {
-        let location_search = _location.search.clone();
+        let location_search = _location.search;
         let navigate_explore = navigate.clone();
         let engine_for_explore = engine.clone();
         Effect::new(move |_| {
@@ -936,16 +931,14 @@ pub fn ChatPage() -> impl IntoView {
 
             // M14 — Clear query params after processing so browser refresh
             // doesn't re-trigger the context effect.
-            if has_explore_chart || has_create_watch {
-                if let Some(window) = web_sys::window() {
-                    if let Ok(location) = window.location().pathname() {
+            if (has_explore_chart || has_create_watch)
+                && let Some(window) = web_sys::window()
+                    && let Ok(location) = window.location().pathname() {
                         navigate_explore(&location, leptos_router::NavigateOptions {
                             replace: true,
                             ..Default::default()
                         });
                     }
-                }
-            }
         });
     }
 

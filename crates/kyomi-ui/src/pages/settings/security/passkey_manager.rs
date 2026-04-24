@@ -187,41 +187,36 @@ async fn browser_create_credential(options_json: &str) -> Result<String, String>
         .unwrap_or(js_options.clone());
 
     // Decode base64url challenge -> ArrayBuffer
-    if let Ok(challenge_val) = Reflect::get(&js_pub_key, &"challenge".into()) {
-        if let Some(challenge_str) = challenge_val.as_string() {
+    if let Ok(challenge_val) = Reflect::get(&js_pub_key, &"challenge".into())
+        && let Some(challenge_str) = challenge_val.as_string() {
             let bytes = base64url_decode(&challenge_str)?;
             let arr = Uint8Array::from(&bytes[..]);
             let _ = Reflect::set(&js_pub_key, &"challenge".into(), &arr.buffer());
         }
-    }
 
     // Decode user.id -> ArrayBuffer
-    if let Ok(user) = Reflect::get(&js_pub_key, &"user".into()) {
-        if let Ok(user_id_val) = Reflect::get(&user, &"id".into()) {
-            if let Some(user_id_str) = user_id_val.as_string() {
+    if let Ok(user) = Reflect::get(&js_pub_key, &"user".into())
+        && let Ok(user_id_val) = Reflect::get(&user, &"id".into())
+            && let Some(user_id_str) = user_id_val.as_string() {
                 let bytes = base64url_decode(&user_id_str)?;
                 let arr = Uint8Array::from(&bytes[..]);
                 let _ = Reflect::set(&user, &"id".into(), &arr.buffer());
             }
-        }
-    }
 
     // Decode excludeCredentials[].id -> ArrayBuffer
-    if let Ok(exclude_creds) = Reflect::get(&js_pub_key, &"excludeCredentials".into()) {
-        if js_sys::Array::is_array(&exclude_creds) {
+    if let Ok(exclude_creds) = Reflect::get(&js_pub_key, &"excludeCredentials".into())
+        && js_sys::Array::is_array(&exclude_creds) {
             let arr = js_sys::Array::from(&exclude_creds);
             for i in 0..arr.length() {
                 let cred = arr.get(i);
-                if let Ok(id_val) = Reflect::get(&cred, &"id".into()) {
-                    if let Some(id_str) = id_val.as_string() {
+                if let Ok(id_val) = Reflect::get(&cred, &"id".into())
+                    && let Some(id_str) = id_val.as_string() {
                         let bytes = base64url_decode(&id_str)?;
                         let u8arr = Uint8Array::from(&bytes[..]);
                         let _ = Reflect::set(&cred, &"id".into(), &u8arr.buffer());
                     }
-                }
             }
         }
-    }
 
     // Build the CredentialCreationOptions object with { publicKey: ... }
     let create_options = Object::new();

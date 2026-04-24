@@ -924,7 +924,7 @@ fn query_result_to_arrow_ipc(
                     let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
                     if let Some(s) = val.as_str() {
                         if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            let epoch = chrono::NaiveDate::default();
                             let days = d.signed_duration_since(epoch).num_days() as i32;
                             builder.append_value(days);
                         } else {
@@ -991,7 +991,7 @@ fn query_result_to_arrow_ipc(
                         if let Ok(t) = parsed {
                             let micros = t
                                 .signed_duration_since(
-                                    chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+                                    chrono::NaiveTime::default(),
                                 )
                                 .num_microseconds()
                                 .unwrap_or(0);

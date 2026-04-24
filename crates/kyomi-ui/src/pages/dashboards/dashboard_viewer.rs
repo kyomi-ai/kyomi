@@ -81,7 +81,7 @@ fn InlineEditableTitle(
                 gloo_timers::future::TimeoutFuture::new(0).await;
                 if let Some(el) = input_ref.get() {
                     let _ = el.focus();
-                    let _ = el.select();
+                    el.select();
                 }
             });
         }
@@ -484,12 +484,11 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                                 leptos::task::spawn_local(async move {
                                     let mut url = format!("/api/v1/dashboards/{}/export/pdf", did);
-                                    if !params.is_empty() {
-                                        if let Ok(json) = serde_json::to_string(&params) {
+                                    if !params.is_empty()
+                                        && let Ok(json) = serde_json::to_string(&params) {
                                             let encoded = js_sys::encode_uri_component(&json);
                                             url = format!("{}?parameters={}", url, encoded);
                                         }
-                                    }
 
                                     // Use fetch API with credentials to download as blob
                                     if let Some(window) = web_sys::window() {
@@ -502,12 +501,12 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                             Ok(resp) => {
                                                 let resp: web_sys::Response = resp.unchecked_into();
                                                 if resp.ok() {
-                                                    if let Ok(blob_promise) = resp.blob() {
-                                                        if let Ok(blob) = wasm_bindgen_futures::JsFuture::from(blob_promise).await {
+                                                    if let Ok(blob_promise) = resp.blob()
+                                                        && let Ok(blob) = wasm_bindgen_futures::JsFuture::from(blob_promise).await {
                                                             let blob: web_sys::Blob = blob.unchecked_into();
                                                             let blob_url = web_sys::Url::create_object_url_with_blob(&blob).unwrap_or_default();
-                                                            let document = window.document().unwrap();
-                                                            let a = document.create_element("a").unwrap();
+                                                            let Some(document) = window.document() else { return };
+                                                            let Ok(a) = document.create_element("a") else { return };
                                                             let _ = a.set_attribute("href", &blob_url);
 
                                                             // Derive filename from Content-Disposition header or title
@@ -535,16 +534,14 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                                 });
 
                                                             let _ = a.set_attribute("download", &filename);
-                                                            if let Ok(html_a) = a.dyn_into::<web_sys::HtmlElement>() {
-                                                                if let Some(body) = document.body() {
+                                                            if let Ok(html_a) = a.dyn_into::<web_sys::HtmlElement>()
+                                                                && let Some(body) = document.body() {
                                                                     let _ = body.append_child(&html_a);
-                                                                    let _ = html_a.click();
+                                                                    html_a.click();
                                                                     let _ = body.remove_child(&html_a);
                                                                 }
-                                                            }
                                                             let _ = web_sys::Url::revoke_object_url(&blob_url);
                                                         }
-                                                    }
                                                 } else {
                                                     let status = resp.status();
                                                     let message = if status == 403 {
@@ -552,17 +549,13 @@ pub fn DashboardViewerPage() -> impl IntoView {
                                                     } else {
                                                         // Try to extract detail from JSON error body
                                                         let mut msg = format!("PDF export failed (HTTP {})", status);
-                                                        if let Ok(text_promise) = resp.text() {
-                                                            if let Ok(text_val) = wasm_bindgen_futures::JsFuture::from(text_promise).await {
-                                                                if let Some(text) = text_val.as_string() {
-                                                                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
-                                                                        if let Some(detail) = parsed.get("detail").or(parsed.get("message")).and_then(|v| v.as_str()) {
+                                                        if let Ok(text_promise) = resp.text()
+                                                            && let Ok(text_val) = wasm_bindgen_futures::JsFuture::from(text_promise).await
+                                                                && let Some(text) = text_val.as_string()
+                                                                    && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text)
+                                                                        && let Some(detail) = parsed.get("detail").or(parsed.get("message")).and_then(|v| v.as_str()) {
                                                                             msg = format!("PDF export failed: {}", detail);
                                                                         }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
                                                         msg
                                                     };
                                                     leptos::logging::error!("{}", message);

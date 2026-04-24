@@ -152,17 +152,18 @@ pub fn SignupCompletePage() -> impl IntoView {
                     #[cfg(target_arch = "wasm32")]
                     {
                         use wasm_bindgen::prelude::*;
-                        let window = web_sys::window().unwrap();
-                        let closure = Closure::once(move || {
-                            if let Some(window) = web_sys::window() {
-                                let _ = window.location().set_href("/onboarding");
-                            }
-                        });
-                        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                            closure.as_ref().unchecked_ref(),
-                            1500,
-                        );
-                        closure.forget();
+                        if let Some(window) = web_sys::window() {
+                            let closure = Closure::once(move || {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href("/onboarding");
+                                }
+                            });
+                            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                closure.as_ref().unchecked_ref(),
+                                1500,
+                            );
+                            closure.forget();
+                        }
                     }
                 }
                 Ok(SignupCompleteResult::Error { message }) => {

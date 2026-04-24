@@ -37,10 +37,12 @@ struct PushSubscription {
 #[cfg(target_arch = "wasm32")]
 fn push_supported() -> bool {
     // ServiceWorkerContainer exists if the browser supports service workers
-    web_sys::window().is_some() && js_sys::Reflect::has(
-        &web_sys::window().unwrap().navigator(),
-        &wasm_bindgen::JsValue::from_str("serviceWorker"),
-    ).unwrap_or(false)
+    web_sys::window().is_some_and(|w| {
+        js_sys::Reflect::has(
+            &w.navigator(),
+            &wasm_bindgen::JsValue::from_str("serviceWorker"),
+        ).unwrap_or(false)
+    })
 }
 
 /// Check whether we are on a secure context (HTTPS or localhost).
@@ -143,7 +145,9 @@ pub fn PushNotificationsCard() -> impl IntoView {
                 // Request notification permission
                 let permission_result = {
                     let notification =
-                        js_sys::Reflect::get(&web_sys::window().unwrap(), &"Notification".into());
+                        web_sys::window()
+                            .map(|w| js_sys::Reflect::get(&w, &"Notification".into()))
+                            .unwrap_or(Err(wasm_bindgen::JsValue::UNDEFINED));
                     match notification {
                         Ok(n) => {
                             let request_fn =

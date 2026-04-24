@@ -24,11 +24,10 @@ mod inner {
     impl EmbeddedCheckoutHandle {
         /// Unmount the embedded checkout form and release resources.
         pub fn destroy(&self) {
-            if let Ok(destroy_fn) = Reflect::get(&self.instance, &"destroy".into()) {
-                if let Ok(func) = destroy_fn.dyn_into::<Function>() {
+            if let Ok(destroy_fn) = Reflect::get(&self.instance, &"destroy".into())
+                && let Ok(func) = destroy_fn.dyn_into::<Function>() {
                     let _ = func.call0(&self.instance);
                 }
-            }
         }
     }
 

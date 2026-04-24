@@ -255,55 +255,49 @@ pub fn Popover(
         };
 
         // Recompute when open changes or on next frame after render.
-        Effect::new({
-            let reposition = reposition.clone();
-            move |_| {
-                if open.get() {
-                    // Use request_animation_frame so the content element
-                    // has been mounted and measured before we read its
-                    // dimensions.
-                    let reposition = reposition.clone();
-                    let window = web_sys::window().unwrap();
-                    let cb = Closure::once_into_js(move || reposition());
-                    let _ = window.request_animation_frame(cb.unchecked_ref());
-                } else {
-                    set_position.set(None);
-                }
+        Effect::new(move |_| {
+            if open.get() {
+                // Use request_animation_frame so the content element
+                // has been mounted and measured before we read its
+                // dimensions.
+                let reposition = reposition;
+                let Some(window) = web_sys::window() else { return };
+                let cb = Closure::once_into_js(reposition);
+                let _ = window.request_animation_frame(cb.unchecked_ref());
+            } else {
+                set_position.set(None);
             }
         });
 
         // Scroll/resize listeners — active only while open.
-        Effect::new({
-            let reposition = reposition.clone();
-            move |_| {
-                if !open.get() {
-                    return;
-                }
+        Effect::new(move |_| {
+            if !open.get() {
+                return;
+            }
+            let Some(window) = web_sys::window() else { return };
+            let reposition = reposition;
+            let cb = Closure::<dyn FnMut()>::new(reposition);
+            let _ = window.add_event_listener_with_callback(
+                "scroll",
+                cb.as_ref().unchecked_ref(),
+            );
+            let _ = window.add_event_listener_with_callback(
+                "resize",
+                cb.as_ref().unchecked_ref(),
+            );
+            let cb_for_cleanup = send_wrapper::SendWrapper::new(cb);
+            on_cleanup(move || {
                 let Some(window) = web_sys::window() else { return };
-                let reposition = reposition.clone();
-                let cb = Closure::<dyn FnMut()>::new(move || reposition());
-                let _ = window.add_event_listener_with_callback(
+                let cb = cb_for_cleanup.take();
+                let _ = window.remove_event_listener_with_callback(
                     "scroll",
                     cb.as_ref().unchecked_ref(),
                 );
-                let _ = window.add_event_listener_with_callback(
+                let _ = window.remove_event_listener_with_callback(
                     "resize",
                     cb.as_ref().unchecked_ref(),
                 );
-                let cb_for_cleanup = send_wrapper::SendWrapper::new(cb);
-                on_cleanup(move || {
-                    let Some(window) = web_sys::window() else { return };
-                    let cb = cb_for_cleanup.take();
-                    let _ = window.remove_event_listener_with_callback(
-                        "scroll",
-                        cb.as_ref().unchecked_ref(),
-                    );
-                    let _ = window.remove_event_listener_with_callback(
-                        "resize",
-                        cb.as_ref().unchecked_ref(),
-                    );
-                });
-            }
+            });
         });
 
         // Outside-click + Escape — active only while open. Handlers stored
@@ -333,11 +327,10 @@ pub fn Popover(
         Effect::new(move |_| {
             // When closing, tear down any active listeners.
             if !open.get() {
-                if let Some(tid) = timeout_cell_effect.borrow_mut().take() {
-                    if let Some(w) = web_sys::window() {
+                if let Some(tid) = timeout_cell_effect.borrow_mut().take()
+                    && let Some(w) = web_sys::window() {
                         w.clear_timeout_with_handle(tid);
                     }
-                }
                 if let Some((cb, win)) = esc_cell_effect.borrow_mut().take() {
                     let _ = win.remove_event_listener_with_callback(
                         "keydown",
@@ -413,11 +406,10 @@ pub fn Popover(
         let click_cell_drop = click_cell;
         let timeout_cell_drop = timeout_cell;
         on_cleanup(move || {
-            if let Some(tid) = timeout_cell_drop.borrow_mut().take() {
-                if let Some(w) = web_sys::window() {
+            if let Some(tid) = timeout_cell_drop.borrow_mut().take()
+                && let Some(w) = web_sys::window() {
                     w.clear_timeout_with_handle(tid);
                 }
-            }
             if let Some((cb, win)) = esc_cell_drop.borrow_mut().take() {
                 let _ = win.remove_event_listener_with_callback(
                     "keydown",

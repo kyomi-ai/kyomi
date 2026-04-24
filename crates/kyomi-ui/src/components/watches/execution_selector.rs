@@ -79,7 +79,7 @@ fn format_date(date_str: &str) -> String {
         };
         let ampm = if hours < 12 { "AM" } else { "PM" };
 
-        return format!("{month} {day}, {hour_12}:{minutes:02} {ampm}");
+        format!("{month} {day}, {hour_12}:{minutes:02} {ampm}")
     }
 
     // Server-side fallback: just return the raw string truncated

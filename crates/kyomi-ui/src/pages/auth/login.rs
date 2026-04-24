@@ -130,11 +130,10 @@ pub fn LoginPage(
         use crate::server_fns::sidebar::get_sidebar_user;
         let redirect_for_check = redirect_url;
         leptos::task::spawn_local(async move {
-            if get_sidebar_user().await.is_ok() {
-                if let Some(window) = web_sys::window() {
+            if get_sidebar_user().await.is_ok()
+                && let Some(window) = web_sys::window() {
                     let _ = window.location().set_href(&redirect_for_check());
                 }
-            }
         });
     }
 

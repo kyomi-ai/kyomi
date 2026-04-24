@@ -214,6 +214,9 @@ async-stripe-types = { version = "1.0.0-rc.1" }
 # TOTP / 2FA
 totp-rs = { version = "5", features = ["otpauth", "gen_secret", "qr"] }
 
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
 # WASM debug builds: disable debug info to keep link input manageable.
 # Without this, 17GB of debug symbols crashes rust-lld.
 [profile.dev]

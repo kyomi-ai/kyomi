@@ -423,11 +423,14 @@ pub fn ChartHeaderBar(
             // ── Right side: type selector + modifier chips + action icons + overflow menu ──
             <div class="flex items-center gap-1 min-w-0">
                 // Type selector
-                {(show_type_selector && ct.get_value().is_some()).then(|| {
-                    let current = ct.get_value().unwrap();
-                    let on_type = on_type_change.unwrap_or(Callback::new(|_| {}));
-                    view! { <ChartTypeSelector current_type=current on_select=on_type /> }
-                })}
+                {if show_type_selector {
+                    ct.get_value().map(|current| {
+                        let on_type = on_type_change.unwrap_or(Callback::new(|_| {}));
+                        view! { <ChartTypeSelector current_type=current on_select=on_type /> }
+                    })
+                } else {
+                    None
+                }}
 
                 // Orientation chip (bar charts)
                 {show_orientation_chip.then(|| {
@@ -478,91 +481,82 @@ pub fn ChartHeaderBar(
                 })}
 
                 // Refresh button
-                {(show_refresh && on_refresh.is_some()).then(|| {
-                    let on_ref = on_refresh.unwrap();
-                    let spin_class = move || {
-                        let spinning = is_refreshing
-                            .map(|s| s.get())
-                            .unwrap_or(false);
-                        if spinning {
-                            "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring animate-spin"
-                        } else {
-                            "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                {if show_refresh {
+                    on_refresh.map(|on_ref| {
+                        let spin_class = move || {
+                            let spinning = is_refreshing
+                                .map(|s| s.get())
+                                .unwrap_or(false);
+                            if spinning {
+                                "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring animate-spin"
+                            } else {
+                                "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            }
+                        };
+                        view! {
+                            <button
+                                class=spin_class
+                                title="Refresh"
+                                on:click=move |_| on_ref.run(())
+                            >
+                                <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px" />
+                            </button>
                         }
-                    };
-                    view! {
-                        <button
-                            class=spin_class
-                            title="Refresh"
-                            on:click=move |_| on_ref.run(())
-                        >
-                            <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="16px" />
-                        </button>
-                    }
-                })}
+                    })
+                } else {
+                    None
+                }}
 
                 // Save to dashboard button — hidden at Narrow tier; available in the kebab.
-                {(show_save_to_dashboard && on_save_to_dashboard.is_some()).then(|| {
-                    let cb = on_save_to_dashboard.unwrap();
-                    view! {
-                        <div class="hidden @xs:flex">
-                            <button
-                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                title="Save to Dashboard"
-                                on:click=move |_| cb.run(())
-                            >
-                                <Icon icon=phosphor_leptos::PLUS_SQUARE size="16px" />
-                            </button>
-                        </div>
-                    }
+                {show_save_to_dashboard.then_some(on_save_to_dashboard).flatten().map(|cb| view! {
+                    <div class="hidden @xs:flex">
+                        <button
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            title="Save to Dashboard"
+                            on:click=move |_| cb.run(())
+                        >
+                            <Icon icon=phosphor_leptos::PLUS_SQUARE size="16px" />
+                        </button>
+                    </div>
                 })}
 
                 // Ask about this chart — hidden at Narrow tier; available in the kebab.
-                {(show_ask_about && on_ask_about.is_some()).then(|| {
-                    let cb = on_ask_about.unwrap();
-                    view! {
-                        <div class="hidden @xs:flex">
-                            <button
-                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                title="Ask about this chart"
-                                on:click=move |_| cb.run(())
-                            >
-                                <Icon icon=phosphor_leptos::CHATS size="16px" />
-                            </button>
-                        </div>
-                    }
+                {show_ask_about.then_some(on_ask_about).flatten().map(|cb| view! {
+                    <div class="hidden @xs:flex">
+                        <button
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            title="Ask about this chart"
+                            on:click=move |_| cb.run(())
+                        >
+                            <Icon icon=phosphor_leptos::CHATS size="16px" />
+                        </button>
+                    </div>
                 })}
 
                 // Info button — hidden at Narrow tier; available in the kebab.
-                {(show_info && on_info.is_some()).then(|| {
-                    let cb = on_info.unwrap();
-                    view! {
-                        <div class="hidden @xs:flex">
-                            <button
-                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                title="Chart Info"
-                                on:click=move |_| cb.run(())
-                            >
-                                <Icon icon=phosphor_leptos::INFO size="16px" />
-                            </button>
-                        </div>
-                    }
+                {show_info.then_some(on_info).flatten().map(|cb| view! {
+                    <div class="hidden @xs:flex">
+                        <button
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            title="Chart Info"
+                            on:click=move |_| cb.run(())
+                        >
+                            <Icon icon=phosphor_leptos::INFO size="16px" />
+                        </button>
+                    </div>
                 })}
 
                 // Edit button — hidden at Narrow tier; available in the kebab.
-                {(show_edit && on_edit.is_some()).then(|| {
-                    let cb = on_edit.unwrap();
-                    view! {
-                        <div class="hidden @xs:flex">
-                            <button
-                                class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                title="Edit Chart"
-                                on:click=move |_| cb.run(())
-                            >
-                                <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px" />
-                            </button>
-                        </div>
-                    }
+                {show_edit.then_some(on_edit).flatten().map(|cb| view! {
+                    <div class="hidden @xs:flex">
+                        <button
+                            class="p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            title="Edit Chart"
+                            on:click=move |_| cb.run(())
+                        >
+                            <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="16px" />
+                        </button>
+                    </div>
                 })}
 
                 // Overflow menu. Holds Delete at every tier (when available) and

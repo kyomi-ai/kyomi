@@ -76,7 +76,7 @@ fn format_date(date_str: &str) -> String {
         };
         let ampm = if hours < 12 { "am" } else { "pm" };
 
-        return format!("{day} {month}, {:02}:{:02} {ampm}", hour_12, minutes);
+        format!("{day} {month}, {:02}:{:02} {ampm}", hour_12, minutes)
     }
 
     // Server-side fallback: use chrono (UTC).
@@ -759,8 +759,7 @@ pub fn WatchesPage() -> impl IntoView {
                 {move || {
                     let show = show_execution_log.get();
                     let wid = viewing_watch_id.get();
-                    (show && wid.is_some()).then(|| {
-                        let watch_id = wid.clone().unwrap();
+                    show.then(|| wid.clone()).flatten().map(|watch_id| {
                         let watch_id_for_prompt = watch_id.clone();
                         let modal_title = watches_resource.get_untracked()
                             .and_then(|r| r.ok())

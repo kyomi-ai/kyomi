@@ -6,6 +6,9 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = []
 # Server-side rendering — includes leptos_axum, accesses DB/services directly

@@ -374,9 +374,9 @@ fn render_query(schema: &Value) -> impl IntoView {
                     let data = out.get("data");
 
                     let has_data = data.is_some() && !col_names.is_empty();
-                    let display_rows = if has_data {
+                    let display_rows = if let Some(d) = data.filter(|_| !col_names.is_empty()) {
                         let max = if truncated { 20.min(rows as usize) } else { rows as usize };
-                        columnar_to_rows(data.unwrap(), &col_names, max)
+                        columnar_to_rows(d, &col_names, max)
                     } else {
                         vec![]
                     };
@@ -514,9 +514,9 @@ fn render_sample(schema: &Value) -> impl IntoView {
                     let col_names = extract_col_names(&cols_val);
                     let data = out.get("data");
                     let has_data = data.is_some() && !col_names.is_empty();
-                    let display_rows = if has_data {
+                    let display_rows = if let Some(d) = data.filter(|_| !col_names.is_empty()) {
                         let max = if truncated { 20.min(rows as usize) } else { rows as usize };
-                        columnar_to_rows(data.unwrap(), &col_names, max)
+                        columnar_to_rows(d, &col_names, max)
                     } else {
                         vec![]
                     };

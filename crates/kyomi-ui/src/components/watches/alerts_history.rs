@@ -222,7 +222,7 @@ fn format_date(date_str: &str) -> String {
         };
         let ampm = if hours < 12 { "am" } else { "pm" };
 
-        return format!("{day} {month} {year}, {:02}:{:02} {ampm}", hour_12, minutes);
+        format!("{day} {month} {year}, {:02}:{:02} {ampm}", hour_12, minutes)
     }
 
     // Server-side fallback: use chrono for best-effort formatting (UTC).

@@ -220,7 +220,7 @@ pub fn Layout(children: Children) -> impl IntoView {
         {
             let window = web_sys::window().expect("window");
             let cb = Closure::<dyn Fn()>::new(move || {
-                let w = web_sys::window().unwrap();
+                let Some(w) = web_sys::window() else { return };
                 let width = w
                     .inner_width()
                     .ok()

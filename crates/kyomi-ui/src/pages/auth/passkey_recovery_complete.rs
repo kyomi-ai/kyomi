@@ -147,18 +147,19 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
                     #[cfg(target_arch = "wasm32")]
                     {
                         use wasm_bindgen::prelude::*;
-                        let window = web_sys::window().unwrap();
-                        let closure = Closure::once(move || {
-                            if let Some(window) = web_sys::window() {
-                                let _ = window.location().set_href("/");
-                            }
-                        });
-                        let _ = window
-                            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                closure.as_ref().unchecked_ref(),
-                                2000,
-                            );
-                        closure.forget();
+                        if let Some(window) = web_sys::window() {
+                            let closure = Closure::once(move || {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href("/");
+                                }
+                            });
+                            let _ = window
+                                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                                    closure.as_ref().unchecked_ref(),
+                                    2000,
+                                );
+                            closure.forget();
+                        }
                     }
                 }
                 Ok(other) => {

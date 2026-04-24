@@ -223,14 +223,8 @@ pub fn ResultsTable(
 
             // Shared storage for both closures — the up_handler takes
             // ownership and drops them when the mouseup fires.
-            let closures: Rc<
-                RefCell<
-                    Option<(
-                        Closure<dyn FnMut(web_sys::MouseEvent)>,
-                        Closure<dyn FnMut()>,
-                    )>,
-                >,
-            > = Rc::new(RefCell::new(None));
+            type ColResizeClosures = Rc<RefCell<Option<(Closure<dyn FnMut(web_sys::MouseEvent)>, Closure<dyn FnMut()>)>>>;
+            let closures: ColResizeClosures = Rc::new(RefCell::new(None));
 
             let move_handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
                 move |ev: web_sys::MouseEvent| {

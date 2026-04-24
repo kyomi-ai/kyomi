@@ -238,8 +238,8 @@ pub fn ChatsListPage() -> impl IntoView {
         if let Some(ws_ctx) = use_context::<WebSocketContext>() {
             let unsub = ws_ctx.subscribe("shared_conversation_activity", move |msg| {
                 set_sessions.update(|sessions| {
-                    if let Some(session_id) = &msg.session_id {
-                        if let Some(session) = sessions
+                    if let Some(session_id) = &msg.session_id
+                        && let Some(session) = sessions
                             .iter_mut()
                             .find(|s| s.session_id == *session_id)
                         {
@@ -248,7 +248,6 @@ pub fn ChatsListPage() -> impl IntoView {
                             }
                             session.unread_count += 1;
                         }
-                    }
                     // Re-sort by updated_at (most recent first)
                     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 });
@@ -276,16 +275,14 @@ pub fn ChatsListPage() -> impl IntoView {
 
             let cb = Closure::<dyn Fn(web_sys::CustomEvent)>::new(move |event: web_sys::CustomEvent| {
                 // Parse the detail
-                if let Ok(detail) = js_sys::Reflect::get(&event.detail(), &"source".into()) {
-                    if let Some(source) = detail.as_string() {
-                        if source == "chatsList" {
+                if let Ok(detail) = js_sys::Reflect::get(&event.detail(), &"source".into())
+                    && let Some(source) = detail.as_string()
+                        && source == "chatsList" {
                             return; // Ignore our own events
                         }
-                    }
-                }
 
-                if let Ok(ids_val) = js_sys::Reflect::get(&event.detail(), &"sessionIds".into()) {
-                    if let Some(ids_array) = ids_val.dyn_ref::<js_sys::Array>() {
+                if let Ok(ids_val) = js_sys::Reflect::get(&event.detail(), &"sessionIds".into())
+                    && let Some(ids_array) = ids_val.dyn_ref::<js_sys::Array>() {
                         let deleted_ids: Vec<String> = ids_array
                             .iter()
                             .filter_map(|v| v.as_string())
@@ -300,7 +297,6 @@ pub fn ChatsListPage() -> impl IntoView {
                             });
                         }
                     }
-                }
             });
 
             let _ = window.add_event_listener_with_callback(

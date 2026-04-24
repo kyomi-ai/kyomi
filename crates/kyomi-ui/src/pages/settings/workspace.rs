@@ -143,8 +143,8 @@ fn WorkspaceSlackCard() -> impl IntoView {
     // Check URL params for OAuth callback result
     #[cfg(target_arch = "wasm32")]
     {
-        if let Some(window) = web_sys::window() {
-            if let Ok(search) = window.location().search() {
+        if let Some(window) = web_sys::window()
+            && let Ok(search) = window.location().search() {
                 if search.contains("slack=installed") {
                     set_slack_success.set(Some("Kyomi has been added to your Slack workspace!".to_string()));
                     // Clear URL param
@@ -160,7 +160,6 @@ fn WorkspaceSlackCard() -> impl IntoView {
                     });
                 }
             }
-        }
     }
 
     let handle_install = move |_| {

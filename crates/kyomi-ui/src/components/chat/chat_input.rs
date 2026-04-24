@@ -81,23 +81,21 @@ pub fn ChatInput(
         // Reset textarea height and refocus
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(guard) = textarea_ref.try_read_untracked() {
-                if let Some(el) = guard.as_ref() {
+            if let Some(guard) = textarea_ref.try_read_untracked()
+                && let Some(el) = guard.as_ref() {
                     use wasm_bindgen::JsCast;
                     if let Some(textarea) = el.dyn_ref::<web_sys::HtmlTextAreaElement>() {
                         web_sys::HtmlElement::style(textarea).set_property("height", "auto").ok();
                     }
                 }
-            }
             // Refocus after clearing — use try_read_untracked so we don't panic if
             // ChatInput was unmounted (e.g., Show condition changed) before the
             // animation frame fires.
             request_animation_frame(move || {
-                if let Some(guard) = textarea_ref.try_read_untracked() {
-                    if let Some(el) = guard.as_ref() {
+                if let Some(guard) = textarea_ref.try_read_untracked()
+                    && let Some(el) = guard.as_ref() {
                         el.focus().ok();
                     }
-                }
             });
         }
     };
@@ -107,8 +105,8 @@ pub fn ChatInput(
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;
-            if let Some(target) = ev.target() {
-                if let Some(textarea) = target.dyn_ref::<web_sys::HtmlTextAreaElement>() {
+            if let Some(target) = ev.target()
+                && let Some(textarea) = target.dyn_ref::<web_sys::HtmlTextAreaElement>() {
                     set_input_value.set(textarea.value());
                     // Auto-expand: reset height then set to scrollHeight (capped)
                     web_sys::HtmlElement::style(textarea).set_property("height", "auto").ok();
@@ -118,7 +116,6 @@ pub fn ChatInput(
                         .set_property("height", &format!("{}px", capped))
                         .ok();
                 }
-            }
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -141,15 +138,13 @@ pub fn ChatInput(
     // the timeout fires — e.g., when a Show condition changes within 100ms of mount.
     #[cfg(target_arch = "wasm32")]
     {
-        let textarea_ref = textarea_ref;
         Effect::new(move |_| {
             let textarea_ref = textarea_ref;
             gloo_timers::callback::Timeout::new(100, move || {
-                if let Some(guard) = textarea_ref.try_read_untracked() {
-                    if let Some(el) = guard.as_ref() {
+                if let Some(guard) = textarea_ref.try_read_untracked()
+                    && let Some(el) = guard.as_ref() {
                         el.focus().ok();
                     }
-                }
             })
             .forget();
         });

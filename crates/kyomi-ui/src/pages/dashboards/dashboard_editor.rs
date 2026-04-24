@@ -440,7 +440,7 @@ fn DashboardEditorInner(
         use wasm_bindgen::prelude::*;
         use wasm_bindgen::closure::Closure;
 
-        let trigger_save_kb = trigger_save.clone();
+        let trigger_save_kb = trigger_save;
 
         let handler = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(
             move |ev: web_sys::KeyboardEvent| {
@@ -464,14 +464,13 @@ fn DashboardEditorInner(
 
         on_cleanup(move || {
             handler_stored.update_value(|h| {
-                if let Some(cb) = h.take() {
-                    if let Some(window) = web_sys::window() {
+                if let Some(cb) = h.take()
+                    && let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "keydown",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
-                }
             });
         });
     }
@@ -503,14 +502,13 @@ fn DashboardEditorInner(
 
         on_cleanup(move || {
             handler_stored.update_value(|h| {
-                if let Some(cb) = h.take() {
-                    if let Some(window) = web_sys::window() {
+                if let Some(cb) = h.take()
+                    && let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "beforeunload",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
-                }
             });
         });
     }
@@ -542,14 +540,13 @@ fn DashboardEditorInner(
 
         on_cleanup(move || {
             handler_stored.update_value(|h| {
-                if let Some(cb) = h.take() {
-                    if let Some(window) = web_sys::window() {
+                if let Some(cb) = h.take()
+                    && let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "chart-info-request",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
-                }
             });
         });
     }
@@ -612,14 +609,13 @@ fn DashboardEditorInner(
 
         on_cleanup(move || {
             handler_stored.update_value(|h| {
-                if let Some(cb) = h.take() {
-                    if let Some(window) = web_sys::window() {
+                if let Some(cb) = h.take()
+                    && let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "chart-edit-request",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
-                }
             });
         });
     }

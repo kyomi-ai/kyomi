@@ -151,13 +151,12 @@ pub fn extract_browser(ua: &str) -> String {
         return format!("Firefox {}", &version[..end]);
     }
     // Safari
-    if ua.contains("Safari") {
-        if let Some(pos) = ua.find("Version/") {
+    if ua.contains("Safari")
+        && let Some(pos) = ua.find("Version/") {
             let version = &ua[pos + 8..];
             let end = version.find(' ').unwrap_or(version.len());
             return format!("Safari {}", &version[..end]);
         }
-    }
     "Unknown Browser".to_string()
 }
 

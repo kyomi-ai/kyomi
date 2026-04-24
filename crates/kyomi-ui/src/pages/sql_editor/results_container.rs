@@ -69,7 +69,6 @@ pub fn ResultsContainer(
     // server. Without this effect they show a spinner forever.
     #[cfg(target_arch = "wasm32")]
     {
-        let state = state;
         Effect::new(move |_| {
             let Some(tab) = active_tab.get() else { return };
             if !tab.needs_refresh { return; }

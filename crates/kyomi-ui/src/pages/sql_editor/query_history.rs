@@ -134,15 +134,13 @@ pub fn QueryHistory(
 
             let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
                 if let Some(entry) = entries.get(0).dyn_ref::<web_sys::IntersectionObserverEntry>()
-                {
-                    if entry.is_intersecting()
+                    && entry.is_intersecting()
                         && has_more.get_untracked()
                         && !loading_more.get_untracked()
                         && !loading.get_untracked()
                     {
                         load_history(false);
                     }
-                }
             });
 
             let options = web_sys::IntersectionObserverInit::new();

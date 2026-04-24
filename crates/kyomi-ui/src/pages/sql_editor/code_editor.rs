@@ -28,9 +28,6 @@ use super::status_bar::{DryRunStatus, StatusBar};
 // ─── Kyomi editor themes ────────────────────────────────────────────────────
 
 /// Apply Kyomi design system overrides to a kode theme.
-/// Uses CSS custom properties from the active design system so the editor
-/// automatically adapts when colors change. Only `selection`, `current_line`,
-/// and `syntax` differ between dark/light.
 /// Sets CSS custom property references for colors, typography, toolbar, and headings.
 #[cfg(target_arch = "wasm32")]
 fn apply_kyomi_overrides(theme: &mut kode_leptos::Theme) {
@@ -294,7 +291,7 @@ fn use_run_shortcut(on_run: Option<Callback<()>>, query_text: Signal<String>) {
         let Some(window) = web_sys::window() else { return };
         let Some(document) = window.document() else { return };
 
-        let query_text = query_text.clone();
+        let query_text = query_text;
         let closure = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
             let is_meta = ev.meta_key() || ev.ctrl_key();
             if is_meta && ev.key() == "Enter" {

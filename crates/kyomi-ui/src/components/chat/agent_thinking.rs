@@ -178,8 +178,7 @@ pub fn AgentThinking(
     {
         use send_wrapper::SendWrapper;
 
-        let is_active = is_active;
-        let set_elapsed_time = set_elapsed_time;
+        // `is_active` and `set_elapsed_time` are captured by the closure below.
 
         // Store interval handle in a signal so we can clean up
         let interval_handle: StoredValue<Option<SendWrapper<gloo_timers::callback::Interval>>> =
@@ -215,7 +214,6 @@ pub fn AgentThinking(
     // so the scroll-on-mount behavior is sufficient in practice.
     #[cfg(target_arch = "wasm32")]
     {
-        let is_expanded = is_expanded;
         let events_len = thinking_events.len();
 
         Effect::new(move |_| {
@@ -224,11 +222,10 @@ pub fn AgentThinking(
                 // Using scrollIntoView on the sentinel would scroll the entire
                 // page, which is jarring. Instead, set scrollTop on the
                 // overflow container directly.
-                if let Some(guard) = scroll_container_ref.try_read_untracked() {
-                    if let Some(el) = guard.as_ref() {
+                if let Some(guard) = scroll_container_ref.try_read_untracked()
+                    && let Some(el) = guard.as_ref() {
                         el.set_scroll_top(el.scroll_height());
                     }
-                }
             }
         });
     }
