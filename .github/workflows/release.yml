@@ -72,7 +72,9 @@ jobs:
 
       # Same local-dev [patch.crates-io] strip as ci.yml / apps/server/Dockerfile.
       - name: Strip local-dev patch.crates-io block
-        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+        run: |
+          sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+          sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
 
       - name: Install brotli (Trunk post_build hook dependency)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli

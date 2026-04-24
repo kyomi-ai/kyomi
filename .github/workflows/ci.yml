@@ -88,6 +88,10 @@ jobs:
           chmod +x tailwindcss-linux-x64
           sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
 
+      - name: Strip local-dev patches from MCP chart app
+        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+
+
       - name: Build MCP chart app WASM (required by kyomi-server include_str!)
         working-directory: apps/mcp-chart-app-wasm
         run: bash build.sh
