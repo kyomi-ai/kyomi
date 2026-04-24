@@ -41,7 +41,7 @@ jobs:
   # Extract version from tag
   # ---------------------------------------------------------------------------
   prepare:
-    runs-on: self-hosted
+    runs-on: kyomi-ci
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -55,26 +55,10 @@ jobs:
   # builds the linux/amd64 image. arm64 deferred (QEMU + cargo is too slow).
   docker:
     needs: [prepare]
-    runs-on: self-hosted
+    runs-on: kyomi-build
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      # Delete package-lock.json before install — npm has a known bug with
-      # platform-specific optional deps (rollup) when the lock was generated
-      # on a different platform. A fresh resolve dodges it.
-      - name: Build MCP chart app
-        working-directory: apps/mcp-chart-app
-        run: |
-          rm -f package-lock.json
-          npm install
-          npm run build
-          cp dist/mcp-app.html chart_app.html
 
       - name: Install Rust stable + wasm target
         uses: dtolnay/rust-toolchain@stable
@@ -122,6 +106,10 @@ jobs:
         working-directory: crates/kyomi-ui
         run: trunk build --release
 
+      - name: Build MCP chart app WASM
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
@@ -146,7 +134,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     needs: [prepare, docker]
-    runs-on: self-hosted
+    runs-on: kyomi-ci
     steps:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

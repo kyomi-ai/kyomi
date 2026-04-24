@@ -1,0 +1,52 @@
+# Runner Scale Set: kyomi-build
+# Release build runners with Docker-in-Docker for building + pushing images.
+#
+# Install:
+#   helm install kyomi-build \
+#     --namespace arc-runners --create-namespace \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     -f kyomi-build.yaml
+
+githubConfigUrl: "https://github.com/kyomi-ai"
+
+minRunners: 0
+maxRunners: 2
+
+runnerGroup: "default"
+runnerScaleSetName: "kyomi-build"
+
+# Docker-in-Docker mode — runs a Docker daemon sidecar so the runner
+# can use `docker build`, `docker push`, and buildx.
+containerMode:
+  type: "dind"
+
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        resources:
+          limits:
+            cpu: "14"
+            memory: 24Gi
+          requests:
+            cpu: "2"
+            memory: 4Gi
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+      - name: dind
+        image: docker:dind
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+          - name: dind-storage
+            mountPath: /var/lib/docker
+    volumes:
+      - name: work
+        emptyDir: {}
+      - name: dind-storage
+        emptyDir: {}

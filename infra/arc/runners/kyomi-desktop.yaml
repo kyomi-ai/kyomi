@@ -1,0 +1,40 @@
+# Runner Scale Set: kyomi-desktop
+# Ubuntu 22.04 runners with Tauri system dependencies pre-installed.
+# Used for building .deb and .AppImage desktop packages.
+#
+# Requires the custom image built from images/desktop-runner/Dockerfile
+# and pushed to the local registry at 192.168.1.100:6145.
+#
+# Install:
+#   helm install kyomi-desktop \
+#     --namespace arc-runners --create-namespace \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     -f kyomi-desktop.yaml
+
+githubConfigUrl: "https://github.com/kyomi-ai"
+
+minRunners: 0
+maxRunners: 1
+
+runnerGroup: "default"
+runnerScaleSetName: "kyomi-desktop"
+
+template:
+  spec:
+    containers:
+      - name: runner
+        image: 192.168.1.100:6145/arc-runner-desktop:22.04
+        command: ["/home/runner/run.sh"]
+        resources:
+          limits:
+            cpu: "14"
+            memory: 24Gi
+          requests:
+            cpu: "2"
+            memory: 4Gi
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+    volumes:
+      - name: work
+        emptyDir: {}

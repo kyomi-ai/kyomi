@@ -1,0 +1,42 @@
+# Runner Scale Set: kyomi-ci
+# General CI runners for clippy, lint, tests.
+# No Docker needed — pure Rust/Node compilation.
+#
+# Install:
+#   helm install kyomi-ci \
+#     --namespace arc-runners --create-namespace \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     -f kyomi-ci.yaml
+
+githubConfigUrl: "https://github.com/kyomi-ai"
+
+# Min/max runners. ARC auto-scales within this range based on queued jobs.
+minRunners: 0
+maxRunners: 4
+
+# Runner group (default is fine for org-level)
+runnerGroup: "default"
+
+# The workflow label that triggers this scale set
+runnerScaleSetName: "kyomi-ci"
+
+# Use the GitHub-provided runner image
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        resources:
+          limits:
+            cpu: "14"
+            memory: 24Gi
+          requests:
+            cpu: "2"
+            memory: 4Gi
+        volumeMounts:
+          - name: work
+            mountPath: /home/runner/_work
+    volumes:
+      - name: work
+        emptyDir: {}

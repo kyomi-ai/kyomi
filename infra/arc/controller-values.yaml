@@ -1,0 +1,25 @@
+# Actions Runner Controller (ARC) v2 — Controller Helm values
+# Installed once per cluster. Manages all runner scale sets.
+#
+# Install:
+#   helm install arc \
+#     --namespace arc-systems --create-namespace \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
+#     -f controller-values.yaml
+
+replicaCount: 1
+
+# Log level: debug, info, warn, error
+logLevel: info
+
+# Controller listens for RunnerScaleSet CRs in all namespaces
+watchSingleNamespace: ""
+
+# Resource limits — single-node cluster, keep it lean
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
