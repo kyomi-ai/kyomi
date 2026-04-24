@@ -9,12 +9,12 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-chartml-core = { path = "../../../chartml-rs/crates/chartml-core" }
-chartml-chart-cartesian = { path = "../../../chartml-rs/crates/chartml-chart-cartesian" }
-chartml-chart-pie = { path = "../../../chartml-rs/crates/chartml-chart-pie" }
-chartml-chart-scatter = { path = "../../../chartml-rs/crates/chartml-chart-scatter" }
-chartml-chart-metric = { path = "../../../chartml-rs/crates/chartml-chart-metric" }
-chartml-leptos = { path = "../../../chartml-rs/crates/chartml-leptos" }
+chartml-core = { path = "../../../chartml/crates/chartml-core" }
+chartml-chart-cartesian = { path = "../../../chartml/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "../../../chartml/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "../../../chartml/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "../../../chartml/crates/chartml-chart-metric" }
+chartml-leptos = { path = "../../../chartml/crates/chartml-leptos" }
 # No chartml-datafusion — MCP app receives pre-resolved data, no transforms needed
 
 kyomi-ui-components = { path = "../../crates/kyomi-ui-components" }
