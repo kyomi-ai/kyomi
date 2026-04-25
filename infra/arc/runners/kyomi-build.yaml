@@ -26,6 +26,9 @@ template:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
         command: ["/home/runner/run.sh"]
+        env:
+          - name: CARGO_HOME
+            value: /opt/cargo-cache
         resources:
           limits:
             cpu: "14"
@@ -36,6 +39,8 @@ template:
         volumeMounts:
           - name: work
             mountPath: /home/runner/_work
+          - name: cargo-cache
+            mountPath: /opt/cargo-cache
       - name: dind
         image: docker:dind
         securityContext:
@@ -50,3 +55,7 @@ template:
         emptyDir: {}
       - name: dind-storage
         emptyDir: {}
+      - name: cargo-cache
+        hostPath:
+          path: /opt/kyomi-ci/cargo-cache
+          type: DirectoryOrCreate

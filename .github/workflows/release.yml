@@ -65,10 +65,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
       # Same local-dev [patch.crates-io] strip as ci.yml / apps/server/Dockerfile.
       - name: Strip local-dev patch.crates-io block

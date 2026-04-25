@@ -37,7 +37,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
       - name: Strip local-dev patch.crates-io block
         run: |
