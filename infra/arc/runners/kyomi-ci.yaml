@@ -24,6 +24,13 @@ runnerScaleSetName: "kyomi-ci"
 # Use the GitHub-provided runner image
 template:
   spec:
+    initContainers:
+      - name: fix-cargo-cache-perms
+        image: busybox
+        command: ["sh", "-c", "chown -R 1001:1001 /opt/cargo-cache"]
+        volumeMounts:
+          - name: cargo-cache
+            mountPath: /opt/cargo-cache
     containers:
       - name: runner
         image: ghcr.io/actions/actions-runner:latest
