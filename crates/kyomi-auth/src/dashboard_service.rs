@@ -1023,28 +1023,15 @@ pub async fn create_version(
     change_summary: Option<&str>,
 ) -> Result<i32> {
     // Get next version number
-    // MAX() returns NULL when no rows exist — use Option<Option<i32>> to handle:
-    // fetch_optional returns None (no rows) or Some(None) (row with NULL MAX)
-    let max_version: Option<i32> = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            sqlx::query_scalar::<_, Option<i32>>(
-                "SELECT MAX(version_number) FROM dashboard_versions WHERE dashboard_id = $1",
-            )
-            .bind(dashboard_id)
-            .fetch_optional(pg)
-            .await
-            .map(|opt| opt.flatten())
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            sqlx::query_scalar::<_, Option<i32>>(
-                "SELECT MAX(version_number) FROM dashboard_versions WHERE dashboard_id = $1",
-            )
-            .bind(dashboard_id)
-            .fetch_optional(sq)
-            .await
-            .map(|opt| opt.flatten())
-        }
-    }
+    // MAX() is an aggregate that always returns exactly one row (NULL when no rows exist).
+    // db_fetch_scalar! uses fetch_one, which is correct here — SELECT MAX(...) never
+    // returns zero rows, so fetch_one returns Ok(None) rather than Err(RowNotFound).
+    let max_version: Option<i32> = db_fetch_scalar!(
+        db,
+        Option<i32>,
+        "SELECT MAX(version_number) FROM dashboard_versions WHERE dashboard_id = $1",
+        dashboard_id
+    )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to get max version: {e}")))?;
 
     let max_version = max_version.unwrap_or(0);

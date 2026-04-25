@@ -107,47 +107,10 @@ pub async fn list_query_history(
 
     let search_pattern = search.map(|s| format!("%{s}%"));
 
-    // Use match db blocks for dynamic queries
     let rows: Vec<QueryHistoryRow> = if let Some(ref pattern) = search_pattern {
-        match db {
-            kyomi_core::db::DbPool::Postgres(pg) =>
-                sqlx::query_as::<_, QueryHistoryRow>(&sql)
-                    .bind(workspace_id)
-                    .bind(user_id)
-                    .bind(pattern)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(pg)
-                    .await?,
-            kyomi_core::db::DbPool::Sqlite(sq) =>
-                sqlx::query_as::<_, QueryHistoryRow>(&sql)
-                    .bind(workspace_id)
-                    .bind(user_id)
-                    .bind(pattern)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(sq)
-                    .await?,
-        }
+        kyomi_core::db_fetch_all!(db, QueryHistoryRow, &sql, workspace_id, user_id, pattern, limit, offset)?
     } else {
-        match db {
-            kyomi_core::db::DbPool::Postgres(pg) =>
-                sqlx::query_as::<_, QueryHistoryRow>(&sql)
-                    .bind(workspace_id)
-                    .bind(user_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(pg)
-                    .await?,
-            kyomi_core::db::DbPool::Sqlite(sq) =>
-                sqlx::query_as::<_, QueryHistoryRow>(&sql)
-                    .bind(workspace_id)
-                    .bind(user_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(sq)
-                    .await?,
-        }
+        kyomi_core::db_fetch_all!(db, QueryHistoryRow, &sql, workspace_id, user_id, limit, offset)?
     };
 
     Ok(rows
