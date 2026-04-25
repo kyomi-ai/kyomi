@@ -187,6 +187,10 @@ pub fn ChatPage() -> impl IntoView {
             .map(|s| s.to_string())
     });
 
+    let is_on_chat_route = Memo::new(move |_| {
+        location.pathname.get().starts_with("/chat")
+    });
+
     // ── User context (for ownership checks, multi_user_enabled, personal mode) ──
     // Provided by the parent Layout as a LocalResource — one fetch per session,
     // no skeleton flash on navigation into /chat. LocalResource is required
@@ -391,6 +395,9 @@ pub fn ChatPage() -> impl IntoView {
             }
             // URL has no session ID but we have a current session — clear state (new chat)
             (None, Some(_)) => {
+                if !location.pathname.get_untracked().starts_with("/chat") {
+                    return;
+                }
                 just_created_session.set(None);
                 set_current_session_id.set(None);
                 engine_for_load.reset();
@@ -1574,7 +1581,7 @@ pub fn ChatPage() -> impl IntoView {
                                             </div>
                                         </div>
                                     }.into_any()
-                                } else if msgs.is_empty() {
+                                } else if msgs.is_empty() && is_on_chat_route.get() {
                                     // New chat — greeting + inline input (vertically centered)
                                     // Matches React: new chat greeting (Chat.jsx lines 1624-1689)
                                     // React renders the input INSIDE the centered greeting area, NOT
