@@ -369,7 +369,7 @@ pub async fn resolve_credentials(
                         "No credentials found for this datasource".into(),
                     )
                 })?;
-        let decrypted = kyomi_auth::credential_service::decrypt_credentials(
+        let decrypted = kyomi_auth::encryption::decrypt_json(
             &cred.credentials,
             &ctx.encryption_key,
         )?;

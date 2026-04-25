@@ -560,7 +560,7 @@ pub async fn test_existing_datasource(
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let credentials = if let Some(ref cred) = user_cred {
-        kyomi_auth::credential_service::decrypt_credentials(&cred.credentials, encryption_key)
+        kyomi_auth::encryption::decrypt_json(&cred.credentials, encryption_key)
             .unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -659,7 +659,7 @@ pub async fn discover_datasource_resources(
                 .await
                 {
                     Ok(Some(cred)) => {
-                        kyomi_auth::credential_service::decrypt_credentials(
+                        kyomi_auth::encryption::decrypt_json(
                             &cred.credentials,
                             encryption_key,
                         )
@@ -1108,7 +1108,7 @@ pub(crate) async fn create_query_provider(
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
             let credentials = if let Some(ref cred) = user_cred {
-                kyomi_auth::credential_service::decrypt_credentials(
+                kyomi_auth::encryption::decrypt_json(
                     &cred.credentials,
                     encryption_key,
                 )

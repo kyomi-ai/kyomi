@@ -15,7 +15,7 @@ use kyomi_core::datasource_registry::{self, AuthModeConfig};
 use kyomi_core::models::datasource::{UserDatasourceCredential, UserDatasourcePreference};
 use serde_json::Value;
 
-use crate::credential_service;
+use crate::encryption;
 
 // ---------------------------------------------------------------------------
 // Result type for credential status
@@ -403,7 +403,7 @@ fn check_oauth_token_status_from_credential(
     encryption_key: &[u8; 32],
 ) -> String {
     // Decrypt credentials
-    let credentials = match credential_service::decrypt_credentials(&cred.credentials, encryption_key) {
+    let credentials = match encryption::decrypt_json(&cred.credentials, encryption_key) {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!("Failed to decrypt credentials for datasource_config_id={}: {e}", cred.datasource_config_id);

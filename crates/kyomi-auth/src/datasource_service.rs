@@ -21,7 +21,7 @@ use kyomi_core::DbPool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::credential_service;
+use crate::{credential_service, encryption};
 
 // ---------------------------------------------------------------------------
 // ID / Slug generation
@@ -666,7 +666,7 @@ pub fn merge_credentials(
     };
 
     // Decrypt existing credentials
-    let existing = credential_service::decrypt_credentials(encrypted, encryption_key)?;
+    let existing = encryption::decrypt_json(encrypted, encryption_key)?;
 
     let Some(existing_obj) = existing.as_object() else {
         // If existing is not an object, just use new
@@ -715,7 +715,7 @@ pub async fn save_user_credential(
     )?;
 
     // Encrypt the merged credentials
-    let encrypted = credential_service::encrypt_credentials(&merged, encryption_key)?;
+    let encrypted = encryption::encrypt_json(&merged, encryption_key)?;
 
     let is_pg = pool.is_postgres();
 
@@ -863,7 +863,7 @@ pub async fn get_decrypted_user_credentials(
 ) -> kyomi_core::Result<(Option<UserDatasourceCredential>, Value)> {
     let user_cred = get_user_credential(pool, user_id, datasource_config_id).await?;
     let credentials = if let Some(ref cred) = user_cred {
-        credential_service::decrypt_credentials(&cred.credentials, encryption_key)
+        encryption::decrypt_json(&cred.credentials, encryption_key)
             .unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -1237,7 +1237,7 @@ pub async fn get_datasource_settings_detail(
 
     let user_settings = match &user_cred {
         Some(cred) => {
-            credential_service::decrypt_credentials(&cred.credentials, encryption_key)
+            encryption::decrypt_json(&cred.credentials, encryption_key)
                 .unwrap_or(serde_json::json!({}))
         }
         None => serde_json::json!({}),
@@ -1443,7 +1443,7 @@ mod tests {
             "oauth_refresh_token": "ref-xyz",
             "oauth_token_expiry": "2025-01-01T00:00:00Z"
         });
-        let encrypted = credential_service::encrypt_credentials(&existing, &key).unwrap();
+        let encrypted = encryption::encrypt_json(&existing, &key).unwrap();
 
         // New credentials try to update billing_project but also include empty OAuth fields
         let new_creds = json!({
@@ -1471,7 +1471,7 @@ mod tests {
             "oauth_access_token": "existing-token",
             "billing_project": "old"
         });
-        let encrypted = credential_service::encrypt_credentials(&existing, &key).unwrap();
+        let encrypted = encryption::encrypt_json(&existing, &key).unwrap();
 
         // Attempt to overwrite OAuth token via new credentials
         let new_creds = json!({

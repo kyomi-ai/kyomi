@@ -24,8 +24,8 @@ use axum::{
 use serde::Deserialize;
 
 use kyomi_auth::{
-    credential_service,
     datasource_oauth::{self, OAuthProvider, ProviderConfig},
+    encryption,
     middleware::AuthUser,
     rate_limiter,
     redis_ops,
@@ -347,7 +347,7 @@ async fn handle_callback(
     });
 
     // Encrypt credentials
-    let encrypted = credential_service::encrypt_credentials(
+    let encrypted = encryption::encrypt_json(
         &oauth_credentials,
         &state.encryption_key,
     )?;
@@ -509,7 +509,7 @@ async fn status(
     };
 
     // Decrypt credentials to check token status
-    let credentials = credential_service::decrypt_credentials(
+    let credentials = encryption::decrypt_json(
         &cred.credentials,
         &state.encryption_key,
     )?;

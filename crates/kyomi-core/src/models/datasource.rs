@@ -90,7 +90,7 @@ pub struct UserDatasourceCredential {
     pub workspace_id: String,
 
     /// Encrypted credentials (AES-256-GCM base64url-encoded text).
-    /// Decrypt with `kyomi_auth::credential_service::decrypt_credentials`.
+    /// Decrypt with `kyomi_auth::encryption::decrypt_json`.
     pub credentials: String,
 
     /// Whether this credential is enabled for the user.

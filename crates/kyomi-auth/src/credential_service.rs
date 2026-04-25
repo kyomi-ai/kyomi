@@ -1,41 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Credential encryption, decryption, and masking helpers.
-//!
-//! Thin wrappers around `encryption::encrypt` / `encryption::decrypt` that
-//! operate on `serde_json::Value` (the application-level credential format)
-//! rather than raw strings.
+//! Credential masking helpers.
 //!
 //! Masking functions use the datasource type registry to determine which
 //! fields are sensitive and should be replaced with `MASKED_VALUE`.
+//!
+//! For encrypting/decrypting credentials use `encryption::encrypt_json` /
+//! `encryption::decrypt_json` directly.
 
 use kyomi_core::datasource_registry;
 use serde_json::Value;
 
-use crate::encryption;
-
 /// The placeholder string that replaces sensitive fields in API responses.
 pub const MASKED_VALUE: &str = "********";
-
-/// Encrypt a `serde_json::Value` to a base64url string for storage.
-///
-/// Serialises the JSON to a compact string, then encrypts with AES-256-GCM.
-/// The result can be stored directly in the `user_datasource_credentials.credentials`
-/// TEXT column.
-pub fn encrypt_credentials(value: &Value, key: &[u8; 32]) -> kyomi_core::Result<String> {
-    let json_str = serde_json::to_string(value)?;
-    encryption::encrypt(&json_str, key)
-}
-
-/// Decrypt a stored credential string back to `serde_json::Value`.
-///
-/// Reverses [`encrypt_credentials`]: decrypts the base64url AES-256-GCM
-/// ciphertext, then parses the resulting JSON string.
-pub fn decrypt_credentials(encrypted: &str, key: &[u8; 32]) -> kyomi_core::Result<Value> {
-    let json_str = encryption::decrypt(encrypted, key)?;
-    let value: Value = serde_json::from_str(&json_str)?;
-    Ok(value)
-}
 
 /// Mask sensitive credential fields for API responses.
 ///
@@ -117,6 +94,7 @@ fn mask_field_if_present(obj: &mut serde_json::Map<String, Value>, field: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encryption;
     use serde_json::json;
 
     fn test_key() -> [u8; 32] {
@@ -133,8 +111,8 @@ mod tests {
         let key = test_key();
         let creds = json!({"username": "admin", "password": "secret123"});
 
-        let encrypted = encrypt_credentials(&creds, &key).unwrap();
-        let decrypted = decrypt_credentials(&encrypted, &key).unwrap();
+        let encrypted = encryption::encrypt_json(&creds, &key).unwrap();
+        let decrypted = encryption::decrypt_json(&encrypted, &key).unwrap();
 
         assert_eq!(decrypted, creds);
     }
@@ -151,8 +129,8 @@ mod tests {
             }
         });
 
-        let encrypted = encrypt_credentials(&creds, &key).unwrap();
-        let decrypted = decrypt_credentials(&encrypted, &key).unwrap();
+        let encrypted = encryption::encrypt_json(&creds, &key).unwrap();
+        let decrypted = encryption::decrypt_json(&encrypted, &key).unwrap();
 
         assert_eq!(decrypted, creds);
     }
@@ -162,8 +140,8 @@ mod tests {
         let key = test_key();
         let creds = json!({});
 
-        let encrypted = encrypt_credentials(&creds, &key).unwrap();
-        let decrypted = decrypt_credentials(&encrypted, &key).unwrap();
+        let encrypted = encryption::encrypt_json(&creds, &key).unwrap();
+        let decrypted = encryption::decrypt_json(&encrypted, &key).unwrap();
 
         assert_eq!(decrypted, creds);
     }
@@ -173,15 +151,15 @@ mod tests {
         let key = test_key();
         let creds = json!({"password": "same"});
 
-        let enc1 = encrypt_credentials(&creds, &key).unwrap();
-        let enc2 = encrypt_credentials(&creds, &key).unwrap();
+        let enc1 = encryption::encrypt_json(&creds, &key).unwrap();
+        let enc2 = encryption::encrypt_json(&creds, &key).unwrap();
 
         assert_ne!(enc1, enc2, "different nonces should produce different ciphertext");
 
         // Both decrypt to the same value
         assert_eq!(
-            decrypt_credentials(&enc1, &key).unwrap(),
-            decrypt_credentials(&enc2, &key).unwrap()
+            encryption::decrypt_json(&enc1, &key).unwrap(),
+            encryption::decrypt_json(&enc2, &key).unwrap()
         );
     }
 

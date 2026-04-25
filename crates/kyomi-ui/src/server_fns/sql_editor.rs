@@ -294,7 +294,7 @@ async fn resolve_bq_access_for_datasource(
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
     let user_cred_data = if let Some(ref cred) = user_cred {
-        kyomi_auth::credential_service::decrypt_credentials(&cred.credentials, encryption_key).ok()
+        kyomi_auth::encryption::decrypt_json(&cred.credentials, encryption_key).ok()
     } else {
         None
     };
