@@ -180,3 +180,13 @@ macro_rules! db_fetch_scalar {
         }
     }
 }
+
+/// Build a SQL IN clause with numbered placeholders starting at `start_idx`.
+/// Returns the clause `($N, $N+1, ...)` and the next available index.
+pub fn in_clause_placeholders(count: usize, start_idx: usize) -> (String, usize) {
+    let placeholders: Vec<String> = (0..count)
+        .map(|i| format!("${}", start_idx + i))
+        .collect();
+    let clause = format!("({})", placeholders.join(", "));
+    (clause, start_idx + count)
+}

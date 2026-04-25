@@ -12,6 +12,7 @@
 
 use chrono::Utc;
 use kyomi_core::models::Chart;
+use kyomi_core::db::in_clause_placeholders;
 use kyomi_core::DbPool;
 use serde::{Deserialize, Serialize};
 
@@ -174,19 +175,6 @@ struct CreatedAtRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-// ---------------------------------------------------------------------------
-// Helper: build IN-clause placeholders for array queries
-// ---------------------------------------------------------------------------
-
-/// Build a SQL IN clause with numbered placeholders starting at `start_idx`.
-/// Returns the clause `($N, $N+1, ...)` and the next available index.
-fn in_clause_placeholders(count: usize, start_idx: usize) -> (String, usize) {
-    let placeholders: Vec<String> = (0..count)
-        .map(|i| format!("${}", start_idx + i))
-        .collect();
-    let clause = format!("({})", placeholders.join(", "));
-    (clause, start_idx + count)
-}
 
 /// Fetch session counts for a list of session IDs.
 ///
