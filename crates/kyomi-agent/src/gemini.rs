@@ -44,29 +44,21 @@ const RETRY_DELAYS: [Duration; 5] = [
 // Model Pricing
 // ---------------------------------------------------------------------------
 
-/// Pricing per million tokens for a model.
-struct ModelPricing {
-    /// Cost per million input tokens (USD).
-    input: f64,
-    /// Cost per million output tokens (USD).
-    output: f64,
-}
-
 /// Look up pricing for a Gemini model using substring matching.
 /// Uses the lower tier (under 200k context) for simplicity.
-fn get_model_pricing(model: &str) -> ModelPricing {
+fn get_model_pricing(model: &str) -> crate::pricing::ModelPricing {
     if model.contains("gemini-2.5-pro") {
-        ModelPricing {
+        crate::pricing::ModelPricing {
             input: 1.25,
             output: 10.00,
         }
     } else if model.contains("gemini-2.5-flash") {
-        ModelPricing {
+        crate::pricing::ModelPricing {
             input: 0.15,
             output: 0.60,
         }
     } else if model.contains("gemini-2.0-flash") {
-        ModelPricing {
+        crate::pricing::ModelPricing {
             input: 0.10,
             output: 0.40,
         }
@@ -76,7 +68,7 @@ fn get_model_pricing(model: &str) -> ModelPricing {
             model = model,
             "unknown Gemini model for cost calculation, using gemini-2.0-flash pricing as fallback"
         );
-        ModelPricing {
+        crate::pricing::ModelPricing {
             input: 0.10,
             output: 0.40,
         }
@@ -595,20 +587,14 @@ impl GeminiProvider {
 
 /// Calculate estimated cost in USD for a Gemini API call.
 ///
-/// Pricing breakdown (no cache token pricing for Gemini):
-/// - **Input tokens**: base price per million tokens
-/// - **Output tokens**: output price per million tokens
-///
-/// Falls back to gemini-2.0-flash pricing for unknown models.
+/// Looks up the model's pricing (with gemini-2.0-flash as fallback for unknown
+/// models) and delegates to [`crate::pricing::calculate_cost`]. Gemini does not
+/// support prompt caching, so `cache_creation_input_tokens` and
+/// `cache_read_input_tokens` are always 0 — the cache terms evaluate to zero
+/// and the formula reduces to `input_cost + output_cost`.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
     let pricing = get_model_pricing(model);
-
-    let per_million = 1_000_000.0_f64;
-
-    let input_cost = (f64::from(usage.input_tokens) / per_million) * pricing.input;
-    let output_cost = (f64::from(usage.output_tokens) / per_million) * pricing.output;
-
-    input_cost + output_cost
+    crate::pricing::calculate_cost(&pricing, usage)
 }
 
 // ---------------------------------------------------------------------------

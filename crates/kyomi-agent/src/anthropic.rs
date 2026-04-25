@@ -53,49 +53,35 @@ const RETRY_DELAYS: [Duration; 5] = [
 // Model Pricing
 // ---------------------------------------------------------------------------
 
-/// Pricing per million tokens for a model.
-struct ModelPricing {
-    /// Cost per million input tokens (USD).
-    input: f64,
-    /// Cost per million output tokens (USD).
-    output: f64,
-}
-
 /// Look up pricing for a model. Returns `None` for unknown models.
-fn get_model_pricing(model: &str) -> Option<ModelPricing> {
+fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
     // Normalize model name (handle duplicate prefixes from misconfiguration).
     let clean = model.replace("claude-claude-", "claude-");
 
     match clean.as_str() {
-        "claude-opus-4-20250514" => Some(ModelPricing {
+        "claude-opus-4-20250514" => Some(crate::pricing::ModelPricing {
             input: 15.00,
             output: 75.00,
         }),
-        "claude-sonnet-4-5-20250929" => Some(ModelPricing {
+        "claude-sonnet-4-5-20250929" => Some(crate::pricing::ModelPricing {
             input: 3.00,
             output: 15.00,
         }),
-        "claude-sonnet-4-6" => Some(ModelPricing {
+        "claude-sonnet-4-6" => Some(crate::pricing::ModelPricing {
             input: 3.00,
             output: 15.00,
         }),
-        "claude-haiku-4-5-20251001" => Some(ModelPricing {
+        "claude-haiku-4-5-20251001" => Some(crate::pricing::ModelPricing {
             input: 1.00,
             output: 5.00,
         }),
-        "claude-3-5-haiku-20241022" => Some(ModelPricing {
+        "claude-3-5-haiku-20241022" => Some(crate::pricing::ModelPricing {
             input: 0.80,
             output: 4.00,
         }),
         _ => None,
     }
 }
-
-/// Default pricing used when a model is not recognized (Haiku 4.5 — cheapest).
-const FALLBACK_PRICING: ModelPricing = ModelPricing {
-    input: 1.00,
-    output: 5.00,
-};
 
 // ---------------------------------------------------------------------------
 // AnthropicClient
@@ -595,37 +581,24 @@ impl AnthropicClient {
 // Cost Calculation (free function, testable independently)
 // ---------------------------------------------------------------------------
 
-/// Calculate estimated cost in USD for an API call.
+/// Calculate estimated cost in USD for an Anthropic API call.
 ///
-/// Pricing breakdown:
-/// - **Input tokens**: base price per million tokens
-/// - **Cache write tokens**: 1.25x base input price
-/// - **Cache read tokens**: 0.1x base input price (90% savings)
-/// - **Output tokens**: output price per million tokens
-///
-/// Falls back to Haiku 4.5 pricing for unknown models.
+/// Looks up the model's pricing (with Haiku 4.5 as fallback for unknown models)
+/// and delegates to [`crate::pricing::calculate_cost`], which handles the full
+/// cache-aware formula: input + cache_write (1.25x) + cache_read (0.1x) + output.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
     let pricing = get_model_pricing(model).unwrap_or_else(|| {
         warn!(
             model = model,
             "unknown model for cost calculation, using Haiku 4.5 pricing as fallback"
         );
-        ModelPricing {
-            input: FALLBACK_PRICING.input,
-            output: FALLBACK_PRICING.output,
+        crate::pricing::ModelPricing {
+            input: 1.00,
+            output: 5.00,
         }
     });
 
-    let per_million = 1_000_000.0_f64;
-
-    let input_cost = (f64::from(usage.input_tokens) / per_million) * pricing.input;
-    let cache_write_cost =
-        (f64::from(usage.cache_creation_input_tokens) / per_million) * pricing.input * 1.25;
-    let cache_read_cost =
-        (f64::from(usage.cache_read_input_tokens) / per_million) * pricing.input * 0.1;
-    let output_cost = (f64::from(usage.output_tokens) / per_million) * pricing.output;
-
-    input_cost + cache_write_cost + cache_read_cost + output_cost
+    crate::pricing::calculate_cost(&pricing, usage)
 }
 
 // ---------------------------------------------------------------------------

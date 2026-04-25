@@ -43,52 +43,44 @@ const RETRY_DELAYS: [Duration; 5] = [
 // Model Pricing
 // ---------------------------------------------------------------------------
 
-/// Pricing per million tokens for a model.
-struct ModelPricing {
-    /// Cost per million input tokens (USD).
-    input: f64,
-    /// Cost per million output tokens (USD).
-    output: f64,
-}
-
 /// Look up pricing for a model using substring matching.
 ///
 /// Returns `None` for unknown models.
-fn get_model_pricing(model: &str) -> Option<ModelPricing> {
+fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
     // Order matters: check more specific substrings first to avoid
     // "gpt-4o" matching before "gpt-4o-mini".
     if model.contains("gpt-4o-mini") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 0.15,
             output: 0.60,
         })
     } else if model.contains("gpt-4.1-nano") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 0.10,
             output: 0.40,
         })
     } else if model.contains("gpt-4.1-mini") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 0.40,
             output: 1.60,
         })
     } else if model.contains("gpt-4.1") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 2.00,
             output: 8.00,
         })
     } else if model.contains("gpt-4o") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 2.50,
             output: 10.00,
         })
     } else if model.contains("o4-mini") || model.contains("o3-mini") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 1.10,
             output: 4.40,
         })
     } else if model.contains("o3") {
-        Some(ModelPricing {
+        Some(crate::pricing::ModelPricing {
             input: 2.00,
             output: 8.00,
         })
@@ -96,12 +88,6 @@ fn get_model_pricing(model: &str) -> Option<ModelPricing> {
         None
     }
 }
-
-/// Default pricing used when a model is not recognized (gpt-4o-mini — cheapest).
-const FALLBACK_PRICING: ModelPricing = ModelPricing {
-    input: 0.15,
-    output: 0.60,
-};
 
 // ---------------------------------------------------------------------------
 // OpenAIProvider
@@ -587,28 +573,26 @@ impl OpenAIProvider {
 // Cost Calculation (free function, testable independently)
 // ---------------------------------------------------------------------------
 
-/// Calculate estimated cost in USD for an API call.
+/// Calculate estimated cost in USD for an OpenAI API call.
 ///
-/// Uses the pricing table for known models, falling back to gpt-4o-mini
-/// pricing for unknown models.
+/// Looks up the model's pricing (with gpt-4o-mini as fallback for unknown models)
+/// and delegates to [`crate::pricing::calculate_cost`]. OpenAI does not expose
+/// prompt cache tokens, so `cache_creation_input_tokens` and
+/// `cache_read_input_tokens` are always 0 — the cache terms evaluate to zero
+/// and the formula reduces to `input_cost + output_cost`.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
     let pricing = get_model_pricing(model).unwrap_or_else(|| {
         warn!(
             model = model,
             "unknown model for cost calculation, using gpt-4o-mini pricing as fallback"
         );
-        ModelPricing {
-            input: FALLBACK_PRICING.input,
-            output: FALLBACK_PRICING.output,
+        crate::pricing::ModelPricing {
+            input: 0.15,
+            output: 0.60,
         }
     });
 
-    let per_million = 1_000_000.0_f64;
-
-    let input_cost = (f64::from(usage.input_tokens) / per_million) * pricing.input;
-    let output_cost = (f64::from(usage.output_tokens) / per_million) * pricing.output;
-
-    input_cost + output_cost
+    crate::pricing::calculate_cost(&pricing, usage)
 }
 
 // ---------------------------------------------------------------------------
