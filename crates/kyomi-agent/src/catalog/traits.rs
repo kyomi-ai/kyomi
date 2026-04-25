@@ -234,7 +234,7 @@ pub async fn resolve_indexing_credentials(
     let encryption_key = &*ctx.encryption_key;
     // 1. Use provided credentials if they have content
     if let Some(creds) = provided_credentials
-        && creds.is_object() && !creds.as_object().unwrap().is_empty()
+        && creds.as_object().is_some_and(|o| !o.is_empty())
     {
         return Some(creds.clone());
     }

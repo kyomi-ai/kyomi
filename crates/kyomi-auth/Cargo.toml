@@ -52,3 +52,6 @@ totp-rs = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -49,3 +49,6 @@ kyomi-chart-theme = { workspace = true }
 
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }
+
+[lints]
+workspace = true

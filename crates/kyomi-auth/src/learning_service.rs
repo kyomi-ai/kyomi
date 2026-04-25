@@ -313,15 +313,15 @@ pub async fn get_all_learnings(
     let total: i64 = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             let mut q = sqlx::query_scalar::<_, i64>(&count_sql).bind(workspace_id);
-            if bind_search { q = q.bind(search.unwrap().trim()); }
-            if bind_scope { q = q.bind(scope.unwrap()); }
+            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
+            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
             if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
             q.fetch_one(pg).await
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             let mut q = sqlx::query_scalar::<_, i64>(&count_sql).bind(workspace_id);
-            if bind_search { q = q.bind(search.unwrap().trim()); }
-            if bind_scope { q = q.bind(scope.unwrap()); }
+            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
+            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
             if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
             q.fetch_one(sq).await
         }
@@ -346,8 +346,8 @@ pub async fn get_all_learnings(
     let items: Vec<LearningRecord> = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             let mut q = sqlx::query(&data_sql).bind(workspace_id);
-            if bind_search { q = q.bind(search.unwrap().trim()); }
-            if bind_scope { q = q.bind(scope.unwrap()); }
+            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
+            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
             if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
             q = q.bind(limit).bind(offset);
             let rows = q.fetch_all(pg).await
@@ -356,8 +356,8 @@ pub async fn get_all_learnings(
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             let mut q = sqlx::query(&data_sql).bind(workspace_id);
-            if bind_search { q = q.bind(search.unwrap().trim()); }
-            if bind_scope { q = q.bind(scope.unwrap()); }
+            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
+            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
             if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
             q = q.bind(limit).bind(offset);
             let rows = q.fetch_all(sq).await

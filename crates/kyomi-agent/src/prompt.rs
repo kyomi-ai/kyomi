@@ -328,12 +328,14 @@ async fn build_documents_text(db: &DbPool, workspace_id: &str) -> kyomi_core::Re
         let mut named: Vec<_> = by_collection.iter()
             .filter(|(k, _)| k.is_some())
             .collect();
-        named.sort_by_key(|(k, _)| k.as_ref().unwrap().to_lowercase());
+        named.sort_by_key(|(k, _)| k.as_deref().unwrap_or("").to_lowercase());
 
         let uncollected = by_collection.get(&None);
 
         for (collection_name, docs) in &named {
-            let name = collection_name.as_ref().unwrap();
+            let Some(name) = collection_name.as_ref() else {
+                continue;
+            };
             output.push_str(&format!("  {name} (collection)\n"));
             for doc in *docs {
                 output.push_str(&format!("    - {}{}\n", doc.title, format_relative_time(doc.updated_at, now)));

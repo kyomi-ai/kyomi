@@ -31,3 +31,6 @@ dirs = "6"
 
 [build-dependencies]
 tauri-build = "2.5"
+
+[lints]
+workspace = true

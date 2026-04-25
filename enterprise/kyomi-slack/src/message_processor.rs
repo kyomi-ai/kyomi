@@ -688,7 +688,7 @@ fn build_table_cell(text: &str, bold: bool) -> Value {
         let mut elements: Vec<Value> = Vec::new();
         let mut pos = 0;
         for cap in RE_MD_BOLD.captures_iter(&text) {
-            let full_match = cap.get(0).unwrap();
+            let full_match = cap.get(0).expect("group 0 always exists in a regex match");
             // Plain text before bold segment
             if full_match.start() > pos {
                 let plain = &text[pos..full_match.start()];

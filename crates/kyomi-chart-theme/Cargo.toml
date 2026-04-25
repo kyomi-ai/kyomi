@@ -9,3 +9,6 @@ description = "Kyomi chart palettes and editorial chart theme — shared across 
 
 [dependencies]
 chartml-core = { workspace = true }
+
+[lints]
+workspace = true

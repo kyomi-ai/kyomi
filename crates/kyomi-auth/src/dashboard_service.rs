@@ -40,12 +40,12 @@ const POPULARITY_OLD_DAYS: i64 = 90;
 
 /// Regex for extracting `<!-- dashboard-summary: ... -->` HTML comments.
 static SUMMARY_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^<!-- dashboard-summary: (.+?) -->\n?").unwrap()
+    Regex::new(r"^<!-- dashboard-summary: (.+?) -->\n?").expect("hardcoded regex is valid")
 });
 
 /// Regex for extracting ChartML fenced code blocks.
 static CHARTML_BLOCK_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)```chartml\n(.*?)```").unwrap()
+    Regex::new(r"(?s)```chartml\n(.*?)```").expect("hardcoded regex is valid")
 });
 
 /// Target chunk size in characters (~500 tokens).

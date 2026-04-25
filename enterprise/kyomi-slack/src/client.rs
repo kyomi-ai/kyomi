@@ -684,7 +684,7 @@ impl SlackClient {
         let files_json = serde_json::to_string(&serde_json::json!(
             [{"id": file_id, "title": filename}]
         ))
-        .unwrap();
+        .map_err(|e| kyomi_core::Error::Internal(format!("files JSON serialization failed: {e}")))?;
 
         let mut form_params = vec![
             ("files", files_json.as_str()),
@@ -817,7 +817,7 @@ impl SlackClient {
         let files_json = serde_json::to_string(&serde_json::json!(
             [{"id": file_id, "title": title}]
         ))
-        .unwrap();
+        .map_err(|e| kyomi_core::Error::Internal(format!("files JSON serialization failed: {e}")))?;
 
         let step3_response = self
             .http

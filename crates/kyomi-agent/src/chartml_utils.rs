@@ -169,10 +169,7 @@ mod tests {
         let result = extract_chartml_specs(msg);
         assert_eq!(result.specs.len(), 1);
         assert_eq!(result.blocks.len(), 1);
-        assert_eq!(
-            result.specs[0].get("title").unwrap().as_str().unwrap(),
-            "Revenue"
-        );
+        assert_eq!(get_chart_title(&result.specs[0]), "Revenue");
     }
 
     #[test]
@@ -231,10 +228,7 @@ mod tests {
         let msg = "```chartml\n- type: style\n  palette: blues\n- type: chart\n  title: Revenue\n- type: config\n  key: val\n```";
         let result = extract_chartml_specs(msg);
         assert_eq!(result.specs.len(), 1);
-        assert_eq!(
-            result.specs[0].get("title").unwrap().as_str().unwrap(),
-            "Revenue"
-        );
+        assert_eq!(get_chart_title(&result.specs[0]), "Revenue");
         assert_eq!(result.blocks[0].spec_indices, vec![0]);
     }
 

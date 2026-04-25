@@ -65,8 +65,9 @@ if [ -z "$staged_rs_files" ]; then
     echo "✅ Clippy skipped (no Rust files staged)."
 else
     # Derive -p flags from staged file paths.
+    # Handles crates/, apps/, and enterprise/ directories.
     staged_crates=$(echo "$staged_rs_files" \
-        | sed -n 's|^\(crates/[^/]*\)/.*|\1|p' \
+        | sed -n 's|^\(crates/[^/]*\)/.*|\1|p; s|^\(apps/[^/]*\)/.*|\1|p; s|^\(enterprise/[^/]*\)/.*|\1|p' \
         | sort -u \
         | while read -r crate_dir; do
             if [ -f "$crate_dir/Cargo.toml" ]; then
@@ -74,11 +75,6 @@ else
                 [ -n "$pkg" ] && echo "-p $pkg"
             fi
         done)
-
-    # Files outside crates/ (e.g. apps/server) → fall back to workspace.
-    if echo "$staged_rs_files" | grep -qv '^crates/'; then
-        staged_crates="--workspace"
-    fi
 
     if [ -z "$staged_crates" ]; then
         echo "✅ Clippy skipped (no crate detected)."

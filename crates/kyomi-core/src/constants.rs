@@ -27,7 +27,9 @@ pub fn load(path: &Path) -> crate::Result<&'static SharedConstants> {
     CONSTANTS
         .set(parsed)
         .map_err(|_| crate::Error::Internal("constants already loaded".into()))?;
-    Ok(CONSTANTS.get().unwrap())
+    CONSTANTS
+        .get()
+        .ok_or_else(|| crate::Error::Internal("constants not initialized".into()))
 }
 
 /// Load constants from disk, falling back to the embedded copy for standalone mode.
@@ -59,7 +61,9 @@ pub fn load_with_fallback() -> crate::Result<&'static SharedConstants> {
     CONSTANTS
         .set(parsed)
         .map_err(|_| crate::Error::Internal("constants already loaded".into()))?;
-    Ok(CONSTANTS.get().unwrap())
+    CONSTANTS
+        .get()
+        .ok_or_else(|| crate::Error::Internal("constants not initialized".into()))
 }
 
 /// Get the loaded constants. Panics if [`load`] hasn't been called.
