@@ -2,10 +2,11 @@
 # Kyomi — CI (Pull Request Checks)
 # =============================================================================
 # Runs on every PR to main, including new pushes to existing PRs.
-# Two jobs:
+# Three jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
-#   2. clippy (slow, ~2-5min) — full workspace clippy + compilation check
+#   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
+#   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check
 # =============================================================================
 
 name: CI
@@ -58,6 +59,25 @@ jobs:
       # --------------------------------------------------------------------
       - name: Server function / REST divergence lint
         run: ./scripts/lint/check-server-fns.sh
+
+  # ---------------------------------------------------------------------------
+  # Security: Trivy filesystem vulnerability scan
+  # ---------------------------------------------------------------------------
+  trivy-scan:
+    name: Trivy Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'table'
 
   # ---------------------------------------------------------------------------
   # Slow check: cargo clippy (compiles + lints the entire workspace)
