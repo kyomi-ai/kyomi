@@ -6,6 +6,8 @@
 //! structured logging setup, and capability service.
 
 pub mod ai_budget;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cancel_registry;
 pub mod capability;
 pub mod config;
 pub mod connect_protocol;

@@ -277,7 +277,7 @@ fn file_response(
             return (
                 StatusCode::NOT_MODIFIED,
                 [
-                    (header::ETAG, HeaderValue::from_str(&etag).unwrap()),
+                    (header::ETAG, HeaderValue::from_str(&etag).expect("etag is valid ASCII")),
                     (
                         header::CACHE_CONTROL,
                         HeaderValue::from_static("public, no-cache"),
@@ -287,7 +287,7 @@ fn file_response(
                 .into_response();
         }
 
-    let etag_header = HeaderValue::from_str(&etag).unwrap();
+    let etag_header = HeaderValue::from_str(&etag).expect("etag is valid ASCII");
     (
         [
             (header::CONTENT_TYPE, mime),

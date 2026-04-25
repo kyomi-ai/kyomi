@@ -168,9 +168,9 @@ async fn openid_configuration(
         return Err(StatusCode::NOT_FOUND);
     }
     let mut meta = oauth_metadata(&base_url_from_request(&headers, &state));
-    meta.as_object_mut()
-        .unwrap()
-        .insert("subject_types_supported".into(), json!(["public"]));
+    if let Some(obj) = meta.as_object_mut() {
+        obj.insert("subject_types_supported".into(), json!(["public"]));
+    }
     Ok(Json(meta))
 }
 
@@ -190,9 +190,9 @@ pub async fn mcp_openid_configuration(
         return Err(StatusCode::NOT_FOUND);
     }
     let mut meta = oauth_metadata(&base_url_from_request(&headers, &state));
-    meta.as_object_mut()
-        .unwrap()
-        .insert("subject_types_supported".into(), json!(["public"]));
+    if let Some(obj) = meta.as_object_mut() {
+        obj.insert("subject_types_supported".into(), json!(["public"]));
+    }
     Ok(Json(meta))
 }
 
