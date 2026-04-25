@@ -52,6 +52,76 @@ pub trait LLMProvider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// ProviderBase — shared fields for all LLM provider structs
+// ---------------------------------------------------------------------------
+
+/// Shared fields common to all LLM provider implementations.
+///
+/// Each concrete provider embeds this as `base: ProviderBase` and delegates
+/// the `model()` accessor to it. Constructed via [`ProviderBase::new`] (which
+/// uses the shared TLS-aware HTTP client from `kyomi_datasource_server`) or
+/// [`ProviderBase::with_base_url`] (for testing with a plain `reqwest::Client`).
+pub struct ProviderBase {
+    pub(crate) client: reqwest::Client,
+    pub(crate) api_key: String,
+    pub(crate) model: String,
+    pub(crate) base_url: String,
+}
+
+impl ProviderBase {
+    /// Create a new `ProviderBase` using the shared TLS-aware HTTP client.
+    ///
+    /// # Arguments
+    /// * `api_key` - Provider API key.
+    /// * `model` - Model override; `default_model` is used when `None`.
+    /// * `default_model` - Fallback model identifier.
+    /// * `base_url` - URL override; `default_base_url` is used when `None`.
+    /// * `default_base_url` - Fallback API endpoint URL.
+    pub fn new(
+        api_key: String,
+        model: Option<String>,
+        default_model: &str,
+        base_url: Option<String>,
+        default_base_url: &str,
+    ) -> kyomi_core::Result<Self> {
+        Ok(Self {
+            client: kyomi_datasource_server::http_client()?,
+            api_key,
+            model: model.unwrap_or_else(|| default_model.to_string()),
+            base_url: base_url.unwrap_or_else(|| default_base_url.to_string()),
+        })
+    }
+
+    /// Create a `ProviderBase` pointing at a custom API URL.
+    ///
+    /// Uses the shared TLS-aware HTTP client from `kyomi_datasource_server`.
+    ///
+    /// # Arguments
+    /// * `api_key` - Provider API key.
+    /// * `model` - Model override; `default_model` is used when `None`.
+    /// * `default_model` - Fallback model identifier.
+    /// * `base_url` - Custom API endpoint URL.
+    pub fn with_base_url(
+        api_key: String,
+        model: Option<String>,
+        default_model: &str,
+        base_url: String,
+    ) -> kyomi_core::Result<Self> {
+        Ok(Self {
+            client: kyomi_datasource_server::http_client()?,
+            api_key,
+            model: model.unwrap_or_else(|| default_model.to_string()),
+            base_url,
+        })
+    }
+
+    /// Return the model name this base is configured with.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Provider kind
 // ---------------------------------------------------------------------------
 

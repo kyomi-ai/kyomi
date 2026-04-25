@@ -99,14 +99,7 @@ fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
 /// Supports OpenAI, Azure OpenAI, OpenRouter, Groq, Together, Ollama,
 /// vLLM, and any service that implements the OpenAI chat completions spec.
 pub struct OpenAIProvider {
-    /// Underlying HTTP client (connection-pooled).
-    client: reqwest::Client,
-    /// API key for authentication.
-    api_key: String,
-    /// Model name (e.g., "gpt-4o", "gpt-4o-mini").
-    model: String,
-    /// Base URL for the chat completions endpoint.
-    base_url: String,
+    base: crate::provider::ProviderBase,
 }
 
 impl OpenAIProvider {
@@ -122,10 +115,13 @@ impl OpenAIProvider {
         base_url: Option<String>,
     ) -> kyomi_core::Result<Self> {
         Ok(Self {
-            client: kyomi_datasource_server::http_client()?,
-            api_key,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url: base_url.unwrap_or_else(|| OPENAI_API_URL.to_string()),
+            base: crate::provider::ProviderBase::new(
+                api_key,
+                model,
+                DEFAULT_MODEL,
+                base_url,
+                OPENAI_API_URL,
+            )?,
         })
     }
 
@@ -136,16 +132,18 @@ impl OpenAIProvider {
         base_url: String,
     ) -> kyomi_core::Result<Self> {
         Ok(Self {
-            client: kyomi_datasource_server::http_client()?,
-            api_key,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url,
+            base: crate::provider::ProviderBase::with_base_url(
+                api_key,
+                model,
+                DEFAULT_MODEL,
+                base_url,
+            )?,
         })
     }
 
     /// Return the model name this provider is configured with.
     pub fn model(&self) -> &str {
-        &self.model
+        self.base.model()
     }
 
     // -----------------------------------------------------------------------
@@ -307,7 +305,7 @@ impl OpenAIProvider {
 
         // Build request body.
         let mut body = json!({
-            "model": self.model,
+            "model": self.base.model,
             "messages": openai_messages,
             "max_tokens": max_tokens,
         });
@@ -323,7 +321,7 @@ impl OpenAIProvider {
         }
 
         debug!(
-            model = %self.model,
+            model = %self.base.model,
             message_count = openai_messages.len(),
             tool_count = tools.len(),
             "calling OpenAI-compatible API"
@@ -334,7 +332,7 @@ impl OpenAIProvider {
         let response_json = self.call_with_retry(&body).await?;
 
         // Parse response.
-        Self::parse_response(&self.model, &response_json)
+        Self::parse_response(&self.base.model, &response_json)
     }
 
     /// Execute the HTTP POST with retry logic.
@@ -383,9 +381,10 @@ impl OpenAIProvider {
         crate::provider::maybe_log_llm("openai", "request", body);
 
         let response = self
+            .base
             .client
-            .post(&self.base_url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .post(&self.base.base_url)
+            .header("Authorization", format!("Bearer {}", self.base.api_key))
             .header("Content-Type", "application/json")
             .json(body)
             .send()
@@ -1360,7 +1359,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(provider.model(), DEFAULT_MODEL);
-        assert_eq!(provider.base_url, "http://localhost:8080/mock");
+        assert_eq!(provider.base.base_url, "http://localhost:8080/mock");
     }
 
     #[test]

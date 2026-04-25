@@ -83,14 +83,7 @@ fn get_model_pricing(model: &str) -> crate::pricing::ModelPricing {
 ///
 /// Handles message conversion, retry logic, and cost estimation.
 pub struct GeminiProvider {
-    /// Underlying HTTP client (connection-pooled).
-    client: reqwest::Client,
-    /// Gemini API key.
-    api_key: String,
-    /// Model name (e.g., "gemini-2.5-flash").
-    model: String,
-    /// Base URL for the API (allows override for testing).
-    base_url: String,
+    base: crate::provider::ProviderBase,
 }
 
 impl GeminiProvider {
@@ -106,10 +99,13 @@ impl GeminiProvider {
         base_url: Option<String>,
     ) -> kyomi_core::Result<Self> {
         Ok(Self {
-            client: kyomi_datasource_server::http_client()?,
-            api_key,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
+            base: crate::provider::ProviderBase::new(
+                api_key,
+                model,
+                DEFAULT_MODEL,
+                base_url,
+                DEFAULT_BASE_URL,
+            )?,
         })
     }
 
@@ -120,16 +116,18 @@ impl GeminiProvider {
         base_url: String,
     ) -> kyomi_core::Result<Self> {
         Ok(Self {
-            client: kyomi_datasource_server::http_client()?,
-            api_key,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url,
+            base: crate::provider::ProviderBase::with_base_url(
+                api_key,
+                model,
+                DEFAULT_MODEL,
+                base_url,
+            )?,
         })
     }
 
     /// Return the model name this provider is configured with.
     pub fn model(&self) -> &str {
-        &self.model
+        self.base.model()
     }
 
     // -----------------------------------------------------------------------
@@ -342,7 +340,7 @@ impl GeminiProvider {
         }
 
         debug!(
-            model = %self.model,
+            model = %self.base.model,
             message_count,
             tool_count = tools.len(),
             "calling Gemini API"
@@ -352,7 +350,7 @@ impl GeminiProvider {
         let response_json = self.call_with_retry(&body).await?;
 
         // Parse response.
-        Self::parse_response(&self.model, &response_json)
+        Self::parse_response(&self.base.model, &response_json)
     }
 
     /// Execute the HTTP POST to the Gemini API with retry logic.
@@ -401,14 +399,15 @@ impl GeminiProvider {
 
         let url = format!(
             "{}/models/{}:generateContent",
-            self.base_url, self.model
+            self.base.base_url, self.base.model
         );
 
         let response = self
+            .base
             .client
             .post(&url)
             .header("content-type", "application/json")
-            .header("x-goog-api-key", &self.api_key)
+            .header("x-goog-api-key", &self.base.api_key)
             .json(body)
             .send()
             .await

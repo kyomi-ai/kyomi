@@ -93,14 +93,7 @@ fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
 /// Uses `reqwest` for HTTP calls and supports non-streaming mode (matching
 /// the Python backend's behavior).
 pub struct AnthropicClient {
-    /// Underlying HTTP client (connection-pooled).
-    client: reqwest::Client,
-    /// Anthropic API key.
-    api_key: String,
-    /// Model name (e.g., "claude-sonnet-4-5-20250929").
-    model: String,
-    /// Base URL for the API (allows override for testing).
-    base_url: String,
+    base: crate::provider::ProviderBase,
 }
 
 impl AnthropicClient {
@@ -111,10 +104,13 @@ impl AnthropicClient {
     /// * `model` - Model name; uses [`DEFAULT_MODEL`] if `None`.
     pub fn new(api_key: String, model: Option<String>) -> kyomi_core::Result<Self> {
         Ok(Self {
-            client: kyomi_datasource_server::http_client()?,
-            api_key,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url: ANTHROPIC_API_URL.to_string(),
+            base: crate::provider::ProviderBase::new(
+                api_key,
+                model,
+                DEFAULT_MODEL,
+                None,
+                ANTHROPIC_API_URL,
+            )?,
         })
     }
 
@@ -125,16 +121,18 @@ impl AnthropicClient {
         base_url: String,
     ) -> kyomi_core::Result<Self> {
         Ok(Self {
-            client: kyomi_datasource_server::http_client()?,
-            api_key,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            base_url,
+            base: crate::provider::ProviderBase::with_base_url(
+                api_key,
+                model,
+                DEFAULT_MODEL,
+                base_url,
+            )?,
         })
     }
 
     /// Return the model name this client is configured with.
     pub fn model(&self) -> &str {
-        &self.model
+        self.base.model()
     }
 
     // -----------------------------------------------------------------------
@@ -309,7 +307,7 @@ impl AnthropicClient {
 
         // Build request body.
         let mut body = json!({
-            "model": self.model,
+            "model": self.base.model,
             "messages": anthropic_messages,
             "max_tokens": max_tokens,
         });
@@ -332,7 +330,7 @@ impl AnthropicClient {
         body["cache_control"] = json!({"type": "ephemeral"});
 
         debug!(
-            model = %self.model,
+            model = %self.base.model,
             message_count = anthropic_messages.len(),
             tool_count = tools.len(),
             "calling Anthropic API"
@@ -348,7 +346,7 @@ impl AnthropicClient {
         maybe_log_llm("response", &response_json);
 
         // Parse response.
-        Self::parse_response(&self.model, &response_json)
+        Self::parse_response(&self.base.model, &response_json)
     }
 
     /// Execute the HTTP POST to the Anthropic API with retry logic.
@@ -395,9 +393,10 @@ impl AnthropicClient {
         body: &serde_json::Value,
     ) -> kyomi_core::Result<serde_json::Value> {
         let response = self
+            .base
             .client
-            .post(&self.base_url)
-            .header("x-api-key", &self.api_key)
+            .post(&self.base.base_url)
+            .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("anthropic-beta", PROMPT_CACHING_BETA)
             .header("content-type", "application/json")
