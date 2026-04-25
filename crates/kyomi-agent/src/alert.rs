@@ -16,17 +16,8 @@
 use std::sync::{Arc, LazyLock};
 
 use crate::tools::QueryContext;
+use kyomi_auth::email_service::EmailService;
 use kyomi_core::platform::PlatformRegistry;
-
-// ---------------------------------------------------------------------------
-// Embedded assets
-// ---------------------------------------------------------------------------
-
-/// Kyomi email logo PNG, embedded at compile time (~7 KB).
-static LOGO_BYTES: &[u8] = include_bytes!("../../../assets/kyomi_email_logo.png");
-
-/// Content-ID used for the logo in email `<img src="cid:...">` references.
-const LOGO_CID: &str = "kyomi_logo";
 use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_auth::websocket::WebSocketManager;
 use kyomi_core::models::Watch;
@@ -168,17 +159,19 @@ pub async fn deliver_watch_alert(
 
             let email_service = EmailService::from_env();
             if email_service.is_configured() {
-                let success = email_service
-                    .send_watch_alert_emails(
+                let success = send_watch_alert_emails(
+                        &email_service,
                         &email_list,
-                        &watch.name,
-                        alert_title,
-                        message,
-                        execution_id,
-                        &config.frontend_url,
-                        creator_email.as_deref(),
-                        mode,
-                        &config.chart_renderer_url,
+                        &AlertEmailParams {
+                            watch_name: &watch.name,
+                            alert_title,
+                            message,
+                            execution_id,
+                            frontend_url: &config.frontend_url,
+                            creator_email: creator_email.as_deref(),
+                            mode,
+                            chart_renderer_url: &config.chart_renderer_url,
+                        },
                         &query_ctx,
                     )
                     .await;
@@ -314,218 +307,59 @@ async fn lookup_creator_email(db: &DbPool, user_id: &str) -> Option<String> {
 // Email delivery
 // ---------------------------------------------------------------------------
 
-/// SMTP email service for sending watch alerts.
-///
-/// Initialized from environment variables:
-/// - `SMTP_HOST` — SMTP server hostname
-/// - `SMTP_PORT` — SMTP port (587 for STARTTLS, 465 for SMTPS)
-/// - `SMTP_USER` — SMTP username
-/// - `SMTP_PASSWORD` — SMTP password
-/// - `SMTP_FROM_EMAIL` — Sender email address (default: `noreply@kyomi.ai`)
-/// - `SMTP_FROM_NAME` — Sender display name (default: `Kyomi`)
-pub struct EmailService {
-    host: Option<String>,
-    port: u16,
-    user: Option<String>,
-    password: Option<String>,
-    from_email: String,
-    from_name: String,
+struct AlertEmailParams<'a> {
+    watch_name: &'a str,
+    alert_title: &'a str,
+    message: &'a str,
+    execution_id: i32,
+    frontend_url: &'a str,
+    creator_email: Option<&'a str>,
+    mode: WatchMode,
+    chart_renderer_url: &'a str,
 }
 
-impl EmailService {
-    /// Create an `EmailService` from environment variables.
-    pub fn from_env() -> Self {
-        Self {
-            host: std::env::var("SMTP_HOST").ok(),
-            port: std::env::var("SMTP_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(587),
-            user: std::env::var("SMTP_USER").ok(),
-            password: std::env::var("SMTP_PASSWORD").ok(),
-            from_email: std::env::var("SMTP_FROM_EMAIL")
-                .unwrap_or_else(|_| "noreply@kyomi.ai".into()),
-            from_name: std::env::var("SMTP_FROM_NAME")
-                .unwrap_or_else(|_| "Kyomi".into()),
-        }
+/// Send watch alert/report emails to all recipients.
+///
+/// Renders ChartML blocks to inline images (via chart-renderer) and attaches
+/// the Kyomi logo as a CID image. Returns `true` if at least one email was
+/// sent successfully.
+async fn send_watch_alert_emails(
+    email_service: &EmailService,
+    emails: &[&str],
+    params: &AlertEmailParams<'_>,
+    query_ctx: &QueryContext,
+) -> bool {
+    if emails.is_empty() {
+        return false;
     }
 
-    /// Check if all required SMTP configuration is present.
-    pub fn is_configured(&self) -> bool {
-        self.host.is_some() && self.user.is_some() && self.password.is_some()
-    }
+    // Process the message once (render charts, convert markdown → HTML).
+    let (message_html, chart_images) =
+        process_message_for_email(params.message, params.chart_renderer_url, query_ctx).await;
 
-    /// Send a single email via SMTP with optional inline CID images.
-    ///
-    /// Supports STARTTLS (port 587) and direct TLS/SSL (port 465).
-    /// The logo image is always attached as a CID inline image.
-    /// Additional images (e.g. rendered charts) can be passed via `images`.
-    ///
-    /// Returns `true` on success, `false` on failure.
-    async fn send_email(
-        &self,
-        to_email: &str,
-        subject: &str,
-        html_body: &str,
-        images: &[(String, Vec<u8>)],
-    ) -> bool {
-        use lettre::message::{Attachment, Body, Mailbox, MultiPart, SinglePart};
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::{AsyncSmtpTransport, AsyncTransport, Message};
+    let mut any_success = false;
 
-        let Some(ref host) = self.host else {
-            warn!("SMTP not configured, skipping email");
-            return false;
-        };
-        let Some(ref user) = self.user else {
-            return false;
-        };
-        let Some(ref password) = self.password else {
-            return false;
-        };
-
-        // Build the email message
-        let from_mailbox: Mailbox = match format!("{} <{}>", self.from_name, self.from_email).parse()
-        {
-            Ok(m) => m,
-            Err(e) => {
-                error!(error = %e, "Invalid sender email address");
-                return false;
-            }
-        };
-
-        let to_mailbox: Mailbox = match to_email.parse() {
-            Ok(m) => m,
-            Err(e) => {
-                error!(to = %to_email, error = %e, "Invalid recipient email address");
-                return false;
-            }
-        };
-
-        // Build multipart/related: HTML + inline images (logo + charts)
-        let content_type: lettre::message::header::ContentType =
-            "image/png".parse().expect("valid content type");
-
-        let mut related = MultiPart::related()
-            .singlepart(SinglePart::html(html_body.to_string()));
-
-        // Always attach the Kyomi logo
-        related = related.singlepart(
-            Attachment::new_inline(LOGO_CID.to_string())
-                .body(Body::new(LOGO_BYTES.to_vec()), content_type.clone()),
+    for &email in emails {
+        let (subject, html_body) = build_watch_alert_email(
+            email,
+            params.watch_name,
+            params.alert_title,
+            &message_html,
+            params.execution_id,
+            params.frontend_url,
+            params.creator_email,
+            params.mode,
         );
 
-        // Attach chart images
-        for (cid, png_bytes) in images {
-            related = related.singlepart(
-                Attachment::new_inline(cid.clone())
-                    .body(Body::new(png_bytes.clone()), content_type.clone()),
-            );
-        }
-
-        let email = match Message::builder()
-            .from(from_mailbox)
-            .to(to_mailbox)
-            .subject(subject)
-            .multipart(related)
+        if email_service
+            .send_email(email, &subject, &html_body, None, None, &chart_images)
+            .await
         {
-            Ok(e) => e,
-            Err(e) => {
-                error!(error = %e, "Failed to build email message");
-                return false;
-            }
-        };
-
-        let credentials = Credentials::new(user.clone(), password.clone());
-
-        // Build the transport — use SMTPS for port 465, STARTTLS for everything else
-        let send_result = if self.port == 465 {
-            let transport = match AsyncSmtpTransport::<lettre::Tokio1Executor>::relay(host) {
-                Ok(builder) => builder
-                    .credentials(credentials)
-                    .port(self.port)
-                    .build(),
-                Err(e) => {
-                    error!(host = %host, error = %e, "Failed to create SMTP transport");
-                    return false;
-                }
-            };
-            transport.send(email).await
-        } else {
-            let transport = match AsyncSmtpTransport::<lettre::Tokio1Executor>::starttls_relay(host)
-            {
-                Ok(builder) => builder
-                    .credentials(credentials)
-                    .port(self.port)
-                    .build(),
-                Err(e) => {
-                    error!(host = %host, error = %e, "Failed to create SMTP STARTTLS transport");
-                    return false;
-                }
-            };
-            transport.send(email).await
-        };
-
-        match send_result {
-            Ok(_response) => {
-                info!(to = %to_email, "Email sent successfully");
-                true
-            }
-            Err(e) => {
-                error!(to = %to_email, error = %e, "Failed to send email");
-                false
-            }
+            any_success = true;
         }
     }
 
-    /// Send watch alert/report emails to all recipients.
-    ///
-    /// Renders ChartML blocks to inline images (via chart-renderer) and attaches
-    /// the Kyomi logo as a CID image. Returns `true` if at least one email was
-    /// sent successfully.
-    #[allow(clippy::too_many_arguments)]
-    async fn send_watch_alert_emails(
-        &self,
-        emails: &[&str],
-        watch_name: &str,
-        alert_title: &str,
-        message: &str,
-        execution_id: i32,
-        frontend_url: &str,
-        creator_email: Option<&str>,
-        mode: WatchMode,
-        chart_renderer_url: &str,
-        query_ctx: &QueryContext,
-    ) -> bool {
-        if emails.is_empty() {
-            return false;
-        }
-
-        // Process the message once (render charts, convert markdown → HTML).
-        let (message_html, chart_images) =
-            process_message_for_email(message, chart_renderer_url, query_ctx).await;
-
-        let mut any_success = false;
-
-        for &email in emails {
-            let (subject, html_body) = build_watch_alert_email(
-                email,
-                watch_name,
-                alert_title,
-                &message_html,
-                execution_id,
-                frontend_url,
-                creator_email,
-                mode,
-            );
-
-            if self.send_email(email, &subject, &html_body, &chart_images).await {
-                any_success = true;
-            }
-        }
-
-        any_success
-    }
+    any_success
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,35 +1113,6 @@ mod tests {
         assert!(result.contains("</p><p>"));
     }
 
-    // -- EmailService --
-
-    #[test]
-    fn email_service_not_configured_without_env() {
-        // Clear env vars that might be set
-        let service = EmailService {
-            host: None,
-            port: 587,
-            user: None,
-            password: None,
-            from_email: "noreply@kyomi.ai".into(),
-            from_name: "Kyomi".into(),
-        };
-        assert!(!service.is_configured());
-    }
-
-    #[test]
-    fn email_service_configured_with_all_vars() {
-        let service = EmailService {
-            host: Some("smtp.example.com".into()),
-            port: 587,
-            user: Some("user".into()),
-            password: Some("pass".into()),
-            from_email: "noreply@kyomi.ai".into(),
-            from_name: "Kyomi".into(),
-        };
-        assert!(service.is_configured());
-    }
-
     // -- Additional markdown_to_simple_html edge cases --
 
     #[test]
@@ -1645,47 +1450,6 @@ mod tests {
         assert!(html.contains("You configured"));
     }
 
-    // -- EmailService partial configuration tests --
-
-    #[test]
-    fn email_service_missing_host_not_configured() {
-        let service = EmailService {
-            host: None,
-            port: 587,
-            user: Some("user".into()),
-            password: Some("pass".into()),
-            from_email: "noreply@kyomi.ai".into(),
-            from_name: "Kyomi".into(),
-        };
-        assert!(!service.is_configured());
-    }
-
-    #[test]
-    fn email_service_missing_user_not_configured() {
-        let service = EmailService {
-            host: Some("smtp.example.com".into()),
-            port: 587,
-            user: None,
-            password: Some("pass".into()),
-            from_email: "noreply@kyomi.ai".into(),
-            from_name: "Kyomi".into(),
-        };
-        assert!(!service.is_configured());
-    }
-
-    #[test]
-    fn email_service_missing_password_not_configured() {
-        let service = EmailService {
-            host: Some("smtp.example.com".into()),
-            port: 587,
-            user: Some("user".into()),
-            password: None,
-            from_email: "noreply@kyomi.ai".into(),
-            from_name: "Kyomi".into(),
-        };
-        assert!(!service.is_configured());
-    }
-
     // -- Preview truncation edge cases --
 
     #[test]
@@ -1698,20 +1462,6 @@ mod tests {
     fn preview_one_char_max() {
         let preview = truncate_preview("Hello", 1);
         assert_eq!(preview, "H...");
-    }
-
-    // -- Embedded logo --
-
-    #[test]
-    fn logo_bytes_embedded_and_valid_png() {
-        // PNG files start with the 8-byte signature: 137 80 78 71 13 10 26 10
-        assert!(LOGO_BYTES.len() > 8, "Logo should not be empty");
-        assert_eq!(&LOGO_BYTES[..4], b"\x89PNG", "Logo should be a valid PNG");
-    }
-
-    #[test]
-    fn logo_cid_constant() {
-        assert_eq!(LOGO_CID, "kyomi_logo");
     }
 
     #[test]

@@ -91,6 +91,10 @@ impl EmailService {
     ///
     /// `reply_to` sets the Reply-To header so recipients can reply directly
     /// to the relevant person (e.g., the user who submitted feedback).
+    ///
+    /// `images` is an optional list of `(content_id, png_bytes)` pairs for
+    /// additional inline CID images (e.g. rendered charts). Pass `&[]` when
+    /// no extra images are needed.
     pub async fn send_email(
         &self,
         to_email: &str,
@@ -98,6 +102,7 @@ impl EmailService {
         html_body: &str,
         text_body: Option<&str>,
         reply_to: Option<&str>,
+        images: &[(String, Vec<u8>)],
     ) -> bool {
         if !self.is_configured() {
             tracing::warn!(
@@ -162,12 +167,20 @@ impl EmailService {
 
         // Wrap in multipart/related so the inline logo CID resolves
         let png_ct: ContentType = "image/png".parse().expect("valid content type");
-        let related = MultiPart::related()
+        let mut related = MultiPart::related()
             .multipart(alternative)
             .singlepart(
                 Attachment::new_inline(LOGO_CID.to_string())
-                    .body(Body::new(LOGO_BYTES.to_vec()), png_ct),
+                    .body(Body::new(LOGO_BYTES.to_vec()), png_ct.clone()),
             );
+
+        // Attach any additional inline CID images (e.g. rendered charts)
+        for (cid, png_bytes) in images {
+            related = related.singlepart(
+                Attachment::new_inline(cid.clone())
+                    .body(Body::new(png_bytes.clone()), png_ct.clone()),
+            );
+        }
 
         let mut builder = Message::builder()
             .from(from_mailbox)
@@ -432,7 +445,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
 ",
         );
 
-        self.send_email(email, &subject, &html_body, Some(&text_body), None)
+        self.send_email(email, &subject, &html_body, Some(&text_body), None, &[])
             .await
     }
 
@@ -584,7 +597,7 @@ You're receiving this email because you requested account recovery for Kyomi.
 ",
         );
 
-        self.send_email(email, subject, &html_body, Some(&text_body), None)
+        self.send_email(email, subject, &html_body, Some(&text_body), None, &[])
             .await
     }
 
@@ -736,7 +749,7 @@ You're receiving this email because you requested account recovery for Kyomi.
 ",
         );
 
-        self.send_email(email, subject, &html_body, Some(&text_body), None)
+        self.send_email(email, subject, &html_body, Some(&text_body), None, &[])
             .await
     }
 
@@ -888,7 +901,7 @@ You're receiving this because someone signed up for Kyomi with this email addres
 ",
         );
 
-        self.send_email(email, subject, &html_body, Some(&text_body), None)
+        self.send_email(email, subject, &html_body, Some(&text_body), None, &[])
             .await
     }
 
@@ -1033,7 +1046,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
 ",
         );
 
-        self.send_email(email, subject, &html_body, Some(&text_body), None)
+        self.send_email(email, subject, &html_body, Some(&text_body), None, &[])
             .await
     }
 
@@ -1121,7 +1134,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
 
         let text_body = format!("{subject}\n\n{text_sections}\n\n---\nkyomi.ai\n");
 
-        self.send_email(to_email, subject, &html_body, Some(&text_body), reply_to)
+        self.send_email(to_email, subject, &html_body, Some(&text_body), reply_to, &[])
             .await
     }
 }
@@ -1196,7 +1209,7 @@ mod tests {
         };
 
         let result = service
-            .send_email("test@example.com", "Test", "<p>Hi</p>", None, None)
+            .send_email("test@example.com", "Test", "<p>Hi</p>", None, None, &[])
             .await;
         assert!(!result);
     }

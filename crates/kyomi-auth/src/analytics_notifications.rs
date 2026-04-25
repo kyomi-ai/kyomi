@@ -135,7 +135,7 @@ async fn dispatch_inner(
         let body_html = body_text.replace('\n', "<br>");
 
         for (admin_email, _admin_name) in &admins {
-            if !email.send_email(admin_email, &subject, &body_html, Some(&body_text), None).await {
+            if !email.send_email(admin_email, &subject, &body_html, Some(&body_text), None, &[]).await {
                 warn!(email = %admin_email, "Failed to send analytics notification email");
             }
         }

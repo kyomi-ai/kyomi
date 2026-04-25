@@ -977,6 +977,7 @@ async fn send_feedback_email_notification(
             &html_body,
             None,
             Some(user_email),
+            &[],
         )
         .await;
 

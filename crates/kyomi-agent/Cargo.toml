@@ -30,7 +30,6 @@ http = "1"
 regex = "1"
 serde_yaml = "0.9"
 statrs = { workspace = true }
-lettre = { workspace = true }
 rand = { workspace = true }
 
 # PDF generation (Typst)
