@@ -164,7 +164,7 @@ pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
 
     let watches = kyomi_auth::watch_service::list_watches(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let mut items = Vec::with_capacity(watches.len());
     for w in &watches {
@@ -219,7 +219,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         alert_emails_enabled.unwrap_or(false),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Set the Slack alert channel if provided
     if let Some(ref channel_id) = slack_channel_id
@@ -256,7 +256,7 @@ pub async fn get_watch(watch_id: String) -> Result<WatchListItem, ServerFnError>
 
     let watch = kyomi_auth::watch_service::get_watch(&ctx.db, &watch_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
     Ok(watch_to_item(&ctx.db, &watch).await)
@@ -339,7 +339,7 @@ pub async fn update_watch(
     if has_updates {
         kyomi_auth::watch_service::update_watch(&ctx.db, &watch_id, ws_id, &updates)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
     }
 
     // Update the Slack alert channel if provided
@@ -381,7 +381,7 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::delete_watch(&ctx.db, &watch_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -397,12 +397,12 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
 
     let watch = kyomi_auth::watch_service::get_watch(&ctx.db, &watch_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
     kyomi_auth::watch_service::toggle_watch(&ctx.db, &watch_id, ws_id, !watch.enabled)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -422,7 +422,7 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
     let (can_run, reason) =
         kyomi_auth::watch_service::can_run_watch_now(&ctx.db, &watch_id, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     if !can_run {
         return Err(ServerFnError::new(reason));
@@ -502,7 +502,7 @@ pub async fn get_watch_executions(
     let executions =
         kyomi_auth::watch_service::get_executions(&ctx.db, &watch_id, ws_id, limit)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     Ok(executions.iter().map(|e| execution_to_item(e, false)).collect())
 }
@@ -523,7 +523,7 @@ pub async fn get_watch_execution(
     let execution =
         kyomi_auth::watch_service::get_execution_by_id(&ctx.db, &watch_id, execution_id, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
     Ok(execution_to_item(&execution, true))
@@ -560,7 +560,7 @@ pub async fn get_alerts(
         include_deleted,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(AlertsPage {
         alerts: executions.iter().map(execution_to_alert).collect(),
@@ -579,7 +579,7 @@ pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
 
     kyomi_auth::watch_service::get_unread_alerts_count(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 /// Mark an alert as read.
@@ -594,7 +594,7 @@ pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::mark_alert_read(&ctx.db, execution_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 /// Mark an alert as unread.
@@ -609,7 +609,7 @@ pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::mark_alert_unread(&ctx.db, execution_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 /// Soft-delete an alert.
@@ -624,7 +624,7 @@ pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::delete_alert(&ctx.db, execution_id, ws_id, &auth.user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 /// Restore a soft-deleted alert.
@@ -639,7 +639,7 @@ pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
 
     kyomi_auth::watch_service::restore_alert(&ctx.db, execution_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 /// Bulk soft-delete alerts.
@@ -670,7 +670,7 @@ pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnE
 
     kyomi_auth::watch_service::bulk_delete_alerts(&ctx.db, &unique_ids, ws_id, &auth.user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -703,7 +703,7 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
 
     kyomi_auth::watch_service::bulk_mark_alerts_read(&ctx.db, &unique_ids, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -736,7 +736,7 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
 
     kyomi_auth::watch_service::bulk_mark_alerts_unread(&ctx.db, &unique_ids, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -766,7 +766,7 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
         execution_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))
+    .into_sfn()
 }
 
 /// Get the most recent execution for a watch.
@@ -784,13 +784,13 @@ pub async fn get_last_execution(
     // Verify watch exists and belongs to workspace
     kyomi_auth::watch_service::get_watch(&ctx.db, &watch_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
     let executions =
         kyomi_auth::watch_service::get_executions(&ctx.db, &watch_id, ws_id, 1)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     Ok(executions.first().map(|e| execution_to_item(e, true)))
 }
@@ -816,7 +816,7 @@ pub async fn get_thinking_events(
     let execution =
         kyomi_auth::watch_service::get_execution_by_id(&ctx.db, &watch_id, execution_id, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Execution not found"))?;
 
     let mut thinking_events = serde_json::Value::Array(Vec::new());
@@ -870,4 +870,4 @@ pub async fn get_thinking_events(
 
 // SSR-only import — placed at bottom to match `dashboards.rs` convention.
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};

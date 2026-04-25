@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnEr
 
     let sites = kyomi_auth::analytics_site_service::list_sites(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(sites
         .iter()
@@ -215,7 +215,7 @@ pub async fn create_analytics_site(
         },
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(AnalyticsSiteData {
         id: site.id.clone(),
@@ -267,7 +267,7 @@ pub async fn update_analytics_site(
         datasource_slug.as_deref(),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(AnalyticsSiteData {
         id: site.id.clone(),
@@ -299,7 +299,7 @@ pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError>
         ctx.config.analytics_clickhouse_secure,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }

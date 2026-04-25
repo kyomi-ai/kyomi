@@ -149,7 +149,7 @@ pub async fn list_dashboards(
         limit,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(results
         .into_iter()
@@ -198,7 +198,7 @@ pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, Serv
     let dashboard =
         kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .into_sfn()?
             .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
     // Record view for popularity tracking (fire-and-forget)
@@ -262,7 +262,7 @@ pub async fn create_dashboard(
         Some(embedding_svc),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
     kyomi_auth::dashboard_service::spawn_embedding_generation(
         ctx.db.clone(),
         embedding_svc.clone(),
@@ -311,7 +311,7 @@ pub async fn update_dashboard(
         },
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Re-embed if content or title changed (matches REST handler — propagates error)
     if title.is_some() || content.is_some() {
@@ -350,7 +350,7 @@ pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError>
         &auth.user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -373,13 +373,13 @@ pub async fn list_versions(dashboard_id: String) -> Result<VersionListResult, Se
     // Fetch the live dashboard (also verifies workspace ownership)
     let dashboard = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
     let versions =
         kyomi_auth::dashboard_service::list_versions(&ctx.db, &dashboard_id, 50, 0)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     // Current version = max + 1 (represents the live dashboard content)
     let current_version_number = versions
@@ -426,13 +426,13 @@ pub async fn get_version(
     // Verify dashboard belongs to workspace
     kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
     let version =
         kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, version_number)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .into_sfn()?
             .ok_or_else(|| {
                 ServerFnError::new(format!(
                     "Version {version_number} not found for dashboard {dashboard_id}"
@@ -474,7 +474,7 @@ pub async fn diff_versions(
         to_version,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(VersionDiff {
         from_version: result.from_version,
@@ -513,7 +513,7 @@ pub async fn restore_version(
         version_number,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Re-embed after restore (matches REST handler — propagates error)
     let embedding_svc = ctx.embedding.wait_ready().await
@@ -551,7 +551,7 @@ pub async fn get_user_default_dashboard() -> Result<Option<String>, ServerFnErro
 
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("User not found"))?;
 
     let default_id = user
@@ -582,7 +582,7 @@ pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<
 
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &value)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -601,7 +601,7 @@ pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerF
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let default_id = workspace
@@ -640,7 +640,7 @@ pub async fn set_workspace_default_dashboard(
 
     let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let mut current_settings = workspace.settings.clone().unwrap_or(serde_json::json!({}));
@@ -656,7 +656,7 @@ pub async fn set_workspace_default_dashboard(
 
     kyomi_auth::workspace_service::update_workspace_settings(&ctx.db, ws_id, &current_settings)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -666,4 +666,4 @@ pub async fn set_workspace_default_dashboard(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};

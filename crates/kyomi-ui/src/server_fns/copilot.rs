@@ -17,6 +17,9 @@
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ssr")]
+use super::IntoServerFnError;
+
 /// Response from the copilot after submitting a user message.
 ///
 /// The agent runs asynchronously — the actual AI content arrives via WebSocket
@@ -125,7 +128,7 @@ pub async fn send_copilot_message(
         },
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // ── Spawn AI agent execution ────────────────────────────────────────
     // Follows the same pattern as send_chat_message in chat.rs.

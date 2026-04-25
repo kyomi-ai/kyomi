@@ -5,6 +5,9 @@
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ssr")]
+use super::IntoServerFnError;
+
 /// Minimal chat session info for the sidebar list.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SidebarSession {
@@ -53,7 +56,7 @@ pub async fn get_recent_sessions() -> Result<Vec<SidebarSession>, ServerFnError>
         "chat",
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(sessions
         .into_iter()
@@ -73,7 +76,7 @@ pub async fn get_sidebar_user() -> Result<SidebarUser, ServerFnError> {
     // Read theme preference from user's extra_metadata (same source as profile.rs)
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("User not found"))?;
 
     let theme_preference = user

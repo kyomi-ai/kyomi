@@ -276,7 +276,7 @@ pub async fn list_chat_sessions(pinned_only: bool) -> Result<Vec<ChatSessionItem
         "chat", // session_type
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(sessions
         .into_iter()
@@ -307,7 +307,7 @@ pub async fn get_session_messages(
         Some(ws_id),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?
+    .into_sfn()?
     .ok_or_else(|| ServerFnError::new("Session not found or access denied"))?;
 
     let encryption_key = ctx
@@ -322,7 +322,7 @@ pub async fn get_session_messages(
         200, // limit
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(SessionMessagesResponse {
         messages: messages
@@ -357,7 +357,7 @@ pub async fn update_session_title(
         Some(ws_id),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     match session {
         Some(s) if s.user_id == auth.user_id => {}
@@ -374,7 +374,7 @@ pub async fn update_session_title(
     let updated =
         kyomi_auth::chat_service::update_session_title(&ctx.db, &session_id, &title)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     if !updated {
         return Err(ServerFnError::new("Session not found"));
@@ -409,7 +409,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
         Some(ws_id),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     if !deleted {
         return Err(ServerFnError::new(
@@ -456,7 +456,7 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
         ws_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         deleted_count = deleted_count,
@@ -491,7 +491,7 @@ pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>,
         50, // limit (matches default_search_limit)
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(sessions
         .into_iter()
@@ -573,7 +573,7 @@ pub async fn send_chat_message(
         },
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Early return for skip_ai path (service handled storage).
     let (session_id, is_new_session, user_message_id, assistant_message_id, is_shared) =
@@ -813,7 +813,7 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
         "SELECT user_id FROM chat_sessions WHERE session_id = $1",
         &session_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?
+    .into_sfn()?
     .ok_or_else(|| ServerFnError::new("Session not found"))?;
 
     if row.user_id != auth.user_id {
@@ -830,7 +830,7 @@ pub async fn share_session(session_id: String) -> Result<(), ServerFnError> {
         &now,
         &session_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -865,7 +865,7 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
         "SELECT user_id, platform_type, platform_thread_key FROM chat_sessions WHERE session_id = $1",
         &session_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?
+    .into_sfn()?
     .ok_or_else(|| ServerFnError::new("Session not found"))?;
 
     if row.user_id != auth.user_id {
@@ -897,7 +897,7 @@ pub async fn unshare_session(session_id: String) -> Result<(), ServerFnError> {
         "UPDATE chat_sessions SET shared = false, shared_at = NULL WHERE session_id = $1",
         &session_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -932,7 +932,7 @@ pub async fn mark_session_read(
         Some(ws_id),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     if session.is_none() {
         return Err(ServerFnError::new(
@@ -956,7 +956,7 @@ pub async fn mark_session_read(
              ORDER BY created_at DESC LIMIT 1",
             &session_id
         )
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
         latest.map(|r| r.message_id)
     };
@@ -976,7 +976,7 @@ pub async fn mark_session_read(
         &now_str,
         message_id.as_deref()
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -1013,7 +1013,7 @@ pub async fn toggle_message_pin(
         Some(ws_id),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     if success {
         tracing::info!(
@@ -1065,7 +1065,7 @@ pub async fn update_message_content(
         &content,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         session_id = %session_id,
@@ -1082,7 +1082,7 @@ pub async fn update_message_content(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 /// Convert a `chat_service::SessionListItem` to our `ChatSessionItem`.
 #[cfg(feature = "ssr")]

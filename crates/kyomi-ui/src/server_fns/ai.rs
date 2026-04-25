@@ -155,7 +155,7 @@ pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFn
     let ws_id = workspace_id(&auth)?;
     let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
     let balance = load_ai_bundle_remaining_usd(&ctx.db, ws_id).await?;
 
     Ok(view_from_config(&cfg, balance))
@@ -189,7 +189,7 @@ pub async fn update_workspace_ai_config(
 
     let parsed_provider =
         kyomi_auth::workspace_ai_config::WorkspaceAiProvider::from_str(&provider)
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let input = kyomi_auth::workspace_ai_config::UpdateWorkspaceAiConfigInput {
         provider: parsed_provider,
@@ -201,12 +201,12 @@ pub async fn update_workspace_ai_config(
     let ws_id = workspace_id(&auth)?;
     kyomi_auth::workspace_ai_config::update(&ctx.db, ws_id, input)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     // Re-load so the returned view reflects the committed state.
     let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
     let balance = load_ai_bundle_remaining_usd(&ctx.db, ws_id).await?;
 
     Ok(view_from_config(&cfg, balance))
@@ -468,7 +468,7 @@ pub async fn list_workspace_ai_models(
             let ws_id = workspace_id(&auth)?;
             let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .into_sfn()?;
             // Cross-provider guard: never use a stored key intended for
             // provider X to list models from provider Y.
             if cfg.provider.as_str() != provider {
@@ -754,7 +754,7 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ---------------------------------------------------------------------------
 // Tests

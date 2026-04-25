@@ -177,7 +177,7 @@ pub async fn accept_terms(
 /// Mirrors the logic in `DatasourceOnboarding.jsx`'s `checkWorkspaceState()`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id};
+    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -197,7 +197,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
     kyomi_auth::onboarding_service::get_onboarding_state(&ctx.db, ws_id, &auth.user_id, is_admin, encryption_key)
         .await
         .map(Into::into)
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 /// Create the sample datasource for the workspace (admin only).
@@ -206,7 +206,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 /// `apps/server/src/routes/datasources.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id};
+    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -233,7 +233,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     let datasources =
         kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, true)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let has_sample = datasources.iter().any(|ds| {
         ds.connection_config
@@ -260,7 +260,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
         None, // direct connection
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         "Created sample datasource '{}' (id: {}) for workspace {} by user {}",
@@ -317,7 +317,7 @@ pub struct SampleDatasourceAvailability {
 #[server(prefix = "/leptos-api")]
 pub async fn check_sample_datasource_available()
 -> Result<SampleDatasourceAvailability, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id};
+    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
@@ -336,7 +336,7 @@ pub async fn check_sample_datasource_available()
     let datasources =
         kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, true)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let already_added = datasources.iter().any(|ds| {
         ds.connection_config

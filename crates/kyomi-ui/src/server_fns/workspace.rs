@@ -93,7 +93,7 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
     let ws_id = workspace_id(&auth)?;
     let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let default_model = custom_settings_get(&workspace.settings, "default_model")
@@ -132,7 +132,7 @@ pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
     let ws_id = workspace_id(&auth)?;
     kyomi_auth::workspace_service::update_workspace_name(&ctx.db, ws_id, trimmed)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -147,7 +147,7 @@ pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> 
     let ws_id = workspace_id(&auth)?;
     let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let updated_settings = merge_custom_settings(
@@ -162,7 +162,7 @@ pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> 
         &updated_settings,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -177,7 +177,7 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
     let ws_id = workspace_id(&auth)?;
     let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
     let config_value = serde_json::json!({
@@ -198,7 +198,7 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
         &updated_settings,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -220,7 +220,7 @@ pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlack
     let ws_config =
         kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let installed = ws_config.is_some();
     let team_id = ws_config
@@ -313,7 +313,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
     let integration =
         kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     if integration.is_none() {
         return Err(ServerFnError::new(
@@ -324,7 +324,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
     // Remove the workspace integration
     kyomi_core::platform::delete_workspace_integration(&ctx.db, ws_id, "slack")
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let _ = team_id; // used by React for cache invalidation — we verify server-side
 
@@ -333,7 +333,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {

@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -113,7 +113,7 @@ pub async fn list_collections(
         doc_type.as_deref(),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(collections.iter().map(to_collection_item).collect())
 }
@@ -143,7 +143,7 @@ pub async fn create_collection(
         dt,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(bare_to_collection_item(&collection))
 }
@@ -175,13 +175,13 @@ pub async fn update_collection(
         &updates,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Re-fetch to get updated state with dashboards
     let collection =
         kyomi_auth::collection_service::get_collection(&ctx.db, &collection_id, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let collection = collection.ok_or_else(|| {
         ServerFnError::new("Collection not found")
@@ -199,7 +199,7 @@ pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnErro
 
     kyomi_auth::collection_service::delete_collection(&ctx.db, &collection_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -224,7 +224,7 @@ pub async fn add_dashboard_to_collection(
         None, // position — append to end
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -246,7 +246,7 @@ pub async fn remove_dashboard_from_collection(
         ws_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }

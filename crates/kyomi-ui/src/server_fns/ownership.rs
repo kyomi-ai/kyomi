@@ -51,7 +51,7 @@ pub async fn get_ownership_transfer(
         &auth.user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(detail.map(|d| OwnershipTransfer {
         transfer_id: d.transfer_id,
@@ -74,7 +74,7 @@ pub async fn accept_ownership_transfer(
 
     let transfer = kyomi_auth::workspace_service::get_ownership_transfer(&ctx.db, &transfer_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Transfer not found"))?;
 
     // Authorization first — recipient check before status/expiry
@@ -105,7 +105,7 @@ pub async fn accept_ownership_transfer(
         &auth.user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(
         "Ownership transfer {} accepted: workspace {} now owned by {}",
@@ -129,7 +129,7 @@ pub async fn decline_ownership_transfer(
 
     let transfer = kyomi_auth::workspace_service::get_ownership_transfer(&ctx.db, &transfer_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Transfer not found"))?;
 
     // Authorization first — recipient check before status
@@ -145,7 +145,7 @@ pub async fn decline_ownership_transfer(
 
     kyomi_auth::workspace_service::update_transfer_status(&ctx.db, &transfer_id, "declined")
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     tracing::info!(
         "Ownership transfer {} declined by {}",
@@ -158,4 +158,4 @@ pub async fn decline_ownership_transfer(
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context};
+use super::{extract_auth, extract_context, IntoServerFnError};

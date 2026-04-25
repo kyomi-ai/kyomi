@@ -203,3 +203,18 @@ pub(crate) fn workspace_id(auth: &kyomi_auth::middleware::AuthUser) -> Result<&s
         .as_deref()
         .ok_or_else(|| leptos::prelude::ServerFnError::new("Workspace context required"))
 }
+
+/// Extension trait that converts any `Result<T, E: Display>` into a server
+/// function result, replacing the boilerplate
+/// `.map_err(|e| ServerFnError::new(e.to_string()))`.
+#[cfg(feature = "ssr")]
+pub(crate) trait IntoServerFnError<T> {
+    fn into_sfn(self) -> Result<T, leptos::prelude::ServerFnError>;
+}
+
+#[cfg(feature = "ssr")]
+impl<T, E: std::fmt::Display> IntoServerFnError<T> for Result<T, E> {
+    fn into_sfn(self) -> Result<T, leptos::prelude::ServerFnError> {
+        self.map_err(|e| leptos::prelude::ServerFnError::new(e.to_string()))
+    }
+}

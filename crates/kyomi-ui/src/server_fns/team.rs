@@ -61,7 +61,7 @@ async fn get_current_workspace(
 ) -> Result<kyomi_core::models::Workspace, ServerFnError> {
     kyomi_auth::workspace_service::get_workspace_full(db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))
 }
 
@@ -82,7 +82,7 @@ pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> 
     let members =
         kyomi_auth::workspace_service::get_workspace_members_with_users(&ctx.db, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let result = members
         .iter()
@@ -123,7 +123,7 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
         let admin_count =
             kyomi_auth::workspace_service::count_admins(&ctx.db, ws_id)
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .into_sfn()?;
         if admin_count < 2 {
             return Err(ServerFnError::new(
                 "Cannot demote yourself: you are the only admin",
@@ -134,14 +134,14 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
     // Verify member exists
     let target = kyomi_auth::workspace_service::get_workspace_user(&ctx.db, ws_id, &user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
     if target.is_none() {
         return Err(ServerFnError::new("Member not found in workspace"));
     }
 
     kyomi_auth::workspace_service::update_member_role(&ctx.db, ws_id, &user_id, db_role)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -166,7 +166,7 @@ pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
         &user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -188,7 +188,7 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
     let invitations =
         kyomi_auth::workspace_service::get_pending_invitations_for_workspace(&ctx.db, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let result = invitations
         .iter()
@@ -246,7 +246,7 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
         },
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -264,7 +264,7 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
     let invitation =
         kyomi_auth::workspace_service::get_invitation_in_workspace(&ctx.db, &invitation_id, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Invitation not found"))?;
 
     if invitation.status != kyomi_core::enums::InvitationStatus::Pending {
@@ -273,7 +273,7 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
 
     kyomi_auth::workspace_service::update_invitation_status(&ctx.db, &invitation_id, "cancelled")
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -294,7 +294,7 @@ pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, Se
     let transfers =
         kyomi_auth::workspace_service::list_ownership_transfers_for_user(&ctx.db, ws_id, &auth.user_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let result = transfers
         .into_iter()
@@ -326,7 +326,7 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
     let transfer =
         kyomi_auth::workspace_service::get_ownership_transfer(&ctx.db, &transfer_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?
+            .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Transfer not found"))?;
 
     if transfer.status != kyomi_core::enums::TransferStatus::Pending {
@@ -341,7 +341,7 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
 
     kyomi_auth::workspace_service::update_transfer_status(&ctx.db, &transfer_id, "cancelled")
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -371,7 +371,7 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
     let existing =
         kyomi_auth::workspace_service::get_pending_transfer_for_workspace(&ctx.db, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
     if existing.is_some() {
         return Err(ServerFnError::new(
             "There is already a pending ownership transfer for this workspace",
@@ -393,11 +393,11 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
         expires_at,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};

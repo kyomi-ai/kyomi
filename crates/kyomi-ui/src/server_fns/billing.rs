@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -203,7 +203,7 @@ async fn load_workspace(
          FROM workspaces WHERE workspace_id = $1",
         ws_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?
+    .into_sfn()?
     .ok_or_else(|| ServerFnError::new("Workspace not found"))
 }
 
@@ -277,7 +277,7 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
     let ai_remaining_usd = kyomi_auth::billing_service::BillingService::new()
         .get_bundle_remaining_usd(&ctx.db, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
     let ai_token_balance_cents = (ai_remaining_usd * 100.0) as i64;
 
     // Analytics events this month from Redis (same pattern as usage.rs).
@@ -413,7 +413,7 @@ pub async fn create_checkout(
             sub_id,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
         return Ok(CheckoutOutcome::Modified(
             "Subscription reactivated successfully".to_string(),
@@ -443,7 +443,7 @@ pub async fn create_checkout(
                 &new_customer_id,
                 ws_id
             )
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
             new_customer_id
         }
@@ -496,7 +496,7 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
         "UPDATE workspaces SET subscription_status = 'cancelled' WHERE workspace_id = $1",
         ws_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(BillingResult {
         message: "Subscription will be cancelled at the end of your billing period".to_string(),
@@ -535,7 +535,7 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
         "UPDATE workspaces SET subscription_status = 'active' WHERE workspace_id = $1",
         ws_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(BillingResult {
         message: "Subscription has been reactivated".to_string(),
@@ -583,7 +583,7 @@ pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
         limit,
         ws_id
     )
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     tracing::info!(workspace_id = %ws_id, limit, "Updated workspace seat cap");
 

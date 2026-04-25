@@ -11,7 +11,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ---------------------------------------------------------------------------
 // Query count cache — avoids redundant COUNT(*) queries during pagination
@@ -111,7 +111,7 @@ pub async fn execute_sql_query(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // BigQuery direct connections use the REST API for job_id-based pagination.
     // Connect-mode BigQuery goes through the provider path like all other types.
@@ -190,7 +190,7 @@ pub async fn fetch_query_page(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // BigQuery job_id pagination: fetch page directly from a completed job
     // without re-executing the query. Only for direct BigQuery connections.
@@ -291,7 +291,7 @@ async fn resolve_bq_access_for_datasource(
     let user_cred =
         kyomi_auth::datasource_service::get_user_credential(db, user_id, &datasource.id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let user_cred_data = if let Some(ref cred) = user_cred {
         kyomi_auth::encryption::decrypt_json(&cred.credentials, encryption_key).ok()
@@ -316,7 +316,7 @@ async fn resolve_bq_access_for_datasource(
                 client_secret,
             )
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
             let token = tokens.access_token.clone();
 
@@ -396,14 +396,14 @@ async fn resolve_bq_access_for_datasource(
         }
         "service_account" => {
             let client = kyomi_datasource_server::http_client()
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .into_sfn()?;
             let (token, project_id) =
                 kyomi_datasource_server::providers::bigquery::exchange_service_account_jwt(
                     &client,
                     connection_config,
                 )
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .into_sfn()?;
 
             let bp = kyomi_datasource_server::providers::bigquery::resolve_billing_project(
                 connection_config,
@@ -446,7 +446,7 @@ async fn execute_bigquery_query_rest(
     max_results: u32,
 ) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize, Option<String>), ServerFnError> {
     let client = kyomi_datasource_server::http_client()
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let url = format!("{BIGQUERY_API_BASE}/projects/{project_id}/queries");
 
@@ -595,7 +595,7 @@ async fn fetch_bq_job_page(
     max_results: u32,
 ) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize), ServerFnError> {
     let client = kyomi_datasource_server::http_client()
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let url = format!(
         "{BIGQUERY_API_BASE}/projects/{project_id}/queries/{job_id}?startIndex={start_index}&maxResults={max_results}"
@@ -1142,7 +1142,7 @@ pub async fn list_query_history(
         search.as_deref(),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     let entries: Vec<QueryHistoryEntry> = records
         .into_iter()
@@ -1193,7 +1193,7 @@ pub async fn save_query_history(
             ws_id,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
         ds.map(|d| d.id)
     } else {
         None
@@ -1212,7 +1212,7 @@ pub async fn save_query_history(
         error_message.as_deref(),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(record.query_id)
 }
@@ -1241,7 +1241,7 @@ pub async fn update_query_history(
         None, // tags
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     if result.is_none() {
         return Err(ServerFnError::new(format!(
@@ -1272,7 +1272,7 @@ pub async fn delete_query_history(
         &auth.user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     if !deleted {
         return Err(ServerFnError::new(format!(
@@ -1323,7 +1323,7 @@ pub async fn get_catalog_tree(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Fetch all non-archived cached tables for this datasource.
     //
@@ -1347,7 +1347,7 @@ pub async fn get_catalog_tree(
             ),
             &datasource.id
         )
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     // BigQuery public datasets: include if enabled (defaults to true).
     if datasource.datasource_type == kyomi_core::DatasourceType::Bigquery {
@@ -1370,7 +1370,7 @@ pub async fn get_catalog_tree(
                     ),
                     kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID
                 )
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .into_sfn()?;
             cached_tables.extend(public_tables);
         }
     }
@@ -1547,7 +1547,7 @@ pub async fn search_catalog(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Sample datasources used to live in a shared sentinel workspace and
     // required an `is_sample` branch here to read from `SAMPLE_DATA_WORKSPACE_ID`.
@@ -1576,14 +1576,14 @@ pub async fn search_catalog(
                 .bind(&search_pattern)
                 .fetch_all(pg)
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?,
+                .into_sfn()?,
         kyomi_core::db::DbPool::Sqlite(sq) =>
             sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
                 .bind(&datasource.id)
                 .bind(&search_pattern)
                 .fetch_all(sq)
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?,
+                .into_sfn()?,
     };
 
     // BigQuery public datasets: include matching tables if enabled.
@@ -1611,14 +1611,14 @@ pub async fn search_catalog(
                         .bind(&search_pattern)
                         .fetch_all(pg)
                         .await
-                        .map_err(|e| ServerFnError::new(e.to_string()))?,
+                        .into_sfn()?,
                 kyomi_core::db::DbPool::Sqlite(sq) =>
                     sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&public_sql)
                         .bind(kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID)
                         .bind(&search_pattern)
                         .fetch_all(sq)
                         .await
-                        .map_err(|e| ServerFnError::new(e.to_string()))?,
+                        .into_sfn()?,
             };
             cached_tables.extend(public_tables);
         }
@@ -1696,7 +1696,7 @@ pub async fn refresh_catalog(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // (The old "sample datasources cannot be refreshed manually" gate
     // was valid when samples lived in a shared sentinel workspace. Samples
@@ -1720,7 +1720,7 @@ pub async fn refresh_catalog(
             encryption_key,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     // Refresh OAuth credentials if needed.
     let credentials = kyomi_datasource_server::ensure_valid_oauth_credentials(
@@ -1729,7 +1729,7 @@ pub async fn refresh_catalog(
         &ds_type,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Persist refreshed token if it changed.
     if let Some(ref cred) = user_cred {
@@ -1751,7 +1751,7 @@ pub async fn refresh_catalog(
         .embedding
         .wait_ready()
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let params = super::catalog_refresh::CatalogRefreshParams {
         db: &ctx.db,
@@ -1818,7 +1818,7 @@ pub async fn get_table_info(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Parse the table_id (e.g., "project.dataset.table" or "dataset.table").
     let parts: Vec<&str> = table_id.splitn(3, '.').collect();
@@ -1868,7 +1868,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(pg)
                     .await
-                    .map_err(|e| ServerFnError::new(e.to_string()))?
+                    .into_sfn()?
             }
             kyomi_core::db::DbPool::Sqlite(sq) => {
                 sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
@@ -1877,7 +1877,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(sq)
                     .await
-                    .map_err(|e| ServerFnError::new(e.to_string()))?
+                    .into_sfn()?
             }
         }
     } else {
@@ -1890,7 +1890,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(pg)
                     .await
-                    .map_err(|e| ServerFnError::new(e.to_string()))?
+                    .into_sfn()?
             }
             kyomi_core::db::DbPool::Sqlite(sq) => {
                 sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
@@ -1900,7 +1900,7 @@ pub async fn get_table_info(
                     .bind(table_name)
                     .fetch_optional(sq)
                     .await
-                    .map_err(|e| ServerFnError::new(e.to_string()))?
+                    .into_sfn()?
             }
         }
     };

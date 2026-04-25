@@ -45,7 +45,7 @@ pub async fn list_knowledge_docs(
         limit,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(results
         .into_iter()
@@ -85,7 +85,7 @@ pub async fn create_knowledge_doc(
         Some(embedding_svc),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
     kyomi_auth::dashboard_service::spawn_embedding_generation(
         ctx.db.clone(),
         embedding_svc.clone(),
@@ -115,11 +115,11 @@ pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnEr
         &auth.user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
 
 // SSR-only import — placed at bottom to match convention.
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};

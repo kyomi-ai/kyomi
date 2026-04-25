@@ -42,7 +42,7 @@ pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
     // ── User preferences ────────────────────────────────────────────────
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("User not found"))?;
 
     let metadata = user.extra_metadata.as_ref().and_then(|v| v.as_object());
@@ -63,7 +63,7 @@ pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
     {
         let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
         workspace
             .and_then(|ws| ws.settings)
@@ -88,4 +88,4 @@ pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context};
+use super::{extract_auth, extract_context, IntoServerFnError};

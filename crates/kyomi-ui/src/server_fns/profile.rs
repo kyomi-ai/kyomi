@@ -24,7 +24,7 @@ pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
 
     let user = kyomi_auth::user_service::get_user_by_id(&ctx.db, &auth.user_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("User not found"))?;
 
     let metadata = user.extra_metadata.as_ref().and_then(|v| v.as_object());
@@ -85,7 +85,7 @@ pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
         100,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(results
         .into_iter()
@@ -105,7 +105,7 @@ pub async fn get_pending_invitations() -> Result<Vec<InvitationData>, ServerFnEr
     let invitations =
         kyomi_auth::workspace_service::get_pending_invitations_for_email(&ctx.db, &auth.email)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     Ok(invitations
         .into_iter()
@@ -137,7 +137,7 @@ pub async fn update_profile_name(name: String) -> Result<(), ServerFnError> {
 
     kyomi_auth::user_service::update_user_name(&ctx.db, &auth.user_id, &trimmed)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -155,7 +155,7 @@ pub async fn update_theme(theme: String) -> Result<(), ServerFnError> {
     let metadata = serde_json::json!({ "theme": theme });
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &metadata)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -176,7 +176,7 @@ pub async fn update_landing_page(page: String) -> Result<(), ServerFnError> {
     let metadata = serde_json::json!({ "landing_page": page });
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &metadata)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -194,7 +194,7 @@ pub async fn update_default_dashboard(dashboard_id: Option<String>) -> Result<()
 
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &value)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -214,7 +214,7 @@ pub async fn update_query_retention(days: i32) -> Result<(), ServerFnError> {
     let metadata = serde_json::json!({ "query_history_retention_days": days });
     kyomi_auth::user_service::update_extra_metadata(&ctx.db, &auth.user_id, &metadata)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -233,7 +233,7 @@ pub async fn update_chart_palette(palette: String) -> Result<(), ServerFnError> 
 
     kyomi_auth::user_service::update_chartml_config(&ctx.db, &auth.user_id, &config)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -250,7 +250,7 @@ pub async fn accept_invitation(invitation_id: String) -> Result<(), ServerFnErro
         &auth.user_id,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -267,14 +267,14 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
         "declined",
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {

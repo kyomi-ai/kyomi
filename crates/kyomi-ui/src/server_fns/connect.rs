@@ -13,7 +13,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ pub async fn list_connect_datasources() -> Result<Vec<ConnectDatasource>, Server
 
     let datasources = kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, false)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let connect_ds = datasources
         .into_iter()
@@ -149,7 +149,7 @@ pub async fn create_connect_datasource(
 
     kyomi_auth::datasource_service::update_connect_jti(&ctx.db, &ds.id, &jti)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     tracing::info!(
         "Created Connect datasource '{}' (slug: {}, id: {}) for workspace {} by user {}",
@@ -180,7 +180,7 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
 
     let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
 
     if ds.connection_type != "connect" {
@@ -198,7 +198,7 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
 
     kyomi_auth::datasource_service::update_connect_jti(&ctx.db, &ds.id, &jti)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     tracing::info!(
         "Rotated Connect token for datasource '{}' (id: {}) by user {}",
@@ -226,7 +226,7 @@ pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusRespon
 
     let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
 
     if ds.connection_type != "connect" {
@@ -245,7 +245,7 @@ pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusRespon
 
     let presence = kyomi_auth::connect_token::check_presence(&mut redis, &ds.id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(ConnectStatusResponse {
         connected: presence.connected,
@@ -267,7 +267,7 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
 
     let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
 
     if ds.connection_type != "connect" {
@@ -278,7 +278,7 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
 
     kyomi_auth::datasource_service::clear_connect_jti(&ctx.db, &ds.id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     tracing::info!(
         "Disconnected Connect datasource '{}' (id: {}) by user {}",
@@ -327,7 +327,7 @@ fn generate_connect_token(
         .ok_or_else(|| ServerFnError::new("Kyomi Connect is not configured on this server"))?;
     service
         .generate(datasource_id, workspace_id, datasource_type)
-        .map_err(|e| ServerFnError::new(e.to_string()))
+        .into_sfn()
 }
 
 #[cfg(all(test, feature = "ssr"))]

@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id};
+use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
         encryption_key,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(items)
 }
@@ -107,7 +107,7 @@ pub async fn toggle_datasource(
         encryption_key,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))
+    .into_sfn()
 }
 
 /// Delete a datasource (workspace admin only).
@@ -123,7 +123,7 @@ pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnErro
 
     kyomi_auth::datasource_service::delete_datasource(&ctx.db, &datasource_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     Ok(())
 }
@@ -240,7 +240,7 @@ pub async fn create_datasource_modal(
         Some("direct"),
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     // Save credentials if provided
     let has_creds = credentials.as_object().map(|o| !o.is_empty()).unwrap_or(false);
@@ -259,7 +259,7 @@ pub async fn create_datasource_modal(
             &credentials,
         )
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
     }
 
     // Kick off catalog indexing in the background so tables show up
@@ -321,7 +321,7 @@ pub async fn update_datasource_settings(
         None,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(DatasourceResult {
         id: updated.id,
@@ -357,7 +357,7 @@ pub async fn save_datasource_credentials(
         &credentials,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(())
 }
@@ -393,7 +393,7 @@ pub async fn get_datasource_settings(
         encryption_key,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     Ok(DatasourceSettingsResult {
         id: d.id,
@@ -429,7 +429,7 @@ pub async fn test_datasource_standalone(
     let _auth = extract_auth().await?;
 
     let ds_type = kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     let provider = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
@@ -498,7 +498,7 @@ pub async fn test_existing_datasource(
 
     let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
 
     if !ds.active {
@@ -515,7 +515,7 @@ pub async fn test_existing_datasource(
     let user_cred =
         kyomi_auth::datasource_service::get_user_credential(&ctx.db, &auth.user_id, &ds.id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
     let credentials = if let Some(ref cred) = user_cred {
         kyomi_auth::encryption::decrypt_json(&cred.credentials, encryption_key)
@@ -596,7 +596,7 @@ pub async fn discover_datasource_resources(
     let ws_id = workspace_id(&auth)?;
 
     let ds_type = kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .into_sfn()?;
 
     // If slug provided, look up stored credentials (for OAuth datasources)
     let resolved_creds = if let Some(ref slug) = datasource_slug {
@@ -1036,7 +1036,7 @@ pub(crate) async fn create_query_provider(
         false,
     )
     .await
-    .map_err(|e| ServerFnError::new(e.to_string()))?;
+    .into_sfn()?;
 
     let provider: Box<dyn kyomi_datasource_server::DatasourceProvider> =
         if ds.connection_type == "connect" {
@@ -1063,7 +1063,7 @@ pub(crate) async fn create_query_provider(
                 &ds.id,
             )
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .into_sfn()?;
 
             let credentials = if let Some(ref cred) = user_cred {
                 kyomi_auth::encryption::decrypt_json(
@@ -1082,7 +1082,7 @@ pub(crate) async fn create_query_provider(
                     &ds_type,
                 )
                 .await
-                .map_err(|e| ServerFnError::new(e.to_string()))?;
+                .into_sfn()?;
 
             // Build user context for BigQuery OAuth (kyomi_oauth auth mode).
             let user_context = build_user_context(ctx, auth).await?;
