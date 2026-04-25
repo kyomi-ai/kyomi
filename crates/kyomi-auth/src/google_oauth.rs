@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::datasource_oauth::TokenResponse;
+
 // ---------------------------------------------------------------------------
 // Google API endpoints
 // ---------------------------------------------------------------------------
@@ -38,16 +40,6 @@ pub const BIGQUERY_SCOPES: &[&str] = &[
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/// Google token exchange response.
-#[derive(Debug, Deserialize)]
-pub struct TokenResponse {
-    pub access_token: String,
-    pub token_type: String,
-    pub expires_in: Option<i64>,
-    pub refresh_token: Option<String>,
-    pub scope: Option<String>,
-}
 
 /// Google userinfo response.
 #[derive(Debug, Deserialize)]
