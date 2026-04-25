@@ -20,8 +20,8 @@ use phosphor_leptos::{Icon, IconWeight};
 use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
 use crate::components::popover::{Placement, Popover};
 use crate::components::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox, DynSelect, EmptyState, Label,
-    Spinner, Switch,
+    AlertsListSkeleton, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox,
+    DynSelect, EmptyState, Label, Spinner, Switch,
 };
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::context::UserContext;
@@ -564,11 +564,7 @@ pub fn AlertsHistory(
             yaml=chart_info_yaml
             on_close=on_chart_info_close
         />
-        <Suspense fallback=move || view! {
-            <div class="flex items-center justify-center py-12">
-                <Spinner class="text-muted-foreground" />
-            </div>
-        }>
+        <Suspense fallback=move || view! { <AlertsListSkeleton /> }>
             {move || {
                 let alerts_result = alerts_resource.get();
                 let watches_result = watches_resource.get();
@@ -585,11 +581,7 @@ pub fn AlertsHistory(
                         }.into_any();
                     }
                     None => {
-                        return view! {
-                            <div class="flex items-center justify-center py-12">
-                                <Spinner class="text-muted-foreground" />
-                            </div>
-                        }.into_any();
+                        return view! { <AlertsListSkeleton /> }.into_any();
                     }
                 };
 

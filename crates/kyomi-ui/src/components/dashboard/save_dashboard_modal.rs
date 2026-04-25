@@ -19,7 +19,7 @@ use crate::components::alert::{Alert, AlertVariant};
 use crate::components::empty_state::EmptyState;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
-use crate::components::spinner::Spinner;
+use crate::components::ModalListSkeleton;
 use crate::server_fns::dashboards::{
     create_dashboard, get_dashboard, list_dashboards, update_dashboard, DashboardListItem,
 };
@@ -237,6 +237,7 @@ pub fn SaveDashboardModal(
             on_close=on_close
             title="Save to Dashboard"
             size=ModalSize::Lg
+            content_min_height="320px"
             footer=footer_view
         >
             // React: subtitle
@@ -253,16 +254,10 @@ pub fn SaveDashboardModal(
                 })
             }}
 
-            // React: body — flex-1 overflow-y-auto
-            <div class="flex-1 overflow-y-auto">
-                <Suspense fallback=move || view! {
-                    <div class="flex items-center justify-center py-12">
-                        <div class="flex items-center gap-2 text-muted-foreground">
-                            <Spinner />
-                            "Loading dashboards..."
-                        </div>
-                    </div>
-                }>
+            // React: body — flex-1 overflow-y-auto, max-h bounds the list so the
+            // modal doesn't grow unboundedly when many dashboards exist.
+            <div class="flex-1 overflow-y-auto max-h-[420px]">
+                <Suspense fallback=move || view! { <ModalListSkeleton /> }>
                     {move || {
                         dashboards_resource.get().map(|result| {
                             let dashboards = result.unwrap_or_default();

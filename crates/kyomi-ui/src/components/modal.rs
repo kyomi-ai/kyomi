@@ -72,7 +72,7 @@ impl ModalSize {
 /// - Backdrop overlay: `fixed inset-0 flex items-center justify-center z-[1000]` + `bg-[var(--color-overlay)]`
 /// - Modal container: `bg-background text-foreground rounded-lg shadow-xl` + size class
 /// - Header: title + close button, separated by `border-b border-border`
-/// - Content: scrollable area
+/// - Content: scrollable area with optional `min_height` to prevent layout shift during loading
 /// - Footer: optional action buttons, separated by `border-t border-border`
 #[component]
 pub fn Modal(
@@ -89,6 +89,12 @@ pub fn Modal(
     /// Modal size — controls max-width. Default: Lg (896px).
     #[prop(default = ModalSize::Lg)]
     size: ModalSize,
+    /// Optional minimum height for the scrollable content area (e.g. `"320px"`).
+    /// Prevents layout shift when async content transitions from skeleton to real
+    /// data — the modal body maintains this minimum size regardless of loading state.
+    /// Does not cap the maximum height; content can still expand beyond this value.
+    #[prop(optional, into)]
+    content_min_height: Option<String>,
     /// Optional footer content (action buttons, etc.).
     /// Use `ChildrenFn` so the footer can be re-rendered inside `<Show>`.
     #[prop(optional)]
@@ -104,6 +110,11 @@ pub fn Modal(
         "bg-background text-foreground rounded-lg shadow-xl animate-zoom-fade-in {} w-full mx-2 sm:mx-4 max-h-[95vh] sm:max-h-[90vh] flex flex-col",
         size.class()
     );
+
+    // Build the inline style for the content area's min-height, if provided.
+    let content_style = content_min_height
+        .map(|h| format!("min-height: {h}"))
+        .unwrap_or_default();
 
     // Escape key handler
     let handle_keydown = move |ev: ev::KeyboardEvent| {
@@ -156,7 +167,9 @@ pub fn Modal(
 
                     // Content — scrollable
                     // React: `p-4 sm:p-6 overflow-y-auto flex-1`
-                    <div class="p-4 sm:p-6 overflow-y-auto flex-1">
+                    // The `content_style` applies an optional min-height so skeleton
+                    // placeholders prevent layout shift when async data loads.
+                    <div class="p-4 sm:p-6 overflow-y-auto flex-1" style=content_style.clone()>
                         {children()}
                     </div>
 
