@@ -243,8 +243,8 @@ pub fn ChatsListPage() -> impl IntoView {
                             .iter_mut()
                             .find(|s| s.session_id == *session_id)
                         {
-                            if let Some(ref ts) = msg.timestamp {
-                                session.updated_at = ts.clone();
+                            if !msg.timestamp.is_empty() {
+                                session.updated_at = msg.timestamp.clone();
                             }
                             session.unread_count += 1;
                         }

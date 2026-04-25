@@ -5835,6 +5835,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "kyomi-connect-protocol",
+ "kyomi-types",
  "pgvector",
  "rand 0.9.2",
  "redis",
@@ -6070,7 +6071,9 @@ dependencies = [
 name = "kyomi-types"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

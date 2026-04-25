@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+pub mod websocket;
+pub use websocket::{MessageType, WebSocketMessage};
+
 use serde::{Deserialize, Serialize};
 
 /// A datasource with its per-user credential status.

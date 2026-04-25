@@ -16,6 +16,8 @@ use leptos::prelude::*;
 use send_wrapper::SendWrapper;
 use serde::{Deserialize, Serialize};
 
+pub use kyomi_types::WebSocketMessage;
+
 /// WebSocket connection state — matches React's `connectionState` values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionState {
@@ -72,25 +74,6 @@ pub struct WsDiagnostics {
     pub total_subscribers: usize,
     /// Number of unique dedup keys tracked (bounded to 1000).
     pub seen_messages_len: usize,
-}
-
-/// An incoming WebSocket message parsed from JSON.
-///
-/// Uses `serde_json::Value` for the `data` field to avoid tight coupling
-/// with every possible message payload. Subscribers pattern-match on
-/// `message_type` and parse `data` as needed.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WebSocketMessage {
-    #[serde(rename = "type")]
-    pub message_type: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub message_id: Option<String>,
-    #[serde(default)]
-    pub timestamp: Option<String>,
-    #[serde(default)]
-    pub data: Option<serde_json::Value>,
 }
 
 /// Context provided to all child components via `use_context::<WebSocketContext>()`.
@@ -541,7 +524,8 @@ mod wasm {
                 s.seen_messages.insert(dedup_key);
 
                 // Notify subscribers for this message type
-                if let Some(callbacks) = s.subscribers.get(&msg.message_type) {
+                let type_key = msg.message_type.to_string();
+                if let Some(callbacks) = s.subscribers.get(&type_key) {
                     // Clone the callback list to avoid borrow issues
                     let cb_refs: Vec<&Box<dyn Fn(WebSocketMessage)>> =
                         callbacks.iter().map(|(_, cb)| cb).collect();

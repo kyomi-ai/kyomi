@@ -2,101 +2,11 @@
 
 //! WebSocket message types and shared types for the unified WS system.
 //!
-//! `MessageType` and `WebSocketMessage` live in `kyomi-core` so they can be
-//! used by both `kyomi-auth` (the manager) and `kyomi-api` (the endpoints).
+//! `MessageType` and `WebSocketMessage` are defined in `kyomi-types` so they
+//! can be used by both `kyomi-auth` (the manager) and `kyomi-api` (the endpoints)
+//! as well as `kyomi-ui` (the Leptos frontend).
 
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-
-/// WebSocket message types. 23 from `shared/constants.toml` plus workspace event types.
-///
-/// Serializes to/from snake_case strings (e.g., `ChatStream` ↔ `"chat_stream"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageType {
-    ChatStream,
-    ChatComplete,
-    TitleUpdate,
-    SessionCreated,
-    AgentThinking,
-    TokenUsageUpdate,
-    OauthReconnectRequired,
-    OauthCancel,
-    OwnershipTransferOffered,
-    WorkspaceInvitation,
-    WorkspaceRemoved,
-    DashboardUpdate,
-    DatasourceUpdate,
-    ChartUpdate,
-    WatchAlert,
-    WatchStateUpdate,
-    WatchUpdate,
-    CredentialStatusChanged,
-    CatalogStatusUpdate,
-    AiUsageUpdate,
-    SharedConversationActivity,
-    SharedChatMessage,
-    RequestCancelled,
-    Error,
-    Heartbeat,
-    // Workspace event types (not in constants.toml — Rust-only additions)
-    MemberRoleChanged,
-    MemberJoined,
-    OwnershipTransferCompleted,
-    OwnershipTransferDeclined,
-    // Query streaming types (Rust-only — used for Connect streaming responses)
-    QueryStreamHeader,
-    QueryStreamChunk,
-    QueryStreamComplete,
-    QueryStreamError,
-}
-
-/// A WebSocket message sent to clients.
-///
-/// Serializes to JSON matching the Python backend's `WebSocketMessage` format exactly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebSocketMessage {
-    #[serde(rename = "type")]
-    pub message_type: MessageType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
-    pub timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-impl WebSocketMessage {
-    /// Create a new message with auto-set UTC timestamp.
-    pub fn new(message_type: MessageType) -> Self {
-        Self {
-            message_type,
-            session_id: None,
-            message_id: None,
-            timestamp: Utc::now().to_rfc3339(),
-            data: None,
-        }
-    }
-
-    /// Builder: set session_id.
-    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    /// Builder: set message_id.
-    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
-        self.message_id = Some(message_id.into());
-        self
-    }
-
-    /// Builder: set data payload.
-    pub fn with_data(mut self, data: serde_json::Value) -> Self {
-        self.data = Some(data);
-        self
-    }
-}
+pub use kyomi_types::{MessageType, WebSocketMessage};
 
 #[cfg(test)]
 mod tests {
