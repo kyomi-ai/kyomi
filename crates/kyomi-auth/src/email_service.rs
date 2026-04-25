@@ -266,17 +266,17 @@ impl EmailService {
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .logo-img {{
             height: 48px;
@@ -286,25 +286,25 @@ impl EmailService {
             padding: 20px 0;
         }}
         h1 {{
-            color: #111827;
+            color: #1C1917;
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 16px;
         }}
         h2 {{
-            color: #1f2937;
+            color: #1C1917;
             font-size: 20px;
             font-weight: 600;
             margin: 24px 0 12px 0;
         }}
         h3 {{
-            color: #374151;
+            color: #1C1917;
             font-size: 18px;
             font-weight: 600;
             margin: 20px 0 10px 0;
         }}
         p {{
-            color: #4b5563;
+            color: #6B6660;
             font-size: 14px;
             margin: 12px 0;
         }}
@@ -332,13 +332,13 @@ impl EmailService {
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
         .footer a {{
-            color: #6b7280;
+            color: #6B6660;
             text-decoration: none;
         }}
         .footer a:hover {{
@@ -346,7 +346,7 @@ impl EmailService {
         }}
     </style>
 </head>
-<body style="background-color: #ffffff !important; color: #374151;">
+<body style="background-color: #FAFAF8 !important; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -462,17 +462,17 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .logo-img {{
             height: 48px;
@@ -482,13 +482,13 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             padding: 20px 0;
         }}
         h1 {{
-            color: #111827;
+            color: #1C1917;
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 16px;
         }}
         p {{
-            color: #4b5563;
+            color: #6B6660;
             font-size: 14px;
             margin: 12px 0;
         }}
@@ -509,13 +509,13 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
         .footer a {{
-            color: #6b7280;
+            color: #6B6660;
             text-decoration: none;
         }}
         .footer a:hover {{
@@ -523,7 +523,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         }}
     </style>
 </head>
-<body style="background-color: #ffffff !important; color: #374151;">
+<body style="background-color: #FAFAF8 !important; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -614,17 +614,17 @@ You're receiving this email because you requested account recovery for Kyomi.
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .logo-img {{
             height: 48px;
@@ -634,13 +634,13 @@ You're receiving this email because you requested account recovery for Kyomi.
             padding: 20px 0;
         }}
         h1 {{
-            color: #111827;
+            color: #1C1917;
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 16px;
         }}
         p {{
-            color: #4b5563;
+            color: #6B6660;
             font-size: 14px;
             margin: 12px 0;
         }}
@@ -661,13 +661,13 @@ You're receiving this email because you requested account recovery for Kyomi.
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
         .footer a {{
-            color: #6b7280;
+            color: #6B6660;
             text-decoration: none;
         }}
         .footer a:hover {{
@@ -675,7 +675,7 @@ You're receiving this email because you requested account recovery for Kyomi.
         }}
     </style>
 </head>
-<body style="background-color: #ffffff !important; color: #374151;">
+<body style="background-color: #FAFAF8 !important; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -766,17 +766,17 @@ You're receiving this email because you requested account recovery for Kyomi.
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .logo-img {{
             height: 48px;
@@ -786,13 +786,13 @@ You're receiving this email because you requested account recovery for Kyomi.
             padding: 20px 0;
         }}
         h1 {{
-            color: #111827;
+            color: #1C1917;
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 16px;
         }}
         p {{
-            color: #4b5563;
+            color: #6B6660;
             font-size: 14px;
             margin: 12px 0;
         }}
@@ -813,13 +813,13 @@ You're receiving this email because you requested account recovery for Kyomi.
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
         .footer a {{
-            color: #6b7280;
+            color: #6B6660;
             text-decoration: none;
         }}
         .footer a:hover {{
@@ -827,7 +827,7 @@ You're receiving this email because you requested account recovery for Kyomi.
         }}
     </style>
 </head>
-<body style="background-color: #ffffff !important; color: #374151;">
+<body style="background-color: #FAFAF8 !important; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -915,17 +915,17 @@ You're receiving this because someone signed up for Kyomi with this email addres
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .logo-img {{
             height: 48px;
@@ -935,13 +935,13 @@ You're receiving this because someone signed up for Kyomi with this email addres
             padding: 20px 0;
         }}
         h1 {{
-            color: #111827;
+            color: #1C1917;
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 16px;
         }}
         p {{
-            color: #4b5563;
+            color: #6B6660;
             font-size: 14px;
             margin: 12px 0;
         }}
@@ -962,13 +962,13 @@ You're receiving this because someone signed up for Kyomi with this email addres
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
         .footer a {{
-            color: #6b7280;
+            color: #6B6660;
             text-decoration: none;
         }}
         .footer a:hover {{
@@ -976,7 +976,7 @@ You're receiving this because someone signed up for Kyomi with this email addres
         }}
     </style>
 </head>
-<body style="background-color: #ffffff !important; color: #374151;">
+<body style="background-color: #FAFAF8 !important; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -1055,7 +1055,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             .iter()
             .map(|(label, value)| {
                 format!(
-                    r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;white-space:nowrap;">{}</td><td style="padding:4px 0;color:#4b5563;">{}</td></tr>"#,
+                    r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#1C1917;vertical-align:top;white-space:nowrap;">{}</td><td style="padding:4px 0;color:#6B6660;">{}</td></tr>"#,
                     html_escape(label),
                     html_escape(value),
                 )
@@ -1072,24 +1072,24 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
     </style>
@@ -1100,7 +1100,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             <img src="cid:kyomi_logo" alt="Kyomi" style="height: 48px; width: auto;">
         </a>
     </div>
-    <h2 style="color:#111827;margin:0 0 16px 0;">{subject}</h2>
+    <h2 style="color:#1C1917;margin:0 0 16px 0;">{subject}</h2>
     <table style="border-collapse:collapse;width:100%;font-size:14px;">
         {html_sections}
     </table>
