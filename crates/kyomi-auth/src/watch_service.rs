@@ -790,20 +790,12 @@ pub async fn update_watch(
         }};
     }
 
-    let watch = match db {
-        DbPool::Postgres(pg) => {
-            let q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
-                .bind(watch_id)
-                .bind(workspace_id);
-            bind_update_params!(q).fetch_one(pg).await
-        }
-        DbPool::Sqlite(sq) => {
-            let q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
-                .bind(watch_id)
-                .bind(workspace_id);
-            bind_update_params!(q).fetch_one(sq).await
-        }
-    }
+    let watch = kyomi_core::db_with_pool!(db, |p| {
+        let q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
+            .bind(watch_id)
+            .bind(workspace_id);
+        bind_update_params!(q).fetch_one(p).await
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to update watch: {e}"))
     })?;
@@ -1292,26 +1284,15 @@ pub async fn search_watches(
     };
 
     // Dynamic SQL — bind chain varies based on has_query
-    let watches = match db {
-        DbPool::Postgres(pg) => {
-            let mut q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
-                .bind(workspace_id)
-                .bind(limit);
-            if let (true, Some(query_str)) = (has_query, query) {
-                q = q.bind(query_str.trim());
-            }
-            q.fetch_all(pg).await
+    let watches = kyomi_core::db_with_pool!(db, |p| {
+        let mut q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
+            .bind(workspace_id)
+            .bind(limit);
+        if let (true, Some(query_str)) = (has_query, query) {
+            q = q.bind(query_str.trim());
         }
-        DbPool::Sqlite(sq) => {
-            let mut q = sqlx::query_as::<_, kyomi_core::models::Watch>(&sql)
-                .bind(workspace_id)
-                .bind(limit);
-            if let (true, Some(query_str)) = (has_query, query) {
-                q = q.bind(query_str.trim());
-            }
-            q.fetch_all(sq).await
-        }
-    }
+        q.fetch_all(p).await
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to search watches: {e}"))
     })?;
@@ -1386,36 +1367,20 @@ pub async fn get_alerts_history(
     );
 
     // Dynamic SQL — bind chain varies based on watch_id
-    let total_count: i64 = match db {
-        DbPool::Postgres(pg) => {
-            if let Some(wid) = watch_id {
-                sqlx::query_scalar(&count_sql)
-                    .bind(workspace_id)
-                    .bind(wid)
-                    .fetch_one(pg)
-                    .await
-            } else {
-                sqlx::query_scalar(&count_sql)
-                    .bind(workspace_id)
-                    .fetch_one(pg)
-                    .await
-            }
+    let total_count: i64 = kyomi_core::db_with_pool!(db, |p| {
+        if let Some(wid) = watch_id {
+            sqlx::query_scalar(&count_sql)
+                .bind(workspace_id)
+                .bind(wid)
+                .fetch_one(p)
+                .await
+        } else {
+            sqlx::query_scalar(&count_sql)
+                .bind(workspace_id)
+                .fetch_one(p)
+                .await
         }
-        DbPool::Sqlite(sq) => {
-            if let Some(wid) = watch_id {
-                sqlx::query_scalar(&count_sql)
-                    .bind(workspace_id)
-                    .bind(wid)
-                    .fetch_one(sq)
-                    .await
-            } else {
-                sqlx::query_scalar(&count_sql)
-                    .bind(workspace_id)
-                    .fetch_one(sq)
-                    .await
-            }
-        }
-    }
+    })
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to count alerts: {e}")))?;
 
     // SELECT query — $1 (workspace_id), $2 (limit), $3 (offset), optionally $4 (watch_id)
@@ -1442,44 +1407,24 @@ pub async fn get_alerts_history(
     );
 
     // Dynamic SQL — bind chain varies based on watch_id
-    let executions = match db {
-        DbPool::Postgres(pg) => {
-            if let Some(wid) = watch_id {
-                sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
-                    .bind(workspace_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .bind(wid)
-                    .fetch_all(pg)
-                    .await
-            } else {
-                sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
-                    .bind(workspace_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(pg)
-                    .await
-            }
+    let executions = kyomi_core::db_with_pool!(db, |p| {
+        if let Some(wid) = watch_id {
+            sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
+                .bind(workspace_id)
+                .bind(limit)
+                .bind(offset)
+                .bind(wid)
+                .fetch_all(p)
+                .await
+        } else {
+            sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
+                .bind(workspace_id)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(p)
+                .await
         }
-        DbPool::Sqlite(sq) => {
-            if let Some(wid) = watch_id {
-                sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
-                    .bind(workspace_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .bind(wid)
-                    .fetch_all(sq)
-                    .await
-            } else {
-                sqlx::query_as::<_, kyomi_core::models::WatchExecution>(&select_sql)
-                    .bind(workspace_id)
-                    .bind(limit)
-                    .bind(offset)
-                    .fetch_all(sq)
-                    .await
-            }
-        }
-    }
+    })
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to fetch alerts: {e}")))?;
 
     Ok((executions, total_count))

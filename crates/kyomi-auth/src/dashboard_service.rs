@@ -1040,26 +1040,15 @@ pub async fn create_version(
     let content_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
 
     if max_version > 0 {
-        let latest_hash: Option<String> = match db {
-            kyomi_core::db::DbPool::Postgres(pg) => {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT content_hash FROM dashboard_versions WHERE dashboard_id = $1 AND version_number = $2",
-                )
-                .bind(dashboard_id)
-                .bind(max_version)
-                .fetch_optional(pg)
-                .await
-            }
-            kyomi_core::db::DbPool::Sqlite(sq) => {
-                sqlx::query_scalar::<_, String>(
-                    "SELECT content_hash FROM dashboard_versions WHERE dashboard_id = $1 AND version_number = $2",
-                )
-                .bind(dashboard_id)
-                .bind(max_version)
-                .fetch_optional(sq)
-                .await
-            }
-        }
+        let latest_hash: Option<String> = kyomi_core::db_with_pool!(db, |p| {
+            sqlx::query_scalar::<_, String>(
+                "SELECT content_hash FROM dashboard_versions WHERE dashboard_id = $1 AND version_number = $2",
+            )
+            .bind(dashboard_id)
+            .bind(max_version)
+            .fetch_optional(p)
+            .await
+        })
         .map_err(|e| {
             kyomi_core::Error::Internal(format!("failed to check latest hash: {e}"))
         })?;

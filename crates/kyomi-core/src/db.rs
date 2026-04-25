@@ -168,6 +168,27 @@ macro_rules! db_execute {
     }
 }
 
+/// Dispatch to whichever pool variant is active.
+///
+/// Use this when both the Postgres and SQLite arms would be **identical**
+/// except for the pool variable name.  The closure receives `p` which is
+/// either a `&PgPool` or a `&SqlitePool`.
+///
+/// ```rust,ignore
+/// let row = db_with_pool!(pool, |p| {
+///     sqlx::query("SELECT 1").fetch_one(p).await?
+/// });
+/// ```
+#[macro_export]
+macro_rules! db_with_pool {
+    ($pool:expr, |$p:ident| $body:expr) => {
+        match &$pool {
+            $crate::db::DbPool::Postgres($p) => { $body }
+            $crate::db::DbPool::Sqlite($p) => { $body }
+        }
+    }
+}
+
 /// Fetch a single scalar value.
 #[macro_export]
 macro_rules! db_fetch_scalar {

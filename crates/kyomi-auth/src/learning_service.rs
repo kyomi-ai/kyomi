@@ -265,26 +265,15 @@ pub async fn get_all_learnings(
             conditions.push("datasource_config_id IS NULL".to_string());
         } else {
             // Resolve slug to ID
-            let ds_id: Option<String> = match db {
-                kyomi_core::db::DbPool::Postgres(pg) => {
-                    sqlx::query_scalar::<_, String>(
-                        "SELECT id FROM datasource_configs WHERE workspace_id = $1 AND slug = $2",
-                    )
-                    .bind(workspace_id)
-                    .bind(ds_slug)
-                    .fetch_optional(pg)
-                    .await
-                }
-                kyomi_core::db::DbPool::Sqlite(sq) => {
-                    sqlx::query_scalar::<_, String>(
-                        "SELECT id FROM datasource_configs WHERE workspace_id = $1 AND slug = $2",
-                    )
-                    .bind(workspace_id)
-                    .bind(ds_slug)
-                    .fetch_optional(sq)
-                    .await
-                }
-            }
+            let ds_id: Option<String> = kyomi_core::db_with_pool!(db, |p| {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM datasource_configs WHERE workspace_id = $1 AND slug = $2",
+                )
+                .bind(workspace_id)
+                .bind(ds_slug)
+                .fetch_optional(p)
+                .await
+            })
             .map_err(|e| kyomi_core::Error::Internal(format!("failed to resolve datasource: {e}")))?;
 
             if let Some(id) = ds_id {
@@ -310,22 +299,13 @@ pub async fn get_all_learnings(
     // Count query
     let count_sql = format!("SELECT COUNT(*) FROM agent_learnings WHERE {where_clause}");
 
-    let total: i64 = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut q = sqlx::query_scalar::<_, i64>(&count_sql).bind(workspace_id);
-            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
-            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
-            if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
-            q.fetch_one(pg).await
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut q = sqlx::query_scalar::<_, i64>(&count_sql).bind(workspace_id);
-            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
-            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
-            if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
-            q.fetch_one(sq).await
-        }
-    }
+    let total: i64 = kyomi_core::db_with_pool!(db, |p| {
+        let mut q = sqlx::query_scalar::<_, i64>(&count_sql).bind(workspace_id);
+        if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
+        if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
+        if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
+        q.fetch_one(p).await
+    })
     .map_err(|e| kyomi_core::Error::Internal(format!("count query failed: {e}")))?;
 
     // Data query
