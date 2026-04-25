@@ -27,12 +27,20 @@ use reqwest::Client as HttpClient;
 /// **This copy is authoritative.** If the formula changes, update both and
 /// keep their unit tests in sync.
 pub fn database_name(site_id: &str) -> String {
+    assert!(
+        !site_id.is_empty() && site_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "site_id must be non-empty hex digits"
+    );
     format!("site_{site_id}")
 }
 
 // ─── DDL generation ──────────────────────────────────────────────────────────
 
 fn ch_username(site_id: &str) -> String {
+    assert!(
+        !site_id.is_empty() && site_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "site_id must be non-empty hex digits"
+    );
     format!("kyomi_site_{site_id}")
 }
 
@@ -43,17 +51,33 @@ pub fn generate_ch_password() -> String {
 }
 
 fn create_user_ddl(site_id: &str, password: &str) -> String {
+    assert!(
+        !site_id.is_empty() && site_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "site_id must be non-empty hex digits"
+    );
+    assert!(
+        !password.is_empty() && password.chars().all(|c| c.is_ascii_hexdigit()),
+        "password must be non-empty hex digits"
+    );
     let user = ch_username(site_id);
     format!("CREATE USER IF NOT EXISTS {user} IDENTIFIED BY '{password}'")
 }
 
 /// Generate DDL to create the per-site ClickHouse database.
 pub fn create_database_ddl(database: &str) -> String {
+    assert!(
+        database.starts_with("site_") && database[5..].chars().all(|c| c.is_ascii_hexdigit()) && database.len() > 5,
+        "database must match site_{{hex}}"
+    );
     format!("CREATE DATABASE IF NOT EXISTS {database}")
 }
 
 /// Generate DDL to create the `events` table inside the per-site database.
 pub fn create_events_table_ddl(database: &str) -> String {
+    assert!(
+        database.starts_with("site_") && database[5..].chars().all(|c| c.is_ascii_hexdigit()) && database.len() > 5,
+        "database must match site_{{hex}}"
+    );
     format!(
         "CREATE TABLE IF NOT EXISTS {database}.events (\
             visitor_id String, \
@@ -90,15 +114,31 @@ pub fn create_events_table_ddl(database: &str) -> String {
 
 /// Generate DDL to grant SELECT on the per-site database to a ClickHouse user.
 pub fn grant_select_ddl(username: &str, database: &str) -> String {
+    assert!(
+        username.starts_with("kyomi_site_") && username[11..].chars().all(|c| c.is_ascii_hexdigit()) && username.len() > 11,
+        "username must match kyomi_site_{{hex}}"
+    );
+    assert!(
+        database.starts_with("site_") && database[5..].chars().all(|c| c.is_ascii_hexdigit()) && database.len() > 5,
+        "database must match site_{{hex}}"
+    );
     format!("GRANT SELECT ON {database}.* TO {username}")
 }
 
 /// Generate DDL to drop the per-site ClickHouse database (removes all tables).
 pub fn drop_database_ddl(database: &str) -> String {
+    assert!(
+        database.starts_with("site_") && database[5..].chars().all(|c| c.is_ascii_hexdigit()) && database.len() > 5,
+        "database must match site_{{hex}}"
+    );
     format!("DROP DATABASE IF EXISTS {database}")
 }
 
 fn drop_user_ddl(site_id: &str) -> String {
+    assert!(
+        !site_id.is_empty() && site_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "site_id must be non-empty hex digits"
+    );
     let user = ch_username(site_id);
     format!("DROP USER IF EXISTS {user}")
 }
@@ -339,21 +379,21 @@ mod tests {
 
     #[test]
     fn test_create_user_sql() {
-        let sql = create_user_ddl("abc123", "s3cret");
-        assert!(sql.contains("CREATE USER IF NOT EXISTS kyomi_site_abc123"));
-        assert!(sql.contains("IDENTIFIED BY 's3cret'"));
+        let sql = create_user_ddl("abc123def456", "deadbeef01234567");
+        assert!(sql.contains("CREATE USER IF NOT EXISTS kyomi_site_abc123def456"));
+        assert!(sql.contains("IDENTIFIED BY 'deadbeef01234567'"));
     }
 
     #[test]
     fn test_create_database_ddl() {
-        let ddl = create_database_ddl("site_ws123_abc456");
-        assert!(ddl.contains("CREATE DATABASE IF NOT EXISTS site_ws123_abc456"));
+        let ddl = create_database_ddl("site_deadbeef01234567");
+        assert!(ddl.contains("CREATE DATABASE IF NOT EXISTS site_deadbeef01234567"));
     }
 
     #[test]
     fn test_create_events_table_ddl_no_site_id() {
-        let ddl = create_events_table_ddl("site_ws123_abc456");
-        assert!(ddl.contains("site_ws123_abc456.events"));
+        let ddl = create_events_table_ddl("site_deadbeef01234567");
+        assert!(ddl.contains("site_deadbeef01234567.events"));
         assert!(!ddl.contains("site_id")); // No site_id column
         assert!(ddl.contains("visitor_id"));
         assert!(ddl.contains("MergeTree"));
@@ -363,20 +403,70 @@ mod tests {
 
     #[test]
     fn test_grant_ddl_scoped_to_database() {
-        let ddl = grant_select_ddl("kyomi_site_abc456", "site_ws123_abc456");
-        assert!(ddl.contains("GRANT SELECT ON site_ws123_abc456.*"));
-        assert!(ddl.contains("TO kyomi_site_abc456"));
+        let ddl = grant_select_ddl("kyomi_site_abc456def012", "site_deadbeef01234567");
+        assert!(ddl.contains("GRANT SELECT ON site_deadbeef01234567.*"));
+        assert!(ddl.contains("TO kyomi_site_abc456def012"));
     }
 
     #[test]
     fn test_drop_database_ddl() {
-        let ddl = drop_database_ddl("site_ws123_abc456");
-        assert!(ddl.contains("DROP DATABASE IF EXISTS site_ws123_abc456"));
+        let ddl = drop_database_ddl("site_deadbeef01234567");
+        assert!(ddl.contains("DROP DATABASE IF EXISTS site_deadbeef01234567"));
     }
 
     #[test]
     fn test_drop_user_sql() {
-        let sql = drop_user_ddl("abc123");
-        assert!(sql.contains("DROP USER IF EXISTS kyomi_site_abc123"));
+        let sql = drop_user_ddl("abc123def456");
+        assert!(sql.contains("DROP USER IF EXISTS kyomi_site_abc123def456"));
+    }
+
+    // ── Validation rejection tests ──
+
+    #[test]
+    #[should_panic(expected = "site_id must be non-empty hex digits")]
+    fn test_create_user_ddl_rejects_non_hex_site_id() {
+        create_user_ddl("abc; DROP TABLE--", "deadbeef01234567");
+    }
+
+    #[test]
+    #[should_panic(expected = "password must be non-empty hex digits")]
+    fn test_create_user_ddl_rejects_non_hex_password() {
+        create_user_ddl("deadbeef01234567", "s3cret!");
+    }
+
+    #[test]
+    #[should_panic(expected = "site_id must be non-empty hex digits")]
+    fn test_create_user_ddl_rejects_empty_site_id() {
+        create_user_ddl("", "deadbeef01234567");
+    }
+
+    #[test]
+    #[should_panic(expected = "database must match site_{hex}")]
+    fn test_create_database_ddl_rejects_invalid_format() {
+        create_database_ddl("site_ws123_abc456");
+    }
+
+    #[test]
+    #[should_panic(expected = "database must match site_{hex}")]
+    fn test_create_database_ddl_rejects_missing_prefix() {
+        create_database_ddl("deadbeef01234567");
+    }
+
+    #[test]
+    #[should_panic(expected = "database must match site_{hex}")]
+    fn test_drop_database_ddl_rejects_invalid_format() {
+        drop_database_ddl("site_ws123_abc456");
+    }
+
+    #[test]
+    #[should_panic(expected = "username must match kyomi_site_{hex}")]
+    fn test_grant_select_ddl_rejects_invalid_username() {
+        grant_select_ddl("kyomi_site_bad!user", "site_deadbeef01234567");
+    }
+
+    #[test]
+    #[should_panic(expected = "database must match site_{hex}")]
+    fn test_grant_select_ddl_rejects_invalid_database() {
+        grant_select_ddl("kyomi_site_deadbeef01234567", "site_bad_db!");
     }
 }
