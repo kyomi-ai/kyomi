@@ -8,6 +8,7 @@
 #     -f kyomi-build.yaml
 
 githubConfigUrl: "https://github.com/kyomi-ai"
+githubConfigSecret: arc-github-app
 
 minRunners: 0
 maxRunners: 2

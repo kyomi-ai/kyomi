@@ -9,6 +9,7 @@
 #     -f kyomi-ci.yaml
 
 githubConfigUrl: "https://github.com/kyomi-ai"
+githubConfigSecret: arc-github-app
 
 # Min/max runners. ARC auto-scales within this range based on queued jobs.
 minRunners: 0
