@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::types::{LLMResponse, Message, MessageRole, Tool, ToolCall, TokenUsage};
 
@@ -505,23 +505,16 @@ impl AnthropicClient {
 // ---------------------------------------------------------------------------
 
 /// Calculate estimated cost in USD for an Anthropic API call.
-///
-/// Looks up the model's pricing (with Haiku 4.5 as fallback for unknown models)
-/// and delegates to [`crate::pricing::calculate_cost`], which handles the full
-/// cache-aware formula: input + cache_write (1.25x) + cache_read (0.1x) + output.
+/// Delegates to [`crate::pricing::calculate_cost_with_fallback`] with Haiku 4.5 pricing
+/// as the fallback for unknown models.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
-    let pricing = get_model_pricing(model).unwrap_or_else(|| {
-        warn!(
-            model = model,
-            "unknown model for cost calculation, using Haiku 4.5 pricing as fallback"
-        );
-        crate::pricing::ModelPricing {
-            input: 1.00,
-            output: 5.00,
-        }
-    });
-
-    crate::pricing::calculate_cost(&pricing, usage)
+    crate::pricing::calculate_cost_with_fallback(
+        model,
+        usage,
+        get_model_pricing,
+        crate::pricing::ModelPricing { input: 1.00, output: 5.00 },
+        "anthropic",
+    )
 }
 
 // ---------------------------------------------------------------------------

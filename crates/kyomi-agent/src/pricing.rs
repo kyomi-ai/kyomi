@@ -54,6 +54,35 @@ pub fn calculate_cost(pricing: &ModelPricing, usage: &TokenUsage) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// calculate_cost_with_fallback
+// ---------------------------------------------------------------------------
+
+/// Calculate estimated cost in USD, using a provider-specific pricing lookup
+/// with a fallback for unknown models.
+///
+/// - `lookup` returns `Some(ModelPricing)` for known models, `None` otherwise.
+/// - When `None`, logs a warning at `tracing::warn!` level identifying the
+///   unknown model and provider, then uses `fallback` as the pricing.
+/// - Delegates to [`calculate_cost`] for the actual arithmetic.
+pub fn calculate_cost_with_fallback(
+    model: &str,
+    usage: &TokenUsage,
+    lookup: impl FnOnce(&str) -> Option<ModelPricing>,
+    fallback: ModelPricing,
+    provider_name: &str,
+) -> f64 {
+    let pricing = lookup(model).unwrap_or_else(|| {
+        tracing::warn!(
+            model,
+            provider = provider_name,
+            "unknown model for cost calculation, using fallback pricing"
+        );
+        fallback
+    });
+    calculate_cost(&pricing, usage)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

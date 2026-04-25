@@ -508,15 +508,17 @@ impl GeminiProvider {
 // ---------------------------------------------------------------------------
 
 /// Calculate estimated cost in USD for a Gemini API call.
-///
-/// Looks up the model's pricing (with gemini-2.0-flash as fallback for unknown
-/// models) and delegates to [`crate::pricing::calculate_cost`]. Gemini does not
-/// support prompt caching, so `cache_creation_input_tokens` and
-/// `cache_read_input_tokens` are always 0 — the cache terms evaluate to zero
-/// and the formula reduces to `input_cost + output_cost`.
+/// Delegates to [`crate::pricing::calculate_cost_with_fallback`]. Gemini's
+/// `get_model_pricing` always returns a value (fallback built in), so the
+/// dummy fallback here is never reached.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
-    let pricing = get_model_pricing(model);
-    crate::pricing::calculate_cost(&pricing, usage)
+    crate::pricing::calculate_cost_with_fallback(
+        model,
+        usage,
+        |m| Some(get_model_pricing(m)),
+        crate::pricing::ModelPricing { input: 0.0, output: 0.0 },
+        "gemini",
+    )
 }
 
 // ---------------------------------------------------------------------------

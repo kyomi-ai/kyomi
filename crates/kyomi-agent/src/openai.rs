@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::types::{LLMResponse, Message, MessageRole, Tool, ToolCall, TokenUsage};
 
@@ -491,25 +491,16 @@ impl OpenAIProvider {
 // ---------------------------------------------------------------------------
 
 /// Calculate estimated cost in USD for an OpenAI API call.
-///
-/// Looks up the model's pricing (with gpt-4o-mini as fallback for unknown models)
-/// and delegates to [`crate::pricing::calculate_cost`]. OpenAI does not expose
-/// prompt cache tokens, so `cache_creation_input_tokens` and
-/// `cache_read_input_tokens` are always 0 — the cache terms evaluate to zero
-/// and the formula reduces to `input_cost + output_cost`.
+/// Delegates to [`crate::pricing::calculate_cost_with_fallback`] with gpt-4o-mini pricing
+/// as the fallback for unknown models.
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
-    let pricing = get_model_pricing(model).unwrap_or_else(|| {
-        warn!(
-            model = model,
-            "unknown model for cost calculation, using gpt-4o-mini pricing as fallback"
-        );
-        crate::pricing::ModelPricing {
-            input: 0.15,
-            output: 0.60,
-        }
-    });
-
-    crate::pricing::calculate_cost(&pricing, usage)
+    crate::pricing::calculate_cost_with_fallback(
+        model,
+        usage,
+        get_model_pricing,
+        crate::pricing::ModelPricing { input: 0.15, output: 0.60 },
+        "openai",
+    )
 }
 
 // ---------------------------------------------------------------------------
