@@ -34,6 +34,7 @@ use crate::components::chat::CopilotChat;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
 use crate::components::select::DynSelect;
+use crate::components::{Button, ButtonSize, ButtonVariant, RightPanel, SearchInput};
 use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
@@ -816,6 +817,7 @@ pub fn ChartBuilderModal(
     let (catalog_tab, set_catalog_tab) = signal("catalog".to_string());
     let (catalog_search, set_catalog_search) = signal(String::new());
     let (catalog_refresh_trigger, set_catalog_refresh_trigger) = signal(0u32);
+    let catalog_sidebar_width = RwSignal::new(320.0_f64);
 
     // ── Query execution state ─────────────────────────────────────────
     let (query_running, set_query_running) = signal(false);
@@ -1112,128 +1114,133 @@ pub fn ChartBuilderModal(
                                 }}
                             </div>
 
-                            // Catalog sidebar (280px, shown when catalog_open is true)
-                            {move || catalog_open.get().then(|| {
+                            // Catalog sidebar — uses shared RightPanel for consistent
+                            // styling with the main SQL editor sidebar.
+                            {
                                 let catalog_slug_signal = Signal::derive(move || {
                                     let slug = datasource_slug_sig.get();
                                     if slug.is_empty() { None } else { Some(slug) }
                                 });
 
-                                view! {
-                                    <div class="w-72 flex-shrink-0 border-l border-border bg-muted/30 flex flex-col min-h-0">
-                                        // Sidebar header: pill toggle + refresh + close
-                                        <div class="px-3 py-3 border-b border-border flex-shrink-0 flex items-center justify-between">
-                                            <div class="flex items-center gap-1 rounded-lg bg-muted p-0.5">
+                                let catalog_tab_class = move |tab: &str| {
+                                    let base = "flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md transition-colors";
+                                    if catalog_tab.get() == tab {
+                                        format!("{base} bg-background text-foreground shadow-sm")
+                                    } else {
+                                        format!("{base} text-muted-foreground hover:text-foreground")
+                                    }
+                                };
+
+                                let catalog_header_fn: ChildrenFn = Arc::new(move || {
+                                    view! {
+                                        <div class="flex items-center gap-2 min-w-0">
+                                            <div
+                                                class="flex items-center rounded-lg bg-muted p-1"
+                                                role="tablist"
+                                                aria-label="Sidebar panels"
+                                            >
                                                 <button
-                                                    type="button"
-                                                    class=move || {
-                                                        if catalog_tab.get() == "catalog" {
-                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md bg-background text-foreground shadow-sm transition-colors"
-                                                        } else {
-                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                                                        }
-                                                    }
+                                                    class=move || catalog_tab_class("catalog")
                                                     on:click=move |_| set_catalog_tab.set("catalog".to_string())
+                                                    role="tab"
+                                                    aria-selected=move || if catalog_tab.get() == "catalog" { "true" } else { "false" }
                                                 >
                                                     "Catalog"
                                                 </button>
                                                 <button
-                                                    type="button"
-                                                    class=move || {
-                                                        if catalog_tab.get() == "history" {
-                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md bg-background text-foreground shadow-sm transition-colors"
-                                                        } else {
-                                                            "flex-1 text-xs font-medium px-2.5 py-1 rounded-md text-muted-foreground hover:text-foreground transition-colors"
-                                                        }
-                                                    }
+                                                    class=move || catalog_tab_class("history")
                                                     on:click=move |_| set_catalog_tab.set("history".to_string())
+                                                    role="tab"
+                                                    aria-selected=move || if catalog_tab.get() == "history" { "true" } else { "false" }
                                                 >
                                                     "History"
                                                 </button>
                                             </div>
-                                            // Refresh + Close buttons
-                                            <div class="flex items-center gap-1">
-                                                <button
-                                                    type="button"
-                                                    class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                                                    title="Refresh catalog"
+                                            // Refresh button — catalog tab only
+                                            <Show when=move || catalog_tab.get() == "catalog">
+                                                <Button
+                                                    variant=ButtonVariant::GhostMuted
+                                                    size=ButtonSize::IconSm
+                                                    aria_label="Refresh catalog"
                                                     on:click=move |_| set_catalog_refresh_trigger.update(|v| *v += 1)
                                                 >
                                                     <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE size="14px" />
-                                                </button>
-                                                <button
-                                                    type="button"
-                                                    class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                                                    title="Close catalog"
-                                                    on:click=move |_| set_catalog_open.set(false)
-                                                >
-                                                    <Icon icon=phosphor_leptos::X size="14px" />
-                                                </button>
+                                                </Button>
+                                            </Show>
+                                        </div>
+                                    }
+                                    .into_any()
+                                });
+
+                                view! {
+                                    <RightPanel
+                                        open=Signal::derive(move || catalog_open.get())
+                                        on_close=Callback::new(move |()| set_catalog_open.set(false))
+                                        width=catalog_sidebar_width
+                                        min_width=280.0
+                                        max_width=480.0
+                                        header=catalog_header_fn
+                                        close_label="Close sidebar".to_string()
+                                        flex_body=true
+                                    >
+                                        // Catalog tab
+                                        <div class=move || {
+                                            if catalog_tab.get() == "catalog" { "h-full flex flex-col" } else { "h-full flex flex-col hidden" }
+                                        }>
+                                            // Search input
+                                            <div class="px-3 py-2 border-b border-border">
+                                                <SearchInput
+                                                    value=Signal::derive(move || catalog_search.get())
+                                                    on_input=Callback::new(move |val: String| set_catalog_search.set(val))
+                                                    placeholder="Search tables..."
+                                                />
+                                            </div>
+                                            // Catalog tree
+                                            <div class="flex-1 overflow-auto">
+                                                <CatalogTree
+                                                    datasource_slug=catalog_slug_signal
+                                                    search_query=Signal::derive(move || catalog_search.get())
+                                                    refresh_trigger=Signal::derive(move || catalog_refresh_trigger.get())
+                                                    on_table_click=Callback::new(move |table_id: String| {
+                                                        // Insert table name into SQL — append at cursor or end
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                            let cur = ast_get_query(a);
+                                                            let next = if cur.is_empty() {
+                                                                format!("SELECT * FROM {table_id}")
+                                                            } else {
+                                                                format!("{cur} {table_id}")
+                                                            };
+                                                            ast_set_query(a, &next);
+                                                        });
+                                                    })
+                                                    on_column_click=Callback::new(move |col_name: String| {
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                            let cur = ast_get_query(a);
+                                                            let next = if cur.is_empty() {
+                                                                col_name.clone()
+                                                            } else {
+                                                                format!("{cur} {col_name}")
+                                                            };
+                                                            ast_set_query(a, &next);
+                                                        });
+                                                    })
+                                                />
                                             </div>
                                         </div>
 
-                                        // Sidebar body
-                                        {move || {
-                                            if catalog_tab.get() == "catalog" {
-                                                view! {
-                                                    <div class="flex flex-col flex-1 min-h-0">
-                                                        // Search input
-                                                        <div class="px-3 py-2 flex-shrink-0">
-                                                            <input
-                                                                type="text"
-                                                                class=INPUT_CLASS
-                                                                placeholder="Search tables..."
-                                                                prop:value=move || catalog_search.get()
-                                                                on:input=move |ev| set_catalog_search.set(event_target_value(&ev))
-                                                            />
-                                                        </div>
-                                                        // Catalog tree
-                                                        <div class="flex-1 overflow-y-auto min-h-0">
-                                                            <CatalogTree
-                                                                datasource_slug=catalog_slug_signal
-                                                                search_query=Signal::derive(move || catalog_search.get())
-                                                                refresh_trigger=Signal::derive(move || catalog_refresh_trigger.get())
-                                                                on_table_click=Callback::new(move |table_id: String| {
-                                                                    // Insert table name into SQL — append at cursor or end
-                                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                                        let cur = ast_get_query(a);
-                                                                        let next = if cur.is_empty() {
-                                                                            format!("SELECT * FROM {table_id}")
-                                                                        } else {
-                                                                            format!("{cur} {table_id}")
-                                                                        };
-                                                                        ast_set_query(a, &next);
-                                                                    });
-                                                                })
-                                                                on_column_click=Callback::new(move |col_name: String| {
-                                                                    mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                                        let cur = ast_get_query(a);
-                                                                        let next = if cur.is_empty() {
-                                                                            col_name.clone()
-                                                                        } else {
-                                                                            format!("{cur} {col_name}")
-                                                                        };
-                                                                        ast_set_query(a, &next);
-                                                                    });
-                                                                })
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                }.into_any()
-                                            } else {
-                                                // History tab placeholder
-                                                view! {
-                                                    <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                                        <Icon icon=phosphor_leptos::CLOCK size="40px" attr:class="text-muted-foreground mb-2" />
-                                                        <p class="text-sm text-muted-foreground">"Query history"</p>
-                                                        <p class="text-xs text-muted-foreground mt-1">"Coming soon"</p>
-                                                    </div>
-                                                }.into_any()
-                                            }
-                                        }}
-                                    </div>
+                                        // History tab placeholder
+                                        <div class=move || {
+                                            if catalog_tab.get() == "history" { "h-full flex flex-col" } else { "h-full flex flex-col hidden" }
+                                        }>
+                                            <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
+                                                <Icon icon=phosphor_leptos::CLOCK size="40px" attr:class="text-muted-foreground mb-2" />
+                                                <p class="text-sm text-muted-foreground">"Query history"</p>
+                                                <p class="text-xs text-muted-foreground mt-1">"Coming soon"</p>
+                                            </div>
+                                        </div>
+                                    </RightPanel>
                                 }
-                            })}
+                            }
                         </div>
                     })
                 }}
