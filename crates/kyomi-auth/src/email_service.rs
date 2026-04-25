@@ -272,10 +272,10 @@ impl EmailService {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        :root {{ color-scheme: light; }}
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
@@ -357,9 +357,19 @@ impl EmailService {
         .footer a:hover {{
             text-decoration: underline;
         }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .highlight {{ background-color: #2C241E !important; }}
+            .feature {{ color: #A8A29E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+        }}
     </style>
 </head>
-<body style="background-color: #FAFAF8 !important; color: #1C1917;">
+<body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -468,10 +478,10 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        :root {{ color-scheme: light; }}
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
@@ -534,9 +544,19 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         .footer a:hover {{
             text-decoration: underline;
         }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .highlight {{ background-color: #2C241E !important; }}
+            .feature {{ color: #A8A29E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+        }}
     </style>
 </head>
-<body style="background-color: #FAFAF8 !important; color: #1C1917;">
+<body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -620,10 +640,10 @@ You're receiving this email because you requested account recovery for Kyomi.
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        :root {{ color-scheme: light; }}
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
@@ -686,9 +706,19 @@ You're receiving this email because you requested account recovery for Kyomi.
         .footer a:hover {{
             text-decoration: underline;
         }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .highlight {{ background-color: #2C241E !important; }}
+            .feature {{ color: #A8A29E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+        }}
     </style>
 </head>
-<body style="background-color: #FAFAF8 !important; color: #1C1917;">
+<body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -772,10 +802,10 @@ You're receiving this email because you requested account recovery for Kyomi.
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        :root {{ color-scheme: light; }}
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
@@ -838,9 +868,19 @@ You're receiving this email because you requested account recovery for Kyomi.
         .footer a:hover {{
             text-decoration: underline;
         }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .highlight {{ background-color: #2C241E !important; }}
+            .feature {{ color: #A8A29E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+        }}
     </style>
 </head>
-<body style="background-color: #FAFAF8 !important; color: #1C1917;">
+<body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -921,10 +961,10 @@ You're receiving this because someone signed up for Kyomi with this email addres
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        :root {{ color-scheme: light; }}
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
@@ -987,9 +1027,19 @@ You're receiving this because someone signed up for Kyomi with this email addres
         .footer a:hover {{
             text-decoration: underline;
         }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .highlight {{ background-color: #2C241E !important; }}
+            .feature {{ color: #A8A29E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+        }}
     </style>
 </head>
-<body style="background-color: #FAFAF8 !important; color: #1C1917;">
+<body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -1068,7 +1118,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             .iter()
             .map(|(label, value)| {
                 format!(
-                    r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#1C1917;vertical-align:top;white-space:nowrap;">{}</td><td style="padding:4px 0;color:#6B6660;">{}</td></tr>"#,
+                    r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;white-space:nowrap;">{}</td><td style="padding:4px 0;">{}</td></tr>"#,
                     html_escape(label),
                     html_escape(value),
                 )
@@ -1081,7 +1131,10 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             line-height: 1.6;
@@ -1097,6 +1150,15 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             padding: 16px 0;
             border-bottom: 1px solid #E8E5DE;
         }}
+        h2 {{
+            color: #1C1917;
+        }}
+        td {{
+            color: #6B6660;
+        }}
+        td:first-child {{
+            color: #1C1917;
+        }}
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
@@ -1104,6 +1166,15 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             text-align: center;
             color: #9C9790;
             font-size: 12px;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h2 {{ color: #F5F3EF !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+            td {{ color: #A8A29E !important; }}
+            td:first-child {{ color: #F5F3EF !important; }}
         }}
     </style>
 </head>
@@ -1113,7 +1184,7 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             <img src="cid:kyomi_logo" alt="Kyomi" style="height: 48px; width: auto;">
         </a>
     </div>
-    <h2 style="color:#1C1917;margin:0 0 16px 0;">{subject}</h2>
+    <h2 style="margin:0 0 16px 0;">{subject}</h2>
     <table style="border-collapse:collapse;width:100%;font-size:14px;">
         {html_sections}
     </table>
