@@ -7,10 +7,11 @@
 //!
 //! Behaviour:
 //!
-//! 1. If `chart_app.html` already exists, do nothing.
+//! 1. If `chart_app.html` already exists locally, do nothing.
 //! 2. Otherwise, attempt to run `build.sh` in `apps/mcp-chart-app-wasm`.
-//!    Requires `trunk` and `python3` in `PATH`. On failure, emit a clear
-//!    cargo error explaining how to fix it manually.
+//! 3. If the build fails (e.g. in a git worktree where trunk can't resolve
+//!    paths), copy the artifact from the main worktree.
+//! 4. If all of the above fail, emit a clear cargo error.
 //!
 //! Rerun triggers: only when the script itself or the WASM app source files
 //! change.
@@ -62,13 +63,50 @@ fn main() {
     match build {
         Ok(status) if status.success() && chart_app_html.exists() => {}
         _ => {
-            panic!(
-                "kyomi-server build.rs: `apps/mcp-chart-app-wasm/chart_app.html` is missing \
-                 and could not be generated automatically. Run the following manually, \
-                 then retry:\n\n    \
-                 cd {} && bash build.sh\n",
-                wasm_app.display()
-            );
+            if try_copy_from_main_worktree(&chart_app_html) {
+                println!(
+                    "cargo:warning=chart_app.html copied from main worktree. \
+                     Run `cd apps/mcp-chart-app-wasm && bash build.sh` to rebuild locally."
+                );
+            } else {
+                panic!(
+                    "kyomi-server build.rs: `apps/mcp-chart-app-wasm/chart_app.html` is missing \
+                     and could not be generated automatically or copied from the main worktree. \
+                     Run the following manually, then retry:\n\n    \
+                     cd {} && bash build.sh\n",
+                    wasm_app.display()
+                );
+            }
         }
     }
+}
+
+fn try_copy_from_main_worktree(local_path: &PathBuf) -> bool {
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+
+    let stdout = match std::str::from_utf8(&output.stdout) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            let candidate = PathBuf::from(path)
+                .join("apps")
+                .join("mcp-chart-app-wasm")
+                .join("chart_app.html");
+            if candidate != *local_path && candidate.exists() {
+                return std::fs::copy(&candidate, local_path).is_ok();
+            }
+        }
+    }
+
+    false
 }
