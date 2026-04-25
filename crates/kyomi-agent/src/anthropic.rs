@@ -371,7 +371,7 @@ impl AnthropicClient {
 
         // Error response — try to extract the error message from the body.
         let error_body = response.text().await.unwrap_or_default();
-        let error_msg = extract_error_message(&error_body)
+        let error_msg = crate::provider::extract_error_message(&error_body)
             .unwrap_or_else(|| format!("HTTP {status}"));
 
         match status.as_u16() {
@@ -544,19 +544,6 @@ pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
     });
 
     crate::pricing::calculate_cost(&pricing, usage)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Try to extract a human-readable error message from an Anthropic error response body.
-fn extract_error_message(body: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    json.get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-        .map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,34 +1012,6 @@ mod tests {
         assert!(!err.is_transient());
     }
 
-    // -- Error message extraction tests -------------------------------------
-
-    #[test]
-    fn extract_error_message_valid_json() {
-        let body = r#"{"error": {"type": "invalid_request_error", "message": "max_tokens is required"}}"#;
-        assert_eq!(
-            extract_error_message(body),
-            Some("max_tokens is required".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_error_message_no_message_field() {
-        let body = r#"{"error": {"type": "server_error"}}"#;
-        assert_eq!(extract_error_message(body), None);
-    }
-
-    #[test]
-    fn extract_error_message_invalid_json() {
-        let body = "not json";
-        assert_eq!(extract_error_message(body), None);
-    }
-
-    #[test]
-    fn extract_error_message_empty_body() {
-        assert_eq!(extract_error_message(""), None);
-    }
-
     // -- Client constructor tests -------------------------------------------
 
     #[test]
@@ -1445,7 +1404,7 @@ mod tests {
     fn extract_error_message_nested_structure() {
         let body = r#"{"error": {"type": "rate_limit_error", "message": "You have exceeded the rate limit."}}"#;
         assert_eq!(
-            extract_error_message(body),
+            crate::provider::extract_error_message(body),
             Some("You have exceeded the rate limit.".to_string())
         );
     }
@@ -1453,7 +1412,7 @@ mod tests {
     #[test]
     fn extract_error_message_empty_message() {
         let body = r#"{"error": {"type": "server_error", "message": ""}}"#;
-        assert_eq!(extract_error_message(body), Some(String::new()));
+        assert_eq!(crate::provider::extract_error_message(body), Some(String::new()));
     }
 
     // -- Contract: client with_base_url for testing -------------------------

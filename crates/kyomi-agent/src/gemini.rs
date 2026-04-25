@@ -381,7 +381,7 @@ impl GeminiProvider {
 
         // Error response -- try to extract the error message from the body.
         let error_body = response.text().await.unwrap_or_default();
-        let error_msg = extract_error_message(&error_body)
+        let error_msg = crate::provider::extract_error_message(&error_body)
             .unwrap_or_else(|| format!("HTTP {status}"));
 
         match status.as_u16() {
@@ -539,19 +539,6 @@ impl GeminiProvider {
 pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
     let pricing = get_model_pricing(model);
     crate::pricing::calculate_cost(&pricing, usage)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Try to extract a human-readable error message from a Gemini error response body.
-fn extract_error_message(body: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    json.get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-        .map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,35 +1326,6 @@ mod tests {
     fn internal_error_is_not_transient() {
         let err = kyomi_core::Error::Internal("failed to parse response".into());
         assert!(!err.is_transient());
-    }
-
-    // -- Error message extraction tests -------------------------------------
-
-    #[test]
-    fn extract_error_message_valid_json() {
-        let body =
-            r#"{"error": {"code": 400, "message": "Invalid value", "status": "INVALID_ARGUMENT"}}"#;
-        assert_eq!(
-            extract_error_message(body),
-            Some("Invalid value".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_error_message_no_message_field() {
-        let body = r#"{"error": {"code": 500}}"#;
-        assert_eq!(extract_error_message(body), None);
-    }
-
-    #[test]
-    fn extract_error_message_invalid_json() {
-        let body = "not json";
-        assert_eq!(extract_error_message(body), None);
-    }
-
-    #[test]
-    fn extract_error_message_empty_body() {
-        assert_eq!(extract_error_message(""), None);
     }
 
     // -- Constructor tests --------------------------------------------------

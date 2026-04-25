@@ -459,6 +459,18 @@ pub fn maybe_log_llm(provider_name: &str, label: &str, payload: &serde_json::Val
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+pub(crate) fn extract_error_message(body: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    json.get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .map(String::from)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -705,5 +717,33 @@ mod tests {
         assert_eq!(resolved.provider, ProviderKind::Anthropic);
         assert!(resolved.model.is_none());
         assert!(resolved.base_url.is_none());
+    }
+
+    // -- Error message extraction tests -------------------------------------
+
+    #[test]
+    fn extract_error_message_valid_json() {
+        let body = r#"{"error": {"type": "invalid_request_error", "message": "max_tokens is required"}}"#;
+        assert_eq!(
+            extract_error_message(body),
+            Some("max_tokens is required".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_error_message_no_message_field() {
+        let body = r#"{"error": {"type": "server_error"}}"#;
+        assert_eq!(extract_error_message(body), None);
+    }
+
+    #[test]
+    fn extract_error_message_invalid_json() {
+        let body = "not json";
+        assert_eq!(extract_error_message(body), None);
+    }
+
+    #[test]
+    fn extract_error_message_empty_body() {
+        assert_eq!(extract_error_message(""), None);
     }
 }

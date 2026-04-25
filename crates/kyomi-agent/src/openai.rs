@@ -359,7 +359,7 @@ impl OpenAIProvider {
         // Error response — try to extract the error message from the body.
         let error_body = response.text().await.unwrap_or_default();
         let error_msg =
-            extract_error_message(&error_body).unwrap_or_else(|| format!("HTTP {status}"));
+            crate::provider::extract_error_message(&error_body).unwrap_or_else(|| format!("HTTP {status}"));
 
         match status.as_u16() {
             401 => Err(kyomi_core::Error::Unauthorized(format!(
@@ -534,21 +534,6 @@ pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
     });
 
     crate::pricing::calculate_cost(&pricing, usage)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Try to extract a human-readable error message from an OpenAI error response body.
-///
-/// OpenAI errors follow: `{ "error": { "message": "...", "type": "...", ... } }`
-fn extract_error_message(body: &str) -> Option<String> {
-    let json: serde_json::Value = serde_json::from_str(body).ok()?;
-    json.get("error")
-        .and_then(|e| e.get("message"))
-        .and_then(|m| m.as_str())
-        .map(String::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -1254,34 +1239,6 @@ mod tests {
     fn internal_error_is_not_transient() {
         let err = kyomi_core::Error::Internal("failed to parse response".into());
         assert!(!err.is_transient());
-    }
-
-    // -- Error message extraction tests -------------------------------------
-
-    #[test]
-    fn extract_error_message_valid_json() {
-        let body = r#"{"error": {"message": "Invalid API key", "type": "invalid_request_error"}}"#;
-        assert_eq!(
-            extract_error_message(body),
-            Some("Invalid API key".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_error_message_no_message_field() {
-        let body = r#"{"error": {"type": "server_error"}}"#;
-        assert_eq!(extract_error_message(body), None);
-    }
-
-    #[test]
-    fn extract_error_message_invalid_json() {
-        let body = "not json";
-        assert_eq!(extract_error_message(body), None);
-    }
-
-    #[test]
-    fn extract_error_message_empty_body() {
-        assert_eq!(extract_error_message(""), None);
     }
 
     // -- Constructor tests --------------------------------------------------
