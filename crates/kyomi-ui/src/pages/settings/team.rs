@@ -13,7 +13,7 @@ use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
     ButtonVariant, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, INPUT_CLASS,
 };
-use crate::components::select::SELECT_CLASS;
+use crate::components::select::DynSelect;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
@@ -1007,25 +1007,21 @@ fn TransferOwnershipModal(
                                 }.into_any()
                             } else {
                                 view! {
-                                    <select
-                                        class=SELECT_CLASS
-                                        style="background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2.5rem;"
-                                        on:change=move |ev| {
-                                            transfer_selected_user_id.set(event_target_value(&ev));
-                                        }
-                                    >
-                                        <option value="" disabled selected>"Choose a workspace member..."</option>
-                                        {eligible.into_iter().map(|m| {
-                                            let val = m.user_id.clone();
-                                            let label = m.name
-                                                .filter(|n: &String| !n.is_empty())
-                                                .map(|n| format!("{} ({})", n, m.email))
-                                                .unwrap_or_else(|| m.email.clone());
-                                            view! {
-                                                <option value=val>{label}</option>
-                                            }
-                                        }).collect_view()}
-                                    </select>
+                                    <DynSelect
+                                        value=Signal::derive(move || transfer_selected_user_id.get())
+                                        options=Signal::derive(move || {
+                                            eligible_members.get().into_iter().map(|m| {
+                                                let val = m.user_id.clone();
+                                                let label = m.name
+                                                    .filter(|n: &String| !n.is_empty())
+                                                    .map(|n| format!("{} ({})", n, m.email))
+                                                    .unwrap_or_else(|| m.email.clone());
+                                                (val, label)
+                                            }).collect()
+                                        })
+                                        on_change=move |val| transfer_selected_user_id.set(val)
+                                        placeholder="Choose a workspace member..."
+                                    />
                                 }.into_any()
                             }
                         }}

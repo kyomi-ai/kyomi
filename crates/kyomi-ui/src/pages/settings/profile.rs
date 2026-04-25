@@ -11,6 +11,7 @@ use crate::components::{
     ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label,
     SettingsPageSkeleton, StyledSelect, INPUT_CLASS,
 };
+use crate::components::select::DynSelect;
 use crate::pages::settings::push_notifications::PushNotificationsCard;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::profile::*;
@@ -348,23 +349,20 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
                     // Default Dashboard
                     <div class="space-y-2">
                         <Label>"My Default Dashboard"</Label>
-                        <select
-                            class=crate::components::select::SELECT_CLASS
-                            style=crate::components::select::CHEVRON_STYLE
-                            on:change=move |ev| {
-                                dashboard_action.dispatch(event_target_value(&ev));
+                        <DynSelect
+                            value=Signal::derive(move || default_dash.get())
+                            options=Signal::derive(move || {
+                                let mut opts: Vec<(String, String)> = vec![
+                                    (String::new(), "None".to_string()),
+                                ];
+                                opts.extend(dash_leaked.iter().map(|(id, title)| (id.clone(), title.clone())));
+                                opts
+                            })
+                            on_change=move |val| {
+                                dashboard_action.dispatch(val);
                             }
-                        >
-                            <option value="" selected=default_dash.get_untracked().is_empty()>"None"</option>
-                            {dash_leaked.iter().map(|(id, title)| {
-                                let selected = default_dash.get_untracked() == *id;
-                                view! {
-                                    <option value=id.clone() selected=selected>
-                                        {title.clone()}
-                                    </option>
-                                }
-                            }).collect_view()}
-                        </select>
+                            placeholder="None"
+                        />
                         <p class="text-xs text-muted-foreground">"Opens this dashboard when landing page is set to Dashboards."</p>
                     </div>
                 </div>

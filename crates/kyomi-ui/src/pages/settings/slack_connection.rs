@@ -254,37 +254,30 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                         }.into_any()
                                                     } else {
                                                         let save = save_channel;
+                                                        // Build options: "none" sentinel + each channel.
+                                                        let mut channel_opts: Vec<(String, String)> =
+                                                            vec![("none".to_string(), "No default channel".to_string())];
+                                                        channel_opts.extend(channel_list.iter().map(|ch| {
+                                                            (ch.channel_id.clone(), format!("#{}", ch.channel_name))
+                                                        }));
+                                                        let channel_list_for_cb = channel_list.clone();
                                                         view! {
                                                             <div class="space-y-2">
-                                                                <select
-                                                                    class=crate::components::select::SELECT_CLASS
-                                                                    style=crate::components::select::CHEVRON_STYLE
-                                                                    disabled=move || saving_channel.get()
-                                                                    on:change=move |ev| {
-                                                                        let value = event_target_value(&ev);
+                                                                <crate::components::select::DynSelect
+                                                                    value=Signal::derive(move || current_channel_id.clone())
+                                                                    options=Signal::derive(move || channel_opts.clone())
+                                                                    disabled=Signal::derive(move || saving_channel.get())
+                                                                    on_change=move |value| {
                                                                         if value == "none" {
                                                                             save(None, None);
                                                                         } else {
-                                                                            let name = channel_list.iter()
+                                                                            let name = channel_list_for_cb.iter()
                                                                                 .find(|ch| ch.channel_id == value)
                                                                                 .map(|ch| ch.channel_name.clone());
                                                                             save(Some(value), name);
                                                                         }
                                                                     }
-                                                                >
-                                                                    <option value="none" selected=current_channel_id == "none">
-                                                                        "No default channel"
-                                                                    </option>
-                                                                    {channel_list.iter().map(|ch| {
-                                                                        let selected = current_channel_id == ch.channel_id;
-                                                                        let display = format!("#{}", ch.channel_name);
-                                                                        view! {
-                                                                            <option value=ch.channel_id.clone() selected=selected>
-                                                                                {display}
-                                                                            </option>
-                                                                        }
-                                                                    }).collect_view()}
-                                                                </select>
+                                                                />
                                                                 <p class="text-xs text-muted-foreground">
                                                                     "New watches will post alerts to this channel by default. You can override this for individual watches. If you don\u{2019}t see a channel, add the Kyomi app to it in Slack and refresh this page."
                                                                 </p>

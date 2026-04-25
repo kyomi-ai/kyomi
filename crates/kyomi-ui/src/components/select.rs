@@ -16,12 +16,6 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-/// Classes kept for backward compatibility with code that uses raw `<select>` elements
-/// with `SELECT_CLASS` and `CHEVRON_STYLE` directly.
-pub const SELECT_CLASS: &str = "flex h-9 w-full items-center justify-between whitespace-nowrap rounded-md border border-input bg-transparent px-3 py-2 text-sm text-foreground shadow-sm ring-offset-background focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 appearance-none cursor-pointer";
-
-/// Inline chevron SVG as background image (for raw `<select>` elements).
-pub const CHEVRON_STYLE: &str = "background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E\"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2.5rem;";
 
 // ---------------------------------------------------------------------------
 // CSS class constants copied verbatim from the React Select component
@@ -33,7 +27,7 @@ const TRIGGER_CLASS: &str = "flex h-9 w-full items-center justify-between whites
 /// SelectContent classes — visual chrome only. Positioning is handled by
 /// the shared `Popover` helper, which portals the content to `document.body`
 /// and flips/shifts to stay inside the viewport.
-const CONTENT_CLASS: &str = "max-h-[min(40vh,25rem)] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1 animate-slide-fade-in";
+const CONTENT_CLASS: &str = "max-h-[min(40vh,25rem)] min-w-[8rem] overflow-y-auto overflow-x-hidden scrollbar-thin rounded-md border border-border bg-popover text-popover-foreground shadow-md p-1 animate-slide-fade-in";
 
 /// SelectItem classes from React source.
 const ITEM_CLASS: &str = "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none transition-colors hover:bg-secondary hover:text-accent-foreground";
@@ -50,11 +44,14 @@ const CHEVRON_CLASS: &str = "h-4 w-4 opacity-50";
 /// - `value` — the currently selected value.
 /// - `options` — `Vec<(&'static str, &'static str)>` of `(value, label)` pairs.
 /// - `on_change` — callback fired when the user selects an option.
+/// - `disabled` — optional signal; when true the trigger is disabled and the dropdown will not open.
 #[component]
 pub fn StyledSelect(
     #[prop(into)] value: String,
     options: Vec<(&'static str, &'static str)>,
     on_change: impl Fn(String) + 'static + Send + Sync,
+    #[prop(optional, into)]
+    disabled: Option<Signal<bool>>,
 ) -> impl IntoView {
     let (is_open, set_is_open) = signal(false);
     let (selected, set_selected) = signal(value);
@@ -71,8 +68,11 @@ pub fn StyledSelect(
             .unwrap_or_else(|| val.clone())
     });
 
-    // Toggle dropdown on trigger click
+    // Toggle dropdown on trigger click — no-op when disabled.
     let on_trigger_click = move |_| {
+        if disabled.map(|d| d.get()).unwrap_or(false) {
+            return;
+        }
         set_is_open.update(|open| *open = !*open);
     };
 
@@ -85,6 +85,7 @@ pub fn StyledSelect(
             <button
                 type="button"
                 class=TRIGGER_CLASS
+                disabled=move || disabled.map(|d| d.get()).unwrap_or(false)
                 on:click=on_trigger_click
                 aria-expanded=move || is_open.get().to_string()
                 aria-haspopup="listbox"
@@ -160,6 +161,9 @@ pub fn DynSelect(
     /// Placeholder shown when value is empty.
     #[prop(optional, into)]
     placeholder: Option<String>,
+    /// When true the trigger is disabled and the dropdown will not open.
+    #[prop(optional, into)]
+    disabled: Option<Signal<bool>>,
 ) -> impl IntoView {
     let (is_open, set_is_open) = signal(false);
     let trigger_ref = NodeRef::<leptos::html::Div>::new();
@@ -179,7 +183,11 @@ pub fn DynSelect(
             .unwrap_or_else(|| val.clone())
     });
 
+    // Toggle dropdown on trigger click — no-op when disabled.
     let on_trigger_click = move |_| {
+        if disabled.map(|d| d.get()).unwrap_or(false) {
+            return;
+        }
         set_is_open.update(|open| *open = !*open);
     };
 
@@ -192,6 +200,7 @@ pub fn DynSelect(
             <button
                 type="button"
                 class=TRIGGER_CLASS
+                disabled=move || disabled.map(|d| d.get()).unwrap_or(false)
                 on:click=on_trigger_click
                 aria-expanded=move || is_open.get().to_string()
                 aria-haspopup="listbox"

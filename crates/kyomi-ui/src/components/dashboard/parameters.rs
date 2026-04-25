@@ -32,7 +32,7 @@ const PARAM_LABEL_CLASS: &str = "block text-xs font-medium text-muted-foreground
 const MULTISELECT_TRIGGER_CLASS: &str = "w-full px-3 py-2 text-left bg-background border border-border rounded-md text-sm hover:border-ring/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring flex items-center justify-between";
 
 /// Multiselect dropdown panel — from React `MultiSelectDropdown`.
-const MULTISELECT_DROPDOWN_CLASS: &str = "absolute z-10 mt-1 w-full bg-popover border border-border rounded-md shadow-lg max-h-60 overflow-auto";
+const MULTISELECT_DROPDOWN_CLASS: &str = "absolute z-10 mt-1 w-full bg-popover border border-border rounded-md shadow-lg max-h-[min(40vh,25rem)] overflow-y-auto overflow-x-hidden scrollbar-thin";
 
 /// Multiselect option row — from React `MultiSelectDropdown`.
 const MULTISELECT_OPTION_CLASS: &str = "flex items-center px-3 py-2 cursor-pointer transition-colors hover:bg-secondary";

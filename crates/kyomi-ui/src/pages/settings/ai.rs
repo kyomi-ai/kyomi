@@ -20,7 +20,7 @@ use phosphor_leptos::Icon;
 use crate::components::{
     Button, ButtonVariant, Card, CardContent, Label, Skeleton, INPUT_CLASS,
 };
-use crate::components::select::{CHEVRON_STYLE, SELECT_CLASS};
+use crate::components::select::DynSelect;
 use crate::components::toast::{toast_error, toast_success};
 use crate::pages::settings::ai_models::{
     label_for_model, provider_label, KYOMI_CREDITS_MODELS,
@@ -422,25 +422,24 @@ fn KyomiModelPanel(
         }
     });
 
+    let kyomi_model_options: Vec<(String, String)> = KYOMI_CREDITS_MODELS
+        .iter()
+        .map(|m| (m.id.to_string(), m.label.to_string()))
+        .collect();
+
     view! {
         <div class="space-y-4">
             <div class="space-y-2">
                 <Label>"Model"</Label>
-                <select
-                    class=SELECT_CLASS
-                    style=CHEVRON_STYLE
-                    disabled=!is_admin
-                    prop:value=move || selected_model.get()
-                    on:change=move |ev| {
-                        let new_val = event_target_value(&ev);
+                <DynSelect
+                    value=Signal::derive(move || selected_model.get())
+                    options=Signal::derive(move || kyomi_model_options.clone())
+                    disabled=Signal::derive(move || !is_admin)
+                    on_change=move |new_val| {
                         set_selected_model.set(new_val.clone());
                         save_action.dispatch(new_val);
                     }
-                >
-                    {KYOMI_CREDITS_MODELS.iter().map(|m| view! {
-                        <option value=m.id>{m.label}</option>
-                    }).collect_view()}
-                </select>
+                />
                 <p class="text-xs text-muted-foreground">
                     "Kyomi provides the LLM infrastructure. Your admin picks the model; all workspace members use it."
                 </p>
@@ -639,17 +638,20 @@ fn ByokPanel(
                     // ── Provider ─────────────────────────────────────────
                     <div class="space-y-2">
                         <Label>"Provider"</Label>
-                        <select
-                            class=SELECT_CLASS
-                            style=CHEVRON_STYLE
-                            disabled=!is_admin
-                            prop:value=move || provider.get()
-                            on:change=move |ev| set_provider.set(event_target_value(&ev))
-                        >
-                            {PROVIDER_OPTIONS.iter().map(|(id, label)| view! {
-                                <option value=*id>{*label}</option>
-                            }).collect_view()}
-                        </select>
+                        {
+                            let provider_options: Vec<(String, String)> = PROVIDER_OPTIONS
+                                .iter()
+                                .map(|(id, label)| (id.to_string(), label.to_string()))
+                                .collect();
+                            view! {
+                                <DynSelect
+                                    value=Signal::derive(move || provider.get())
+                                    options=Signal::derive(move || provider_options.clone())
+                                    disabled=Signal::derive(move || !is_admin)
+                                    on_change=move |val| set_provider.set(val)
+                                />
+                            }
+                        }
                     </div>
 
                     // ── API key ──────────────────────────────────────────
@@ -717,13 +719,14 @@ fn ByokPanel(
                     <div class="space-y-2">
                         <Label>"Model"</Label>
                         <Suspense fallback=move || view! {
-                            <select
-                                class=SELECT_CLASS
-                                style=CHEVRON_STYLE
-                                disabled=true
-                            >
-                                <option>"Loading models\u{2026}"</option>
-                            </select>
+                            <DynSelect
+                                value=Signal::derive(String::new)
+                                options=Signal::derive(|| vec![
+                                    (String::new(), "Loading models\u{2026}".to_string()),
+                                ])
+                                disabled=Signal::derive(|| true)
+                                on_change=|_| {}
+                            />
                         }>
                             {move || {
                                 let resource_value = models_resource.get();
@@ -744,23 +747,29 @@ fn ByokPanel(
                                     && !models.iter().any(|m| m.id == current);
                                 let synthetic_id = current.clone();
 
+                                // Build the options list: placeholder + optional synthetic +
+                                // fetched models + custom sentinel.
+                                let mut model_opts: Vec<(String, String)> =
+                                    vec![(String::new(), "Select a model...".to_string())];
+                                if needs_synthetic {
+                                    model_opts.push((synthetic_id.clone(), synthetic_id));
+                                }
+                                for m in models {
+                                    model_opts.push((m.id, m.label));
+                                }
+                                model_opts.push((
+                                    CUSTOM_MODEL_SENTINEL.to_string(),
+                                    "Custom model ID\u{2026}".to_string(),
+                                ));
+
                                 view! {
-                                    <select
-                                        class=SELECT_CLASS
-                                        style=CHEVRON_STYLE
-                                        disabled=!is_admin
-                                        prop:value=move || model_choice.get()
-                                        on:change=move |ev| set_model_choice.set(event_target_value(&ev))
-                                    >
-                                        <option value="">"Select a model..."</option>
-                                        {needs_synthetic.then(|| view! {
-                                            <option value=synthetic_id.clone()>{synthetic_id.clone()}</option>
-                                        })}
-                                        {models.into_iter().map(|m| view! {
-                                            <option value=m.id.clone()>{m.label}</option>
-                                        }).collect_view()}
-                                        <option value=CUSTOM_MODEL_SENTINEL>"Custom model ID\u{2026}"</option>
-                                    </select>
+                                    <DynSelect
+                                        value=Signal::derive(move || model_choice.get())
+                                        options=Signal::derive(move || model_opts.clone())
+                                        disabled=Signal::derive(move || !is_admin)
+                                        on_change=move |val| set_model_choice.set(val)
+                                        placeholder="Select a model..."
+                                    />
                                     {fetch_error.map(|msg| view! {
                                         <p class="text-xs text-error-foreground">
                                             "Couldn\u{2019}t load models: " {msg}
