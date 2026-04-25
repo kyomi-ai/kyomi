@@ -406,6 +406,32 @@ pub fn resolve_provider_config(
 }
 
 // ---------------------------------------------------------------------------
+// Shared formatting helpers
+// ---------------------------------------------------------------------------
+
+/// Format a user message with sender attribution.
+///
+/// If the message has a `user_id` and a matching name is found in `user_names`,
+/// formats as `[Name (last8chars)]: content`. Otherwise returns content as-is.
+pub(crate) fn format_user_message(msg: &Message, user_names: &HashMap<String, String>) -> String {
+    let Some(user_id) = &msg.user_id else {
+        return msg.content.clone();
+    };
+
+    let id_short = if user_id.len() >= 8 {
+        &user_id[user_id.len() - 8..]
+    } else {
+        user_id.as_str()
+    };
+
+    if let Some(name) = user_names.get(user_id.as_str()) {
+        format!("[{name} ({id_short})]: {}", msg.content)
+    } else {
+        format!("[User ({id_short})]: {}", msg.content)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LLM debug logging (shared across all providers)
 // ---------------------------------------------------------------------------
 
@@ -745,5 +771,40 @@ mod tests {
     #[test]
     fn extract_error_message_empty_body() {
         assert_eq!(extract_error_message(""), None);
+    }
+
+    // -- User attribution formatting -----------------------------------------
+
+    #[test]
+    fn format_user_message_no_user_id() {
+        let msg = Message::user("hello");
+        let names = HashMap::new();
+        let result = format_user_message(&msg, &names);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn format_user_message_with_known_user() {
+        let msg = Message::user_with_id("hello", "user-abcd-1234-efgh");
+        let mut names = HashMap::new();
+        names.insert("user-abcd-1234-efgh".to_string(), "Jason Adams".to_string());
+        let result = format_user_message(&msg, &names);
+        assert_eq!(result, "[Jason Adams (234-efgh)]: hello");
+    }
+
+    #[test]
+    fn format_user_message_with_unknown_user() {
+        let msg = Message::user_with_id("hello", "user-abcd-1234-efgh");
+        let names = HashMap::new();
+        let result = format_user_message(&msg, &names);
+        assert_eq!(result, "[User (234-efgh)]: hello");
+    }
+
+    #[test]
+    fn format_user_message_short_user_id() {
+        let msg = Message::user_with_id("hello", "abc");
+        let names = HashMap::new();
+        let result = format_user_message(&msg, &names);
+        assert_eq!(result, "[User (abc)]: hello");
     }
 }
