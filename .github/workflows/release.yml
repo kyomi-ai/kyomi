@@ -1,21 +1,28 @@
 # =============================================================================
 # Kyomi — Release Workflow
 # =============================================================================
-# Triggered by version tags (v*). Builds a linux/amd64 Docker image on GHCR
-# for self-hosted users and creates a GitHub Release.
+# Triggered by version tags (v*). Builds linux/amd64 and linux/arm64 Docker
+# images natively (no QEMU) via a matrix strategy, combines them with
+# `docker manifest create`, produces standalone kyomi binaries for
+# linux/amd64, linux/arm64, macos/arm64, and macos/amd64, then creates a
+# GitHub Release with all artifacts attached.
 #
 # Usage:
 #   git tag v2026.04.19.2
 #   git push --tags
 #
-# The Leptos WASM frontend is pre-built on the amd64 runner and COPY'd into
-# the Docker image. Docker builds linux/amd64 only — arm64 via QEMU timed
-# out at ~85 min in initial testing (cargo build under emulation is too
-# slow). Native arm64 support is tracked in KYO-112 (matrix build across
-# `ubuntu-latest` + `ubuntu-24.04-arm` + docker manifest create).
+# Each Docker matrix leg pre-builds the Leptos WASM frontend and MCP chart
+# app on its native runner, then builds and pushes a per-arch image tagged
+# `kyomi:VERSION-ARCH`. The docker-manifest job combines them into a
+# multi-arch manifest at `kyomi:VERSION` and `kyomi:latest`.
+#
+# Each binaries matrix leg builds the same WASM artifacts plus the server
+# binary, packages it as a .tar.gz, and uploads it as a workflow artifact.
+# The release job downloads all tarballs, generates SHA256SUMS.txt, and
+# attaches everything to the GitHub Release.
 #
 # Desktop installers (.dmg/.msi/.AppImage) for apps/desktop are tracked in
-# KYO-113. Self-hosted install is Docker-only for now.
+# KYO-113.
 # =============================================================================
 
 name: Release
@@ -49,13 +56,30 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
   # ---------------------------------------------------------------------------
-  # Docker: linux/amd64 image
+  # Docker: per-arch images built natively (no QEMU)
   # ---------------------------------------------------------------------------
-  # Pre-builds MCP chart app + Leptos WASM dist on the amd64 runner, then
-  # builds the linux/amd64 image. arm64 deferred (QEMU + cargo is too slow).
+  # Each matrix leg pre-builds MCP chart app + Leptos WASM dist on its native
+  # runner, then builds and pushes a per-arch image tagged kyomi:VERSION-ARCH.
   docker:
     needs: [prepare]
-    runs-on: kyomi-build
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: kyomi-build
+            trunk_target: x86_64-unknown-linux-gnu
+            trunk_arch: x86_64
+            wasm_bindgen_arch: x86_64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-x64
+            binaryen_arch: x86_64-linux
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            trunk_target: aarch64-unknown-linux-gnu
+            trunk_arch: aarch64
+            wasm_bindgen_arch: aarch64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-arm64
+            binaryen_arch: aarch64-linux
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -68,6 +92,12 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
+      # arm64 runner (ubuntu-24.04-arm) is a clean GitHub-hosted runner and
+      # needs build deps. The kyomi-build runner (amd64) already has them.
+      - name: Install build dependencies (arm64 only)
+        if: matrix.arch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
       # Same local-dev [patch.crates-io] strip as ci.yml / Dockerfile.
       - name: Strip local-dev patch.crates-io block
         run: |
@@ -78,19 +108,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
 
       # Trunk resolves wasm-opt from $HOME/.cache/trunk/... — on the runner
-      # that's /home/runner/.cache.
+      # that's /home/runner/.cache. The wasm-opt wrapper injects
+      # --enable-bulk-memory-opt and --enable-nontrapping-float-to-int so
+      # trunk's invocation doesn't need them spelled out.
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
         run: |
           set -euo pipefail
-          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-unknown-linux-gnu.tar.gz" \
             | sudo tar -xz -C /usr/local/bin trunk
-          sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+          sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
             | sudo tar -xz --strip-components=1 -C /usr/local/bin \
-                "wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen"
+                "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
           sudo curl -fsSL -o /usr/local/bin/tailwindcss \
-            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64"
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
           sudo chmod +x /usr/local/bin/tailwindcss
-          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
           mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
@@ -114,30 +146,208 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push image (linux/amd64)
+      - name: Build and push per-arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ${{ env.GHCR_REGISTRY }}/kyomi:${{ needs.prepare.outputs.version }}
-            ${{ env.GHCR_REGISTRY }}/kyomi:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.GHCR_REGISTRY }}/kyomi:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+
+  # ---------------------------------------------------------------------------
+  # Docker manifest: combine per-arch images into a multi-arch manifest
+  # ---------------------------------------------------------------------------
+  docker-manifest:
+    needs: [prepare, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Create and push multi-arch manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION} \
+            --tag ${{ env.GHCR_REGISTRY }}/kyomi:latest \
+            ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION}-amd64 \
+            ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION}-arm64
+
+  # ---------------------------------------------------------------------------
+  # Binaries: per-platform standalone kyomi binary tarballs
+  # ---------------------------------------------------------------------------
+  # Each matrix leg builds the full WASM frontend + MCP chart app + server
+  # binary on its native runner, then packages the binary as a .tar.gz and
+  # uploads it as a workflow artifact for the release job to collect.
+  binaries:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: kyomi-build
+            rust_target: x86_64-unknown-linux-gnu
+            trunk_arch: x86_64
+            trunk_os_suffix: unknown-linux-gnu
+            wasm_bindgen_arch: x86_64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-x64
+            binaryen_arch: x86_64-linux
+            sed_inplace: "sed -i"
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            trunk_arch: aarch64
+            trunk_os_suffix: unknown-linux-gnu
+            wasm_bindgen_arch: aarch64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-arm64
+            binaryen_arch: aarch64-linux
+            sed_inplace: "sed -i"
+          - os: macos
+            arch: arm64
+            runner: macos-14
+            rust_target: aarch64-apple-darwin
+            trunk_arch: aarch64
+            trunk_os_suffix: apple-darwin
+            wasm_bindgen_arch: aarch64-apple-darwin
+            tailwind_binary: tailwindcss-macos-arm64
+            binaryen_arch: arm64-macos
+            sed_inplace: "sed -i ''"
+          - os: macos
+            arch: amd64
+            runner: macos-13
+            rust_target: x86_64-apple-darwin
+            trunk_arch: x86_64
+            trunk_os_suffix: apple-darwin
+            wasm_bindgen_arch: x86_64-apple-darwin
+            tailwind_binary: tailwindcss-macos-x64
+            binaryen_arch: x86_64-macos
+            sed_inplace: "sed -i ''"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+
+      # GitHub-hosted Linux runners (ubuntu-24.04-arm) need build deps.
+      # The kyomi-build runner (linux/amd64) already has them.
+      - name: Install build dependencies (Linux only)
+        if: matrix.os == 'linux' && matrix.arch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+      # Same local-dev [patch.crates-io] strip as ci.yml / Dockerfile.
+      - name: Strip local-dev patch.crates-io block
+        run: |
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+
+      - name: Install brotli (Trunk post_build hook dependency)
+        run: |
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
+          else
+            brew install brotli
+          fi
+
+      # Trunk resolves wasm-opt from $HOME/.cache/trunk/... The wasm-opt
+      # wrapper injects --enable-bulk-memory-opt and
+      # --enable-nontrapping-float-to-int so trunk's invocation doesn't need
+      # them spelled out.
+      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
+              | sudo tar -xz -C /usr/local/bin trunk
+            sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+              | sudo tar -xz --strip-components=1 -C /usr/local/bin \
+                  "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
+            sudo curl -fsSL -o /usr/local/bin/tailwindcss \
+              "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
+            sudo chmod +x /usr/local/bin/tailwindcss
+          else
+            curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
+              | tar -xz -C /usr/local/bin trunk
+            curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+              | tar -xz --strip-components=1 -C /usr/local/bin \
+                  "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
+            curl -fsSL -o /usr/local/bin/tailwindcss \
+              "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
+            chmod +x /usr/local/bin/tailwindcss
+          fi
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
+            | tar -xz -C /tmp
+          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
+          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
+          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+
+      - name: Build Leptos WASM frontend
+        working-directory: crates/kyomi-ui
+        run: trunk build --release
+
+      - name: Build MCP chart app WASM
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
+      - name: Build release binary
+        run: cargo build --release -p kyomi-server
+
+      - name: Create tarball
+        run: tar -czf kyomi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz -C target/release kyomi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyomi-${{ matrix.os }}-${{ matrix.arch }}
+          path: kyomi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
 
   # ---------------------------------------------------------------------------
   # GitHub Release
   # ---------------------------------------------------------------------------
   release:
-    needs: [prepare, docker]
+    needs: [prepare, docker-manifest, binaries]
     runs-on: kyomi-ci
     steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: |
+          for dir in kyomi-*/; do
+            mv "$dir"/*.tar.gz .
+          done
+          sha256sum kyomi-*.tar.gz > SHA256SUMS.txt
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          files: |
+            artifacts/kyomi-*.tar.gz
+            artifacts/SHA256SUMS.txt
           body: |
             ## Installation
 
@@ -153,9 +363,17 @@ jobs:
               ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
             ```
 
-            The image is linux/amd64 and fully self-contained — frontend,
-            ML model, and server in a single binary. Requires an LLM API key
-            (Anthropic, OpenAI, or Gemini). arm64 support is on the roadmap.
+            The image supports linux/amd64 and linux/arm64 and is fully
+            self-contained — frontend, ML model, and server in a single binary.
+            Requires an LLM API key (Anthropic, OpenAI, or Gemini).
+
+            ### Standalone binary
+            Download the tarball for your platform from the assets below,
+            then extract and run:
+            ```bash
+            tar -xzf kyomi-<os>-<arch>.tar.gz
+            ./kyomi
+            ```
 
             See [Self-Hosting Guide](https://kyomi.ai/self-hosting) for full
             setup instructions.
