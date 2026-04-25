@@ -1044,6 +1044,11 @@ fn DashboardEditorInner(
                             set_editor_content.set(content.clone());
                             set_preview_content.set(content);
                         });
+                        let context_name = if is_knowledge.get() {
+                            "document".to_string()
+                        } else {
+                            "dashboard".to_string()
+                        };
                         view! {
                             <CopilotSidebar
                                 dashboard_id=did
@@ -1051,6 +1056,7 @@ fn DashboardEditorInner(
                                 open=Signal::derive(move || copilot_open.get())
                                 on_close=on_copilot_close
                                 on_apply_content=on_apply_content
+                                context_name=context_name
                             />
                         }
                     })

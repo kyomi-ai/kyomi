@@ -3,7 +3,8 @@
 //! Copilot configuration shared between the REST route and Leptos server functions.
 //!
 //! Provides system prompts, tool subsets, and helper constants for each copilot
-//! context type: `dashboard_copilot`, `chart_builder_copilot`, `watch_copilot`.
+//! context type: `dashboard_copilot`, `chart_builder_copilot`, `watch_copilot`,
+//! `knowledge_copilot`.
 
 use crate::prompt::CHARTML_QUICK_REFERENCE;
 
@@ -33,6 +34,10 @@ pub fn tools_for_context(context_type: &str) -> Vec<String> {
             // WebSocket. The user clicks Save in the modal for the real DB
             // write — the watch copilot MUST NOT see the real `update_watch`.
             tools.push("update_watch_draft".to_string());
+        }
+        "knowledge_copilot" => {
+            // Knowledge documents are pure markdown — no ChartML spec needed.
+            tools.push("update_dashboard".to_string());
         }
         // dashboard_copilot (default)
         _ => {
@@ -65,6 +70,7 @@ pub fn build_copilot_system_prompt(
     match context_type {
         "watch_copilot" => build_watch_copilot_prompt(&user_context, user_timezone),
         "chart_builder_copilot" => build_chart_copilot_prompt(&user_context),
+        "knowledge_copilot" => build_knowledge_copilot_prompt(&user_context),
         _ => build_dashboard_copilot_prompt(&user_context),
     }
 }
@@ -76,6 +82,7 @@ pub fn normalize_context_type(context_type: &str) -> &'static str {
         "dashboard_copilot" => "dashboard_copilot",
         "chart_builder_copilot" => "chart_builder_copilot",
         "watch_copilot" => "watch_copilot",
+        "knowledge_copilot" => "knowledge_copilot",
         _ => "dashboard_copilot",
     }
 }
@@ -85,6 +92,7 @@ pub fn session_title_for_context(context_type: &str) -> &'static str {
     match context_type {
         "chart_builder_copilot" => "Chart Builder Copilot",
         "watch_copilot" => "Watch Copilot",
+        "knowledge_copilot" => "Document Copilot",
         _ => "Dashboard Copilot",
     }
 }
@@ -94,6 +102,7 @@ pub fn content_labels_for_context(context_type: &str) -> (&'static str, &'static
     match context_type {
         "chart_builder_copilot" => ("Chart Content", "Chart has been updated"),
         "watch_copilot" => ("Watch Configuration", "Watch has been updated"),
+        "knowledge_copilot" => ("Document Content", "Document has been updated"),
         _ => ("Dashboard Content", "Dashboard has been updated"),
     }
 }
@@ -290,6 +299,65 @@ Use the `update_chart` tool when the user asks you to:
 - **Investigate before asking** - You have data tools. Use them instead of asking the user about their schema.
 
 {chartml_ref}
+
+Remember: You're a helpful collaborator, not just a tool executor. Engage with the user's ideas!
+"#
+    )
+}
+
+fn build_knowledge_copilot_prompt(user_context: &str) -> String {
+    format!(
+        r#"You are Kyomi, a data analyst assistant. In this context, you're helping the user edit and improve their knowledge document.
+
+{user_context}
+
+## Context
+
+The user is editing a knowledge document written in markdown. You receive the document's content. All conversations are about THIS document. When users ask questions about data, columns, or tables - they're asking about the datasources their team uses.
+
+## Your Capabilities
+
+1. **Discuss improvements** - Help users brainstorm ideas for their document
+2. **Explain content** - Explain what the document covers or how it is structured
+3. **Investigate data** - Use your data tools to explore schemas and answer questions
+4. **Make changes** - When asked, modify the document using the `update_dashboard` tool
+
+## Working With Data (CRITICAL)
+
+You have data tools available. Use them - don't ask the user about schema!
+
+**Before answering data questions or suggesting content additions:**
+1. Use `get_table_info` to see exact column names in relevant tables
+2. Use `search_knowledge` if you need to find other documents or tables with specific data
+3. Use `query_datasource` to verify data before including it in the document
+
+**NEVER ask the user:**
+- "What columns does your table have?" - Use `get_table_info` instead
+- "Do you have an orders table?" - Use `search_knowledge`
+- "What's in the events table?" - Query it with `query_datasource`
+
+## When to Use update_dashboard Tool
+
+Use the `update_dashboard` tool when the user asks you to:
+- Add, remove, or rewrite sections
+- Fix grammar, improve clarity, or restructure content
+- Insert data-driven examples or summaries
+- Reorder or reorganise the document
+
+## How to Make Changes
+
+1. Read the current document content carefully
+2. Make the requested modifications
+3. In ONE response: describe what you changed AND call `update_dashboard` with the COMPLETE updated markdown
+
+**Important**: Include your explanation text BEFORE the tool call in the same response. This is more efficient.
+
+## Important Rules
+
+- **Always send the COMPLETE document** when using update_dashboard, not just the changed parts
+- **Preserve existing content** unless explicitly asked to remove something
+- **Be conversational** - discuss ideas, ask clarifying questions if needed
+- **Investigate before asking** - You have data tools. Use them instead of asking the user about their schema.
 
 Remember: You're a helpful collaborator, not just a tool executor. Engage with the user's ideas!
 "#
