@@ -1574,7 +1574,6 @@ async fn handle_app_mention(
                 "I couldn't generate a response. Please try rephrasing your question.",
                 &state.slack_client,
                 &query_ctx,
-                &state.config.chart_renderer_url,
                 &footer_url,
             )
             .await;
@@ -1588,7 +1587,6 @@ async fn handle_app_mention(
                 &response_text,
                 &state.slack_client,
                 &query_ctx,
-                &state.config.chart_renderer_url,
                 &footer_url,
             )
             .await;
@@ -1764,7 +1762,6 @@ async fn handle_direct_message(
                 "I couldn't generate a response. Please try rephrasing your question.",
                 &state.slack_client,
                 &query_ctx,
-                &state.config.chart_renderer_url,
                 &footer_url,
             )
             .await;
@@ -1778,7 +1775,6 @@ async fn handle_direct_message(
                 &response_text,
                 &state.slack_client,
                 &query_ctx,
-                &state.config.chart_renderer_url,
                 &footer_url,
             )
             .await;
@@ -2007,7 +2003,6 @@ async fn post_slack_response(
     response: &str,
     slack_client_ref: &SlackClient,
     query_ctx: &kyomi_agent::tools::QueryContext,
-    chart_renderer_url: &str,
     footer_url: &str,
 ) {
     use crate::message_processor;
@@ -2018,7 +2013,6 @@ async fn post_slack_response(
         bot_token,
         slack_client_ref,
         query_ctx,
-        chart_renderer_url,
         Some(footer_url),
         "Continue in Kyomi",
         None, // no header for chat responses

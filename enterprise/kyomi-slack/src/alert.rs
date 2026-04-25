@@ -87,7 +87,6 @@ pub async fn send_slack_alert(
         &config.frontend_url,
         mode,
         &query_ctx,
-        &config.chart_renderer_url,
     )
     .await
 }
@@ -185,7 +184,6 @@ async fn send_watch_alert_to_slack(
     frontend_url: &str,
     mode: WatchMode,
     query_ctx: &QueryContext,
-    chart_renderer_url: &str,
 ) -> bool {
     let is_report = mode == WatchMode::Report;
     let type_label = if is_report { "report" } else { "alert" };
@@ -225,7 +223,6 @@ async fn send_watch_alert_to_slack(
             bot_token,
             slack_client,
             query_ctx,
-            chart_renderer_url,
             if is_last { Some(&footer_url) } else { None },
             &footer_text,
             if is_first { Some(header_text) } else { None },

@@ -8,7 +8,6 @@
 #
 # Enterprise edition includes:
 #   - Redis for multi-replica support and real-time features
-#   - Chart renderer for server-side chart image generation
 #   - Slack integration support
 #   - All Community edition features
 #
@@ -73,29 +72,6 @@ services:
     #       memory: 512M
 
   # ---------------------------------------------------------------------------
-  # Chart Renderer (server-side chart image generation)
-  # ---------------------------------------------------------------------------
-  chart-renderer:
-    image: ghcr.io/kyomi-ai/chart-renderer:latest
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3030/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    # No ports exposed to host — only accessible by the kyomi service
-    # Uncomment to expose for debugging:
-    # ports:
-    #   - "3030:3030"
-
-    ## Resource limits (uncomment and adjust for your environment):
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 1G
-
-  # ---------------------------------------------------------------------------
   # Kyomi application (backend + embedded frontend)
   # ---------------------------------------------------------------------------
   kyomi:
@@ -105,8 +81,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      chart-renderer:
         condition: service_healthy
     ports:
       - "${KYOMI_PORT:-8080}:8003"
@@ -119,7 +93,6 @@ services:
       PORT: "8003"
       DATABASE_URL: postgresql://kyomi:${POSTGRES_PASSWORD}@postgres:5432/kyomi
       REDIS_URL: redis://redis:6379/0
-      CHART_RENDERER_URL: http://chart-renderer:3030
 
       # --- Application URLs ---
       # These must match the external URL users will access.

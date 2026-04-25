@@ -170,7 +170,6 @@ pub async fn deliver_watch_alert(
                             frontend_url: &config.frontend_url,
                             creator_email: creator_email.as_deref(),
                             mode,
-                            chart_renderer_url: &config.chart_renderer_url,
                         },
                         &query_ctx,
                     )
@@ -316,12 +315,11 @@ struct AlertEmailParams<'a> {
     frontend_url: &'a str,
     creator_email: Option<&'a str>,
     mode: WatchMode,
-    chart_renderer_url: &'a str,
 }
 
 /// Send watch alert/report emails to all recipients.
 ///
-/// Renders ChartML blocks to inline images (via chart-renderer) and attaches
+/// Renders ChartML blocks to inline images (via chartml-rs) and attaches
 /// the Kyomi logo as a CID image. Returns `true` if at least one email was
 /// sent successfully.
 async fn send_watch_alert_emails(
@@ -336,7 +334,7 @@ async fn send_watch_alert_emails(
 
     // Process the message once (render charts, convert markdown → HTML).
     let (message_html, chart_images) =
-        process_message_for_email(params.message, params.chart_renderer_url, query_ctx).await;
+        process_message_for_email(params.message, query_ctx).await;
 
     let mut any_success = false;
 
@@ -391,7 +389,6 @@ static RE_CHARTML_CAPTURE: LazyLock<regex::Regex> = LazyLock::new(|| {
 /// Returns `(html_content, cid_images)`.
 async fn process_message_for_email(
     message: &str,
-    _chart_renderer_url: &str,
     query_ctx: &QueryContext,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     use crate::chartml_factory;
@@ -1348,8 +1345,7 @@ mod tests {
     async fn process_message_no_charts() {
         let message = "Revenue is down **15%** this week.";
         let ctx = dummy_query_ctx();
-        // Empty renderer URL — no charts to render.
-        let (html, images) = process_message_for_email(message, "", &ctx).await;
+        let (html, images) = process_message_for_email(message, &ctx).await;
         assert!(images.is_empty());
         assert!(html.contains("<strong>15%</strong>"));
         assert!(html.contains("Revenue is down"));
@@ -1359,8 +1355,7 @@ mod tests {
     async fn process_message_chartml_becomes_placeholder_without_renderer() {
         let message = "Revenue is down.\n```chartml\ntype: chart\nversion: 1\n```\nSee chart above.";
         let ctx = dummy_query_ctx();
-        // Empty renderer URL — charts replaced with placeholders.
-        let (html, images) = process_message_for_email(message, "", &ctx).await;
+        let (html, images) = process_message_for_email(message, &ctx).await;
         assert!(images.is_empty());
         assert!(!html.contains("chartml"));
         assert!(html.contains("[Chart available - view in Kyomi]"));
@@ -1372,7 +1367,7 @@ mod tests {
     async fn process_message_yaml_chart_becomes_placeholder() {
         let message = "Results:\n```yaml\ntype: chart\nvisualize:\n  type: bar\n```\nEnd.";
         let ctx = dummy_query_ctx();
-        let (html, images) = process_message_for_email(message, "", &ctx).await;
+        let (html, images) = process_message_for_email(message, &ctx).await;
         assert!(images.is_empty());
         assert!(!html.contains("yaml"));
         assert!(html.contains("[Chart available - view in Kyomi]"));
@@ -1382,7 +1377,7 @@ mod tests {
     async fn process_message_preserves_normal_text() {
         let message = "No charts here, just text.";
         let ctx = dummy_query_ctx();
-        let (html, images) = process_message_for_email(message, "", &ctx).await;
+        let (html, images) = process_message_for_email(message, &ctx).await;
         assert!(images.is_empty());
         assert!(html.contains("No charts here, just text."));
     }

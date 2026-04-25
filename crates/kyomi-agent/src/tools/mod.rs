@@ -18,7 +18,6 @@ pub mod catalog;
 pub mod chart;
 pub mod chart_data_resolver;
 pub mod chart_palettes;
-pub mod chart_renderer;
 pub mod chartml;
 pub mod copilot;
 pub mod dashboard;

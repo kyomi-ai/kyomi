@@ -78,9 +78,6 @@ pub struct Config {
     /// Enable background schedulers (watches, catalog refresh)
     pub enable_schedulers: bool,
 
-    /// Chart renderer service URL for health checks
-    pub chart_renderer_url: String,
-
     /// Demo mode — disables HSTS headers
     pub demo_mode: bool,
 
@@ -324,8 +321,6 @@ impl Config {
                 .unwrap_or_else(|_| "true".into())
                 .parse()
                 .unwrap_or(true),
-            chart_renderer_url: env::var("CHART_RENDERER_URL")
-                .unwrap_or_else(|_| "http://localhost:3030".into()),
             demo_mode: env::var("DEMO_MODE")
                 .unwrap_or_else(|_| "false".into())
                 .parse()
@@ -421,7 +416,6 @@ impl Config {
                 .unwrap_or_else(|_| TEST_ENCRYPTION_KEY_B64.into()),
             port: 0, // random port for tests
             enable_schedulers: false,
-            chart_renderer_url: "http://localhost:3030".into(),
             demo_mode: false,
             self_hosted: false,
             edition: SelfHostedEdition::Community,
@@ -482,13 +476,6 @@ impl Config {
     /// Returns true if SMTP is configured (account emails and alerts enabled).
     pub fn smtp_configured(&self) -> bool {
         self.smtp_configured
-    }
-
-    /// Returns true if the chart renderer service is configured.
-    /// The default value ("http://localhost:3030") is treated as unconfigured.
-    pub fn chart_renderer_configured(&self) -> bool {
-        let url = &self.chart_renderer_url;
-        !url.is_empty() && url != "http://localhost:3030"
     }
 
     /// Returns true if Slack integration is configured (client ID + secret present).

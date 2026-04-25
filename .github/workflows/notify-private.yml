@@ -9,7 +9,7 @@
 # do not deploy. See docs/RELEASING.md for the release flow.
 #
 # Only the API is dispatched from this repo. Private-only services
-# (chart-renderer, marketing, analytics-collector, k8s infra) deploy from
+# (marketing, analytics-collector, k8s infra) deploy from
 # their own workflows in kyomi-private when their source changes there.
 # =============================================================================
 

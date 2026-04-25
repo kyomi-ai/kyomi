@@ -5,7 +5,7 @@
 //! Generates PDF exports of dashboards by:
 //! 1. Extracting ChartML specs from dashboard markdown
 //! 2. Resolving chart data (executing queries)
-//! 3. Rendering charts to PNG via chartml-rs (Rust-native)
+//! 3. Rendering charts to PNG via chartml-rs (Rust-native, no external service)
 //! 4. Converting markdown + chart images to Typst markup
 //! 5. Compiling Typst to PDF (pure Rust, no external deps)
 
@@ -51,7 +51,6 @@ pub async fn generate_dashboard_pdf(
     content: &str,
     title: &str,
     ctx: &QueryContext,
-    _chart_renderer_url: &str,
     user_palette: &[String],
     parameter_values: Option<&Value>,
 ) -> Result<Vec<u8>, String> {

@@ -123,7 +123,7 @@ choose_edition() {
     echo "      Postgres + Kyomi. Everything you need to get started."
     echo ""
     echo "  [2] Enterprise (commercial license required)"
-    echo "      Adds Redis, chart renderer, Slack integration."
+    echo "      Adds Redis, Slack integration, and more."
     echo ""
     _edition=$(prompt "Select edition" "1")
     case "$_edition" in

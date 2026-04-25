@@ -28,9 +28,8 @@ pub struct SystemConfig {
 struct FeatureFlags {
     ai_enabled: bool,
     smtp_configured: bool,
-    chart_renderer_configured: bool,
     slack_configured: bool,
-    /// PDF export: Enterprise + chart renderer configured
+    /// PDF export: Enterprise only
     pdf_export: bool,
     /// Watch email alerts: Enterprise + SMTP configured
     watch_email_alerts: bool,
@@ -67,7 +66,6 @@ pub async fn get_system_config(State(state): State<AppState>) -> Json<SystemConf
     let llm_configured = config.llm_configured();
 
     let smtp_configured = config.smtp_configured();
-    let chart_renderer_configured = config.chart_renderer_configured();
     let slack_configured = config.slack_configured();
     let ai_enabled = config.llm_configured();
 
@@ -77,7 +75,6 @@ pub async fn get_system_config(State(state): State<AppState>) -> Json<SystemConf
         FeatureFlags {
             ai_enabled,
             smtp_configured: true,
-            chart_renderer_configured: true,
             slack_configured: true,
             pdf_export: true,
             watch_email_alerts: true,
@@ -90,9 +87,8 @@ pub async fn get_system_config(State(state): State<AppState>) -> Json<SystemConf
         FeatureFlags {
             ai_enabled,
             smtp_configured,
-            chart_renderer_configured,
             slack_configured,
-            pdf_export: is_enterprise && chart_renderer_configured,
+            pdf_export: is_enterprise,
             watch_email_alerts: is_enterprise && smtp_configured,
             watch_slack_alerts: is_enterprise && slack_configured,
             slack_integration: is_enterprise && slack_configured,

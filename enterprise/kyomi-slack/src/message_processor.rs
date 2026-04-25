@@ -201,7 +201,6 @@ pub async fn process_and_build_slack_blocks(
     bot_token: &str,
     slack_client: &SlackClient,
     query_ctx: &QueryContext,
-    _chart_renderer_url: &str,
     footer_url: Option<&str>,
     footer_text: &str,
     header_text: Option<&str>,

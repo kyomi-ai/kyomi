@@ -73,30 +73,17 @@ async fn export_pdf_inner(
         .as_deref()
         .ok_or_else(|| kyomi_core::Error::BadRequest("Workspace context required".into()))?;
 
-    // 1. Self-hosted edition gate: PDF export requires Enterprise + chart renderer.
-    if state.config.self_hosted {
-        if !state.config.is_enterprise() {
-            return Ok((
-                axum::http::StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "feature_not_available",
-                    "edition_required": "enterprise",
-                    "message": "PDF export requires an Enterprise license. See kyomi.ai/enterprise."
-                })),
-            )
-                .into_response());
-        }
-        if !state.config.chart_renderer_configured() {
-            return Ok((
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "service_not_configured",
-                    "service": "chart_renderer",
-                    "message": "PDF export requires the chart renderer service. Set CHART_RENDERER_URL."
-                })),
-            )
-                .into_response());
-        }
+    // 1. Self-hosted edition gate: PDF export requires Enterprise.
+    if state.config.self_hosted && !state.config.is_enterprise() {
+        return Ok((
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "feature_not_available",
+                "edition_required": "enterprise",
+                "message": "PDF export requires an Enterprise license. See kyomi.ai/enterprise."
+            })),
+        )
+            .into_response());
     }
 
     // 2. Capability gate: PDF export requires paid plan
@@ -149,7 +136,6 @@ async fn export_pdf_inner(
         &dashboard.content,
         &dashboard.title,
         &query_ctx,
-        &state.config.chart_renderer_url,
         &user_palette,
         parameter_values.as_ref(),
     )
