@@ -353,6 +353,18 @@ fn CreateNewOption(
     /// Called when Escape is pressed
     on_close: Callback<()>,
 ) -> impl IntoView {
+    let input_ref = NodeRef::<leptos::html::Input>::new();
+
+    Effect::new(move || {
+        if is_creating_new.get()
+            && let Some(el) = input_ref.get()
+        {
+            request_animation_frame(move || {
+                el.focus().ok();
+            });
+        }
+    });
+
     view! {
         <div
             on:click=move |_| on_select.run(())
@@ -403,41 +415,41 @@ fn CreateNewOption(
                 }}
             </div>
 
-            // Title input — shown when creating mode is active
-            // React: "mt-4 pl-13" with input field
-            {move || {
+            // Title input — always rendered to keep DOM element alive across
+            // re-renders (avoids focus loss on every keystroke). Visibility is
+            // toggled via the `hidden` Tailwind class instead of conditional
+            // rendering so the input node is never destroyed while the user types.
+            <div class=move || {
                 if is_creating_new.try_get().unwrap_or_default() {
-                    Some(view! {
-                        <div class="mt-4 pl-13">
-                            <input
-                                type="text"
-                                prop:value=move || new_dashboard_title.try_get().unwrap_or_default()
-                                on:input=move |ev| {
-                                    set_new_dashboard_title.set(event_target_value(&ev));
-                                }
-                                on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                    if ev.key() == "Enter"
-                                        && !ev.shift_key()
-                                        && !new_dashboard_title.get_untracked().trim().is_empty()
-                                    {
-                                        ev.prevent_default();
-                                        on_save.run(());
-                                    } else if ev.key() == "Escape" {
-                                        on_close.run(());
-                                    }
-                                }
-                                on:click=|ev: web_sys::MouseEvent| ev.stop_propagation()
-                                placeholder="Enter dashboard title..."
-                                class=INPUT_CLASS
-                                autofocus=true
-                                disabled=move || is_saving.try_get().unwrap_or_default()
-                            />
-                        </div>
-                    })
+                    "mt-4 pl-13"
                 } else {
-                    None
+                    "mt-4 pl-13 hidden"
                 }
-            }}
+            }>
+                <input
+                    type="text"
+                    node_ref=input_ref
+                    prop:value=move || new_dashboard_title.try_get().unwrap_or_default()
+                    on:input=move |ev| {
+                        set_new_dashboard_title.set(event_target_value(&ev));
+                    }
+                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                        if ev.key() == "Enter"
+                            && !ev.shift_key()
+                            && !new_dashboard_title.get_untracked().trim().is_empty()
+                        {
+                            ev.prevent_default();
+                            on_save.run(());
+                        } else if ev.key() == "Escape" {
+                            on_close.run(());
+                        }
+                    }
+                    on:click=|ev: web_sys::MouseEvent| ev.stop_propagation()
+                    placeholder="Enter dashboard title..."
+                    class=INPUT_CLASS
+                    disabled=move || is_saving.try_get().unwrap_or_default()
+                />
+            </div>
         </div>
     }
 }
