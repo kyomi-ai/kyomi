@@ -503,34 +503,6 @@ pub async fn execute_agent_chat(
         }
     }
 
-    // 16. Record conversation in PostgreSQL (fire-and-forget).
-    //     Creates rows in `conversation_discussed` for injected entities.
-    {
-        let session_id_clone = config.session_id.clone();
-        let user_id_clone = config.user_id.clone();
-        let workspace_id_clone = config.workspace_id.clone();
-        let kv_clone = kv.clone();
-        let db_clone = db.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = record_conversation_background(
-                &db_clone,
-                &kv_clone,
-                &session_id_clone,
-                &user_id_clone,
-                &workspace_id_clone,
-            )
-            .await
-            {
-                warn!(
-                    session_id = %session_id_clone,
-                    error = %e,
-                    "Failed to record conversation (non-fatal)"
-                );
-            }
-        });
-    }
-
     info!(
         session_id = %config.session_id,
         assistant_message_id = %assistant_message_id,
@@ -787,34 +759,6 @@ async fn generate_title_inner(
         title = %title,
         "Generated session title"
     );
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Episodic layer -- post-conversation recording
-// ---------------------------------------------------------------------------
-
-/// Load conversation context from Redis and record the conversation in PostgreSQL.
-///
-/// Called as a fire-and-forget background task after `execute_agent_chat` completes.
-async fn record_conversation_background(
-    db: &DbPool,
-    kv: &KVPool,
-    session_id: &str,
-    user_id: &str,
-    workspace_id: &str,
-) -> kyomi_core::Result<()> {
-    // Load the conversation context that was accumulated during the chat.
-    let context = kyomi_knowledge::context::load_context(kv, session_id).await?;
-
-    if context.is_empty() {
-        return Ok(());
-    }
-
-    // Record the conversation in PostgreSQL (conversation_discussed table).
-    kyomi_knowledge::episodic::record_conversation(db, session_id, user_id, workspace_id, &context)
-        .await?;
 
     Ok(())
 }

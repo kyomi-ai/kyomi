@@ -2,7 +2,7 @@
 
 //! Knowledge search tool — unified search across the workspace knowledge base.
 //!
-//! Uses pgvector-based semantic search to find tables, learnings, and metrics
+//! Uses pgvector-based semantic search to find tables and metrics
 //! in a single call.
 
 use std::collections::{HashMap, HashSet};
@@ -34,7 +34,7 @@ struct TableFullNameRow {
 
 /// Unified search across the workspace knowledge base.
 ///
-/// Searches tables, learnings, and metrics using pgvector-based semantic
+/// Searches tables and metrics using pgvector-based semantic
 /// search in PostgreSQL.
 pub struct SearchKnowledgeTool;
 
@@ -46,7 +46,7 @@ impl AgentTool for SearchKnowledgeTool {
 
     fn description(&self) -> &str {
         "Search the workspace's knowledge base for relevant tables, dashboards, \
-         knowledge documents, learnings, and metrics using semantic search. \
+         knowledge documents, and metrics using semantic search. \
          Use this to discover what is available before querying. Pass `doc_type` \
          to restrict results to only dashboards or only knowledge documents \
          (omit for everything including tables and metrics)."
@@ -67,7 +67,7 @@ impl AgentTool for SearchKnowledgeTool {
                 "doc_type": {
                     "type": "string",
                     "enum": ["dashboard", "knowledge"],
-                    "description": "Optional document type filter. When set, only returns matching dashboards or knowledge documents (tables, metrics, and legacy learnings are excluded). Omit to search everything."
+                    "description": "Optional document type filter. When set, only returns matching dashboards or knowledge documents (tables and metrics are excluded). Omit to search everything."
                 },
                 "limit": {
                     "type": "integer",
@@ -171,22 +171,27 @@ impl AgentTool for SearchKnowledgeTool {
             &ctx.db, &ctx.workspace_id, &query_embedding, limit, doc_type_filter,
         ).await;
 
-        // When doc_type filter is specified, exclude legacy table/metric/learning
-        // entries — the caller is asking specifically for documents of that type.
+        // When doc_type filter is specified, exclude legacy table/metric entries —
+        // the caller is asking specifically for documents of that type.
+        // Learning entries are always excluded from tool results.
         let legacy_entries: Vec<_> = if doc_type_filter.is_some() {
             Vec::new()
         } else {
-            result.entries
+            result
+                .entries
+                .into_iter()
+                .filter(|e| e.kind != kyomi_knowledge::ContextEntryKind::Learning)
+                .collect()
         };
 
         // Format entries as structured JSON
         let mut results: Vec<serde_json::Value> = legacy_entries
             .into_iter()
-            .map(|entry| {
+            .filter_map(|entry| {
                 let entry_type = match entry.kind {
                     kyomi_knowledge::ContextEntryKind::Table => "table",
-                    kyomi_knowledge::ContextEntryKind::Learning => "learning",
                     kyomi_knowledge::ContextEntryKind::Metric => "metric",
+                    kyomi_knowledge::ContextEntryKind::Learning => return None,
                 };
 
                 let mut obj = serde_json::json!({
@@ -211,7 +216,7 @@ impl AgentTool for SearchKnowledgeTool {
                     obj["matched_columns"] = serde_json::json!(cols);
                 }
 
-                obj
+                Some(obj)
             })
             .collect();
 
@@ -289,7 +294,9 @@ impl AgentTool for SearchKnowledgeTool {
                     let id = entry["id"].as_str().unwrap_or("");
                     ds_tables.contains(id)
                 } else {
-                    true // keep learnings and metrics regardless
+                    // Keep metrics regardless of datasource; Learning entries
+                    // are already excluded before this point.
+                    entry_type == "metric"
                 }
             });
         }

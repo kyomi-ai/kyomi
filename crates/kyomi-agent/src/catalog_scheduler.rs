@@ -801,8 +801,7 @@ impl CatalogRefreshScheduler {
     ///
     /// After an initial delay (6 hours), runs every 24 hours until cancelled.
     /// Each iteration acquires a Redis lock, then for each workspace:
-    /// - Runs contradiction detection (metrics with multiple conflicting definitions)
-    /// - Runs staleness detection (learnings older than 90 days)
+    /// - Backfills learning references (ensures pre-migration learnings have reference rows)
     ///
     /// Failures are logged as warnings — they never block the scheduler.
     async fn knowledge_maintenance_loop(self: &Arc<Self>) {
@@ -842,7 +841,7 @@ impl CatalogRefreshScheduler {
         info!("Knowledge maintenance scheduler exited");
     }
 
-    /// Run contradiction + staleness detection across all workspaces.
+    /// Backfill learning references across all workspaces.
     async fn run_knowledge_maintenance(&self) {
         #[derive(sqlx::FromRow)]
         struct WsRow { workspace_id: String }
@@ -858,34 +857,8 @@ impl CatalogRefreshScheduler {
             }
         };
 
-        let mut contradiction_total = 0usize;
-        let mut stale_total = 0usize;
-
         for ws_row in &workspaces {
             let workspace_id = &ws_row.workspace_id;
-
-            // Contradiction detection
-            match kyomi_knowledge::episodic::detect_contradictions(&self.db, workspace_id).await {
-                Ok(contradictions) if !contradictions.is_empty() => {
-                    for c in &contradictions {
-                        warn!(
-                            workspace_id,
-                            metric = %c.metric_name,
-                            definitions = c.conflicts.len(),
-                            "Metric has conflicting definitions"
-                        );
-                    }
-                    contradiction_total += contradictions.len();
-                }
-                Err(e) => {
-                    warn!(
-                        workspace_id,
-                        error = %e,
-                        "Contradiction detection failed"
-                    );
-                }
-                _ => {}
-            }
 
             // Backfill learning references (ensures pre-migration learnings get reference rows)
             if let Err(e) = kyomi_knowledge::references::backfill_all_references(&self.db, workspace_id).await {
@@ -895,33 +868,9 @@ impl CatalogRefreshScheduler {
                     "Learning references backfill failed"
                 );
             }
-
-            // Staleness detection
-            match kyomi_knowledge::episodic::detect_stale_learnings(&self.db, workspace_id, 90).await {
-                Ok(stale) if !stale.is_empty() => {
-                    info!(
-                        workspace_id,
-                        count = stale.len(),
-                        "Found stale learnings (>90 days old)"
-                    );
-                    stale_total += stale.len();
-                }
-                Err(e) => {
-                    warn!(
-                        workspace_id,
-                        error = %e,
-                        "Staleness detection failed"
-                    );
-                }
-                _ => {}
-            }
         }
 
-        info!(
-            contradictions = contradiction_total,
-            stale_learnings = stale_total,
-            "Knowledge maintenance completed"
-        );
+        info!("Knowledge maintenance completed");
     }
 
     // -----------------------------------------------------------------------

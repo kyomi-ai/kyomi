@@ -16,10 +16,8 @@
 //! - [`retrieval`] -- Vector search pipeline
 //! - [`expansion`] -- Graph-style expansion via SQL JOINs
 //! - [`context`] -- Per-session conversation context (Redis-backed)
-//! - [`episodic`] -- Post-conversation recording and contradiction detection
 
 pub mod context;
-pub mod episodic;
 pub mod expansion;
 pub mod knowledge_files;
 pub mod models;
