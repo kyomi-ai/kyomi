@@ -25,32 +25,7 @@ use super::{extract_auth, extract_context, workspace_id};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-/// A datasource with its credential status, returned by the list server function.
-///
-/// Combines data from the datasource config and the credential status endpoint
-/// into a single struct so the UI can render everything in one pass.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DatasourceInfo {
-    pub id: String,
-    pub name: String,
-    pub slug: String,
-    pub datasource_type: String,
-    pub type_display_name: String,
-    pub active: bool,
-    pub connection_type: String,
-    /// User's credential status: "valid", "shared", "missing", "expired"
-    pub credential_status: String,
-    /// Auth method: "oauth", "password", "connect"
-    pub auth_method: String,
-    /// Whether the user has this datasource enabled
-    pub user_enabled: bool,
-    /// Whether the user can enable this datasource
-    pub can_enable: bool,
-    /// Whether this is a sample datasource
-    pub is_sample: bool,
-    /// Whether the catalog needs attention (no tables, no index, or stale)
-    pub needs_catalog_attention: bool,
-}
+pub use kyomi_types::DatasourceInfo;
 
 /// A datasource type from the registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,24 +60,7 @@ pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
     .await
     .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(items
-        .into_iter()
-        .map(|d| DatasourceInfo {
-            id: d.id,
-            name: d.name,
-            slug: d.slug,
-            datasource_type: d.datasource_type,
-            type_display_name: d.type_display_name,
-            active: d.active,
-            connection_type: d.connection_type,
-            credential_status: d.credential_status,
-            auth_method: d.auth_method,
-            user_enabled: d.user_enabled,
-            can_enable: d.can_enable,
-            is_sample: d.is_sample,
-            needs_catalog_attention: d.needs_catalog_attention,
-        })
-        .collect())
+    Ok(items)
 }
 
 /// Get all registered datasource types.

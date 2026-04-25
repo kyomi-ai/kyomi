@@ -5782,6 +5782,7 @@ dependencies = [
  "kyomi-core",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-types",
  "lettre",
  "p256",
  "pgvector",
@@ -6069,6 +6070,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kyomi-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "kyomi-ui"
 version = "0.1.0"
 dependencies = [
@@ -6104,6 +6112,7 @@ dependencies = [
  "kyomi-embed",
  "kyomi-knowledge",
  "kyomi-slack",
+ "kyomi-types",
  "leptos",
  "leptos_axum",
  "leptos_meta",

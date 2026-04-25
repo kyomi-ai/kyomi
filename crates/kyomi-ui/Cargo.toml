@@ -57,6 +57,7 @@ leptos_axum = { version = "0.8", optional = true }
 # Serialization (shared types cross server/client boundary)
 serde = { workspace = true }
 serde_json = { workspace = true }
+kyomi-types = { workspace = true }
 
 # Icons — Phosphor icon set. Uses the Light weight for inactive nav items
 # and the Fill weight for active nav items (see NavItem in components/layout.rs).
