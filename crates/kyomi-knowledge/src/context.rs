@@ -126,14 +126,14 @@ pub async fn save_context(
     kv: &KVPool,
     session_id: &str,
     ctx: &ConversationContext,
-) -> anyhow::Result<()> {
+) -> kyomi_core::Result<()> {
     let key = format!("{REDIS_KEY_PREFIX}:{session_id}");
     let json = serde_json::to_string(ctx)
-        .map_err(|e| anyhow::anyhow!("failed to serialize ConversationContext: {e}"))?;
+        .map_err(|e| kyomi_core::Error::Internal(format!("failed to serialize ConversationContext: {e}")))?;
 
     kv.set(&key, &json, Some(CONTEXT_TTL_SECS))
         .await
-        .map_err(|e| anyhow::anyhow!("KVStore SET kg:ctx failed: {e}"))?;
+        .map_err(|e| kyomi_core::Error::Internal(format!("KVStore SET kg:ctx failed: {e}")))?;
 
     tracing::debug!(
         session_id,
@@ -155,17 +155,17 @@ pub async fn save_context(
 pub async fn load_context(
     kv: &KVPool,
     session_id: &str,
-) -> anyhow::Result<ConversationContext> {
+) -> kyomi_core::Result<ConversationContext> {
     let key = format!("{REDIS_KEY_PREFIX}:{session_id}");
 
     let json = kv.get(&key)
         .await
-        .map_err(|e| anyhow::anyhow!("KVStore GET kg:ctx failed: {e}"))?;
+        .map_err(|e| kyomi_core::Error::Internal(format!("KVStore GET kg:ctx failed: {e}")))?;
 
     match json {
         Some(data) => {
             let ctx: ConversationContext = serde_json::from_str(&data)
-                .map_err(|e| anyhow::anyhow!("failed to deserialize ConversationContext: {e}"))?;
+                .map_err(|e| kyomi_core::Error::Internal(format!("failed to deserialize ConversationContext: {e}")))?;
             tracing::debug!(
                 session_id,
                 tables = ctx.injected_tables.len(),
@@ -205,7 +205,7 @@ pub async fn retrieve_and_inject(
     workspace_id: &str,
     query: &str,
     budget: usize,
-) -> anyhow::Result<(String, ConversationContext)> {
+) -> kyomi_core::Result<(String, ConversationContext)> {
     // 1. Load fresh context from KV store (or default for new conversations)
     let mut context = load_context(kv, session_id).await?;
 

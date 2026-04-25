@@ -89,14 +89,14 @@ pub async fn retrieve(
     query: &str,
     already_injected: &HashSet<String>,
     token_budget: Option<usize>,
-) -> anyhow::Result<RetrievalResult> {
+) -> kyomi_core::Result<RetrievalResult> {
     let budget = token_budget.unwrap_or(PER_TURN_TOKEN_BUDGET);
 
     // 1. Embed the query with BGE prefix
     let embed_start = std::time::Instant::now();
     let query_vec = embed
         .embed_query(query)
-        .map_err(|e| anyhow::anyhow!("embedding failed: {e}"))?;
+        .map_err(|e| kyomi_core::Error::Internal(format!("embedding failed: {e}")))?;
     tracing::debug!(elapsed_ms = embed_start.elapsed().as_millis(), "Query embedding");
 
     // 2. Search all vector indexes in parallel

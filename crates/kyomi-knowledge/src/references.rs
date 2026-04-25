@@ -45,7 +45,7 @@ pub async fn materialize_learning_references(
     learning_id: &str,
     workspace_id: &str,
     preloaded_table_names: Option<&[String]>,
-) -> anyhow::Result<()> {
+) -> kyomi_core::Result<()> {
     let row = kyomi_core::db_fetch_optional!(
         db,
         LearningRefRow,
@@ -241,7 +241,7 @@ pub async fn materialize_learning_references(
 pub async fn backfill_all_references(
     db: &DbPool,
     workspace_id: &str,
-) -> anyhow::Result<usize> {
+) -> kyomi_core::Result<usize> {
     #[derive(sqlx::FromRow)]
     struct LearningIdRow {
         learning_id: String,

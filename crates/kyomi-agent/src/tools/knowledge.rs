@@ -127,8 +127,7 @@ impl AgentTool for SearchKnowledgeTool {
             &HashSet::new(),
             Some(4096),
         )
-        .await
-        .map_err(|e| kyomi_core::Error::Internal(format!("Knowledge retrieval failed: {e}")))?;
+        .await?;
 
         // Also search the public dataset workspace if any BigQuery datasource has include_public_datasets enabled.
         let is_pg = ctx.db.is_postgres();

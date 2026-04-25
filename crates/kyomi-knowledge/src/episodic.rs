@@ -88,7 +88,7 @@ pub async fn record_conversation(
     user_id: &str,
     workspace_id: &str,
     context: &ConversationContext,
-) -> anyhow::Result<()> {
+) -> kyomi_core::Result<()> {
     // Nothing to record if no context was injected.
     if context.is_empty() {
         tracing::debug!(
@@ -181,7 +181,7 @@ pub async fn record_conversation(
 pub async fn detect_contradictions(
     db: &DbPool,
     workspace_id: &str,
-) -> anyhow::Result<Vec<Contradiction>> {
+) -> kyomi_core::Result<Vec<Contradiction>> {
     let is_pg = db.is_postgres();
     let json_extract = kyomi_core::sql_compat::json_extract_text(is_pg, "structured_metadata", "metric_name");
 
@@ -296,7 +296,7 @@ pub async fn detect_stale_learnings(
     db: &DbPool,
     workspace_id: &str,
     days: i64,
-) -> anyhow::Result<Vec<StaleLearning>> {
+) -> kyomi_core::Result<Vec<StaleLearning>> {
     let is_pg = db.is_postgres();
     let true_val = kyomi_core::sql_compat::bool_true(is_pg);
     let false_val = kyomi_core::sql_compat::bool_false(is_pg);

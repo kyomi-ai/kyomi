@@ -37,7 +37,7 @@ pub async fn populate_table_embeddings(
     embed: &EmbeddingService,
     workspace_id: &str,
     datasource_config_id: &str,
-) -> anyhow::Result<usize> {
+) -> kyomi_core::Result<usize> {
     let is_pg = db.is_postgres();
     let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
     let sql = format!(
@@ -88,7 +88,7 @@ pub async fn populate_table_embeddings(
         let desc_emb = if desc_texts[i].is_some() {
             Some(desc_embed_iter
                 .next()
-                .ok_or_else(|| anyhow::anyhow!("missing description embedding"))?)
+                .ok_or_else(|| kyomi_core::Error::Internal("missing description embedding".into()))?)
         } else {
             None
         };
@@ -147,7 +147,7 @@ pub async fn populate_column_embeddings(
     embed: &EmbeddingService,
     workspace_id: &str,
     datasource_config_id: &str,
-) -> anyhow::Result<usize> {
+) -> kyomi_core::Result<usize> {
     let is_pg = db.is_postgres();
     let bool_false = kyomi_core::sql_compat::bool_false(is_pg);
     let table_sql = format!(
@@ -244,7 +244,7 @@ pub async fn populate_column_embeddings(
         let desc_emb = if col.description.is_some() {
             Some(desc_embed_iter
                 .next()
-                .ok_or_else(|| anyhow::anyhow!("missing column description embedding"))?)
+                .ok_or_else(|| kyomi_core::Error::Internal("missing column description embedding".into()))?)
         } else {
             None
         };
@@ -326,7 +326,7 @@ pub async fn populate_learning_embedding(
     db: &DbPool,
     embed: &EmbeddingService,
     learning_id: &str,
-) -> anyhow::Result<()> {
+) -> kyomi_core::Result<()> {
     let row = kyomi_core::db_fetch_optional!(
         db,
         LearningInsightRow,
@@ -376,7 +376,7 @@ pub async fn populate_workspace(
     db: &DbPool,
     embed: &EmbeddingService,
     workspace_id: &str,
-) -> anyhow::Result<()> {
+) -> kyomi_core::Result<()> {
     // Get all distinct datasource_config_ids for the workspace
     #[derive(sqlx::FromRow)]
     struct DsId {

@@ -81,28 +81,28 @@ pub trait VectorSearch: Send + Sync {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<TableSearchResult>>;
+    ) -> kyomi_core::Result<Vec<TableSearchResult>>;
 
     async fn search_columns(
         &self,
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<ColumnSearchResult>>;
+    ) -> kyomi_core::Result<Vec<ColumnSearchResult>>;
 
     async fn search_learnings(
         &self,
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<LearningSearchResult>>;
+    ) -> kyomi_core::Result<Vec<LearningSearchResult>>;
 
     async fn search_metrics(
         &self,
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<MetricSearchResult>>;
+    ) -> kyomi_core::Result<Vec<MetricSearchResult>>;
 
     async fn search_query_history(
         &self,
@@ -110,14 +110,14 @@ pub trait VectorSearch: Send + Sync {
         user_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<QueryHistorySearchResult>>;
+    ) -> kyomi_core::Result<Vec<QueryHistorySearchResult>>;
 
     async fn search_dashboards(
         &self,
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<DashboardSearchResult>>;
+    ) -> kyomi_core::Result<Vec<DashboardSearchResult>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ impl VectorSearch for PgVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<TableSearchResult>> {
+    ) -> kyomi_core::Result<Vec<TableSearchResult>> {
         let query_vector = pgvector::Vector::from(query_embedding.to_vec());
 
         // Search both name_embedding and desc_embedding, union results
@@ -239,7 +239,7 @@ impl VectorSearch for PgVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<ColumnSearchResult>> {
+    ) -> kyomi_core::Result<Vec<ColumnSearchResult>> {
         let query_vector = pgvector::Vector::from(query_embedding.to_vec());
 
         // Search both name_embedding and desc_embedding
@@ -304,7 +304,7 @@ impl VectorSearch for PgVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<LearningSearchResult>> {
+    ) -> kyomi_core::Result<Vec<LearningSearchResult>> {
         let query_vector = pgvector::Vector::from(query_embedding.to_vec());
 
         let rows = sqlx::query_as::<_, PgLearningSearchRow>(
@@ -345,7 +345,7 @@ impl VectorSearch for PgVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<MetricSearchResult>> {
+    ) -> kyomi_core::Result<Vec<MetricSearchResult>> {
         let query_vector = pgvector::Vector::from(query_embedding.to_vec());
 
         let rows = sqlx::query_as::<_, PgLearningSearchRow>(
@@ -387,7 +387,7 @@ impl VectorSearch for PgVectorSearch {
         _user_id: &str,
         _query_embedding: &[f32],
         _limit: usize,
-    ) -> anyhow::Result<Vec<QueryHistorySearchResult>> {
+    ) -> kyomi_core::Result<Vec<QueryHistorySearchResult>> {
         // Query history search not yet implemented for pgvector
         Ok(vec![])
     }
@@ -397,7 +397,7 @@ impl VectorSearch for PgVectorSearch {
         _workspace_id: &str,
         _query_embedding: &[f32],
         _limit: usize,
-    ) -> anyhow::Result<Vec<DashboardSearchResult>> {
+    ) -> kyomi_core::Result<Vec<DashboardSearchResult>> {
         // Dashboard search not yet implemented for pgvector
         Ok(vec![])
     }
@@ -493,7 +493,7 @@ impl VectorSearch for InMemoryVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<TableSearchResult>> {
+    ) -> kyomi_core::Result<Vec<TableSearchResult>> {
         let bool_false = kyomi_core::sql_compat::bool_false(false);
         let sql = format!(
             "SELECT tc.project_id, tc.dataset_id, tc.table_id, \
@@ -558,7 +558,7 @@ impl VectorSearch for InMemoryVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<ColumnSearchResult>> {
+    ) -> kyomi_core::Result<Vec<ColumnSearchResult>> {
         let bool_false = kyomi_core::sql_compat::bool_false(false);
         let col_sql = format!(
             "SELECT ce.column_name, ce.data_type, \
@@ -619,7 +619,7 @@ impl VectorSearch for InMemoryVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<LearningSearchResult>> {
+    ) -> kyomi_core::Result<Vec<LearningSearchResult>> {
         let bool_true = kyomi_core::sql_compat::bool_true(false);
         let sql = format!(
             "SELECT learning_id, insight, NULL AS title, created_at, embedding \
@@ -647,7 +647,7 @@ impl VectorSearch for InMemoryVectorSearch {
         workspace_id: &str,
         query_embedding: &[f32],
         limit: usize,
-    ) -> anyhow::Result<Vec<MetricSearchResult>> {
+    ) -> kyomi_core::Result<Vec<MetricSearchResult>> {
         let bool_true = kyomi_core::sql_compat::bool_true(false);
         let sql = format!(
             "SELECT learning_id, insight, NULL AS title, created_at, embedding \
@@ -676,7 +676,7 @@ impl VectorSearch for InMemoryVectorSearch {
         _user_id: &str,
         _query_embedding: &[f32],
         _limit: usize,
-    ) -> anyhow::Result<Vec<QueryHistorySearchResult>> {
+    ) -> kyomi_core::Result<Vec<QueryHistorySearchResult>> {
         // Query history search not yet implemented for SQLite
         Ok(vec![])
     }
@@ -686,7 +686,7 @@ impl VectorSearch for InMemoryVectorSearch {
         _workspace_id: &str,
         _query_embedding: &[f32],
         _limit: usize,
-    ) -> anyhow::Result<Vec<DashboardSearchResult>> {
+    ) -> kyomi_core::Result<Vec<DashboardSearchResult>> {
         // Dashboard search not yet implemented for SQLite
         Ok(vec![])
     }
@@ -697,7 +697,7 @@ fn search_learning_rows_in_memory(
     rows: Vec<SqliteLearningRow>,
     query_embedding: &[f32],
     limit: usize,
-) -> anyhow::Result<Vec<LearningSearchResult>> {
+) -> kyomi_core::Result<Vec<LearningSearchResult>> {
     let mut scored: Vec<ScoredIndex> = Vec::with_capacity(rows.len());
     for (i, row) in rows.iter().enumerate() {
         if let Some(ref emb_bytes) = row.embedding {

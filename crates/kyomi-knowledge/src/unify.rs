@@ -52,7 +52,7 @@ fn resolve_path(folder_id: &str, folder_map: &HashMap<String, (&str, Option<&str
 ///    skipping any that already exist (ON CONFLICT / INSERT OR IGNORE).
 /// 4. Links files that had a `parent_id` to their folder's collection.
 /// 5. Drops the `knowledge_files` table.
-pub async fn migrate_folders_to_collections(db: &DbPool) -> anyhow::Result<()> {
+pub async fn migrate_folders_to_collections(db: &DbPool) -> kyomi_core::Result<()> {
     // Idempotent guard: check if knowledge_files table still exists.
     let table_exists = check_knowledge_files_exists(db).await?;
     if !table_exists {
@@ -230,7 +230,7 @@ pub async fn migrate_folders_to_collections(db: &DbPool) -> anyhow::Result<()> {
 }
 
 /// Check whether the `knowledge_files` table exists in the database.
-async fn check_knowledge_files_exists(db: &DbPool) -> anyhow::Result<bool> {
+async fn check_knowledge_files_exists(db: &DbPool) -> kyomi_core::Result<bool> {
     let sql = match db {
         DbPool::Postgres(_) => {
             "SELECT COUNT(*) FROM information_schema.tables \
@@ -246,7 +246,7 @@ async fn check_knowledge_files_exists(db: &DbPool) -> anyhow::Result<bool> {
 }
 
 /// Drop the `knowledge_files` table and its indexes.
-async fn drop_knowledge_files(db: &DbPool) -> anyhow::Result<()> {
+async fn drop_knowledge_files(db: &DbPool) -> kyomi_core::Result<()> {
     kyomi_core::db_execute!(db, "DROP TABLE IF EXISTS knowledge_files")?;
     tracing::info!("Dropped knowledge_files table");
     Ok(())

@@ -804,7 +804,7 @@ async fn record_conversation_background(
     session_id: &str,
     user_id: &str,
     workspace_id: &str,
-) -> anyhow::Result<()> {
+) -> kyomi_core::Result<()> {
     // Load the conversation context that was accumulated during the chat.
     let context = kyomi_knowledge::context::load_context(kv, session_id).await?;
 
