@@ -66,14 +66,14 @@ Kyomi is available in two editions. Both are deployed the same way (Docker Compo
 | Web Push Notifications | Yes | Yes |
 | Knowledge System | Yes | Yes |
 | Email Alerts | With SMTP | With SMTP |
-| Server-side Chart Rendering | -- | Yes |
+| Server-side Chart Rendering | Yes | Yes |
 | Slack Integration | -- | Yes |
 | Multi-replica Support | -- | Yes (Redis) |
 | Commercial License | -- | Yes |
 
 **Community Edition** is licensed under AGPL-3.0. It runs Kyomi and PostgreSQL -- two containers, no other dependencies.
 
-**Enterprise Edition** adds Redis (for multi-replica state and real-time features), a chart renderer (for server-side chart image generation in Slack and email), and Slack integration. Contact [sales@kyomi.ai](mailto:sales@kyomi.ai) for licensing.
+**Enterprise Edition** adds Redis (for multi-replica state and real-time features) and Slack integration. Contact [sales@kyomi.ai](mailto:sales@kyomi.ai) for licensing.
 
 ## Supported LLM Providers
 

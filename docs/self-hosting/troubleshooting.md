@@ -139,31 +139,6 @@ If `WEBAUTHN_RP_ID` is not set, Kyomi infers it from `FRONTEND_URL`. Ensure `FRO
 
 ---
 
-### Charts not rendering (Enterprise)
-
-**Symptom:** Charts appear in the browser but server-side PNG rendering (for Slack, PDF export, or email) does not work.
-
-**Diagnosis:**
-
-1. Verify the chart renderer is running:
-   ```bash
-   docker compose ps chart-renderer
-   ```
-
-2. Verify `CHART_RENDERER_URL` is set in `.env` and points to the chart renderer service:
-   ```env
-   CHART_RENDERER_URL=http://chart-renderer:3030
-   ```
-
-3. Test the renderer directly:
-   ```bash
-   docker compose exec kyomi sh -c "curl -s http://chart-renderer:3030/health"
-   ```
-
-**Note:** Chart rendering is an Enterprise feature. Community edition renders all charts client-side in the browser and does not need the chart renderer service.
-
----
-
 ### Permission denied on .env
 
 **Symptom:** Kyomi cannot read the `.env` file, or you see permission errors in logs.

@@ -104,14 +104,6 @@ Redis is used for multi-replica state synchronization, WebSocket pub/sub, and ca
 |---|---|---|
 | `REDIS_URL` | -- | Redis connection URL. The Enterprise compose file sets this to `redis://redis:6379/0` automatically. Format: `redis://[user:password@]host:port/db` |
 
-## Chart Renderer (Enterprise Only)
-
-The chart renderer generates server-side PNG images of charts for use in Slack messages and email alerts.
-
-| Variable | Default | Description |
-|---|---|---|
-| `CHART_RENDERER_URL` | -- | Internal URL of the chart renderer service. The Enterprise compose file sets this to `http://chart-renderer:3030` automatically. |
-
 ## Stripe (Not Used in Self-Hosted)
 
 The `STRIPE_*` variables are used by Kyomi's SaaS offering and are not relevant for self-hosted deployments. You can safely ignore them.

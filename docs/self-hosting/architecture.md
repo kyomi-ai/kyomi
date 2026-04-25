@@ -58,14 +58,13 @@ docker-compose.yml:
 
 ## Enterprise Edition
 
-The Enterprise edition adds services for production deployments that need multi-replica scaling, server-side chart rendering, and Slack integration.
+The Enterprise edition adds services for production deployments that need multi-replica scaling and Slack integration.
 
 ```
 docker-compose.yml:
   - kyomi           (application: frontend + API, port 8080)
   - postgres        (database)
   - redis           (session store, pub/sub, multi-replica coordination)
-  - chart-renderer  (headless browser for server-side PNG rendering)
 ```
 
 **What Redis adds:**
@@ -74,10 +73,7 @@ docker-compose.yml:
 - **Pub/sub for WebSockets** -- broadcasts real-time events across all replicas so every connected browser receives updates
 - **Rate limiting** -- distributed rate limit counters that are consistent across replicas
 
-**What the chart renderer adds:**
-
-- **Server-side PNG rendering** -- converts ChartML charts to PNG images for Slack messages, PDF exports, and email alerts
-- **Headless Chromium** -- runs a headless browser that renders charts identically to how they appear in the browser
+Chart rendering is handled natively by the Kyomi binary via chartml-rs — no separate service is needed.
 
 ## Data Flow
 
@@ -136,6 +132,5 @@ If you use Ollama or another local LLM, nothing leaves your infrastructure at al
 | Kyomi (HTTP + WebSocket) | 8080 | `docker-compose.yml` port mapping |
 | PostgreSQL | 5432 | `docker-compose.yml` (internal to Docker network) |
 | Redis (Enterprise) | 6379 | `docker-compose.yml` (internal to Docker network) |
-| Chart Renderer (Enterprise) | 3030 | `CHART_RENDERER_URL` env var |
 
-Only the Kyomi port (8080) needs to be exposed. PostgreSQL, Redis, and the chart renderer communicate over the internal Docker network and should not be exposed to the internet.
+Only the Kyomi port (8080) needs to be exposed. PostgreSQL and Redis communicate over the internal Docker network and should not be exposed to the internet.

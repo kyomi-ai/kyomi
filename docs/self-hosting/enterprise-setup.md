@@ -3,7 +3,6 @@
 This guide covers deploying Kyomi Enterprise Edition. Enterprise builds on everything in [Community Edition](community-setup.md) and adds:
 
 - **Redis** -- multi-replica state synchronization, WebSocket pub/sub, and caching
-- **Chart Renderer** -- server-side PNG generation of charts for Slack messages and email alerts
 - **Slack Integration** -- users interact with Kyomi from Slack channels and receive Watch alerts as Slack messages
 - **Multi-replica Support** -- run multiple Kyomi instances behind a load balancer
 - **Commercial License** -- for organizations that cannot comply with AGPL-3.0
@@ -12,7 +11,7 @@ Contact [sales@kyomi.ai](mailto:sales@kyomi.ai) for Enterprise licensing.
 
 ## Compose File Overview
 
-The Enterprise compose file (`docker-compose.enterprise.yml`) defines four services:
+The Enterprise compose file (`docker-compose.enterprise.yml`) defines three services:
 
 ```
 postgres (pgvector/pgvector:pg16)
@@ -24,18 +23,13 @@ redis (redis:7-alpine)
   |- volume: redis_data
   |- maxmemory: 256mb, allkeys-lru
 
-chart-renderer (ghcr.io/kyomi-ai/chart-renderer:latest)
-  |- healthcheck: HTTP /health on port 3030
-  |- no ports exposed to host
-
 kyomi (ghcr.io/kyomi-ai/kyomi:latest)
-  |- depends_on: postgres (healthy), redis (healthy), chart-renderer (healthy)
+  |- depends_on: postgres (healthy), redis (healthy)
   |- port: ${KYOMI_PORT:-8080} -> 8003
   |- env_file: .env
   |- volume: kyomi_data
   |- KYOMI_EDITION: enterprise
   |- REDIS_URL: redis://redis:6379/0
-  |- CHART_RENDERER_URL: http://chart-renderer:3030
 ```
 
 ## Step-by-Step Setup
@@ -62,13 +56,13 @@ The Enterprise `.env` has the same required variables as Community, plus optiona
 docker compose up -d
 ```
 
-Verify all four services are running:
+Verify all three services are running:
 
 ```bash
 docker compose ps
 ```
 
-You should see `postgres`, `redis`, `chart-renderer`, and `kyomi` all in a healthy/running state.
+You should see `postgres`, `redis`, and `kyomi` all in a healthy/running state.
 
 ## Redis Configuration
 
@@ -120,31 +114,6 @@ If you have an existing Redis instance, remove the `redis` service from the comp
 ```bash
 REDIS_URL=redis://:password@your-redis-host:6379/0
 ```
-
-## Chart Renderer
-
-The chart renderer is a Node.js service that generates PNG images of charts. These images are used in:
-
-- **Slack messages** -- when a Watch alert includes a chart, the image is uploaded to Slack
-- **Email alerts** -- chart images are embedded in notification emails
-
-The renderer runs on port 3030 inside the Docker network and is not exposed to the host by default.
-
-### Health check
-
-The renderer exposes `GET /health` on port 3030. The compose file checks this every 30 seconds.
-
-### Debugging
-
-To expose the renderer for debugging:
-
-```yaml
-chart-renderer:
-  ports:
-    - "3030:3030"
-```
-
-Then visit `http://localhost:3030/health` to verify it is running.
 
 ## Slack Integration
 
@@ -313,7 +282,7 @@ Upgrading from Community to Enterprise preserves all your data. No migration is 
    curl -fsSL https://raw.githubusercontent.com/kyomi-ai/kyomi/main/deploy/docker-compose.enterprise.yml -o docker-compose.yml
    ```
 
-2. Your existing `.env` continues to work. The Enterprise-specific variables (`REDIS_URL`, `CHART_RENDERER_URL`) are set in the compose file itself.
+2. Your existing `.env` continues to work. The Enterprise-specific variable (`REDIS_URL`) is set in the compose file itself.
 
 3. If you want Slack integration, add the Slack variables to your `.env` (see [Slack Integration](#slack-integration) above).
 
@@ -322,4 +291,4 @@ Upgrading from Community to Enterprise preserves all your data. No migration is 
    docker compose up -d
    ```
 
-The new Redis and chart-renderer services will start alongside your existing PostgreSQL and Kyomi containers. Your database volume is preserved.
+The new Redis service will start alongside your existing PostgreSQL and Kyomi containers. Your database volume is preserved.
