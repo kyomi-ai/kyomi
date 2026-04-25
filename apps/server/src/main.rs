@@ -1,14 +1,58 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! Kyomi Rust backend — entry point.
+//!
+//! Subcommands:
+//!   (none) / serve  — start the HTTP server (default)
+//!   health          — probe localhost:$PORT/api/health, exit 0 if healthy
 
 use kyomi_core::Config;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let arg = std::env::args().nth(1);
+
+    if arg.as_deref() == Some("health") {
+        std::process::exit(health_probe());
+    }
+
+    // Default: start the server
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(serve());
+}
+
+/// Minimal health probe — hits the local health endpoint and exits.
+/// Used by Docker HEALTHCHECK in scratch images where curl isn't available.
+fn health_probe() -> i32 {
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let url = format!("http://localhost:{port}/api/health");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+
+    rt.block_on(async {
+        match reqwest::get(&url).await {
+            Ok(resp) if resp.status().is_success() => 0,
+            Ok(resp) => {
+                eprintln!("health check failed: HTTP {}", resp.status());
+                1
+            }
+            Err(e) => {
+                eprintln!("health check failed: {e}");
+                1
+            }
+        }
+    })
+}
+
+async fn serve() {
     // Structured logging — respects RUST_LOG env var
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))

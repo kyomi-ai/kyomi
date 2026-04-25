@@ -68,7 +68,7 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
-      # Same local-dev [patch.crates-io] strip as ci.yml / apps/server/Dockerfile.
+      # Same local-dev [patch.crates-io] strip as ci.yml / Dockerfile.
       - name: Strip local-dev patch.crates-io block
         run: |
           sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
@@ -78,9 +78,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
 
       # Trunk resolves wasm-opt from $HOME/.cache/trunk/... — on the runner
-      # that's /home/runner/.cache, which differs from apps/server/Dockerfile
-      # (which runs as root and uses /root/.cache). Both are correct for
-      # their respective contexts.
+      # that's /home/runner/.cache.
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
         run: |
           set -euo pipefail
@@ -120,7 +118,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.standalone
+          file: Dockerfile
           platforms: linux/amd64
           push: true
           tags: |
