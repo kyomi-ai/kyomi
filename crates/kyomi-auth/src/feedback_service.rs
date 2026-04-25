@@ -59,6 +59,10 @@ pub struct FeedbackResult {
 // Entry point
 // ---------------------------------------------------------------------------
 
+fn is_test_account(email: &str) -> bool {
+    matches!(email, "e2e-test@kyomi.dev" | "e2e-admin@kyomi.dev")
+}
+
 /// Submit feedback end-to-end: validate, rate-limit, persist, and fire the
 /// Linear + Slack + email notifications in a background task.
 ///
@@ -184,88 +188,96 @@ pub async fn submit_feedback(
         "Feedback submitted"
     );
 
-    // Spawn background notifications (fire-and-forget)
-    let notify_config = config.clone();
-    let fb_id = feedback_id.clone();
-    let fb_type = input.feedback_type.clone();
-    let fb_description = description.clone();
-    let fb_email = user.email.clone();
-    let fb_workspace_name = user.workspace.workspace_name.clone();
-    let fb_context = context.clone();
-    tokio::spawn(async move {
-        // 1. Create Linear issue (primary feedback destination)
-        let linear_result = create_linear_issue_from_feedback(
-            &notify_config,
-            &fb_id,
-            &fb_type,
-            &fb_description,
-            &fb_email,
-            fb_workspace_name.as_deref(),
-            &fb_context,
-        )
-        .await;
+    if is_test_account(&user.email) {
+        tracing::debug!(
+            feedback_id = %feedback_id,
+            user = %user.email,
+            "Suppressing notifications for test account feedback"
+        );
+    } else {
+        // Spawn background notifications (fire-and-forget)
+        let notify_config = config.clone();
+        let fb_id = feedback_id.clone();
+        let fb_type = input.feedback_type.clone();
+        let fb_description = description.clone();
+        let fb_email = user.email.clone();
+        let fb_workspace_name = user.workspace.workspace_name.clone();
+        let fb_context = context.clone();
+        tokio::spawn(async move {
+            // 1. Create Linear issue (primary feedback destination)
+            let linear_result = create_linear_issue_from_feedback(
+                &notify_config,
+                &fb_id,
+                &fb_type,
+                &fb_description,
+                &fb_email,
+                fb_workspace_name.as_deref(),
+                &fb_context,
+            )
+            .await;
 
-        // 2. Slack notification — slim one-liner if Linear succeeded, full fallback otherwise
-        match &linear_result {
-            Some(result) => {
-                if let Err(e) = send_slim_slack_notification(
-                    &notify_config,
-                    &fb_type,
-                    &fb_email,
-                    &result.identifier,
-                    &result.url,
-                )
-                .await
-                {
-                    tracing::error!(
-                        feedback_id = %fb_id,
-                        error = %e,
-                        "Failed to send slim Slack notification"
-                    );
+            // 2. Slack notification — slim one-liner if Linear succeeded, full fallback otherwise
+            match &linear_result {
+                Some(result) => {
+                    if let Err(e) = send_slim_slack_notification(
+                        &notify_config,
+                        &fb_type,
+                        &fb_email,
+                        &result.identifier,
+                        &result.url,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            feedback_id = %fb_id,
+                            error = %e,
+                            "Failed to send slim Slack notification"
+                        );
+                    }
+                }
+                None => {
+                    if let Err(e) = send_feedback_slack_notification(
+                        &notify_config,
+                        &fb_id,
+                        &fb_type,
+                        &fb_description,
+                        &fb_email,
+                        fb_workspace_name.as_deref(),
+                        &fb_context,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            feedback_id = %fb_id,
+                            error = %e,
+                            "Failed to send Slack notification for feedback"
+                        );
+                    }
+
+                    // Upload screenshot to Slack if available (only in fallback mode)
+                    if let Some(screenshot_b64) = fb_context
+                        .as_object()
+                        .and_then(|obj| obj.get("screenshot_base64"))
+                        .and_then(|v| v.as_str())
+                    {
+                        upload_screenshot_to_slack(&notify_config, &fb_id, screenshot_b64).await;
+                    }
                 }
             }
-            None => {
-                if let Err(e) = send_feedback_slack_notification(
-                    &notify_config,
-                    &fb_id,
-                    &fb_type,
-                    &fb_description,
-                    &fb_email,
-                    fb_workspace_name.as_deref(),
-                    &fb_context,
-                )
-                .await
-                {
-                    tracing::error!(
-                        feedback_id = %fb_id,
-                        error = %e,
-                        "Failed to send Slack notification for feedback"
-                    );
-                }
 
-                // Upload screenshot to Slack if available (only in fallback mode)
-                if let Some(screenshot_b64) = fb_context
-                    .as_object()
-                    .and_then(|obj| obj.get("screenshot_base64"))
-                    .and_then(|v| v.as_str())
-                {
-                    upload_screenshot_to_slack(&notify_config, &fb_id, screenshot_b64).await;
-                }
-            }
-        }
-
-        // 3. Email notification to support (always)
-        send_feedback_email_notification(
-            &notify_config,
-            &fb_id,
-            &fb_type,
-            &fb_description,
-            &fb_email,
-            fb_workspace_name.as_deref(),
-            &fb_context,
-        )
-        .await;
-    });
+            // 3. Email notification to support (always)
+            send_feedback_email_notification(
+                &notify_config,
+                &fb_id,
+                &fb_type,
+                &fb_description,
+                &fb_email,
+                fb_workspace_name.as_deref(),
+                &fb_context,
+            )
+            .await;
+        });
+    }
 
     Ok(FeedbackResult {
         status: "received".into(),
