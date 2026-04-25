@@ -11,7 +11,7 @@
 # Prerequisites: the CI workflow (or manual build) must produce these
 # artifacts BEFORE running docker build:
 #   1. crates/kyomi-ui/dist/         — Leptos WASM frontend (trunk build --release)
-#   2. apps/mcp-chart-app/chart_app.html — MCP chart viewer (npm run build)
+#   2. apps/mcp-chart-app-wasm/chart_app.html — MCP chart viewer (bash build.sh)
 #
 # Self-hosted quickstart:
 #   docker run -v kyomi-data:/data -p 3000:3000 -e ANTHROPIC_API_KEY=sk-... kyomi
@@ -42,7 +42,7 @@ RUN sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
 # keeps this Dockerfile cross-arch friendly since the heavy trunk/wasm-bindgen
 # tooling runs on the native amd64 host, not inside QEMU-emulated containers.
 COPY data/ ./data/
-COPY apps/mcp-chart-app/chart_app.html ./apps/mcp-chart-app/chart_app.html
+COPY apps/mcp-chart-app-wasm/chart_app.html ./apps/mcp-chart-app-wasm/chart_app.html
 COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
 COPY crates/kyomi-ui/dist/ ./crates/kyomi-ui/dist/
 
