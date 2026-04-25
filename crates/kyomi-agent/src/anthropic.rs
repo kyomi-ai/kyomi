@@ -11,7 +11,6 @@
 //! and error handling.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -37,17 +36,6 @@ pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 /// Model used for lightweight audit tasks (e.g., learning validation).
 pub const AUDIT_MODEL: &str = "claude-haiku-4-5-20251001";
 
-/// Maximum retry attempts for transient API errors (matches Python's tenacity config).
-const MAX_RETRY_ATTEMPTS: usize = 5;
-
-/// Exponential backoff delays between retry attempts (matches Python: 4s, 8s, 16s, 32s, 60s).
-const RETRY_DELAYS: [Duration; 5] = [
-    Duration::from_secs(4),
-    Duration::from_secs(8),
-    Duration::from_secs(16),
-    Duration::from_secs(32),
-    Duration::from_secs(60),
-];
 
 // ---------------------------------------------------------------------------
 // Model Pricing
@@ -339,52 +327,15 @@ impl AnthropicClient {
         // Log request if LOG_LLM_CONTEXT is enabled
         maybe_log_llm("request", &body);
 
-        // Call with retry.
-        let response_json = self.call_with_retry(&body).await?;
+        // Call with retry using shared exponential backoff utility.
+        let response_json =
+            kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Log response if LOG_LLM_CONTEXT is enabled
         maybe_log_llm("response", &response_json);
 
         // Parse response.
         Self::parse_response(&self.base.model, &response_json)
-    }
-
-    /// Execute the HTTP POST to the Anthropic API with retry logic.
-    ///
-    /// Retries up to [`MAX_RETRY_ATTEMPTS`] times with exponential backoff
-    /// for transient errors (429 rate limit, 529 overloaded, 5xx server errors).
-    /// Non-retryable errors (401 auth, 400 bad request) fail immediately.
-    async fn call_with_retry(
-        &self,
-        body: &serde_json::Value,
-    ) -> kyomi_core::Result<serde_json::Value> {
-        let mut last_error = None;
-
-        for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {
-            match self.call_api(body).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    if !Self::is_retryable(&e) {
-                        return Err(e);
-                    }
-                    last_error = Some(e);
-                    if attempt < RETRY_DELAYS.len() - 1 {
-                        warn!(
-                            attempt = attempt + 1,
-                            max_attempts = MAX_RETRY_ATTEMPTS,
-                            delay_secs = delay.as_secs(),
-                            "Anthropic API transient error, retrying"
-                        );
-                        tokio::time::sleep(*delay).await;
-                    }
-                }
-            }
-        }
-
-        // All retries exhausted — return the last error.
-        Err(last_error.unwrap_or_else(|| {
-            kyomi_core::Error::Internal("Anthropic API: all retries exhausted".into())
-        }))
     }
 
     /// Send a single HTTP request to the Anthropic Messages API.
@@ -403,7 +354,11 @@ impl AnthropicClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| kyomi_core::Error::Internal(format!("Anthropic API request failed: {e}")))?;
+            .map_err(|e| {
+                kyomi_core::Error::ServiceUnavailable(format!(
+                    "Anthropic API request failed: {e}"
+                ))
+            })?;
 
         let status = response.status();
 
@@ -426,33 +381,20 @@ impl AnthropicClient {
             400 => Err(kyomi_core::Error::BadRequest(format!(
                 "Anthropic API bad request: {error_msg}"
             ))),
-            429 => Err(kyomi_core::Error::Internal(format!(
-                "Anthropic API rate limited: {error_msg}"
+            429 => Err(kyomi_core::Error::TooManyRequests(
+                format!("Anthropic API rate limited: {error_msg}"),
+                0,
+            )),
+            // 529 = Anthropic-specific "overloaded"; treat as service unavailable.
+            529 | 502 | 503 | 504 => Err(kyomi_core::Error::ServiceUnavailable(format!(
+                "Anthropic API unavailable ({status}): {error_msg}"
             ))),
-            529 => Err(kyomi_core::Error::Internal(format!(
-                "Anthropic API overloaded: {error_msg}"
-            ))),
-            _ if status.is_server_error() => Err(kyomi_core::Error::Internal(format!(
+            _ if status.is_server_error() => Err(kyomi_core::Error::ServiceUnavailable(format!(
                 "Anthropic API server error ({status}): {error_msg}"
             ))),
             _ => Err(kyomi_core::Error::Internal(format!(
                 "Anthropic API error ({status}): {error_msg}"
             ))),
-        }
-    }
-
-    /// Check whether an error is transient and should be retried.
-    fn is_retryable(error: &kyomi_core::Error) -> bool {
-        match error {
-            // Auth and bad request errors are permanent — do not retry.
-            kyomi_core::Error::Unauthorized(_) | kyomi_core::Error::BadRequest(_) => false,
-            // Internal errors from 429, 529, and 5xx are retryable.
-            kyomi_core::Error::Internal(msg) => {
-                msg.contains("rate limited")
-                    || msg.contains("overloaded")
-                    || msg.contains("server error")
-            }
-            _ => false,
         }
     }
 
@@ -1039,42 +981,48 @@ mod tests {
         assert_eq!(result.usage.output_tokens, 0);
     }
 
-    // -- Retry logic tests --------------------------------------------------
+    // -- Retry classification tests (via kyomi_core::Error::is_transient) ----
+    //
+    // call_api now produces semantically correct error variants, which
+    // kyomi_core::retry::retry_with_backoff classifies via is_transient().
 
     #[test]
-    fn is_retryable_rate_limit() {
-        let err = kyomi_core::Error::Internal("Anthropic API rate limited: too fast".into());
-        assert!(AnthropicClient::is_retryable(&err));
+    fn rate_limit_error_is_transient() {
+        // 429 → TooManyRequests, which is_transient() returns true.
+        let err = kyomi_core::Error::TooManyRequests("Anthropic API rate limited".into(), 0);
+        assert!(err.is_transient());
     }
 
     #[test]
-    fn is_retryable_overloaded() {
-        let err = kyomi_core::Error::Internal("Anthropic API overloaded: try again".into());
-        assert!(AnthropicClient::is_retryable(&err));
+    fn service_unavailable_is_transient() {
+        // 502/503/504/529 → ServiceUnavailable, which is_transient() returns true.
+        let err = kyomi_core::Error::ServiceUnavailable("Anthropic API unavailable (503)".into());
+        assert!(err.is_transient());
     }
 
     #[test]
-    fn is_retryable_server_error() {
-        let err = kyomi_core::Error::Internal("Anthropic API server error (500): oops".into());
-        assert!(AnthropicClient::is_retryable(&err));
-    }
-
-    #[test]
-    fn is_not_retryable_auth() {
+    fn auth_error_is_not_transient() {
         let err = kyomi_core::Error::Unauthorized("invalid key".into());
-        assert!(!AnthropicClient::is_retryable(&err));
+        assert!(!err.is_transient());
     }
 
     #[test]
-    fn is_not_retryable_bad_request() {
+    fn bad_request_is_not_transient() {
         let err = kyomi_core::Error::BadRequest("invalid params".into());
-        assert!(!AnthropicClient::is_retryable(&err));
+        assert!(!err.is_transient());
     }
 
     #[test]
-    fn is_not_retryable_not_found() {
+    fn not_found_is_not_transient() {
         let err = kyomi_core::Error::NotFound("missing".into());
-        assert!(!AnthropicClient::is_retryable(&err));
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn internal_error_is_not_transient() {
+        // Generic internal errors (parse failures etc.) are not retried.
+        let err = kyomi_core::Error::Internal("failed to parse response".into());
+        assert!(!err.is_transient());
     }
 
     // -- Error message extraction tests -------------------------------------
@@ -1521,18 +1469,4 @@ mod tests {
         assert_eq!(client.model(), DEFAULT_MODEL);
     }
 
-    // -- Contract: is_retryable for different error types -------------------
-
-    #[test]
-    fn is_not_retryable_generic_internal() {
-        // Internal errors that don't contain rate limit/overloaded/server error are not retryable.
-        let err = kyomi_core::Error::Internal("Something unexpected happened".into());
-        assert!(!AnthropicClient::is_retryable(&err));
-    }
-
-    #[test]
-    fn is_not_retryable_validation() {
-        let err = kyomi_core::Error::BadRequest("invalid parameter: max_tokens".into());
-        assert!(!AnthropicClient::is_retryable(&err));
-    }
 }

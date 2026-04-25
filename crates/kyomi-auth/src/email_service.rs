@@ -208,32 +208,41 @@ impl EmailService {
 
         let creds = Credentials::new(smtp_user.to_string(), smtp_password.to_string());
 
-        // Use SMTP_SSL for port 465, STARTTLS for port 587 (or other)
-        let send_result = if self.smtp_port == 465 {
-            let mailer = match AsyncSmtpTransport::<Tokio1Executor>::relay(smtp_host) {
-                Ok(builder) => builder
-                    .port(self.smtp_port)
-                    .credentials(creds)
-                    .build(),
-                Err(e) => {
-                    tracing::error!(to = %to_email, "Failed to create SMTP transport: {}", e);
-                    return false;
-                }
-            };
-            mailer.send(message).await
+        // Build the SMTP transport. Configuration errors (bad hostname, invalid
+        // credentials format) are not retryable — return immediately.
+        let mailer_result = if self.smtp_port == 465 {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(smtp_host).map(|b| {
+                b.port(self.smtp_port).credentials(creds).build()
+            })
         } else {
-            let mailer = match AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host) {
-                Ok(builder) => builder
-                    .port(self.smtp_port)
-                    .credentials(creds)
-                    .build(),
-                Err(e) => {
-                    tracing::error!(to = %to_email, "Failed to create SMTP transport: {}", e);
-                    return false;
-                }
-            };
-            mailer.send(message).await
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(smtp_host).map(|b| {
+                b.port(self.smtp_port).credentials(creds).build()
+            })
         };
+
+        let mailer = match mailer_result {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(to = %to_email, "Failed to create SMTP transport: {}", e);
+                return false;
+            }
+        };
+
+        // Retry transient SMTP errors (4xx SMTP codes — transient deferrals —
+        // network timeouts, connection drops). Permanent errors (5xx SMTP codes
+        // — hard rejections — and auth failures) are not retried: they will
+        // produce the same result on every attempt.
+        let send_result = kyomi_core::retry::retry_with_backoff_classified(
+            || {
+                let mailer = mailer.clone();
+                let message = message.clone();
+                async move { mailer.send(message).await }
+            },
+            |e: &lettre::transport::smtp::Error| {
+                e.is_transient() || e.is_timeout()
+            },
+        )
+        .await;
 
         match send_result {
             Ok(_) => {

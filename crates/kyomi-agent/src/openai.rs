@@ -10,7 +10,6 @@
 //! token usage tracking, and cost estimation.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -27,17 +26,6 @@ const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 /// Default model for chat completions.
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
-/// Maximum retry attempts for transient API errors.
-const MAX_RETRY_ATTEMPTS: usize = 5;
-
-/// Exponential backoff delays between retry attempts (matches Anthropic: 4s, 8s, 16s, 32s, 60s).
-const RETRY_DELAYS: [Duration; 5] = [
-    Duration::from_secs(4),
-    Duration::from_secs(8),
-    Duration::from_secs(16),
-    Duration::from_secs(32),
-    Duration::from_secs(60),
-];
 
 // ---------------------------------------------------------------------------
 // Model Pricing
@@ -328,49 +316,12 @@ impl OpenAIProvider {
         );
 
 
-        // Call with retry.
-        let response_json = self.call_with_retry(&body).await?;
+        // Call with retry using shared exponential backoff utility.
+        let response_json =
+            kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Parse response.
         Self::parse_response(&self.base.model, &response_json)
-    }
-
-    /// Execute the HTTP POST with retry logic.
-    ///
-    /// Retries up to [`MAX_RETRY_ATTEMPTS`] times with exponential backoff
-    /// for transient errors (429 rate limit, 5xx server errors).
-    /// Non-retryable errors (401 auth, 400 bad request) fail immediately.
-    async fn call_with_retry(
-        &self,
-        body: &serde_json::Value,
-    ) -> kyomi_core::Result<serde_json::Value> {
-        let mut last_error = None;
-
-        for (attempt, delay) in RETRY_DELAYS.iter().enumerate() {
-            match self.call_api(body).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    if !Self::is_retryable(&e) {
-                        return Err(e);
-                    }
-                    last_error = Some(e);
-                    if attempt < RETRY_DELAYS.len() - 1 {
-                        warn!(
-                            attempt = attempt + 1,
-                            max_attempts = MAX_RETRY_ATTEMPTS,
-                            delay_secs = delay.as_secs(),
-                            "OpenAI API transient error, retrying"
-                        );
-                        tokio::time::sleep(*delay).await;
-                    }
-                }
-            }
-        }
-
-        // All retries exhausted — return the last error.
-        Err(last_error.unwrap_or_else(|| {
-            kyomi_core::Error::Internal("OpenAI API: all retries exhausted".into())
-        }))
     }
 
     /// Send a single HTTP request to the OpenAI-compatible API.
@@ -390,7 +341,7 @@ impl OpenAIProvider {
             .send()
             .await
             .map_err(|e| {
-                kyomi_core::Error::Internal(format!("OpenAI API request failed: {e}"))
+                kyomi_core::Error::ServiceUnavailable(format!("OpenAI API request failed: {e}"))
             })?;
 
         let status = response.status();
@@ -417,28 +368,19 @@ impl OpenAIProvider {
             400 => Err(kyomi_core::Error::BadRequest(format!(
                 "OpenAI API bad request: {error_msg}"
             ))),
-            429 => Err(kyomi_core::Error::Internal(format!(
-                "OpenAI API rate limited: {error_msg}"
+            429 => Err(kyomi_core::Error::TooManyRequests(
+                format!("OpenAI API rate limited: {error_msg}"),
+                0,
+            )),
+            502..=504 => Err(kyomi_core::Error::ServiceUnavailable(format!(
+                "OpenAI API unavailable ({status}): {error_msg}"
             ))),
-            _ if status.is_server_error() => Err(kyomi_core::Error::Internal(format!(
+            _ if status.is_server_error() => Err(kyomi_core::Error::ServiceUnavailable(format!(
                 "OpenAI API server error ({status}): {error_msg}"
             ))),
             _ => Err(kyomi_core::Error::Internal(format!(
                 "OpenAI API error ({status}): {error_msg}"
             ))),
-        }
-    }
-
-    /// Check whether an error is transient and should be retried.
-    fn is_retryable(error: &kyomi_core::Error) -> bool {
-        match error {
-            // Auth and bad request errors are permanent — do not retry.
-            kyomi_core::Error::Unauthorized(_) | kyomi_core::Error::BadRequest(_) => false,
-            // Internal errors from 429 and 5xx are retryable.
-            kyomi_core::Error::Internal(msg) => {
-                msg.contains("rate limited") || msg.contains("server error")
-            }
-            _ => false,
         }
     }
 
@@ -1282,42 +1224,36 @@ mod tests {
         assert!(mini.output < full.output);
     }
 
-    // -- Retry logic tests --------------------------------------------------
+    // -- Retry classification tests (via kyomi_core::Error::is_transient) ----
 
     #[test]
-    fn is_retryable_rate_limit() {
-        let err = kyomi_core::Error::Internal("OpenAI API rate limited: too fast".into());
-        assert!(OpenAIProvider::is_retryable(&err));
+    fn rate_limit_error_is_transient() {
+        let err = kyomi_core::Error::TooManyRequests("OpenAI API rate limited".into(), 0);
+        assert!(err.is_transient());
     }
 
     #[test]
-    fn is_retryable_server_error() {
-        let err = kyomi_core::Error::Internal("OpenAI API server error (500): oops".into());
-        assert!(OpenAIProvider::is_retryable(&err));
+    fn service_unavailable_is_transient() {
+        let err = kyomi_core::Error::ServiceUnavailable("OpenAI API server error (503)".into());
+        assert!(err.is_transient());
     }
 
     #[test]
-    fn is_not_retryable_auth() {
+    fn auth_error_is_not_transient() {
         let err = kyomi_core::Error::Unauthorized("invalid key".into());
-        assert!(!OpenAIProvider::is_retryable(&err));
+        assert!(!err.is_transient());
     }
 
     #[test]
-    fn is_not_retryable_bad_request() {
+    fn bad_request_is_not_transient() {
         let err = kyomi_core::Error::BadRequest("invalid params".into());
-        assert!(!OpenAIProvider::is_retryable(&err));
+        assert!(!err.is_transient());
     }
 
     #[test]
-    fn is_not_retryable_not_found() {
-        let err = kyomi_core::Error::NotFound("missing".into());
-        assert!(!OpenAIProvider::is_retryable(&err));
-    }
-
-    #[test]
-    fn is_not_retryable_generic_internal() {
-        let err = kyomi_core::Error::Internal("Something unexpected happened".into());
-        assert!(!OpenAIProvider::is_retryable(&err));
+    fn internal_error_is_not_transient() {
+        let err = kyomi_core::Error::Internal("failed to parse response".into());
+        assert!(!err.is_transient());
     }
 
     // -- Error message extraction tests -------------------------------------

@@ -30,5 +30,8 @@ base64 = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-types = { workspace = true }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [lints]
 workspace = true

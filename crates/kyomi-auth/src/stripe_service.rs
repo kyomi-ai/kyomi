@@ -128,6 +128,32 @@ pub struct PaymentCheckoutParams {
     pub quantity: u64,
 }
 
+// ─── Retry classification ───────────────────────────────────────────────────
+
+/// Returns `true` if the Stripe error is transient and the operation may succeed
+/// on retry.
+///
+/// Retryable conditions:
+/// - `Timeout` — network timeout talking to Stripe.
+/// - `ClientError` — network-level error (connection reset, DNS failure, etc.).
+/// - `Stripe(_, status)` where status is 429 (rate limit), 502, 503, or 504
+///   (gateway/upstream errors).
+///
+/// Permanent errors that must not be retried:
+/// - `Stripe(_, 400..=404)` — bad request, auth failure, not found.
+/// - `JSONDeserialize` — response parsing error (not a transient condition).
+/// - `ConfigError` — client misconfiguration.
+fn is_stripe_transient(e: &StripeError) -> bool {
+    match e {
+        StripeError::Timeout => true,
+        StripeError::ClientError(_) => true,
+        StripeError::Stripe(_, status) => {
+            kyomi_core::retry::is_transient_http_status(*status)
+        }
+        StripeError::JSONDeserialize(_) | StripeError::ConfigError(_) => false,
+    }
+}
+
 // ─── Service ────────────────────────────────────────────────────────────────
 
 /// Wraps the `async-stripe` `Client` and provides typed methods for
@@ -167,16 +193,17 @@ impl StripeService {
         workspace_name: &str,
     ) -> Result<String, StripeError> {
         let description = format!("Kyomi Workspace: {workspace_name}");
+        let metadata: std::collections::HashMap<String, String> = [
+            ("workspace_id".to_string(), workspace_id.to_string()),
+            ("workspace_name".to_string(), workspace_name.to_string()),
+        ]
+        .into_iter()
+        .collect();
 
         let customer = CreateCustomer::new()
             .email(email)
             .description(&description)
-            .metadata([
-                ("workspace_id".to_string(), workspace_id.to_string()),
-                ("workspace_name".to_string(), workspace_name.to_string()),
-            ]
-            .into_iter()
-            .collect::<std::collections::HashMap<String, String>>())
+            .metadata(metadata)
             .send(&self.client)
             .await?;
 
@@ -389,10 +416,12 @@ impl StripeService {
         tier: &str,
         billing_cycle: &str,
     ) -> Result<SubscriptionData, StripeError> {
-        // Retrieve current subscription to get item ID
-        let subscription = RetrieveSubscription::new(subscription_id)
-            .send(&self.client)
-            .await?;
+        // Retrieve current subscription to get item ID.
+        let subscription = kyomi_core::retry::retry_with_backoff_classified(
+            || async { RetrieveSubscription::new(subscription_id).send(&self.client).await },
+            is_stripe_transient,
+        )
+        .await?;
 
         let items = &subscription.items.data;
         if items.is_empty() {
@@ -403,26 +432,36 @@ impl StripeService {
 
         let first_item_id = items[0].id.to_string();
 
-        // Build update parameters using the builder
-        let updated = UpdateSubscription::new(subscription_id)
-            .items(vec![stripe_billing::subscription::UpdateSubscriptionItems {
-                id: Some(first_item_id),
-                price: Some(new_price_id.to_string()),
-                ..Default::default()
-            }])
-            .metadata(
-                [
-                    ("tier".to_string(), tier.to_string()),
-                    ("billing_cycle".to_string(), billing_cycle.to_string()),
-                ]
-                .into_iter()
-                .collect::<std::collections::HashMap<String, String>>(),
-            )
-            .proration_behavior(
-                stripe_billing::subscription::UpdateSubscriptionProrationBehavior::CreateProrations,
-            )
-            .send(&self.client)
-            .await?;
+        let update_metadata: std::collections::HashMap<String, String> = [
+            ("tier".to_string(), tier.to_string()),
+            ("billing_cycle".to_string(), billing_cycle.to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // Build update parameters using the builder.
+        let updated = kyomi_core::retry::retry_with_backoff_classified(
+            || {
+                let first_item_id = first_item_id.clone();
+                let update_metadata = update_metadata.clone();
+                async move {
+                    UpdateSubscription::new(subscription_id)
+                        .items(vec![stripe_billing::subscription::UpdateSubscriptionItems {
+                            id: Some(first_item_id),
+                            price: Some(new_price_id.to_string()),
+                            ..Default::default()
+                        }])
+                        .metadata(update_metadata)
+                        .proration_behavior(
+                            stripe_billing::subscription::UpdateSubscriptionProrationBehavior::CreateProrations,
+                        )
+                        .send(&self.client)
+                        .await
+                }
+            },
+            is_stripe_transient,
+        )
+        .await?;
 
         tracing::info!(
             subscription_id,
@@ -443,12 +482,17 @@ impl StripeService {
         price_id: &str,
         quantity: u64,
     ) -> Result<String, StripeError> {
-        let new_item =
-            stripe_billing::subscription_item::CreateSubscriptionItem::new(subscription_id)
-                .price(price_id)
-                .quantity(quantity)
-                .send(&self.client)
-                .await?;
+        let new_item = kyomi_core::retry::retry_with_backoff_classified(
+            || async {
+                stripe_billing::subscription_item::CreateSubscriptionItem::new(subscription_id)
+                    .price(price_id)
+                    .quantity(quantity)
+                    .send(&self.client)
+                    .await
+            },
+            is_stripe_transient,
+        )
+        .await?;
 
         tracing::info!(
             subscription_id,
@@ -468,19 +512,27 @@ impl StripeService {
         new_quantity: i64,
     ) -> Result<(), StripeError> {
         if new_quantity == 0 {
-            // Remove the additional users line item
-            DeleteSubscriptionItem::new(item_id)
-                .send(&self.client)
-                .await?;
+            // Remove the additional users line item.
+            kyomi_core::retry::retry_with_backoff_classified(
+                || async { DeleteSubscriptionItem::new(item_id).send(&self.client).await },
+                is_stripe_transient,
+            )
+            .await?;
             tracing::info!(
                 subscription_id,
                 "Removed additional users from subscription"
             );
         } else {
-            UpdateSubscriptionItem::new(item_id)
-                .quantity(new_quantity as u64)
-                .send(&self.client)
-                .await?;
+            kyomi_core::retry::retry_with_backoff_classified(
+                || async {
+                    UpdateSubscriptionItem::new(item_id)
+                        .quantity(new_quantity as u64)
+                        .send(&self.client)
+                        .await
+                },
+                is_stripe_transient,
+            )
+            .await?;
             tracing::info!(
                 subscription_id,
                 new_quantity,
@@ -496,9 +548,11 @@ impl StripeService {
         &self,
         subscription_id: &str,
     ) -> Result<u64, StripeError> {
-        let subscription = RetrieveSubscription::new(subscription_id)
-            .send(&self.client)
-            .await?;
+        let subscription = kyomi_core::retry::retry_with_backoff_classified(
+            || async { RetrieveSubscription::new(subscription_id).send(&self.client).await },
+            is_stripe_transient,
+        )
+        .await?;
 
         let first_item = subscription.items.data.first().ok_or_else(|| {
             StripeError::ClientError("Subscription has no items".into())
@@ -515,18 +569,30 @@ impl StripeService {
         subscription_id: &str,
         total_users: u64,
     ) -> Result<(), StripeError> {
-        let subscription = RetrieveSubscription::new(subscription_id)
-            .send(&self.client)
-            .await?;
+        let subscription = kyomi_core::retry::retry_with_backoff_classified(
+            || async { RetrieveSubscription::new(subscription_id).send(&self.client).await },
+            is_stripe_transient,
+        )
+        .await?;
 
         let first_item = subscription.items.data.first().ok_or_else(|| {
             StripeError::ClientError("Subscription has no items".into())
         })?;
 
-        UpdateSubscriptionItem::new(first_item.id.clone())
-            .quantity(total_users)
-            .send(&self.client)
-            .await?;
+        let first_item_id = first_item.id.clone();
+        kyomi_core::retry::retry_with_backoff_classified(
+            || {
+                let first_item_id = first_item_id.clone();
+                async move {
+                    UpdateSubscriptionItem::new(first_item_id)
+                        .quantity(total_users)
+                        .send(&self.client)
+                        .await
+                }
+            },
+            is_stripe_transient,
+        )
+        .await?;
 
         tracing::info!(
             subscription_id,
@@ -941,5 +1007,137 @@ mod tests {
         assert_eq!(json["tier"], "cloud");
         assert_eq!(json["status"], "active");
         assert_eq!(json["user_limit"], 3);
+    }
+
+    // -- Stripe retry classification -----------------------------------------
+
+    #[test]
+    fn stripe_timeout_is_transient() {
+        assert!(is_stripe_transient(&StripeError::Timeout));
+    }
+
+    #[test]
+    fn stripe_client_error_is_transient() {
+        assert!(is_stripe_transient(&StripeError::ClientError(
+            "connection reset".into()
+        )));
+    }
+
+    #[test]
+    fn stripe_429_is_transient() {
+        // 429 Too Many Requests — rate limiting is transient.
+        assert!(is_stripe_transient(&StripeError::Stripe(
+            Box::new(stripe_shared::ApiErrors {
+                type_: stripe_shared::ApiErrorsType::ApiError,
+                advice_code: None,
+                charge: None,
+                code: None,
+                decline_code: None,
+                doc_url: None,
+                message: Some("Rate limit exceeded".into()),
+                network_advice_code: None,
+                network_decline_code: None,
+                param: None,
+                payment_intent: None,
+                payment_method: None,
+                payment_method_type: None,
+                request_log_url: None,
+                setup_intent: None,
+                source: None,
+            }),
+            429,
+        )));
+    }
+
+    #[test]
+    fn stripe_503_is_transient() {
+        // 503 Service Unavailable — upstream failure is transient.
+        assert!(is_stripe_transient(&StripeError::Stripe(
+            Box::new(stripe_shared::ApiErrors {
+                type_: stripe_shared::ApiErrorsType::ApiError,
+                advice_code: None,
+                charge: None,
+                code: None,
+                decline_code: None,
+                doc_url: None,
+                message: Some("Service unavailable".into()),
+                network_advice_code: None,
+                network_decline_code: None,
+                param: None,
+                payment_intent: None,
+                payment_method: None,
+                payment_method_type: None,
+                request_log_url: None,
+                setup_intent: None,
+                source: None,
+            }),
+            503,
+        )));
+    }
+
+    #[test]
+    fn stripe_400_is_not_transient() {
+        // 400 Bad Request — permanent error.
+        assert!(!is_stripe_transient(&StripeError::Stripe(
+            Box::new(stripe_shared::ApiErrors {
+                type_: stripe_shared::ApiErrorsType::InvalidRequestError,
+                advice_code: None,
+                charge: None,
+                code: None,
+                decline_code: None,
+                doc_url: None,
+                message: Some("Invalid request".into()),
+                network_advice_code: None,
+                network_decline_code: None,
+                param: None,
+                payment_intent: None,
+                payment_method: None,
+                payment_method_type: None,
+                request_log_url: None,
+                setup_intent: None,
+                source: None,
+            }),
+            400,
+        )));
+    }
+
+    #[test]
+    fn stripe_401_is_not_transient() {
+        // 401 Unauthorized — permanent error.
+        assert!(!is_stripe_transient(&StripeError::Stripe(
+            Box::new(stripe_shared::ApiErrors {
+                type_: stripe_shared::ApiErrorsType::ApiError,
+                advice_code: None,
+                charge: None,
+                code: None,
+                decline_code: None,
+                doc_url: None,
+                message: Some("No such API key".into()),
+                network_advice_code: None,
+                network_decline_code: None,
+                param: None,
+                payment_intent: None,
+                payment_method: None,
+                payment_method_type: None,
+                request_log_url: None,
+                setup_intent: None,
+                source: None,
+            }),
+            401,
+        )));
+    }
+
+    #[test]
+    fn stripe_json_deserialize_is_not_transient() {
+        assert!(!is_stripe_transient(&StripeError::JSONDeserialize(
+            "unexpected field".into()
+        )));
+    }
+
+    #[test]
+    fn stripe_config_error_is_not_transient() {
+        assert!(!is_stripe_transient(&StripeError::ConfigError(
+            "invalid key format".into()
+        )));
     }
 }

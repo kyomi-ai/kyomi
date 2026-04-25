@@ -54,6 +54,22 @@ impl From<kyomi_connect_protocol::Error> for Error {
     }
 }
 
+impl Error {
+    /// Returns `true` if this error is transient and the operation may succeed
+    /// on a subsequent attempt.
+    ///
+    /// Transient errors are those caused by temporary server-side conditions:
+    /// rate limiting, gateway errors, and service unavailability. Permanent
+    /// errors (authentication failures, bad requests, not-found) must not be
+    /// retried because repeating them will produce the same result.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Error::TooManyRequests(_, _) | Error::ServiceUnavailable(_)
+        )
+    }
+}
+
 /// Convenience alias used throughout the codebase.
 pub type Result<T> = std::result::Result<T, Error>;
 

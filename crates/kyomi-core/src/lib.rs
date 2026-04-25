@@ -27,6 +27,7 @@ pub mod websocket;
 
 pub mod doc_resources;
 pub mod embedding_compat;
+pub mod retry;
 pub mod sql_compat;
 
 pub use config::Config;
