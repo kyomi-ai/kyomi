@@ -720,9 +720,17 @@ pub fn ChartBuilderModal(
     // panicking. on_close is omitted here — insert_cb already sets
     // chart_builder_open to false, which closes the modal.
     let handle_insert = Callback::new(move |()| {
-        let ast_val = ast.try_get_untracked().unwrap_or_default();
-        let yaml =
-            serde_yaml::to_string(&wrap_as_sequence(&ast_val)).unwrap_or_default();
+        let mut doc = ast.try_get_untracked().unwrap_or_default();
+        if doc.get("type").and_then(|v| v.as_str()) != Some("chart") {
+            ensure_root_mapping(&mut doc);
+            if let Some(map) = doc.as_mapping_mut() {
+                map.insert(
+                    Value::String("type".to_string()),
+                    Value::String("chart".to_string()),
+                );
+            }
+        }
+        let yaml = serde_yaml::to_string(&doc).unwrap_or_default();
         on_insert.run(yaml);
     });
 
