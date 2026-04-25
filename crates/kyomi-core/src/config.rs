@@ -247,8 +247,6 @@ impl Config {
     /// Panics on missing required variables — fail fast at startup.
     pub fn from_env() -> Self {
         // Standalone mode: if DATABASE_URL is not set, auto-configure for single-binary operation.
-        // SAFETY: env::set_var is called before the tokio runtime spawns worker threads
-        // (this runs in main() before any async work begins), so there are no data races.
         if env::var("DATABASE_URL").is_err() {
             let data_dir = standalone::data_dir();
             std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
@@ -258,6 +256,8 @@ impl Config {
 
             // Inject env vars for the rest of initialization
             let db_path = data_dir.join("kyomi.db");
+            // SAFETY: env::set_var is called before the tokio runtime spawns worker threads
+            // (this runs in main() before any async work begins), so there are no data races.
             unsafe {
                 env::set_var(
                     "DATABASE_URL",
@@ -276,14 +276,17 @@ impl Config {
 
             // Set defaults only if not already set by user
             if env::var("PORT").is_err() {
+                // SAFETY: Single-threaded startup — no worker threads yet.
                 unsafe { env::set_var("PORT", "3000") };
             }
             if env::var("FRONTEND_URL").is_err() {
                 let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+                // SAFETY: Single-threaded startup — no worker threads yet.
                 unsafe { env::set_var("FRONTEND_URL", format!("http://localhost:{port}")) };
             }
             if env::var("BASE_URL").is_err() {
                 let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+                // SAFETY: Single-threaded startup — no worker threads yet.
                 unsafe { env::set_var("BASE_URL", format!("http://localhost:{port}")) };
             }
         }

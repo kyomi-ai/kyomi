@@ -205,6 +205,8 @@ mod tests {
         fn without_key() -> Self {
             let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
             let prev = std::env::var(MASTER_KEY_ENV).ok();
+            // SAFETY: tests are single-threaded w.r.t. this env var because
+            // `lock` is held for the entire test body.
             unsafe { std::env::remove_var(MASTER_KEY_ENV) };
             Self { _lock: lock, prev }
         }
@@ -212,6 +214,9 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
+            // SAFETY: tests are single-threaded w.r.t. this env var because
+            // `_lock` is held for the entire test body and released only after
+            // this drop completes.
             unsafe {
                 match self.prev.take() {
                     Some(v) => std::env::set_var(MASTER_KEY_ENV, v),
