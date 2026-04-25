@@ -134,13 +134,13 @@ impl OpenAIProvider {
         api_key: String,
         model: Option<String>,
         base_url: String,
-    ) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+    ) -> kyomi_core::Result<Self> {
+        Ok(Self {
+            client: kyomi_datasource_server::http_client()?,
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url,
-        }
+        })
     }
 
     /// Return the model name this provider is configured with.
@@ -1357,7 +1357,8 @@ mod tests {
             "test-key".into(),
             None,
             "http://localhost:8080/mock".into(),
-        );
+        )
+        .unwrap();
         assert_eq!(provider.model(), DEFAULT_MODEL);
         assert_eq!(provider.base_url, "http://localhost:8080/mock");
     }
@@ -1368,7 +1369,8 @@ mod tests {
             "test-key".into(),
             Some("gpt-4o".into()),
             "http://localhost:8080".into(),
-        );
+        )
+        .unwrap();
         assert_eq!(provider.model(), "gpt-4o");
     }
 

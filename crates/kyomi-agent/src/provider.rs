@@ -192,7 +192,7 @@ pub fn create_provider(
     match config.provider {
         ProviderKind::Anthropic => {
             let client = if let Some(base_url) = config.base_url {
-                AnthropicClient::with_base_url(config.api_key, config.model, base_url)
+                AnthropicClient::with_base_url(config.api_key, config.model, base_url)?
             } else {
                 AnthropicClient::new(config.api_key, config.model)?
             };

@@ -196,6 +196,7 @@ impl ChartRendererClient {
     /// Check if the renderer service is available.
     pub async fn health_check(&self) -> bool {
         let client = reqwest::Client::builder()
+            .user_agent("Kyomi/1.0")
             .timeout(std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS))
             .build()
             .unwrap_or_else(|_| self.client.clone());

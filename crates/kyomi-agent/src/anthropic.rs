@@ -119,13 +119,17 @@ impl AnthropicClient {
     }
 
     /// Create a client pointing at a custom API URL.
-    pub fn with_base_url(api_key: String, model: Option<String>, base_url: String) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+    pub fn with_base_url(
+        api_key: String,
+        model: Option<String>,
+        base_url: String,
+    ) -> kyomi_core::Result<Self> {
+        Ok(Self {
+            client: kyomi_datasource_server::http_client()?,
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url,
-        }
+        })
     }
 
     /// Return the model name this client is configured with.
@@ -1513,7 +1517,8 @@ mod tests {
             "test-key".into(),
             None,
             "http://localhost:8080/mock".into(),
-        );
+        )
+        .unwrap();
         assert_eq!(client.model(), DEFAULT_MODEL);
     }
 

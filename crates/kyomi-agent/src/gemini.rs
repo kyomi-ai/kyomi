@@ -118,13 +118,13 @@ impl GeminiProvider {
         api_key: String,
         model: Option<String>,
         base_url: String,
-    ) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+    ) -> kyomi_core::Result<Self> {
+        Ok(Self {
+            client: kyomi_datasource_server::http_client()?,
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             base_url,
-        }
+        })
     }
 
     /// Return the model name this provider is configured with.
@@ -1438,7 +1438,8 @@ mod tests {
     #[test]
     fn provider_default_model() {
         let provider =
-            GeminiProvider::with_base_url("test-key".into(), None, "http://localhost".into());
+            GeminiProvider::with_base_url("test-key".into(), None, "http://localhost".into())
+                .unwrap();
         assert_eq!(provider.model(), DEFAULT_MODEL);
     }
 
@@ -1448,7 +1449,8 @@ mod tests {
             "test-key".into(),
             Some("gemini-2.5-pro".into()),
             "http://localhost".into(),
-        );
+        )
+        .unwrap();
         assert_eq!(provider.model(), "gemini-2.5-pro");
     }
 

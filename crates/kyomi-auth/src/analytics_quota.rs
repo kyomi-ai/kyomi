@@ -99,7 +99,7 @@ pub async fn get_per_site_counts_from_clickhouse(
     let url = format!("{scheme}://{}:{}/", ch_host, ch_port);
     let ch_password = ch_password.to_string();
     // reqwest::Client is cheap to clone — all clones share the same connection pool.
-    let client = reqwest::Client::new();
+    let client = crate::http_client()?;
 
     // Spawn concurrent requests — avoids N sequential round-trips for workspaces with many sites.
     let handles: Vec<tokio::task::JoinHandle<(String, Option<u64>)>> = sites
@@ -314,7 +314,7 @@ pub async fn cleanup_retention(
     .await
     .map_err(|e| kyomi_core::Error::Internal(format!("DB query failed: {e}")))?;
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client()?;
     let scheme = if ch_secure { "https" } else { "http" };
     let url = format!("{scheme}://{}:{}/", ch_host, ch_port);
 
