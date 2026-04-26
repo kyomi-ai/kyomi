@@ -44,29 +44,6 @@ const MIN_WIDTH: f64 = 280.0;
 /// Maximum sidebar width in pixels.
 const MAX_WIDTH: f64 = 480.0;
 
-
-// ─── Collection form data ───────────────────────────────────────────────────
-
-/// Form state for creating/editing a collection.
-#[derive(Clone, Debug)]
-struct CollectionFormData {
-    name: String,
-    description: String,
-    color: String,
-    is_public: bool,
-}
-
-impl Default for CollectionFormData {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            description: String::new(),
-            color: "#d97706".to_string(),
-            is_public: false,
-        }
-    }
-}
-
 // ─── Collection item row ────────────────────────────────────────────────────
 
 /// A single collection row in the sidebar list.
@@ -333,8 +310,11 @@ fn ColorPicker(
 fn CollectionModal(
     #[prop(into)] show: Signal<bool>,
     on_close: Callback<()>,
-    /// None for create, Some for edit.
-    editing: Option<CollectionItem>,
+    /// None for create, Some for edit. Accepts a signal so the component does
+    /// not need to be re-mounted when switching between create and edit modes —
+    /// avoiding disposal of scoped reactive signals and preventing WASM panics.
+    #[prop(into)]
+    editing: Signal<Option<CollectionItem>>,
     on_saved: Callback<()>,
     /// doc_type for new collections ("dashboard" or "knowledge").
     #[prop(default = "dashboard".to_string())]
@@ -343,25 +323,48 @@ fn CollectionModal(
     #[prop(default = "dashboards".to_string())]
     type_name_lower: String,
 ) -> impl IntoView {
-    let is_edit = editing.is_some();
-    let editing_id = StoredValue::new(editing.as_ref().map(|c| c.collection_id.clone()));
     let doc_type_stored = StoredValue::new(Some(doc_type));
-    let title = if is_edit { "Edit Collection" } else { "Create Collection" };
 
-    let initial = editing.as_ref().map_or_else(CollectionFormData::default, |c| {
-        CollectionFormData {
-            name: c.name.clone(),
-            description: c.description.clone().unwrap_or_default(),
-            color: c.color.clone().unwrap_or_else(|| "#d97706".to_string()),
-            is_public: c.is_public,
+    let (name, set_name) = signal(String::new());
+    let (description, set_description) = signal(String::new());
+    let (color, set_color) = signal("#d97706".to_string());
+    let (is_public, set_is_public) = signal(false);
+    let (saving, set_saving) = signal(false);
+
+    // Reactively reset form fields whenever the `editing` signal changes.
+    // This replaces the old one-shot initialisation from `editing.as_ref()`
+    // so the form is always in sync with the current editing target.
+    Effect::new(move |_| {
+        let ed = editing.get();
+        if let Some(c) = ed {
+            set_name.set(c.name.clone());
+            set_description.set(c.description.clone().unwrap_or_default());
+            set_color.set(c.color.clone().unwrap_or_else(|| "#d97706".to_string()));
+            set_is_public.set(c.is_public);
+        } else {
+            set_name.set(String::new());
+            set_description.set(String::new());
+            set_color.set("#d97706".to_string());
+            set_is_public.set(false);
         }
     });
 
-    let (name, set_name) = signal(initial.name);
-    let (description, set_description) = signal(initial.description);
-    let (color, set_color) = signal(initial.color);
-    let (is_public, set_is_public) = signal(initial.is_public);
-    let (saving, set_saving) = signal(false);
+    let is_edit = Signal::derive(move || editing.get().is_some());
+    let editing_id = Signal::derive(move || editing.get().map(|c| c.collection_id.clone()));
+    let title = Signal::derive(move || {
+        if is_edit.get() {
+            "Edit Collection".to_string()
+        } else {
+            "Create Collection".to_string()
+        }
+    });
+    let submit_text = Signal::derive(move || {
+        if is_edit.get() {
+            "Update Collection"
+        } else {
+            "Create Collection"
+        }
+    });
 
     let color_signal: Signal<String> = color.into();
     let is_public_signal: Signal<bool> = is_public.into();
@@ -370,17 +373,17 @@ fn CollectionModal(
         ev.prevent_default();
         set_saving.set(true);
 
-        let name_val = name.get_untracked();
-        let desc_val = description.get_untracked();
-        let color_val = color.get_untracked();
-        let is_pub_val = is_public.get_untracked();
-        let editing_id = editing_id.get_value();
+        let Some(name_val) = name.try_get_untracked() else { return };
+        let Some(desc_val) = description.try_get_untracked() else { return };
+        let Some(color_val) = color.try_get_untracked() else { return };
+        let Some(is_pub_val) = is_public.try_get_untracked() else { return };
+        let editing_id_val = editing_id.try_get_untracked().flatten();
         let dt = doc_type_stored.get_value();
 
         leptos::task::spawn_local(async move {
             let desc = if desc_val.is_empty() { None } else { Some(desc_val) };
 
-            let result: Result<(), ServerFnError> = if let Some(id) = editing_id {
+            let result: Result<(), ServerFnError> = if let Some(id) = editing_id_val {
                 update_collection(
                     id,
                     Some(name_val),
@@ -425,8 +428,6 @@ fn CollectionModal(
         set_is_public.set(val);
     });
 
-    let submit_text = if is_edit { "Update Collection" } else { "Create Collection" };
-
     // Footer with Cancel + Submit buttons
     let footer: Arc<dyn Fn() -> AnyView + Send + Sync> = Arc::new(move || {
         view! {
@@ -454,7 +455,7 @@ fn CollectionModal(
                     }
                 }
             >
-                {move || if saving.get() { "Saving..." } else { submit_text }}
+                {move || if saving.get() { "Saving..." } else { submit_text.get() }}
             </Button>
         }.into_any()
     });
@@ -463,7 +464,7 @@ fn CollectionModal(
         <Modal
             show=show
             on_close=on_close
-            title=title
+            title=Signal::derive(move || title.get())
             size=ModalSize::Md
             footer=footer
         >
@@ -609,7 +610,7 @@ pub fn CollectionsSidebar(
     });
 
     let handle_collection_click = Callback::new(move |id: String| {
-        let current = active_collection_id.get_untracked();
+        let Some(current) = active_collection_id.try_get_untracked() else { return };
         if current.as_deref() == Some(&id) {
             // Clicking active collection clears filter
             set_active_collection_id.set(None);
@@ -639,8 +640,8 @@ pub fn CollectionsSidebar(
 
     let on_confirm_delete = Callback::new(move |()| {
         set_confirm_open.set(false);
-        if let Some(id) = deleting_id.get_untracked() {
-            let active = active_collection_id.get_untracked();
+        if let Some(id) = deleting_id.try_get_untracked().flatten() {
+            let active = active_collection_id.try_get_untracked().unwrap_or(None);
             let on_changed = on_collections_changed;
             leptos::task::spawn_local(async move {
                 if let Err(e) = delete_collection(id.clone()).await {
@@ -722,33 +723,27 @@ pub fn CollectionsSidebar(
             }}
         </RightPanel>
 
-        // Modals — rendered as siblings so they overlay above the panel.
-        // Wrapped in a reactive closure so `editing` / `title` / `message`
-        // track their underlying signals. Without this, the modal is
-        // constructed once with the initial values (None / "" / "") and the
-        // edit/delete flows appear broken at runtime.
-        {move || {
-            let modal_editing = editing_collection.get();
-            let confirm_title_val = confirm_title.get();
-            let confirm_message_val = confirm_message.get();
-            view! {
-                <CollectionModal
-                    show=Signal::from(show_modal)
-                    on_close=on_modal_close
-                    editing=modal_editing
-                    on_saved=on_modal_saved
-                    doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
-                    type_name_lower=type_name_lower.to_string()
-                />
-                <ConfirmDialog
-                    open=Signal::from(confirm_open)
-                    title=confirm_title_val
-                    message=confirm_message_val
-                    confirm_text="Delete Collection"
-                    on_confirm=on_confirm_delete
-                    on_cancel=on_cancel_delete
-                />
-            }
-        }}
+        // Modals — rendered as static siblings so their internal reactive
+        // signals are never disposed between edit/create cycles. The
+        // `CollectionModal` now accepts `editing` as a `Signal` and resets
+        // its form fields via an `Effect` when the signal changes, and
+        // `ConfirmDialog` already accepts `MaybeProp<String>` for title and
+        // message so signals are read reactively inside it.
+        <CollectionModal
+            show=Signal::from(show_modal)
+            on_close=on_modal_close
+            editing=Signal::derive(move || editing_collection.get())
+            on_saved=on_modal_saved
+            doc_type=doc_type_for_modal.get_value().unwrap_or_else(|| "dashboard".to_string())
+            type_name_lower=type_name_lower.to_string()
+        />
+        <ConfirmDialog
+            open=Signal::from(confirm_open)
+            title=confirm_title
+            message=confirm_message
+            confirm_text="Delete Collection"
+            on_confirm=on_confirm_delete
+            on_cancel=on_cancel_delete
+        />
     }
 }

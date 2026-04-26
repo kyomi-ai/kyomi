@@ -108,7 +108,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     let on_confirm_delete = Callback::new(move |()| {
         set_confirm_open.set(false);
-        if let Some((dashboard_id, _title)) = deleting_dashboard.get_untracked() {
+        if let Some((dashboard_id, _title)) = deleting_dashboard.try_get_untracked().flatten() {
             leptos::task::spawn_local(async move {
                 if let Err(e) = delete_dashboard(dashboard_id).await {
                     leptos::logging::error!("Failed to delete dashboard: {e}");
@@ -135,7 +135,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     let on_confirm_remove = Callback::new(move |()| {
         set_remove_confirm_open.set(false);
-        if let Some((collection_id, dashboard_id, _)) = removing_info.get_untracked() {
+        if let Some((collection_id, dashboard_id, _)) = removing_info.try_get_untracked().flatten() {
             leptos::task::spawn_local(async move {
                 if let Err(e) =
                     remove_dashboard_from_collection(collection_id, dashboard_id).await
@@ -299,7 +299,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                                 view! {
                                     <button
                                         on:click=move |_| {
-                                            if active_collection_id.get_untracked().as_deref() == Some(&coll_id) {
+                                            if active_collection_id.try_get_untracked().flatten().as_deref() == Some(&coll_id) {
                                                 set_active_collection_id.set(None);
                                             } else {
                                                 set_active_collection_id.set(Some(coll_id.clone()));
@@ -360,7 +360,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                                                     set_remove_confirm_open.set(true);
                                                 })
                                                 on_collection_click=Callback::new(move |coll_id: String| {
-                                                    if active_collection_id.get_untracked().as_deref() == Some(&coll_id) {
+                                                    if active_collection_id.try_get_untracked().flatten().as_deref() == Some(&coll_id) {
                                                         set_active_collection_id.set(None);
                                                     } else {
                                                         set_active_collection_id.set(Some(coll_id));

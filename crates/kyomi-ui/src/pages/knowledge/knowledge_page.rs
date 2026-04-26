@@ -94,7 +94,7 @@ pub fn KnowledgePage() -> impl IntoView {
 
     let on_confirm_delete = Callback::new(move |()| {
         set_confirm_open.set(false);
-        if let Some((doc_id, _title)) = deleting_doc.get_untracked() {
+        if let Some((doc_id, _title)) = deleting_doc.try_get_untracked().flatten() {
             leptos::task::spawn_local(async move {
                 if let Err(e) = delete_knowledge_doc(doc_id).await {
                     leptos::logging::error!("Failed to delete knowledge doc: {e}");
