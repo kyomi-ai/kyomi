@@ -15,6 +15,9 @@ use kyomi_core::sql_compat;
 use kyomi_core::DbPool;
 use serde::{Deserialize, Serialize};
 
+use crate::sync_log_service;
+use kyomi_types::sync::{SyncActionType, entity_types};
+
 /// Get all active workspace user memberships for a workspace.
 ///
 /// Returns membership records only (not joined user data).
@@ -83,6 +86,58 @@ pub async fn get_user_workspaces(
     Ok(results)
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct WorkspaceSnapshotRow {
+    workspace_id: String,
+    name: Option<String>,
+    settings: Option<String>,
+    business_knowledge: Option<String>,
+    updated_at: String,
+}
+
+async fn fetch_workspace_settings_snapshot(
+    pool: &DbPool,
+    workspace_id: &str,
+) -> Option<serde_json::Value> {
+    get_workspace_settings_for_sync(pool, workspace_id).await
+}
+
+/// Return a workspace settings snapshot (name, settings, business_knowledge,
+/// updated_at) as a JSON value for the sync bootstrap protocol.
+///
+/// Returns `None` if the workspace does not exist or the query fails.
+pub async fn get_workspace_settings_for_sync(
+    pool: &DbPool,
+    workspace_id: &str,
+) -> Option<serde_json::Value> {
+    let row = kyomi_core::db_fetch_optional!(
+        pool,
+        WorkspaceSnapshotRow,
+        r#"SELECT workspace_id,
+                  name,
+                  CAST(settings AS TEXT) AS settings,
+                  business_knowledge,
+                  CAST(updated_at AS TEXT) AS updated_at
+           FROM workspaces WHERE workspace_id = $1"#,
+        workspace_id
+    )
+    .ok()?;
+
+    let row = row?;
+    let settings_json: Option<serde_json::Value> = row
+        .settings
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+
+    Some(serde_json::json!({
+        "workspace_id": row.workspace_id,
+        "name": row.name,
+        "settings": settings_json,
+        "business_knowledge": row.business_knowledge,
+        "updated_at": row.updated_at,
+    }))
+}
+
 /// Update workspace display name.
 pub async fn update_workspace_name(
     pool: &DbPool,
@@ -90,11 +145,29 @@ pub async fn update_workspace_name(
     name: &str,
 ) -> kyomi_core::Result<bool> {
     let is_pg = pool.is_postgres();
-    let now = sql_compat::now(is_pg);
+    let now_expr = sql_compat::now(is_pg);
     let sql = format!(
-        "UPDATE workspaces SET name = $1, updated_at = {now} WHERE workspace_id = $2"
+        "UPDATE workspaces SET name = $1, updated_at = {now_expr} WHERE workspace_id = $2"
     );
     let result = kyomi_core::db_execute!(pool, &sql, name, workspace_id)?;
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0 {
+        let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
+        if let Err(e) = sync_log_service::write_sync_entry(
+            pool,
+            entity_types::WORKSPACE_SETTINGS,
+            workspace_id,
+            workspace_id,
+            SyncActionType::Update,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(result.rows_affected() > 0)
 }
 
@@ -125,6 +198,24 @@ pub async fn update_workspace_settings(
         )
     };
     let result = kyomi_core::db_execute!(pool, &sql, &settings_str, workspace_id)?;
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0 {
+        let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
+        if let Err(e) = sync_log_service::write_sync_entry(
+            pool,
+            entity_types::WORKSPACE_SETTINGS,
+            workspace_id,
+            workspace_id,
+            SyncActionType::Update,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(result.rows_affected() > 0)
 }
 
@@ -190,15 +281,33 @@ pub async fn update_workspace_knowledge(
     knowledge: &str,
 ) -> kyomi_core::Result<bool> {
     let is_pg = pool.is_postgres();
-    let now = sql_compat::now(is_pg);
+    let now_expr = sql_compat::now(is_pg);
     let sql = format!(
         "UPDATE workspaces SET \
          business_knowledge = $1, \
-         knowledge_updated_at = {now}, \
-         updated_at = {now} \
+         knowledge_updated_at = {now_expr}, \
+         updated_at = {now_expr} \
          WHERE workspace_id = $2"
     );
     let result = kyomi_core::db_execute!(pool, &sql, knowledge, workspace_id)?;
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0 {
+        let snapshot = fetch_workspace_settings_snapshot(pool, workspace_id).await;
+        if let Err(e) = sync_log_service::write_sync_entry(
+            pool,
+            entity_types::WORKSPACE_SETTINGS,
+            workspace_id,
+            workspace_id,
+            SyncActionType::Update,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(result.rows_affected() > 0)
 }
 

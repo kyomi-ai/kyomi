@@ -735,6 +735,26 @@ pub async fn send_watch_update(
         .await;
 }
 
+// ---------------------------------------------------------------------------
+// Live sync broadcasts
+// ---------------------------------------------------------------------------
+
+/// Broadcast a SyncAction to all connected workspace members.
+/// Used for live sync — clients receive these to update their local cache.
+pub async fn send_sync_action(
+    manager: &WebSocketManager,
+    workspace_id: &str,
+    sync_action: &kyomi_types::sync::SyncAction,
+    exclude_user_id: Option<&str>,
+) {
+    let msg = WebSocketMessage::new(MessageType::SyncAction)
+        .with_data(serde_json::to_value(sync_action).unwrap_or_default());
+
+    manager
+        .broadcast_to_workspace(workspace_id, msg, exclude_user_id)
+        .await;
+}
+
 /// Send a dashboard_summary_ready notification.
 pub async fn send_dashboard_summary_ready(
     manager: &WebSocketManager,

@@ -85,8 +85,9 @@ async fn handle_authenticated_ws(
 
     let jwt_user_id = &claims.sub;
 
-    // 2. Extract user_id from path — may be "{workspace_id}_{user_id}" format
+    // 2. Extract user_id and workspace_id from path — may be "{workspace_id}_{user_id}" format
     let actual_user_id = extract_user_id_from_path(&path_user_id);
+    let workspace_id = extract_workspace_id_from_path(&path_user_id).to_string();
 
     // 3. Verify path user_id matches JWT user_id
     if actual_user_id != jwt_user_id {
@@ -171,6 +172,7 @@ async fn handle_authenticated_ws(
     let db_clone = state.db.clone();
     let cancel_registry_clone = state.cancel_registry.clone();
     let user_id_for_recv = jwt_user_id.clone();
+    let workspace_id_for_recv = workspace_id.clone();
     let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
@@ -178,6 +180,7 @@ async fn handle_authenticated_ws(
                     handle_client_message(
                         &text,
                         &user_id_for_recv,
+                        &workspace_id_for_recv,
                         &manager_clone,
                         &db_clone,
                         &cancel_registry_clone,
@@ -205,6 +208,24 @@ async fn handle_authenticated_ws(
         connection_id,
         "WebSocket disconnected"
     );
+}
+
+/// Extract the workspace_id from a path that is "{workspace_id}_{user_id}".
+///
+/// Uses the same boundary detection as `extract_user_id_from_path` but returns
+/// the prefix portion instead. Returns an empty string when no workspace prefix
+/// is found (plain user_id paths).
+fn extract_workspace_id_from_path(path: &str) -> &str {
+    if let Some(idx) = path.find("_usr_") {
+        return &path[..idx];
+    }
+    if let Some(idx) = path.find('_') {
+        let prefix = &path[..idx];
+        if prefix.starts_with("ws-") || prefix.starts_with("workspace-") {
+            return &path[..idx];
+        }
+    }
+    ""
 }
 
 /// Extract the actual user_id from a path that may be "{workspace_id}_{user_id}".
@@ -237,7 +258,8 @@ fn extract_user_id_from_path(path: &str) -> &str {
 async fn handle_client_message(
     text: &str,
     user_id: &str,
-    _manager: &kyomi_auth::websocket::WebSocketManager,
+    workspace_id: &str,
+    manager: &kyomi_auth::websocket::WebSocketManager,
     db: &kyomi_core::DbPool,
     cancel_registry: &crate::cancel_registry::CancelRegistry,
 ) {
@@ -287,10 +309,236 @@ async fn handle_client_message(
                 tracing::error!("Failed to set oauth_reconnect_cancelled for {user_id}: {e}");
             }
         }
+        "sync_bootstrap" => {
+            handle_sync_bootstrap(manager, db, user_id, workspace_id).await;
+        }
+        "sync_delta" => {
+            let last_sync_id = msg
+                .get("last_sync_id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            handle_sync_delta(manager, db, user_id, workspace_id, last_sync_id).await;
+        }
         _ => {
             tracing::debug!(user_id, msg_type, "Received unknown client message type");
         }
     }
+}
+
+// ─── Sync protocol handlers ───────────────────────────────────────────────────
+
+/// Handle a `sync_bootstrap` request.
+///
+/// Streams all Tier 1 entities for the workspace as `SyncAction` messages with
+/// `action = insert`, then closes with a `SyncComplete` carrying the current
+/// `latest_sync_id`. Clients should store this ID and use `sync_delta` for
+/// subsequent reconnects.
+async fn handle_sync_bootstrap(
+    manager: &kyomi_auth::websocket::WebSocketManager,
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    workspace_id: &str,
+) {
+    use kyomi_types::sync::{SyncResponse, entity_types};
+
+    tracing::debug!(user_id, workspace_id, "Handling sync_bootstrap");
+
+    // 1. Fetch all Tier 1 metadata.
+    let dashboards = kyomi_auth::dashboard_service::list_dashboards_for_sync(db, workspace_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(user_id, workspace_id, error = %e, "list_dashboards_for_sync failed");
+            vec![]
+        });
+    let knowledge = kyomi_auth::dashboard_service::list_knowledge_for_sync(db, workspace_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(user_id, workspace_id, error = %e, "list_knowledge_for_sync failed");
+            vec![]
+        });
+    let sessions = kyomi_auth::chat_service::list_sessions_for_sync(db, workspace_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(user_id, workspace_id, error = %e, "list_sessions_for_sync failed");
+            vec![]
+        });
+    let watches = kyomi_auth::watch_service::list_watches_for_sync(db, workspace_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(user_id, workspace_id, error = %e, "list_watches_for_sync failed");
+            vec![]
+        });
+    let settings =
+        kyomi_auth::workspace_service::get_workspace_settings_for_sync(db, workspace_id).await;
+
+    // 2. Get the current sync watermark.
+    let latest_sync_id =
+        kyomi_auth::sync_log_service::get_latest_sync_id(db, workspace_id)
+            .await
+            .unwrap_or(0);
+
+    // 3. Stream each entity as a SyncAction with action=Insert.
+    stream_entities(manager, user_id, workspace_id, entity_types::DASHBOARD, "dashboard_id", dashboards).await;
+    stream_entities(manager, user_id, workspace_id, entity_types::KNOWLEDGE, "dashboard_id", knowledge).await;
+    stream_entities(manager, user_id, workspace_id, entity_types::CHAT_SESSION, "session_id", sessions).await;
+    stream_entities(manager, user_id, workspace_id, entity_types::WATCH, "watch_id", watches).await;
+
+    if let Some(item) = settings {
+        stream_entities(manager, user_id, workspace_id, entity_types::WORKSPACE_SETTINGS, "workspace_id", vec![item]).await;
+    }
+
+    // 4. Signal completion with the current sync watermark.
+    send_sync_response(
+        manager,
+        user_id,
+        SyncResponse::SyncComplete {
+            last_sync_id: latest_sync_id,
+        },
+    )
+    .await;
+
+    tracing::debug!(user_id, workspace_id, latest_sync_id, "sync_bootstrap complete");
+}
+
+/// Handle a `sync_delta` request.
+///
+/// Streams all sync log entries with `sync_id > last_sync_id`. If the
+/// requested `sync_id` is no longer in the log (pruned), sends `SyncReset`
+/// so the client falls back to a full bootstrap.
+async fn handle_sync_delta(
+    manager: &kyomi_auth::websocket::WebSocketManager,
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    workspace_id: &str,
+    last_sync_id: i64,
+) {
+    use kyomi_types::sync::SyncResponse;
+
+    tracing::debug!(user_id, workspace_id, last_sync_id, "Handling sync_delta");
+
+    // 1. Verify the requested sync_id is still available (not pruned).
+    if last_sync_id > 0 {
+        match kyomi_auth::sync_log_service::is_sync_id_available(db, workspace_id, last_sync_id)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    user_id,
+                    workspace_id,
+                    last_sync_id,
+                    "sync_id pruned — sending SyncReset"
+                );
+                send_sync_response(manager, user_id, SyncResponse::SyncReset).await;
+                return;
+            }
+            Err(e) => {
+                tracing::error!(
+                    user_id,
+                    workspace_id,
+                    last_sync_id,
+                    error = %e,
+                    "DB error checking sync_id availability — sending SyncReset"
+                );
+                send_sync_response(manager, user_id, SyncResponse::SyncReset).await;
+                return;
+            }
+        }
+    }
+
+    // 2. Fetch all entries since last_sync_id (capped at 10 000 rows).
+    let entries =
+        kyomi_auth::sync_log_service::get_entries_since(db, workspace_id, last_sync_id, 10_000)
+            .await
+            .unwrap_or_default();
+
+    // 3. Stream each entry as a SyncAction message.
+    for entry in &entries {
+        send_sync_response(manager, user_id, SyncResponse::SyncAction(entry.clone())).await;
+    }
+
+    // 4. Send SyncComplete with the latest sync_id we streamed.
+    let latest_id = entries.last().map(|e| e.sync_id).unwrap_or(last_sync_id);
+    send_sync_response(
+        manager,
+        user_id,
+        SyncResponse::SyncComplete {
+            last_sync_id: latest_id,
+        },
+    )
+    .await;
+
+    tracing::debug!(user_id, workspace_id, latest_id, "sync_delta complete");
+}
+
+/// Stream a batch of entities as individual `SyncAction(Insert)` messages.
+///
+/// Used by `handle_sync_bootstrap` to avoid copy-pasting the same loop for
+/// each entity type. `id_field` is the JSON key that holds the entity's
+/// primary key (e.g. `"dashboard_id"`, `"session_id"`).
+async fn stream_entities(
+    manager: &kyomi_auth::websocket::WebSocketManager,
+    user_id: &str,
+    workspace_id: &str,
+    entity_type: &str,
+    id_field: &str,
+    items: Vec<serde_json::Value>,
+) {
+    use kyomi_types::sync::{SyncAction, SyncActionType, SyncResponse};
+
+    for item in items {
+        let entity_id = item
+            .get(id_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let timestamp = item
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let action = SyncAction {
+            sync_id: 0,
+            entity_type: entity_type.to_string(),
+            entity_id,
+            workspace_id: workspace_id.to_string(),
+            action: SyncActionType::Insert,
+            data: Some(item),
+            timestamp,
+        };
+        send_sync_response(manager, user_id, SyncResponse::SyncAction(action)).await;
+    }
+}
+
+/// Send a `SyncResponse` to a specific user over WebSocket.
+async fn send_sync_response(
+    manager: &kyomi_auth::websocket::WebSocketManager,
+    user_id: &str,
+    response: kyomi_types::sync::SyncResponse,
+) {
+    use kyomi_types::websocket::{MessageType, WebSocketMessage};
+
+    let (msg_type, data) = match &response {
+        kyomi_types::sync::SyncResponse::SyncAction(action) => (
+            MessageType::SyncAction,
+            Some(serde_json::to_value(action).unwrap_or_default()),
+        ),
+        kyomi_types::sync::SyncResponse::SyncComplete { last_sync_id } => (
+            MessageType::SyncComplete,
+            Some(serde_json::json!({ "last_sync_id": last_sync_id })),
+        ),
+        kyomi_types::sync::SyncResponse::SyncReset => (MessageType::SyncReset, None),
+    };
+
+    let message = WebSocketMessage {
+        message_type: msg_type,
+        session_id: None,
+        message_id: None,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        data,
+    };
+
+    manager.send_to_user(user_id, message).await;
 }
 
 // ===========================================================================
@@ -353,4 +601,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extract_workspace_id_plain() {
+        assert_eq!(extract_workspace_id_from_path("user-abc123"), "");
+    }
+
+    #[test]
+    fn extract_workspace_id_with_ws_prefix() {
+        assert_eq!(
+            extract_workspace_id_from_path("ws-550e8400-e29b-41d4-a716-446655440000_user-abc123"),
+            "ws-550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn extract_workspace_id_with_workspace_prefix() {
+        assert_eq!(
+            extract_workspace_id_from_path("workspace-99f24d05-673d25b8_user-PHjsNsAj8hqZXOGGM-em1Q"),
+            "workspace-99f24d05-673d25b8"
+        );
+    }
+
+    #[test]
+    fn extract_workspace_id_e2e_format() {
+        assert_eq!(
+            extract_workspace_id_from_path("e2e-test-workspace-0001_usr_a0bda4c2e7af4be3a29d"),
+            "e2e-test-workspace-0001"
+        );
+    }
 }

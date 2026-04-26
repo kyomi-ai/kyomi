@@ -86,6 +86,12 @@ pub fn Layout(children: Children) -> impl IntoView {
     // level so cached list data survives navigation between authed pages.
     provide_query_cache();
 
+    // Create and provide the reactive in-memory sync store (KYO-169).
+    // Lives at the Layout level alongside the query cache so all authed pages
+    // share a single store instance that survives navigation.
+    let sync_store = crate::cache::store::SyncStore::new();
+    provide_context(sync_store);
+
     // Auth guard: tracks whether the user has been authenticated.
     // Starts as `false`; set to `true` once `user_info` resolves successfully.
     // While `false`, the layout renders a loading state instead of the full
@@ -229,6 +235,35 @@ pub fn Layout(children: Children) -> impl IntoView {
 
     let is_routing = expect_context::<ReadSignal<bool>>();
 
+    // Hydrate the SyncStore from IndexedDB on mount (WASM only).
+    //
+    // The Effect watches `ws_workspace_id` reactively — hydration runs once the
+    // workspace ID is available (after auth resolves) and re-runs if the user
+    // switches workspace. On SSR the block is absent; the store stays empty and
+    // pages show a loading state until `initialized()` becomes `true`.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use leptos::task::spawn_local;
+        let sync_store_for_hydrate = sync_store;
+        let ws_id_for_hydrate = ws_workspace_id;
+
+        Effect::new(move |_| {
+            let Some(workspace_id) = ws_id_for_hydrate.get() else {
+                return;
+            };
+            if workspace_id.is_empty() {
+                return;
+            }
+            let store = sync_store_for_hydrate;
+            store.reset();
+            spawn_local(async move {
+                if let Ok(cache_db) = crate::cache::db::init_cache_db(&workspace_id).await {
+                    hydrate_store_from_cache(&cache_db, &workspace_id, &store).await;
+                }
+            });
+        });
+    }
+
     // Persist collapsed state to localStorage whenever it changes.
     #[cfg(target_arch = "wasm32")]
     {
@@ -363,6 +398,9 @@ pub fn Layout(children: Children) -> impl IntoView {
                 // channel so list pages stay fresh without each page owning
                 // its own subscription. See [KYO-9].
                 <QueryCacheWsBridge/>
+                // Drives the bootstrap/delta/live sync protocol over WebSocket
+                // and keeps SyncStore + IndexedDB current. See [KYO-169].
+                <SyncEngineStarter workspace_id=ws_workspace_id.into()/>
                 <div class="h-screen flex flex-col bg-background">
                     // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
                     <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
@@ -422,14 +460,75 @@ pub fn Layout(children: Children) -> impl IntoView {
     }
 }
 
-/// Bridges the Layout-level [`QueryCache`] to the `dashboard_update`
-/// WebSocket channel.
+/// Populate [`crate::cache::store::SyncStore`] from the local IndexedDB cache.
 ///
-/// Hoists the subscription that used to live on every list page (dashboards,
-/// knowledge) up to the Layout, where the cache itself lives. A single
-/// subscription survives navigation, so a dashboard created from the chat
-/// page is already invalidated by the time the user visits the dashboards
-/// list — no more "stale until you visit the page" gap. See [KYO-9].
+/// Called once per workspace on WASM startup (from the Layout hydration
+/// Effect). For each entity type it reads all cached records, deserialises
+/// them, and bulk-sets the corresponding list on the store. If a sync cursor
+/// already exists (previous session completed at least one delta sync), the
+/// store is also marked as initialised so pages stop showing loading state
+/// immediately.
+///
+/// Errors from individual entity types are silently ignored — the sync engine
+/// will fetch missing data from the server on its next run.
+#[cfg(target_arch = "wasm32")]
+async fn hydrate_store_from_cache(
+    db: &crate::cache::db::CacheDb,
+    workspace_id: &str,
+    store: &crate::cache::store::SyncStore,
+) {
+    use kyomi_types::sync::entity_types;
+
+    fn deserialize_entries<T: serde::de::DeserializeOwned>(
+        entries: &[(String, String, String)],
+        entity_type: &str,
+    ) -> Vec<T> {
+        let mut items = Vec::with_capacity(entries.len());
+        for (id, json, _ts) in entries {
+            match serde_json::from_str(json) {
+                Ok(item) => items.push(item),
+                Err(e) => {
+                    tracing::warn!(entity_type, entity_id = %id, error = %e, "cache deserialization failed — skipping entry");
+                }
+            }
+        }
+        items
+    }
+
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::DASHBOARD, workspace_id).await {
+        store.set_dashboards(deserialize_entries(&entries, entity_types::DASHBOARD));
+    }
+
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::KNOWLEDGE, workspace_id).await {
+        store.set_knowledge_docs(deserialize_entries(&entries, entity_types::KNOWLEDGE));
+    }
+
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::CHAT_SESSION, workspace_id).await {
+        store.set_chat_sessions(deserialize_entries(&entries, entity_types::CHAT_SESSION));
+    }
+
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WATCH, workspace_id).await {
+        store.set_watches(deserialize_entries(&entries, entity_types::WATCH));
+    }
+
+    if let Ok(Some(_cursor)) = crate::cache::db::get_last_sync_id(db, workspace_id).await {
+        store.mark_initialized();
+    }
+}
+
+/// Bridges the Layout-level [`QueryCache`] to relevant WebSocket channels.
+///
+/// Hoists non-sync subscriptions up to the Layout so they survive navigation.
+/// Subscriptions for entity types managed by the sync engine
+/// (`dashboard_update` → dashboards/knowledge, `watch_update` → watches,
+/// `chat_sessions` → chat session list) have been removed — the sync engine
+/// keeps those stores current via `SyncStore` and IndexedDB (KYO-169).
+///
+/// Remaining subscriptions:
+/// - `session_created`, `title_update`, `shared_conversation_activity`:
+///   invalidate the sidebar's `recent_sessions` cache (KYO-23).
+/// - `watch_alert`, `watch_state_update`: invalidate the unread alerts badge.
+/// - `datasource_update`: invalidate the datasources list.
 ///
 /// Rendered as a child of `<WebSocketProvider>` (not directly in `Layout`)
 /// so that `use_context::<WebSocketContext>()` resolves — the provider
@@ -450,25 +549,6 @@ fn QueryCacheWsBridge() -> impl IntoView {
             let Some(ws) = ws_ctx.as_ref().cloned() else {
                 return;
             };
-
-            let dashboard_unsub = ws.subscribe("dashboard_update", move |msg| {
-                let action = msg
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("action"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                match action {
-                    "created" | "deleted" => {
-                        // Knowledge docs share the `dashboard_update`
-                        // channel, so both caches invalidate together.
-                        query_cache.invalidate("dashboards");
-                        query_cache.invalidate("knowledge");
-                    }
-                    _ => {}
-                }
-            });
 
             // ── Recent sessions cache invalidation (KYO-23) ──────────
             // New chat created — sidebar should show it.
@@ -504,13 +584,6 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 cache_alerts_2.invalidate("unread_alerts");
             });
 
-            // Watch CRUD mutation — create/update/delete of a watch by this
-            // user or another workspace member. Refresh the watches list.
-            let cache_watches = query_cache;
-            let watch_update_unsub = ws.subscribe("watch_update", move |_msg| {
-                cache_watches.invalidate("watches");
-            });
-
             // Datasource CRUD mutation — create/update/delete of a datasource by
             // this user or another workspace member. Refresh the datasources list.
             let cache_datasources = query_cache;
@@ -518,24 +591,82 @@ fn QueryCacheWsBridge() -> impl IntoView {
                 cache_datasources.invalidate("datasources");
             });
 
-            let dashboard_unsub = send_wrapper::SendWrapper::new(dashboard_unsub);
             let session_created_unsub = send_wrapper::SendWrapper::new(session_created_unsub);
             let title_update_unsub = send_wrapper::SendWrapper::new(title_update_unsub);
             let shared_activity_unsub = send_wrapper::SendWrapper::new(shared_activity_unsub);
             let watch_alert_unsub = send_wrapper::SendWrapper::new(watch_alert_unsub);
             let watch_state_unsub = send_wrapper::SendWrapper::new(watch_state_unsub);
-            let watch_update_unsub = send_wrapper::SendWrapper::new(watch_update_unsub);
             let datasource_update_unsub = send_wrapper::SendWrapper::new(datasource_update_unsub);
             on_cleanup(move || {
-                dashboard_unsub.take()();
                 session_created_unsub.take()();
                 title_update_unsub.take()();
                 shared_activity_unsub.take()();
                 watch_alert_unsub.take()();
                 watch_state_unsub.take()();
-                watch_update_unsub.take()();
                 datasource_update_unsub.take()();
             });
+        });
+    }
+
+    view! { <></> }
+}
+
+/// Starts the KYO-169 sync engine once the WebSocket is connected and the
+/// workspace ID is available.
+///
+/// Rendered as a sibling of `<QueryCacheWsBridge/>` — both must sit inside
+/// `<WebSocketProvider>` so that `use_context::<WebSocketContext>()` resolves.
+///
+/// The component is invisible (returns an empty fragment). Its only job is to
+/// call [`crate::cache::sync_engine::start_sync_engine`] at the right moment.
+/// The sync engine itself watches `connection_state` to re-send sync requests
+/// on reconnect, so start_sync_engine is called at most once per workspace_id.
+#[component]
+fn SyncEngineStarter(
+    /// Reactive signal with the current workspace ID, or `None` if not yet
+    /// authenticated. Passed in from the Layout scope (same value provided to
+    /// `WebSocketProvider`). The engine starts as soon as this becomes `Some`.
+    workspace_id: Signal<Option<String>>,
+) -> impl IntoView {
+    // The whole effect is WASM-only: IndexedDB and WebSocket are browser APIs.
+    // On SSR, workspace_id is unused — mark it explicitly so the compiler
+    // doesn't emit an `unused_variables` warning (lint suppressions are banned).
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = workspace_id;
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::cache::store::SyncStore;
+        use crate::cache::sync_engine::start_sync_engine;
+        use crate::components::chat::websocket_client::WebSocketContext;
+
+        let store = expect_context::<SyncStore>();
+        let ws_ctx = use_context::<WebSocketContext>();
+
+        // Track whether the engine has already been started for the current
+        // workspace so we don't call start_sync_engine more than once per
+        // workspace. Stored as a StoredValue so the closure can mutate it.
+        let started_for: StoredValue<Option<String>> = StoredValue::new(None);
+
+        Effect::new(move |_| {
+            let Some(ref wid) = workspace_id.get() else {
+                return;
+            };
+            if wid.is_empty() {
+                return;
+            }
+            // Already started for this workspace — nothing to do.
+            if started_for.get_value().as_deref() == Some(wid.as_str()) {
+                return;
+            }
+            let Some(ws) = ws_ctx.as_ref().cloned() else {
+                return;
+            };
+            // Mark as started before calling so a reactive re-run from inside
+            // start_sync_engine can't trigger a second start.
+            started_for.set_value(Some(wid.clone()));
+            tracing::info!(workspace_id = %wid, "SyncEngineStarter: starting sync engine");
+            start_sync_engine(ws, store, wid.clone());
         });
     }
 

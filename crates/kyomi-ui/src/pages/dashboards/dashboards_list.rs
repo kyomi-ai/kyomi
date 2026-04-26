@@ -42,7 +42,7 @@ use crate::server_fns::collections::{
     list_collections, remove_dashboard_from_collection, CollectionItem,
 };
 use crate::server_fns::dashboards::{
-    create_dashboard, delete_dashboard, list_dashboards, DashboardListItem,
+    create_dashboard, delete_dashboard, DashboardListItem,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,15 +62,36 @@ pub fn DashboardsListPage() -> impl IntoView {
     let (sort_signal, set_sort_signal) = signal("recent".to_string());
 
     // ── Data fetching ───────────────────────────────────────────────────
-    // Backed by the Layout-level QueryCache: cached across navigation with
-    // stale-while-revalidate. Dependencies (`search text, sort`) key the
-    // cache so each filter combination has its own entry.
+    // Dashboards come from the SyncStore (populated from IndexedDB on
+    // startup and kept current by the sync engine). Client-side
+    // search/sort replaces the server-side query so list page navigation
+    // is instant on return visits (KYO-169).
     let query_cache = expect_context::<QueryCache>();
-    let dashboards_resource = use_query(
-        "dashboards",
-        move || (query_signal.get(), sort_signal.get()),
-        |(q, s): (Option<String>, String)| list_dashboards(q, Some(s), None),
-    );
+    let sync_store = expect_context::<crate::cache::store::SyncStore>();
+    let all_dashboards = sync_store.dashboards();
+
+    let store_initialized = sync_store.initialized();
+
+    // Client-side search + sort derived from the in-memory store.
+    let dashboards_signal = Signal::derive(move || {
+        let mut items = all_dashboards.get();
+        // Search filter
+        if let Some(ref q) = query_signal.get() {
+            let q_lower = q.to_lowercase();
+            items.retain(|d| {
+                d.title.to_lowercase().contains(&q_lower)
+                    || d.summary.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
+            });
+        }
+        // Sort
+        match sort_signal.get().as_str() {
+            "updated_at" | "recent" | "" => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+            "created_at" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
+            _ => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+        }
+        items
+    });
 
     // Collections list, scoped to dashboards. Deps hold the doc_type so
     // each scope (dashboard / knowledge / all) has its own cache entry.
@@ -92,7 +113,8 @@ pub fn DashboardsListPage() -> impl IntoView {
                 if let Err(e) = delete_dashboard(dashboard_id).await {
                     leptos::logging::error!("Failed to delete dashboard: {e}");
                 }
-                query_cache.invalidate("dashboards");
+                // Sync engine handles cache updates via WebSocket — no manual
+                // invalidation needed for dashboards (KYO-169).
             });
         }
     });
@@ -152,33 +174,35 @@ pub fn DashboardsListPage() -> impl IntoView {
     };
 
     // ── Filter dashboards by active collection ──────────────────────────
-    let filtered_dashboards = move || -> Option<Result<Vec<DashboardListItem>, ServerFnError>> {
-        let result = dashboards_resource.get()?;
+    // Returns None while the SyncStore has not yet been initialized (shows
+    // the loading skeleton). Once initialized, returns the list (possibly
+    // empty) filtered by the active collection.
+    let filtered_dashboards = move || -> Option<Vec<DashboardListItem>> {
+        if !store_initialized.get() {
+            return None;
+        }
+        let dashboards = dashboards_signal.get();
         let active_id = active_collection_id.get();
 
-        match result {
-            Err(e) => Some(Err(e)),
-            Ok(dashboards) => {
-                if let Some(ref coll_id) = active_id {
-                    let collection_dashboard_ids: std::collections::HashSet<String> =
-                        collections_resource
-                            .get()
-                            .and_then(|r| r.ok())
-                            .unwrap_or_default()
-                            .iter()
-                            .filter(|c| c.collection_id == *coll_id)
-                            .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
-                            .collect();
+        if let Some(ref coll_id) = active_id {
+            let collection_dashboard_ids: std::collections::HashSet<String> =
+                collections_resource
+                    .get()
+                    .and_then(|r| r.ok())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|c| c.collection_id == *coll_id)
+                    .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
+                    .collect();
 
-                    let filtered: Vec<DashboardListItem> = dashboards
-                        .into_iter()
-                        .filter(|d| collection_dashboard_ids.contains(&d.dashboard_id))
-                        .collect();
-                    Some(Ok(filtered))
-                } else {
-                    Some(Ok(dashboards))
-                }
-            }
+            Some(
+                dashboards
+                    .into_iter()
+                    .filter(|d| collection_dashboard_ids.contains(&d.dashboard_id))
+                    .collect(),
+            )
+        } else {
+            Some(dashboards)
         }
     };
 
@@ -189,9 +213,8 @@ pub fn DashboardsListPage() -> impl IntoView {
             .unwrap_or_default()
     };
 
-    // `dashboard_update` WebSocket subscription lives at the Layout level
-    // (see `QueryCacheWsBridge` in `components/layout.rs`) so list caches
-    // stay fresh across navigation — KYO-9.
+    // Freshness handled by the sync engine writing to SyncStore on
+    // sync_action WebSocket events (KYO-169).
 
     view! {
         <div class="flex flex-col h-full bg-background">
@@ -309,52 +332,42 @@ pub fn DashboardsListPage() -> impl IntoView {
                             {move || {
                                 let collections = get_collections();
 
-                                filtered_dashboards().map(|result| {
-                                    match result {
-                                        Err(e) => {
-                                            view! {
-                                                <div class="text-center py-16 text-destructive">
-                                                    <p>"Failed to load dashboards: " {e.to_string()}</p>
-                                                </div>
-                                            }.into_any()
-                                        }
-                                        Ok(dashboards) if dashboards.is_empty() => {
-                                            let create_cb = Callback::new(handle_create);
-                                            let has_active_collection = active_collection_id.get().is_some();
-                                            view! {
-                                                <DashboardsEmptyState
-                                                    has_search=Signal::derive(move || query_signal.get().is_some())
-                                                    has_active_collection=has_active_collection
-                                                    on_create=create_cb
-                                                />
-                                            }.into_any()
-                                        }
-                                        Ok(dashboards) => {
-                                            view! {
-                                                <DocumentCardGrid
-                                                    dashboards=dashboards
-                                                    collections=collections
-                                                    on_delete=Callback::new(move |(id, title): (String, String)| {
-                                                        set_deleting_dashboard.set(Some((id, title)));
-                                                        set_confirm_open.set(true);
-                                                    })
-                                                    on_add_to_collection=Callback::new(move |dashboard: DashboardListItem| {
-                                                        set_add_to_collection_dashboard.set(Some(dashboard));
-                                                    })
-                                                    on_remove_from_collection=Callback::new(move |(coll_id, dash_id, coll_name): (String, String, String)| {
-                                                        set_removing_info.set(Some((coll_id, dash_id, coll_name)));
-                                                        set_remove_confirm_open.set(true);
-                                                    })
-                                                    on_collection_click=Callback::new(move |coll_id: String| {
-                                                        if active_collection_id.get_untracked().as_deref() == Some(&coll_id) {
-                                                            set_active_collection_id.set(None);
-                                                        } else {
-                                                            set_active_collection_id.set(Some(coll_id));
-                                                        }
-                                                    })
-                                                />
-                                            }.into_any()
-                                        }
+                                filtered_dashboards().map(|dashboards| {
+                                    if dashboards.is_empty() {
+                                        let create_cb = Callback::new(handle_create);
+                                        let has_active_collection = active_collection_id.get().is_some();
+                                        view! {
+                                            <DashboardsEmptyState
+                                                has_search=Signal::derive(move || query_signal.get().is_some())
+                                                has_active_collection=has_active_collection
+                                                on_create=create_cb
+                                            />
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <DocumentCardGrid
+                                                dashboards=dashboards
+                                                collections=collections
+                                                on_delete=Callback::new(move |(id, title): (String, String)| {
+                                                    set_deleting_dashboard.set(Some((id, title)));
+                                                    set_confirm_open.set(true);
+                                                })
+                                                on_add_to_collection=Callback::new(move |dashboard: DashboardListItem| {
+                                                    set_add_to_collection_dashboard.set(Some(dashboard));
+                                                })
+                                                on_remove_from_collection=Callback::new(move |(coll_id, dash_id, coll_name): (String, String, String)| {
+                                                    set_removing_info.set(Some((coll_id, dash_id, coll_name)));
+                                                    set_remove_confirm_open.set(true);
+                                                })
+                                                on_collection_click=Callback::new(move |coll_id: String| {
+                                                    if active_collection_id.get_untracked().as_deref() == Some(&coll_id) {
+                                                        set_active_collection_id.set(None);
+                                                    } else {
+                                                        set_active_collection_id.set(Some(coll_id));
+                                                    }
+                                                })
+                                            />
+                                        }.into_any()
                                     }
                                 })
                             }}
@@ -370,7 +383,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                     set_active_collection_id=set_active_collection_id
                     on_collections_changed=Callback::new(move |()| {
                         query_cache.invalidate("collections");
-                        query_cache.invalidate("dashboards");
+                        // Dashboards list is kept current by the sync engine (KYO-169).
                     })
                     doc_type="dashboard".to_string()
                 />
@@ -414,6 +427,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 on_added=Callback::new(move |()| {
                     set_add_to_collection_dashboard.set(None);
                     query_cache.invalidate("collections");
+                    // Dashboards list is kept current by the sync engine (KYO-169).
                 })
             />
         </div>

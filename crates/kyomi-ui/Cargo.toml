@@ -191,6 +191,16 @@ kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 libm = "0.2"
 
+# Client-side persistent cache for the sync engine (WASM-only).
+#
+# Design: rusqlite + sqlite-wasm-vfs was evaluated but dropped because rusqlite
+# carries `links = "sqlite3"` which conflicts with sqlx's sqlite feature at the
+# workspace resolver level (Cargo checks link conflicts across all platforms).
+# Instead we use `indexed_db_futures` directly — it provides the same persistent
+# key-value semantics via IndexedDB with a clean async Rust API and no link
+# conflicts.
+indexed_db_futures = { version = "0.6", features = ["serde"] }
+
 [dev-dependencies]
 kyomi-core = { workspace = true, features = ["test-helpers"] }
 kyomi-auth = { workspace = true }

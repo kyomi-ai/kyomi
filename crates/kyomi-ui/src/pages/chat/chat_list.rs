@@ -35,9 +35,8 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
 use crate::components::{Badge, BadgeVariant, Checkbox, ConfirmDialog, EmptyState, SearchInput, Skeleton};
-use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::chat::{
-    bulk_delete_sessions, delete_chat_session, list_chat_sessions, ChatSessionItem,
+    bulk_delete_sessions, delete_chat_session, ChatSessionItem,
 };
 use crate::server_fns::context::UserContext;
 
@@ -110,8 +109,16 @@ pub fn ChatsListPage() -> impl IntoView {
         expect_context::<LocalResource<Result<UserContext, ServerFnError>>>();
 
     // ── Sessions state ───────────────────────────────────────────────────
-    let (sessions, set_sessions) = signal(Vec::<ChatSessionItem>::new());
-    let (is_loading, set_is_loading) = signal(true);
+    // Base list from SyncStore — populated from IndexedDB on startup and kept
+    // current by the sync engine (KYO-169). A separate override signal holds
+    // server search results when the user types in the search box (Tier 2).
+    let sync_store = expect_context::<crate::cache::store::SyncStore>();
+    let store_initialized = sync_store.initialized();
+    let all_sessions_from_store = sync_store.chat_sessions();
+
+    // `search_results` holds server-side search hits when a search is active.
+    // When None, the page renders from the SyncStore.
+    let (search_results, set_search_results) = signal(Option::<Vec<ChatSessionItem>>::None);
 
     // ── Search (with 300ms debounce) ─────────────────────────────────────
     let (search_input, set_search_input) = signal(String::new());
@@ -134,29 +141,32 @@ pub fn ChatsListPage() -> impl IntoView {
     // Stores the action to execute on confirm: single delete ID or bulk flag
     let (pending_delete, set_pending_delete) = signal(Option::<PendingDelete>::None);
 
-    // ── Load sessions function ───────────────────────────────────────────
-    // Backed by the Layout-level QueryCache — cached across navigation with
-    // stale-while-revalidate (KYO-22 Part 2). The deps `(pinned_only,)` are
-    // stringified into the cache key.
-    let query_cache = expect_context::<QueryCache>();
-    let sessions_resource = use_query(
-        "chat_sessions",
-        move || show_pinned_only.get(),
-        |pinned: bool| list_chat_sessions(pinned),
-    );
-
-    // Sync resource results into the sessions signal
-    Effect::new(move |_| {
-        if let Some(Ok(data)) = sessions_resource.get() {
-            set_sessions.set(data);
-            set_is_loading.set(false);
-        } else if let Some(Err(_)) = sessions_resource.get() {
-            set_sessions.set(Vec::new());
-            set_is_loading.set(false);
+    // ── Derived: current session list ────────────────────────────────────
+    // When a text search is active, use the server search results.
+    // Otherwise, use the SyncStore (with client-side pinned filter).
+    let sessions = Signal::derive(move || {
+        if let Some(results) = search_results.get() {
+            // Server search results — apply pinned filter if needed
+            if show_pinned_only.get() {
+                results.into_iter().filter(|s| s.pinned_count > 0).collect()
+            } else {
+                results
+            }
+        } else {
+            // SyncStore — apply client-side pinned filter
+            let mut items = all_sessions_from_store.get();
+            if show_pinned_only.get() {
+                items.retain(|s| s.pinned_count > 0);
+            }
+            items
         }
     });
 
     // ── Debounced search ─────────────────────────────────────────────────
+    // Tier 2 search: when the user types, call `search_chat_messages` on the
+    // server (searches message *content*, not just session titles). The results
+    // override the SyncStore view. When the query is cleared, revert to the
+    // SyncStore (KYO-169).
     #[cfg(target_arch = "wasm32")]
     {
         use crate::server_fns::chat::search_chat_messages;
@@ -174,25 +184,21 @@ pub fn ChatsListPage() -> impl IntoView {
             });
 
             if value.trim().is_empty() {
-                // No search — refetch full list
+                // No search — revert to SyncStore view
                 set_is_searching.set(false);
-                query_cache.invalidate("chat_sessions");
+                set_search_results.set(None);
                 return;
             }
 
             let handle = gloo_timers::callback::Timeout::new(300, move || {
                 set_is_searching.set(true);
-                let pinned = show_pinned_only.get_untracked();
                 leptos::task::spawn_local(async move {
                     match search_chat_messages(value).await {
-                        Ok(mut results) => {
-                            if pinned {
-                                results.retain(|s| s.pinned_count > 0);
-                            }
-                            set_sessions.set(results);
+                        Ok(results) => {
+                            set_search_results.set(Some(results));
                         }
                         Err(_) => {
-                            set_sessions.set(Vec::new());
+                            set_search_results.set(Some(Vec::new()));
                         }
                     }
                     set_is_searching.set(false);
@@ -209,14 +215,14 @@ pub fn ChatsListPage() -> impl IntoView {
         });
     }
 
-    // SSR: no debounce needed
+    // SSR: no debounce needed — store is empty on SSR, search is client-only
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let _ = set_search_results;
         Effect::new(move |_| {
             let value = search_input.get();
             if value.trim().is_empty() {
                 set_is_searching.set(false);
-                query_cache.invalidate("chat_sessions");
             }
             // On SSR, search happens on next page load — no async calls
         });
@@ -232,25 +238,28 @@ pub fn ChatsListPage() -> impl IntoView {
     });
 
     // ── Task 6.4: WebSocket subscription for shared_conversation_activity ─
+    // Optimistically increments unread_count and updates updated_at in the
+    // SyncStore when a message arrives in a shared session. The sync engine
+    // handles structural changes (new sessions, deletes) — this subscription
+    // handles the real-time activity indicator only (KYO-169).
     #[cfg(target_arch = "wasm32")]
     {
         use crate::components::chat::websocket_client::WebSocketContext;
         if let Some(ws_ctx) = use_context::<WebSocketContext>() {
+            let store_for_ws = sync_store;
+            let store_sessions_signal = sync_store.chat_sessions();
             let unsub = ws_ctx.subscribe("shared_conversation_activity", move |msg| {
-                set_sessions.update(|sessions| {
-                    if let Some(session_id) = &msg.session_id
-                        && let Some(session) = sessions
-                            .iter_mut()
-                            .find(|s| s.session_id == *session_id)
-                        {
-                            if !msg.timestamp.is_empty() {
-                                session.updated_at = msg.timestamp.clone();
-                            }
-                            session.unread_count += 1;
-                        }
-                    // Re-sort by updated_at (most recent first)
-                    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                });
+                let Some(ref session_id) = msg.session_id else { return };
+                // Find the affected session in the store, apply the activity
+                // update, and upsert it back so the change propagates reactively.
+                let mut current = store_sessions_signal.get_untracked();
+                if let Some(session) = current.iter_mut().find(|s| s.session_id == *session_id) {
+                    if !msg.timestamp.is_empty() {
+                        session.updated_at = msg.timestamp.clone();
+                    }
+                    session.unread_count += 1;
+                    store_for_ws.upsert_chat_session(session.clone());
+                }
             });
 
             let unsub = send_wrapper::SendWrapper::new(unsub);
@@ -262,7 +271,7 @@ pub fn ChatsListPage() -> impl IntoView {
 
     // ── Task 6.4: Listen for sessions-deleted DOM event ──────────────────
     // NOTE: This Effect::new closure only runs once despite being inside an
-    // effect, because all captured signals (`set_sessions`, `set_selected_chats`)
+    // effect, because all captured signals (`sync_store`, `set_selected_chats`)
     // are write-only — no reactive reads trigger re-execution. The `on_cleanup`
     // inside correctly removes the listener when the component unmounts.
     #[cfg(target_arch = "wasm32")]
@@ -270,6 +279,7 @@ pub fn ChatsListPage() -> impl IntoView {
         use send_wrapper::SendWrapper;
         use wasm_bindgen::prelude::*;
 
+        let store_for_delete = sync_store;
         Effect::new(move |_| {
             let window = web_sys::window().expect("window");
 
@@ -289,9 +299,9 @@ pub fn ChatsListPage() -> impl IntoView {
                             .collect();
 
                         if !deleted_ids.is_empty() {
-                            set_sessions.update(|sessions| {
-                                sessions.retain(|s| !deleted_ids.contains(&s.session_id));
-                            });
+                            for id in &deleted_ids {
+                                store_for_delete.remove_chat_session(id);
+                            }
                             set_selected_chats.update(|selected| {
                                 selected.retain(|id| !deleted_ids.contains(id));
                             });
@@ -345,16 +355,16 @@ pub fn ChatsListPage() -> impl IntoView {
     }
 
     // ── Confirm dialog callbacks ─────────────────────────────────────────
+    let store_for_confirm = sync_store;
     let on_confirm = Callback::new(move |()| {
         set_confirm_open.set(false);
         let pending = pending_delete.get_untracked();
         match pending {
             Some(PendingDelete::Single(session_id)) => {
+                let store = store_for_confirm;
                 leptos::task::spawn_local(async move {
                     if delete_chat_session(session_id.clone()).await.is_ok() {
-                        set_sessions.update(|sessions| {
-                            sessions.retain(|s| s.session_id != session_id);
-                        });
+                        store.remove_chat_session(&session_id);
                         #[cfg(target_arch = "wasm32")]
                         dispatch_sessions_deleted(&[session_id]);
                     }
@@ -366,11 +376,12 @@ pub fn ChatsListPage() -> impl IntoView {
                     return;
                 }
                 set_is_bulk_deleting.set(true);
+                let store = store_for_confirm;
                 leptos::task::spawn_local(async move {
                     if bulk_delete_sessions(ids.clone()).await.is_ok() {
-                        set_sessions.update(|sessions| {
-                            sessions.retain(|s| !ids.contains(&s.session_id));
-                        });
+                        for id in &ids {
+                            store.remove_chat_session(id);
+                        }
                         set_selected_chats.set(Vec::new());
                         #[cfg(target_arch = "wasm32")]
                         dispatch_sessions_deleted(&ids);
@@ -633,7 +644,9 @@ pub fn ChatsListPage() -> impl IntoView {
                         // Wait for user context to be available
                         let _user_ctx = user_ctx_resource.get();
 
-                        if is_loading.get() {
+                        // Show skeleton until the SyncStore has been hydrated
+                        // from IndexedDB (or a search is in progress).
+                        if !store_initialized.get() {
                             return view! { <ChatsLoadingSkeleton /> }.into_any();
                         }
 

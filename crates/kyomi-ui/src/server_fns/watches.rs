@@ -242,6 +242,29 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         })?;
     }
 
+    // Broadcast live sync action to workspace peers.
+    if let Some(ws_manager) = &ctx.ws_manager {
+        let sync_action = kyomi_types::sync::SyncAction {
+            sync_id: 0,
+            entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
+            entity_id: watch.watch_id.clone(),
+            workspace_id: ws_id.to_string(),
+            action: kyomi_types::sync::SyncActionType::Insert,
+            data: Some(serde_json::json!({
+                "watch_id": watch.watch_id,
+                "name": watch.name,
+            })),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        kyomi_auth::websocket::helpers::send_sync_action(
+            ws_manager,
+            ws_id,
+            &sync_action,
+            Some(&auth.user_id),
+        )
+        .await;
+    }
+
     Ok(watch_to_item(&ctx.db, &watch).await)
 }
 
@@ -367,6 +390,26 @@ pub async fn update_watch(
         }
     }
 
+    // Broadcast live sync action to workspace peers.
+    if let Some(ws_manager) = &ctx.ws_manager {
+        let sync_action = kyomi_types::sync::SyncAction {
+            sync_id: 0,
+            entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
+            entity_id: watch_id.clone(),
+            workspace_id: ws_id.to_string(),
+            action: kyomi_types::sync::SyncActionType::Update,
+            data: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        kyomi_auth::websocket::helpers::send_sync_action(
+            ws_manager,
+            ws_id,
+            &sync_action,
+            Some(&auth.user_id),
+        )
+        .await;
+    }
+
     Ok(())
 }
 
@@ -382,6 +425,26 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
     kyomi_auth::watch_service::delete_watch(&ctx.db, &watch_id, ws_id)
         .await
         .into_sfn()?;
+
+    // Broadcast live sync action to workspace peers.
+    if let Some(ws_manager) = &ctx.ws_manager {
+        let sync_action = kyomi_types::sync::SyncAction {
+            sync_id: 0,
+            entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
+            entity_id: watch_id.clone(),
+            workspace_id: ws_id.to_string(),
+            action: kyomi_types::sync::SyncActionType::Delete,
+            data: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        kyomi_auth::websocket::helpers::send_sync_action(
+            ws_manager,
+            ws_id,
+            &sync_action,
+            Some(&auth.user_id),
+        )
+        .await;
+    }
 
     Ok(())
 }
@@ -403,6 +466,26 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
     kyomi_auth::watch_service::toggle_watch(&ctx.db, &watch_id, ws_id, !watch.enabled)
         .await
         .into_sfn()?;
+
+    // Broadcast live sync action to workspace peers.
+    if let Some(ws_manager) = &ctx.ws_manager {
+        let sync_action = kyomi_types::sync::SyncAction {
+            sync_id: 0,
+            entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
+            entity_id: watch_id.clone(),
+            workspace_id: ws_id.to_string(),
+            action: kyomi_types::sync::SyncActionType::Update,
+            data: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        kyomi_auth::websocket::helpers::send_sync_action(
+            ws_manager,
+            ws_id,
+            &sync_action,
+            Some(&auth.user_id),
+        )
+        .await;
+    }
 
     Ok(())
 }

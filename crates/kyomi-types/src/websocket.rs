@@ -43,6 +43,10 @@ pub enum MessageType {
     QueryStreamChunk,
     QueryStreamComplete,
     QueryStreamError,
+    // Live sync broadcast types (Rust-only — used for real-time cache invalidation)
+    SyncAction,
+    SyncComplete,
+    SyncReset,
 }
 
 impl std::fmt::Display for MessageType {

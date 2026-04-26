@@ -17,6 +17,8 @@ use kyomi_core::DbPool;
 use serde::{Deserialize, Serialize};
 
 use crate::encryption;
+use crate::sync_log_service;
+use kyomi_types::sync::{SyncActionType, entity_types};
 
 // ---------------------------------------------------------------------------
 // Response structs
@@ -176,6 +178,51 @@ struct CreatedAtRow {
 }
 
 
+// ─── Sync snapshot helpers ────────────────────────────────────────────────────
+
+/// Row for building a session metadata snapshot.
+#[derive(Debug, sqlx::FromRow)]
+struct SessionSnapshotRow {
+    session_id: String,
+    user_id: String,
+    workspace_id: String,
+    title: Option<String>,
+    updated_at: String,
+    created_at: String,
+}
+
+/// Build a JSON snapshot for the sync log from a live session row.
+///
+/// Returns `(workspace_id, snapshot_json)`. Returns `None` if the session is
+/// not found or if the query fails.
+async fn fetch_session_snapshot(
+    db: &DbPool,
+    session_id: &str,
+) -> Option<(String, serde_json::Value)> {
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        SessionSnapshotRow,
+        r#"SELECT session_id, user_id, workspace_id, title,
+                  CAST(updated_at AS TEXT) AS updated_at,
+                  CAST(created_at AS TEXT) AS created_at
+           FROM chat_sessions WHERE session_id = $1"#,
+        session_id
+    )
+    .ok()?;
+
+    let row = row?;
+    let workspace_id = row.workspace_id.clone();
+    let json = serde_json::json!({
+        "session_id": row.session_id,
+        "user_id": row.user_id,
+        "workspace_id": row.workspace_id,
+        "title": row.title,
+        "updated_at": row.updated_at,
+        "created_at": row.created_at,
+    });
+    Some((workspace_id, json))
+}
+
 /// Fetch session counts for a list of session IDs.
 ///
 /// Uses `= ANY($1)` on Postgres and individual placeholders on SQLite.
@@ -285,6 +332,30 @@ pub async fn create_session(
         empty_config
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create session: {e}")))?;
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    {
+        let snapshot = serde_json::json!({
+            "session_id": session_id,
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "title": serde_json::Value::Null,
+            "updated_at": now.to_rfc3339(),
+            "created_at": now.to_rfc3339(),
+        });
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_types::CHAT_SESSION,
+            &session_id,
+            workspace_id,
+            SyncActionType::Insert,
+            Some(snapshot),
+        )
+        .await
+        {
+            tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+        }
+    }
 
     Ok(session_id)
 }
@@ -763,6 +834,21 @@ pub async fn add_message(
     )
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to update session timestamp: {e}")))?;
 
+    // Sync log for the session metadata update — best-effort.
+    if let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await
+        && let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_types::CHAT_SESSION,
+            session_id,
+            &workspace_id,
+            SyncActionType::Update,
+            Some(snapshot),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+    }
+
     Ok(msg_id)
 }
 
@@ -892,6 +978,23 @@ pub async fn update_session(
                 .map(kyomi_core::db::DbQueryResult::from_sqlite)?
         }
     };
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0
+        && let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await
+        && let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_types::CHAT_SESSION,
+            session_id,
+            &workspace_id,
+            SyncActionType::Update,
+            Some(snapshot),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+    }
+
     Ok(result.rows_affected() > 0)
 }
 
@@ -937,6 +1040,26 @@ pub async fn delete_session(
         return Ok(false);
     }
 
+    // Resolve workspace_id BEFORE deletion so the sync log entry has it even
+    // when the caller passes workspace_id=None.
+    let resolved_wid: Option<String> = match workspace_id {
+        Some(w) => Some(w.to_string()),
+        None => {
+            let row = kyomi_core::db_fetch_optional!(
+                db,
+                SessionSnapshotRow,
+                r#"SELECT session_id, user_id, workspace_id, title,
+                          CAST(updated_at AS TEXT) AS updated_at,
+                          CAST(created_at AS TEXT) AS created_at
+                   FROM chat_sessions WHERE session_id = $1"#,
+                session_id
+            )
+            .ok()
+            .flatten();
+            row.map(|r| r.workspace_id)
+        }
+    };
+
     // Delete messages first (explicit cascade for safety, matching Python).
     kyomi_core::db_execute!(
         db,
@@ -965,6 +1088,26 @@ pub async fn delete_session(
         )
     }
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete session: {e}")))?;
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0 {
+        if let Some(wid) = &resolved_wid {
+            if let Err(e) = sync_log_service::write_sync_entry(
+                db,
+                entity_types::CHAT_SESSION,
+                session_id,
+                wid,
+                SyncActionType::Delete,
+                None,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
+            }
+        } else {
+            tracing::warn!(session_id = %session_id, "Skipped sync log entry: workspace_id unknown");
+        }
+    }
 
     Ok(result.rows_affected() > 0)
 }
@@ -1018,7 +1161,7 @@ pub async fn bulk_delete_sessions(
     let owned_ids: Vec<String> = owned.into_iter().map(|r| r.session_id).collect();
 
     // Delete messages first, then sessions using match blocks for array binds.
-    match db {
+    let deleted_count = match db {
         kyomi_core::db::DbPool::Postgres(pg) => {
             sqlx::query("DELETE FROM chat_messages WHERE session_id = ANY($1)")
                 .bind(&owned_ids)
@@ -1030,7 +1173,7 @@ pub async fn bulk_delete_sessions(
                 .execute(pg)
                 .await?;
 
-            Ok(result.rows_affected() as i64)
+            result.rows_affected() as i64
         }
         kyomi_core::db::DbPool::Sqlite(sq) => {
             let (in_clause, _) = in_clause_placeholders(owned_ids.len(), 1);
@@ -1049,9 +1192,27 @@ pub async fn bulk_delete_sessions(
             }
             let result = query.execute(sq).await?;
 
-            Ok(result.rows_affected() as i64)
+            result.rows_affected() as i64
+        }
+    };
+
+    // Sync log — one Delete entry per removed session, best-effort.
+    for sid in &owned_ids {
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_types::CHAT_SESSION,
+            sid,
+            workspace_id,
+            SyncActionType::Delete,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, session_id = %sid, "Failed to write sync log entry");
         }
     }
+
+    Ok(deleted_count)
 }
 
 /// Toggle the pinned flag on a message (with session ownership check).
@@ -1695,6 +1856,56 @@ struct ExistsRow {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// ─── Sync helpers ─────────────────────────────────────────────────────────────
+
+/// List all chat sessions for a workspace, returning list-level metadata
+/// as JSON values for the sync bootstrap protocol.
+pub async fn list_sessions_for_sync(
+    db: &kyomi_core::DbPool,
+    workspace_id: &str,
+) -> kyomi_core::Result<Vec<serde_json::Value>> {
+    #[derive(sqlx::FromRow)]
+    struct SessionSyncRow {
+        session_id: String,
+        user_id: String,
+        workspace_id: String,
+        title: Option<String>,
+        updated_at: String,
+        created_at: String,
+    }
+
+    let rows: Vec<SessionSyncRow> = kyomi_core::db_fetch_all!(
+        db,
+        SessionSyncRow,
+        r#"SELECT session_id, user_id, workspace_id, title,
+                  CAST(updated_at AS TEXT) AS updated_at,
+                  CAST(created_at AS TEXT) AS created_at
+           FROM chat_sessions
+           WHERE workspace_id = $1
+           ORDER BY updated_at DESC"#,
+        workspace_id
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to list sessions for sync: {e}"))
+    })?;
+
+    let values = rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "session_id": row.session_id,
+                "user_id": row.user_id,
+                "workspace_id": row.workspace_id,
+                "title": row.title,
+                "updated_at": row.updated_at,
+                "created_at": row.created_at,
+            })
+        })
+        .collect();
+
+    Ok(values)
+}
 
 /// Convert a `SessionWithUserRow` into a `SessionDetail`.
 fn session_row_to_detail(row: SessionWithUserRow) -> SessionDetail {

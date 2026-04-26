@@ -16,6 +16,7 @@ slack = ["dep:kyomi-slack", "kyomi-ui/slack"]
 kyomi-slack = { path = "../../enterprise/kyomi-slack", optional = true }
 kyomi-core = { workspace = true }
 kyomi-auth = { workspace = true }
+kyomi-types = { workspace = true }
 kyomi-ui = { workspace = true, features = ["ssr"] }
 leptos = "0.8"
 leptos_axum = "0.8"

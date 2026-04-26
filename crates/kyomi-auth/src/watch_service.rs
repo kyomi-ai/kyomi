@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 use crate::chat_service;
+use crate::sync_log_service;
+use kyomi_types::sync::{SyncActionType, entity_types};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -552,6 +554,24 @@ pub async fn create_watch(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create watch: {e}")))?;
 
     tracing::info!(watch_id = %watch.watch_id, name = %watch.name, "Created watch");
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    {
+        let snapshot = serde_json::to_value(&watch).ok();
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_types::WATCH,
+            &watch.watch_id,
+            &watch.workspace_id,
+            SyncActionType::Insert,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, watch_id = %watch.watch_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(watch)
 }
 
@@ -605,6 +625,24 @@ pub async fn list_watches(
         .map_err(|e| kyomi_core::Error::Internal(format!("failed to list watches: {e}")))?;
 
     Ok(watches)
+}
+
+// ─── Sync helpers ─────────────────────────────────────────────────────────────
+
+/// List all watches for a workspace, returning the full Watch records as JSON
+/// values for the sync bootstrap protocol.
+pub async fn list_watches_for_sync(
+    db: &DbPool,
+    workspace_id: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let watches = list_watches(db, workspace_id).await?;
+
+    let values = watches
+        .into_iter()
+        .map(|w| serde_json::to_value(&w).unwrap_or_default())
+        .collect();
+
+    Ok(values)
 }
 
 // ─── List enabled watches ───────────────────────────────────────────────────
@@ -801,6 +839,24 @@ pub async fn update_watch(
     })?;
 
     tracing::info!(watch_id = %watch_id, "Updated watch");
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    {
+        let snapshot = serde_json::to_value(&watch).ok();
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_types::WATCH,
+            &watch.watch_id,
+            &watch.workspace_id,
+            SyncActionType::Update,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, watch_id = %watch_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(watch)
 }
 
@@ -823,6 +879,21 @@ pub async fn delete_watch(db: &DbPool, watch_id: &str, workspace_id: &str) -> Re
     }
 
     tracing::info!(watch_id = %watch_id, "Deleted watch");
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if let Err(e) = sync_log_service::write_sync_entry(
+        db,
+        entity_types::WATCH,
+        watch_id,
+        workspace_id,
+        SyncActionType::Delete,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, watch_id = %watch_id, "Failed to write sync log entry");
+    }
+
     Ok(())
 }
 

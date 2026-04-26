@@ -26,6 +26,9 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::sync::LazyLock;
 
+use crate::sync_log_service;
+use kyomi_types::sync::{SyncActionType, entity_types};
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// Free tier dashboard limit.
@@ -227,6 +230,49 @@ pub fn generate_change_summary(old_content: &str, new_content: &str) -> String {
     }
 }
 
+// ─── Sync snapshot helper ────────────────────────────────────────────────────
+
+/// Fetch a dashboard/knowledge row and build a JSON snapshot for the sync log.
+///
+/// Returns `None` if the row no longer exists or if the query fails.
+async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) -> Option<serde_json::Value> {
+    #[derive(sqlx::FromRow)]
+    struct SnapshotRow {
+        dashboard_id: String,
+        user_id: String,
+        workspace_id: String,
+        title: String,
+        doc_type: String,
+        content_preview: Option<String>,
+        updated_at: String,
+        created_at: String,
+    }
+
+    let row = db_fetch_optional!(
+        db,
+        SnapshotRow,
+        r#"SELECT dashboard_id, user_id, workspace_id, title, doc_type,
+                  CAST(content_preview AS TEXT) AS content_preview,
+                  CAST(updated_at AS TEXT) AS updated_at,
+                  CAST(created_at AS TEXT) AS created_at
+           FROM dashboards WHERE dashboard_id = $1"#,
+        dashboard_id
+    )
+    .ok()?;
+
+    let row = row?;
+    Some(serde_json::json!({
+        "dashboard_id": row.dashboard_id,
+        "user_id": row.user_id,
+        "workspace_id": row.workspace_id,
+        "title": row.title,
+        "doc_type": row.doc_type,
+        "content_preview": row.content_preview,
+        "updated_at": row.updated_at,
+        "created_at": row.created_at,
+    }))
+}
+
 // ─── Create dashboard ────────────────────────────────────────────────────────
 
 /// Create a new dashboard or knowledge document.
@@ -294,6 +340,28 @@ pub async fn create_dashboard(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to create dashboard: {e}")))?;
 
     tracing::info!(dashboard_id = %dashboard_id, doc_type = doc_type_str, "Created dashboard");
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    {
+        let entity_type = if doc_type.is_dashboard() {
+            entity_types::DASHBOARD
+        } else {
+            entity_types::KNOWLEDGE
+        };
+        let snapshot = fetch_dashboard_snapshot(db, &dashboard_id).await;
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_type,
+            &dashboard_id,
+            workspace_id,
+            SyncActionType::Insert,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+        }
+    }
 
     // Rechunk newly created document in background (if content is non-trivial)
     if let Some(embed_svc) = embed
@@ -516,6 +584,28 @@ pub async fn update_dashboard(
         }
     }
 
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0 {
+        let entity_type = if current_doc_type.is_dashboard() {
+            entity_types::DASHBOARD
+        } else {
+            entity_types::KNOWLEDGE
+        };
+        let snapshot = fetch_dashboard_snapshot(db, dashboard_id).await;
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_type,
+            dashboard_id,
+            workspace_id,
+            SyncActionType::Update,
+            snapshot,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(result.rows_affected() > 0)
 }
 
@@ -551,6 +641,28 @@ pub async fn delete_dashboard(
     .map_err(|e| kyomi_core::Error::Internal(format!("failed to delete dashboard: {e}")))?;
 
     tracing::info!(dashboard_id = %dashboard_id, "Deleted dashboard");
+
+    // Sync log — best-effort: log a warning and continue on failure.
+    if result.rows_affected() > 0 {
+        let entity_type = if current.doc_type().is_dashboard() {
+            entity_types::DASHBOARD
+        } else {
+            entity_types::KNOWLEDGE
+        };
+        if let Err(e) = sync_log_service::write_sync_entry(
+            db,
+            entity_type,
+            dashboard_id,
+            workspace_id,
+            SyncActionType::Delete,
+            None,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, dashboard_id = %dashboard_id, "Failed to write sync log entry");
+        }
+    }
+
     Ok(result.rows_affected() > 0)
 }
 
@@ -1508,6 +1620,84 @@ pub fn spawn_rechunk_document(
             tracing::error!(dashboard_id = %dashboard_id, "Background rechunking failed: {e}");
         }
     });
+}
+
+// ─── Sync helpers ─────────────────────────────────────────────────────────────
+
+/// List all dashboards (doc_type = 'dashboard') for a workspace, returning
+/// list-level metadata as JSON values for the sync bootstrap protocol.
+pub async fn list_dashboards_for_sync(
+    db: &DbPool,
+    workspace_id: &str,
+) -> Result<Vec<serde_json::Value>> {
+    list_docs_for_sync(db, workspace_id, "dashboard").await
+}
+
+/// List all knowledge documents (doc_type = 'knowledge') for a workspace,
+/// returning list-level metadata as JSON values for the sync bootstrap protocol.
+pub async fn list_knowledge_for_sync(
+    db: &DbPool,
+    workspace_id: &str,
+) -> Result<Vec<serde_json::Value>> {
+    list_docs_for_sync(db, workspace_id, "knowledge").await
+}
+
+/// Shared implementation for list_dashboards_for_sync / list_knowledge_for_sync.
+async fn list_docs_for_sync(
+    db: &DbPool,
+    workspace_id: &str,
+    doc_type: &str,
+) -> Result<Vec<serde_json::Value>> {
+    #[derive(sqlx::FromRow)]
+    struct DocSyncRow {
+        dashboard_id: String,
+        user_id: String,
+        workspace_id: String,
+        title: String,
+        content_preview: Option<String>,
+        summary: Option<String>,
+        updated_at: String,
+        created_at: String,
+        doc_type: String,
+    }
+
+    let rows: Vec<DocSyncRow> = kyomi_core::db_fetch_all!(
+        db,
+        DocSyncRow,
+        r#"SELECT dashboard_id, user_id, workspace_id, title,
+                  CAST(content_preview AS TEXT) AS content_preview,
+                  CAST(summary AS TEXT) AS summary,
+                  CAST(updated_at AS TEXT) AS updated_at,
+                  CAST(created_at AS TEXT) AS created_at,
+                  doc_type
+           FROM dashboards
+           WHERE workspace_id = $1 AND doc_type = $2
+           ORDER BY updated_at DESC"#,
+        workspace_id,
+        doc_type
+    )
+    .map_err(|e| {
+        kyomi_core::Error::Internal(format!("failed to list {doc_type} docs for sync: {e}"))
+    })?;
+
+    let values = rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "dashboard_id": row.dashboard_id,
+                "user_id": row.user_id,
+                "workspace_id": row.workspace_id,
+                "title": row.title,
+                "content_preview": row.content_preview,
+                "summary": row.summary,
+                "updated_at": row.updated_at,
+                "created_at": row.created_at,
+                "doc_type": row.doc_type,
+            })
+        })
+        .collect();
+
+    Ok(values)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

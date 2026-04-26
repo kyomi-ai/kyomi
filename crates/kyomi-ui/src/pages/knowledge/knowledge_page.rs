@@ -29,7 +29,7 @@ use crate::pages::dashboards::CollectionsSidebar;
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::collections::{list_collections, CollectionItem};
 use crate::server_fns::dashboards::DashboardListItem;
-use crate::server_fns::knowledge::{create_knowledge_doc, delete_knowledge_doc, list_knowledge_docs};
+use crate::server_fns::knowledge::{create_knowledge_doc, delete_knowledge_doc};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main page component
@@ -48,13 +48,36 @@ pub fn KnowledgePage() -> impl IntoView {
     let (sort_signal, set_sort_signal) = signal("recent".to_string());
 
     // ── Data fetching ───────────────────────────────────────────────────
-    // Layout-level QueryCache — cached across navigation (KYO-22 Part 2).
+    // Knowledge docs come from the SyncStore (populated from IndexedDB on
+    // startup and kept current by the sync engine). Client-side
+    // search/sort replaces the server-side query so list page navigation
+    // is instant on return visits (KYO-169).
     let query_cache = expect_context::<QueryCache>();
-    let knowledge_resource = use_query(
-        "knowledge",
-        move || (query_signal.get(), sort_signal.get()),
-        |(q, s): (Option<String>, String)| list_knowledge_docs(q, Some(s), None),
-    );
+    let sync_store = expect_context::<crate::cache::store::SyncStore>();
+    let all_knowledge_docs = sync_store.knowledge_docs();
+
+    let store_initialized = sync_store.initialized();
+
+    // Client-side search + sort derived from the in-memory store.
+    let knowledge_signal = Signal::derive(move || {
+        let mut items = all_knowledge_docs.get();
+        // Search filter
+        if let Some(ref q) = query_signal.get() {
+            let q_lower = q.to_lowercase();
+            items.retain(|d| {
+                d.title.to_lowercase().contains(&q_lower)
+                    || d.summary.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
+            });
+        }
+        // Sort
+        match sort_signal.get().as_str() {
+            "updated_at" | "recent" | "" => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+            "created_at" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
+            _ => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+        }
+        items
+    });
 
     // Collections list, scoped to knowledge docs. Deps include the doc_type
     // so this entry stays distinct from the dashboards page's collections.
@@ -76,7 +99,8 @@ pub fn KnowledgePage() -> impl IntoView {
                 if let Err(e) = delete_knowledge_doc(doc_id).await {
                     leptos::logging::error!("Failed to delete knowledge doc: {e}");
                 }
-                query_cache.invalidate("knowledge");
+                // Sync engine handles cache updates via WebSocket — no manual
+                // invalidation needed for knowledge docs (KYO-169).
             });
         }
     });
@@ -108,33 +132,34 @@ pub fn KnowledgePage() -> impl IntoView {
     };
 
     // ── Filter documents by active collection ───────────────────────────
-    let filtered_docs = move || -> Option<Result<Vec<DashboardListItem>, ServerFnError>> {
-        let result = knowledge_resource.get()?;
+    // Returns None while the SyncStore has not yet been initialized (shows
+    // the loading skeleton). Once initialized, returns the list (possibly
+    // empty) filtered by the active collection.
+    let filtered_docs = move || -> Option<Vec<DashboardListItem>> {
+        if !store_initialized.get() {
+            return None;
+        }
+        let docs = knowledge_signal.get();
         let active_id = active_collection_id.get();
 
-        match result {
-            Err(e) => Some(Err(e)),
-            Ok(docs) => {
-                if let Some(ref coll_id) = active_id {
-                    let collection_doc_ids: std::collections::HashSet<String> =
-                        collections_resource
-                            .get()
-                            .and_then(|r| r.ok())
-                            .unwrap_or_default()
-                            .iter()
-                            .filter(|c| c.collection_id == *coll_id)
-                            .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
-                            .collect();
+        if let Some(ref coll_id) = active_id {
+            let collection_doc_ids: std::collections::HashSet<String> =
+                collections_resource
+                    .get()
+                    .and_then(|r| r.ok())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|c| c.collection_id == *coll_id)
+                    .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
+                    .collect();
 
-                    let filtered: Vec<DashboardListItem> = docs
-                        .into_iter()
-                        .filter(|d| collection_doc_ids.contains(&d.dashboard_id))
-                        .collect();
-                    Some(Ok(filtered))
-                } else {
-                    Some(Ok(docs))
-                }
-            }
+            Some(
+                docs.into_iter()
+                    .filter(|d| collection_doc_ids.contains(&d.dashboard_id))
+                    .collect(),
+            )
+        } else {
+            Some(docs)
         }
     };
 
@@ -207,37 +232,27 @@ pub fn KnowledgePage() -> impl IntoView {
                             {move || {
                                 let collections = get_collections();
 
-                                filtered_docs().map(|result| {
-                                    match result {
-                                        Err(e) => {
-                                            view! {
-                                                <div class="text-center py-16 text-destructive">
-                                                    <p>"Failed to load knowledge: " {e.to_string()}</p>
-                                                </div>
-                                            }.into_any()
-                                        }
-                                        Ok(docs) if docs.is_empty() => {
-                                            let create_cb = Callback::new(handle_create);
-                                            view! {
-                                                <KnowledgeEmptyState
-                                                    has_search=Signal::derive(move || query_signal.get().is_some())
-                                                    on_create=create_cb
-                                                />
-                                            }.into_any()
-                                        }
-                                        Ok(docs) => {
-                                            view! {
-                                                <DocumentCardGrid
-                                                    dashboards=docs
-                                                    collections=collections
-                                                    on_delete=Callback::new(move |(id, title): (String, String)| {
-                                                        set_deleting_doc.set(Some((id, title)));
-                                                        set_confirm_open.set(true);
-                                                    })
-                                                    base_path="/knowledge"
-                                                />
-                                            }.into_any()
-                                        }
+                                filtered_docs().map(|docs| {
+                                    if docs.is_empty() {
+                                        let create_cb = Callback::new(handle_create);
+                                        view! {
+                                            <KnowledgeEmptyState
+                                                has_search=Signal::derive(move || query_signal.get().is_some())
+                                                on_create=create_cb
+                                            />
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <DocumentCardGrid
+                                                dashboards=docs
+                                                collections=collections
+                                                on_delete=Callback::new(move |(id, title): (String, String)| {
+                                                    set_deleting_doc.set(Some((id, title)));
+                                                    set_confirm_open.set(true);
+                                                })
+                                                base_path="/knowledge"
+                                            />
+                                        }.into_any()
                                     }
                                 })
                             }}
@@ -253,7 +268,7 @@ pub fn KnowledgePage() -> impl IntoView {
                     set_active_collection_id=set_active_collection_id
                     on_collections_changed=Callback::new(move |()| {
                         query_cache.invalidate("collections");
-                        query_cache.invalidate("knowledge");
+                        // Knowledge docs list is kept current by the sync engine (KYO-169).
                     })
                     doc_type="knowledge".to_string()
                 />
