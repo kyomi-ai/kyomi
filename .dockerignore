@@ -1,8 +1,9 @@
 # Exclude node_modules from all Docker build contexts
 **/node_modules
 
-# Rust build artifacts (large)
+# Rust build artifacts (large) — except the release binary needed by Dockerfile
 target/
+!target/release/kyomi
 apps/backend-rust/target
 
 # Local dev data
