@@ -21,15 +21,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DashboardListItem {
     pub dashboard_id: String,
+    #[serde(default)]
     pub user_id: String,
+    #[serde(default)]
     pub workspace_id: String,
     pub title: String,
+    #[serde(default)]
     pub content: String,
     pub content_preview: Option<String>,
     pub summary: Option<String>,
     pub last_change_summary: Option<String>,
+    #[serde(default)]
     pub popularity_score: f64,
+    #[serde(default)]
     pub view_count: i64,
+    #[serde(default)]
     pub recent_views: i64,
     pub updated_at: String,
     pub created_at: String,

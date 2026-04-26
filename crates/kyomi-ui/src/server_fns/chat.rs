@@ -61,12 +61,16 @@ pub struct ChatSessionItem {
     pub title: Option<String>,
     pub model: Option<String>,
     pub session_type: Option<String>,
+    #[serde(default)]
     pub shared: bool,
     pub shared_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
     pub message_count: i64,
+    #[serde(default)]
     pub pinned_count: i64,
+    #[serde(default)]
     pub unread_count: i64,
     pub created_by: Option<SessionUser>,
     pub slack_channel_id: Option<String>,

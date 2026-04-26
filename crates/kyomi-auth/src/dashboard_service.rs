@@ -1654,8 +1654,8 @@ async fn list_docs_for_sync(
         user_id: String,
         workspace_id: String,
         title: String,
-        content_preview: Option<String>,
-        summary: Option<String>,
+        content: String,
+        last_change_summary: Option<String>,
         updated_at: String,
         created_at: String,
         doc_type: String,
@@ -1664,9 +1664,8 @@ async fn list_docs_for_sync(
     let rows: Vec<DocSyncRow> = kyomi_core::db_fetch_all!(
         db,
         DocSyncRow,
-        r#"SELECT dashboard_id, user_id, workspace_id, title,
-                  CAST(content_preview AS TEXT) AS content_preview,
-                  CAST(summary AS TEXT) AS summary,
+        r#"SELECT dashboard_id, user_id, workspace_id, title, content,
+                  last_change_summary,
                   CAST(updated_at AS TEXT) AS updated_at,
                   CAST(created_at AS TEXT) AS created_at,
                   doc_type
@@ -1683,13 +1682,23 @@ async fn list_docs_for_sync(
     let values = rows
         .into_iter()
         .map(|row| {
+            let summary = extract_summary(&row.content);
+            let content_preview = if row.content.len() > 200 {
+                Some(row.content[..200].to_string())
+            } else if row.content.is_empty() {
+                None
+            } else {
+                Some(row.content.clone())
+            };
             serde_json::json!({
                 "dashboard_id": row.dashboard_id,
                 "user_id": row.user_id,
                 "workspace_id": row.workspace_id,
                 "title": row.title,
-                "content_preview": row.content_preview,
-                "summary": row.summary,
+                "content": row.content,
+                "content_preview": content_preview,
+                "summary": summary,
+                "last_change_summary": row.last_change_summary,
                 "updated_at": row.updated_at,
                 "created_at": row.created_at,
                 "doc_type": row.doc_type,

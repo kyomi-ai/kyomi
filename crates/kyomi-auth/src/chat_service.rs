@@ -1869,21 +1869,37 @@ pub async fn list_sessions_for_sync(
     struct SessionSyncRow {
         session_id: String,
         user_id: String,
-        workspace_id: String,
         title: Option<String>,
+        model: Option<String>,
+        session_type: String,
+        #[sqlx(default)]
+        shared: bool,
+        shared_at: Option<String>,
         updated_at: String,
         created_at: String,
+        display_name: String,
     }
+
+    let is_pg = db.is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+    let sql = format!(
+        r#"SELECT cs.session_id, cs.user_id, cs.title,
+                  cs.model, cs.session_type,
+                  COALESCE(cs.shared, {bf}) AS shared,
+                  CAST(cs.shared_at AS TEXT) AS shared_at,
+                  CAST(cs.updated_at AS TEXT) AS updated_at,
+                  CAST(cs.created_at AS TEXT) AS created_at,
+                  COALESCE(u.name, u.email, 'Unknown') AS display_name
+           FROM chat_sessions cs
+           LEFT JOIN users u ON cs.user_id = u.user_id
+           WHERE cs.workspace_id = $1
+           ORDER BY cs.updated_at DESC"#
+    );
 
     let rows: Vec<SessionSyncRow> = kyomi_core::db_fetch_all!(
         db,
         SessionSyncRow,
-        r#"SELECT session_id, user_id, workspace_id, title,
-                  CAST(updated_at AS TEXT) AS updated_at,
-                  CAST(created_at AS TEXT) AS created_at
-           FROM chat_sessions
-           WHERE workspace_id = $1
-           ORDER BY updated_at DESC"#,
+        &sql,
         workspace_id
     )
     .map_err(|e| {
@@ -1895,11 +1911,21 @@ pub async fn list_sessions_for_sync(
         .map(|row| {
             serde_json::json!({
                 "session_id": row.session_id,
-                "user_id": row.user_id,
-                "workspace_id": row.workspace_id,
                 "title": row.title,
-                "updated_at": row.updated_at,
+                "model": row.model,
+                "session_type": row.session_type,
+                "shared": row.shared,
+                "shared_at": row.shared_at,
                 "created_at": row.created_at,
+                "updated_at": row.updated_at,
+                "message_count": 0,
+                "pinned_count": 0,
+                "unread_count": 0,
+                "created_by": {
+                    "user_id": row.user_id,
+                    "display_name": row.display_name,
+                },
+                "slack_channel_id": null,
             })
         })
         .collect();
