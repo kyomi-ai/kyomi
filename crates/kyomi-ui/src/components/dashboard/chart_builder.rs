@@ -1279,11 +1279,11 @@ pub fn ChartBuilderModal(
                                 </div>
 
                                 // Sub-tab content
-                                <div class="flex-1 min-h-0 overflow-auto">
+                                <div class="flex-1 min-h-0 flex flex-col">
                                     // ── Visual sub-tab ──────────────────
                                     // Always rendered — hidden class toggled so inputs keep
                                     // DOM focus when switching between Visual / AI / YAML tabs.
-                                    <div class="p-4 space-y-6" class:hidden=move || config_tab.get() != "visual">
+                                    <div class="p-4 space-y-6 flex-1 min-h-0 overflow-auto" class:hidden=move || config_tab.get() != "visual">
                                             // Chart Type
                                             <div class="space-y-2">
                                                 <label class=LABEL_CLASS>"Chart Type"</label>
@@ -1549,7 +1549,7 @@ pub fn ChartBuilderModal(
                                     // ── YAML sub-tab ────────────────────
                                     // Always rendered — hidden class toggled so the YAML
                                     // editor input keeps focus across tab switches.
-                                    <div class="flex flex-col h-full min-h-[400px]" class:hidden=move || config_tab.get() != "yaml">
+                                    <div class="flex flex-col flex-1 min-h-[400px]" class:hidden=move || config_tab.get() != "yaml">
                                             // Inline parse error banner — shown only while the buffer
                                             // fails to parse. The AST keeps showing the last-known-good
                                             // state to the Visual tab in the meantime.
