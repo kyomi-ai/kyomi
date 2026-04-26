@@ -398,7 +398,7 @@ pub fn KyomiChart(
             // `min-height` reserves the rendered chart's vertical space so the
             // ChartMLChart loading placeholder doesn't cause a layout shift when
             // data arrives. (Parity fix #11 / #23 / #29.)
-            <div class="w-full" style=format!("min-height: {}px", chart_height_px)>
+            <div class="w-full flex flex-col" style=format!("min-height: {}px", chart_height_px)>
                 <ChartMLChart
                     spec=spec_signal
                     chartml=chartml

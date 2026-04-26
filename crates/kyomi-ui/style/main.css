@@ -1074,6 +1074,14 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 .kode-toolbar { overflow-y: hidden; }
 
 
+/* KYO-214: chartml-container must grow to fill the height-reserve wrapper
+ * so the absolutely-positioned loading indicator centers vertically within
+ * the full chart tile, not just the container's natural content height. */
+.chart-card .chartml-container {
+  flex: 1 1 0%;
+  min-height: 0;
+}
+
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected
  * automatically by chartml-leptos's ChartMLChart component on mount.
  * No manual CSS needed — styles are embedded in the chartml-leptos crate. */
