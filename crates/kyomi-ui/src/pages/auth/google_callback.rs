@@ -8,6 +8,8 @@
 //! Auto-processes the callback on mount. No user interaction needed for the happy path.
 
 use leptos::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use leptos_router::hooks::use_navigate;
 use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant};
 use crate::pages::auth::auth_layout::AuthLayout;
@@ -120,6 +122,8 @@ async fn process_google_callback(
 
 #[component]
 pub fn GoogleCallbackPage() -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    let navigate = use_navigate();
     let (status, set_status) = signal(CallbackStatus::Processing);
     let (message, set_message) = signal(String::from("Signing in with Google"));
 
@@ -163,18 +167,21 @@ pub fn GoogleCallbackPage() -> impl IntoView {
         }
 
         // Redirect handling — gloo_timers and web_sys are browser-only,
-        // but reading redirect_url must happen on both targets.
-        if let Some(_url) = outcome.redirect_url {
+        // but reading redirect_url must happen on both targets to consume the field.
+        if let Some(_redirect_url) = outcome.redirect_url {
             #[cfg(target_arch = "wasm32")]
             {
-                let delay = if _url.contains("/oauth/authorize/continue") {
-                    500
+                let navigate_clone = navigate.clone();
+                if _redirect_url.contains("/oauth/authorize/continue") {
+                    // API endpoint — must hard-redirect (not within the SPA router)
+                    gloo_timers::future::TimeoutFuture::new(500).await;
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.location().set_href(&_redirect_url);
+                    }
                 } else {
-                    1500
-                };
-                gloo_timers::future::TimeoutFuture::new(delay).await;
-                if let Some(window) = web_sys::window() {
-                    let _ = window.location().set_href(&_url);
+                    // SPA navigation — keeps WASM in memory
+                    gloo_timers::future::TimeoutFuture::new(1500).await;
+                    navigate_clone(&_redirect_url, Default::default());
                 }
             }
         }

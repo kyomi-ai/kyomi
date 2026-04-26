@@ -8,6 +8,7 @@
 //! Matches `apps/frontend/src/pages/Welcome.jsx` exactly.
 
 use leptos::prelude::*;
+use leptos_router::hooks::use_navigate;
 
 use crate::components::{Alert, AlertVariant, Card, Checkbox, Spinner};
 use crate::server_fns::onboarding::{accept_terms, AcceptTermsResult};
@@ -21,6 +22,9 @@ use crate::server_fns::onboarding::{accept_terms, AcceptTermsResult};
 /// If `temp_token` is missing, redirects to `/login`.
 #[component]
 pub fn WelcomePage() -> impl IntoView {
+    // ── SPA navigation handle (must be obtained at component level) ─────
+    let navigate = use_navigate();
+
     // ── Query parameter extraction ───────────────────────────────────────
     let params = leptos_router::hooks::use_query_map();
     let temp_token = Signal::derive(move || {
@@ -38,11 +42,10 @@ pub fn WelcomePage() -> impl IntoView {
 
     // ── Redirect if no temp_token ────────────────────────────────────────
     // Runs when temp_token signal changes (effectively once on mount since query params are static).
+    let nav_effect = navigate.clone();
     Effect::new(move || {
-        if temp_token.get().is_empty()
-            && let Some(window) = web_sys::window()
-        {
-            let _ = window.location().set_href("/login");
+        if temp_token.get().is_empty() {
+            nav_effect.clone()("/login", Default::default());
         }
     });
 
@@ -58,13 +61,12 @@ pub fn WelcomePage() -> impl IntoView {
         set_loading.set(true);
         set_error.set(None);
 
+        let navigate_clone = navigate.clone();
         leptos::task::spawn_local(async move {
             match accept_terms(token, consent).await {
                 Ok(AcceptTermsResult::Success) => {
-                    // Terms accepted — hard redirect to pick up new auth cookies
-                    if let Some(window) = web_sys::window() {
-                        let _ = window.location().set_href("/onboarding");
-                    }
+                    // Terms accepted — navigate to onboarding (keeps WASM in memory)
+                    navigate_clone("/onboarding", Default::default());
                 }
                 Ok(AcceptTermsResult::Error { message }) => {
                     set_error.set(Some(message));

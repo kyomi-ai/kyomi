@@ -13,6 +13,8 @@
 //! State machine: Form | Creating { status_message } | Success | Error
 
 use leptos::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use leptos_router::hooks::use_navigate;
 use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Checkbox,
@@ -41,6 +43,11 @@ enum PageState {
 
 #[component]
 pub fn PasskeySignupCompletePage() -> impl IntoView {
+    // ── SPA navigation handle (wasm32 only — only used in wasm async context) ─
+    // Wrapped in StoredValue so it can be copied into FnMut closures (view! reactive closures).
+    #[cfg(target_arch = "wasm32")]
+    let navigate = StoredValue::new(use_navigate());
+
     // ── Extract token from URL query params ──────────────────────────────
     let (token, _set_token) = signal(Option::<String>::None);
     let (page_state, set_page_state) = signal(PageState::Form);
@@ -167,23 +174,12 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
                 Ok(LoginResult::Success { .. }) => {
                     set_page_state.set(PageState::Success);
 
-                    // Redirect to onboarding after 1.5 seconds
+                    // Navigate to onboarding after 1.5 seconds (keeps WASM in memory)
                     #[cfg(target_arch = "wasm32")]
                     {
-                        use wasm_bindgen::prelude::*;
-                        if let Some(window) = web_sys::window() {
-                            let closure = Closure::once(move || {
-                                if let Some(window) = web_sys::window() {
-                                    let _ = window.location().set_href("/onboarding");
-                                }
-                            });
-                            let _ = window
-                                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                    closure.as_ref().unchecked_ref(),
-                                    1500,
-                                );
-                            closure.forget();
-                        }
+                        let nav = navigate.get_value();
+                        gloo_timers::future::TimeoutFuture::new(1500).await;
+                        nav("/onboarding", Default::default());
                     }
                 }
                 Ok(other) => {

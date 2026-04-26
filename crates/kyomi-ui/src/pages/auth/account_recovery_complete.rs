@@ -14,6 +14,8 @@
 //! State machine: Verifying | Ready | Submitting | Success | Error
 
 use leptos::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use leptos_router::hooks::use_navigate;
 use phosphor_leptos::Icon;
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonLink, ButtonSize,
@@ -77,6 +79,11 @@ async fn verify_recovery_token(token: Option<String>) -> PageState {
 
 #[component]
 pub fn AccountRecoveryCompletePage() -> impl IntoView {
+    // ── SPA navigation handle (wasm32 only — only used in wasm async context) ─
+    // Wrapped in StoredValue so it can be copied into FnMut closures (view! reactive closures).
+    #[cfg(target_arch = "wasm32")]
+    let navigate = StoredValue::new(use_navigate());
+
     let (page_state, set_page_state) = signal(PageState::Verifying);
 
     // ── Form signals ─────────────────────────────────────────────────────
@@ -146,23 +153,12 @@ pub fn AccountRecoveryCompletePage() -> impl IntoView {
                 Ok(RecoverySetPasswordResult::Success) => {
                     set_page_state.set(PageState::Success);
 
-                    // Redirect to home after 2 seconds
+                    // Navigate to home after 2 seconds (keeps WASM in memory)
                     #[cfg(target_arch = "wasm32")]
                     {
-                        use wasm_bindgen::prelude::*;
-                        if let Some(window) = web_sys::window() {
-                            let closure = Closure::once(move || {
-                                if let Some(window) = web_sys::window() {
-                                    let _ = window.location().set_href("/");
-                                }
-                            });
-                            let _ = window
-                                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                                    closure.as_ref().unchecked_ref(),
-                                    2000,
-                                );
-                            closure.forget();
-                        }
+                        let nav = navigate.get_value();
+                        gloo_timers::future::TimeoutFuture::new(2000).await;
+                        nav("/", Default::default());
                     }
                 }
                 Ok(RecoverySetPasswordResult::Error { message }) => {

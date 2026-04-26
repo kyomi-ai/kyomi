@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 #[cfg(target_arch = "wasm32")]
-use leptos_router::hooks::use_query_map;
+use leptos_router::hooks::{use_navigate, use_query_map};
 
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Button, ButtonSize, ButtonVariant, Label,
@@ -94,6 +94,11 @@ pub fn LoginPage(
     let (verification_email, set_verification_email) = signal(String::new());
     let (resend_loading, set_resend_loading) = signal(false);
     let (resend_success, set_resend_success) = signal(false);
+
+    // ── SPA navigation handle (must be obtained at component level) ─────
+    // Wrapped in StoredValue so it can be copied into Fn + Copy closures.
+    #[cfg(target_arch = "wasm32")]
+    let navigate = StoredValue::new(use_navigate());
 
     // ── Read post-login destination from query params ─────────────────
     // `oauth_continue` (set by /api/v1/oauth/authorize when an MCP client
@@ -292,10 +297,16 @@ pub fn LoginPage(
             let complete_result = passkey_login_complete(challenge_id, assertion_json).await;
             match complete_result {
                 Ok(LoginResult::Success { .. }) => {
-                    // Full page reload to initialize auth state from cookies
                     #[cfg(target_arch = "wasm32")]
-                    if let Some(window) = web_sys::window() {
-                        let _ = window.location().set_href(&redirect_url());
+                    {
+                        let dest = redirect_url();
+                        if dest.starts_with("/api/") {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().set_href(&dest);
+                            }
+                        } else {
+                            navigate.get_value()(&dest, Default::default());
+                        }
                     }
                 }
                 Ok(LoginResult::VerificationRequired { email }) => {
@@ -347,14 +358,15 @@ pub fn LoginPage(
 
                 match result {
                     Ok(LoginResult::Success { .. }) => {
-                        // Full page reload to initialize auth state from cookies.
-                        // Use redirect URL from query params if present (set by
-                        // server auth guard when redirecting to /login).
                         #[cfg(target_arch = "wasm32")]
                         {
                             let dest = redirect_url();
-                            if let Some(window) = web_sys::window() {
-                                let _ = window.location().set_href(&dest);
+                            if dest.starts_with("/api/") {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href(&dest);
+                                }
+                            } else {
+                                navigate.get_value()(&dest, Default::default());
                             }
                         }
                     }
@@ -437,10 +449,9 @@ pub fn LoginPage(
 
                 match result {
                     Ok(SignupResult::AccountCreated { redirect }) => {
+                        // SPA navigation — keeps WASM in memory
                         #[cfg(target_arch = "wasm32")]
-                        if let Some(window) = web_sys::window() {
-                            let _ = window.location().set_href(&redirect);
-                        }
+                        navigate.get_value()(&redirect, Default::default());
                         let _ = &redirect; // Suppress unused warning on SSR
                     }
                     Ok(SignupResult::VerificationRequired { message }) => {
