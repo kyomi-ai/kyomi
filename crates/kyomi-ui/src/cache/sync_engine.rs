@@ -209,7 +209,7 @@ fn apply_sync_action(
 ) {
     use crate::server_fns::chat::ChatSessionItem;
     use crate::server_fns::dashboards::DashboardListItem;
-    use crate::types::WatchListItem;
+    use crate::types::{WatchListItem, WorkspaceSettingsData};
 
     let action_str = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let entity_type = data.get("entity_type").and_then(|v| v.as_str()).unwrap_or("");
@@ -310,6 +310,16 @@ fn apply_sync_action(
                         ),
                     }
                 }
+                et if et == entity_types::WORKSPACE_SETTINGS => {
+                    match serde_json::from_value::<WorkspaceSettingsData>(entity_data.clone()) {
+                        Ok(item) => store.upsert_workspace_settings(item),
+                        Err(e) => tracing::warn!(
+                            entity_type,
+                            entity_id = %entity_id,
+                            "sync_action: failed to deserialize workspace settings: {e}"
+                        ),
+                    }
+                }
                 other => {
                     tracing::debug!(entity_type = other, "sync_action: unhandled entity type — ignoring");
                 }
@@ -345,6 +355,7 @@ fn apply_sync_action(
                 et if et == entity_types::KNOWLEDGE => store.remove_knowledge_doc(&entity_id),
                 et if et == entity_types::CHAT_SESSION => store.remove_chat_session(&entity_id),
                 et if et == entity_types::WATCH => store.remove_watch(&entity_id),
+                et if et == entity_types::WORKSPACE_SETTINGS => store.remove_workspace_settings(),
                 other => {
                     tracing::debug!(entity_type = other, "sync_action delete: unhandled entity type — ignoring");
                 }

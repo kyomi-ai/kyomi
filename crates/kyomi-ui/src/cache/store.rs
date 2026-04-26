@@ -17,7 +17,7 @@ use send_wrapper::SendWrapper;
 
 use crate::server_fns::dashboards::DashboardListItem;
 use crate::server_fns::chat::ChatSessionItem;
-use crate::types::WatchListItem;
+use crate::types::{WatchListItem, WorkspaceSettingsData};
 
 // ── Inner storage ─────────────────────────────────────────────────────────────
 
@@ -31,6 +31,7 @@ struct SyncStoreInner {
     chat_sessions: ArcRwSignal<Vec<ChatSessionItem>>,
     knowledge_docs: ArcRwSignal<Vec<DashboardListItem>>,
     watches: ArcRwSignal<Vec<WatchListItem>>,
+    workspace_settings: ArcRwSignal<Option<WorkspaceSettingsData>>,
     initialized: ArcRwSignal<bool>,
 }
 
@@ -65,6 +66,7 @@ impl SyncStore {
                 chat_sessions: ArcRwSignal::new(Vec::new()),
                 knowledge_docs: ArcRwSignal::new(Vec::new()),
                 watches: ArcRwSignal::new(Vec::new()),
+                workspace_settings: ArcRwSignal::new(None),
                 initialized: ArcRwSignal::new(false),
             })),
         }
@@ -93,6 +95,12 @@ impl SyncStore {
     /// Reactive signal over the current watch list.
     pub fn watches(&self) -> Signal<Vec<WatchListItem>> {
         let sig = self.inner.with_value(|inner| inner.watches.clone());
+        Signal::derive(move || sig.get())
+    }
+
+    /// Reactive signal over the current workspace settings (singleton).
+    pub fn workspace_settings(&self) -> Signal<Option<WorkspaceSettingsData>> {
+        let sig = self.inner.with_value(|inner| inner.workspace_settings.clone());
         Signal::derive(move || sig.get())
     }
 
@@ -125,6 +133,11 @@ impl SyncStore {
     /// Replace the entire watch list (called during IDB hydration).
     pub fn set_watches(&self, items: Vec<WatchListItem>) {
         self.inner.with_value(|inner| inner.watches.set(items));
+    }
+
+    /// Set the workspace settings singleton (called during IDB hydration).
+    pub fn set_workspace_settings(&self, settings: Option<WorkspaceSettingsData>) {
+        self.inner.with_value(|inner| inner.workspace_settings.set(settings));
     }
 
     // ── Single-item upserts (live sync) ───────────────────────────────────────
@@ -181,6 +194,14 @@ impl SyncStore {
         });
     }
 
+    /// Update the workspace settings singleton (live sync).
+    ///
+    /// Since workspace settings are a singleton (one per workspace), upsert is
+    /// equivalent to a simple set.
+    pub fn upsert_workspace_settings(&self, settings: WorkspaceSettingsData) {
+        self.inner.with_value(|inner| inner.workspace_settings.set(Some(settings)));
+    }
+
     // ── Single-item removes (delete sync) ────────────────────────────────────
 
     /// Remove a dashboard by `dashboard_id`.
@@ -219,6 +240,11 @@ impl SyncStore {
         });
     }
 
+    /// Remove the workspace settings singleton (delete sync).
+    pub fn remove_workspace_settings(&self) {
+        self.inner.with_value(|inner| inner.workspace_settings.set(None));
+    }
+
     // ── State transitions ─────────────────────────────────────────────────────
 
     /// Mark the store as fully hydrated from IndexedDB.
@@ -240,6 +266,7 @@ impl SyncStore {
             inner.chat_sessions.set(Vec::new());
             inner.knowledge_docs.set(Vec::new());
             inner.watches.set(Vec::new());
+            inner.workspace_settings.set(None);
             inner.initialized.set(false);
         });
     }

@@ -511,6 +511,15 @@ async fn hydrate_store_from_cache(
         store.set_watches(deserialize_entries(&entries, entity_types::WATCH));
     }
 
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WORKSPACE_SETTINGS, workspace_id).await {
+        if let Some((_id, json, _ts)) = entries.first() {
+            match serde_json::from_str::<crate::types::WorkspaceSettingsData>(json) {
+                Ok(settings) => store.set_workspace_settings(Some(settings)),
+                Err(e) => tracing::warn!(entity_type = entity_types::WORKSPACE_SETTINGS, error = %e, "cache deserialization failed"),
+            }
+        }
+    }
+
     if let Ok(Some(_cursor)) = crate::cache::db::get_last_sync_id(db, workspace_id).await {
         store.mark_initialized();
     }
