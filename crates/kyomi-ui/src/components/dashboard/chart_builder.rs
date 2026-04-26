@@ -70,13 +70,12 @@ const CHART_TYPES: &[(&str, &str)] = &[
 /// dashboards actually render once data is supplied.
 const NEW_CHART_SEED: &str = r#"type: chart
 version: 1
+title: "New Chart"
 data:
   datasource: ""
   query: ""
 visualize:
   type: bar
-  style:
-    title: "New Chart"
 "#;
 
 // ─── Series entry (Visual tab view model) ───────────────────────────────────
@@ -210,38 +209,35 @@ fn seed_ast() -> Value {
 
 // ─── AST field accessors — Visual tab controls ──────────────────────────────
 
-/// Get the chart title. The canonical location is `visualize.style.title`; we
-/// also accept a top-level `title` (some older exports).
+/// Get the chart title. The canonical location is the top-level `title` field;
+/// `visualize.style.title` is accepted as a legacy fallback for older saves.
 fn ast_get_title(ast: &Value) -> String {
-    get_string_at(ast, &["visualize", "style", "title"])
-        .or_else(|| get_string_at(ast, &["title"]))
+    get_string_at(ast, &["title"])
+        .or_else(|| get_string_at(ast, &["visualize", "style", "title"]))
         .unwrap_or_default()
 }
 
-/// Set (or clear) the chart title, writing to `visualize.style.title`.
+/// Set (or clear) the chart title, writing to the top-level `title` field.
+/// Cleans up any legacy `visualize.style.title` so we don't have two copies.
 fn ast_set_title(ast: &mut Value, val: &str) {
     ensure_root_mapping(ast);
-    // Always strip any legacy top-level title so we don't have two copies.
-    remove_key(ast, "title");
+
+    // Clean up legacy visualize.style.title so we don't have two copies.
+    if let Some(vis) = ast.get_mut("visualize")
+        && let Some(style) = vis.get_mut("style")
+    {
+        remove_key(style, "title");
+        if style.as_mapping().is_some_and(|m| m.is_empty()) {
+            remove_key(vis, "style");
+        }
+    }
 
     if val.is_empty() {
-        // Remove from visualize.style.title; tidy up empty style mapping.
-        if let Some(vis) = ast.get_mut("visualize")
-            && let Some(style) = vis.get_mut("style")
-        {
-            remove_key(style, "title");
-            if style.as_mapping().is_some_and(|m| m.is_empty()) {
-                remove_key(vis, "style");
-            }
-        }
+        remove_key(ast, "title");
         return;
     }
 
-    ensure_nested_mapping(ast, "visualize");
-    let vis = ast.get_mut("visualize").expect("ensured");
-    ensure_nested_mapping(vis, "style");
-    let style = vis.get_mut("style").expect("ensured");
-    if let Some(map) = style.as_mapping_mut() {
+    if let Some(map) = ast.as_mapping_mut() {
         map.insert(
             Value::String("title".to_string()),
             Value::String(val.to_string()),
