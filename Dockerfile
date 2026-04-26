@@ -10,8 +10,14 @@
 #
 # Prerequisites: the CI workflow (or manual build) must produce these
 # artifacts BEFORE running docker build:
-#   1. crates/kyomi-ui/dist/         — Leptos WASM frontend (trunk build --release)
-#   2. apps/mcp-chart-app-wasm/chart_app.html — MCP chart viewer (bash build.sh)
+#   1. target/release/kyomi             — server binary (cargo build --release -p kyomi-server)
+#   2. crates/kyomi-ui/dist/            — Leptos WASM frontend (trunk build --release)
+#   3. apps/mcp-chart-app-wasm/chart_app.html ��� MCP chart viewer (bash build.sh)
+#
+# IMPORTANT: The server binary and WASM frontend MUST be compiled on the same
+# host so that CARGO_MANIFEST_DIR is identical for both. Leptos server_fn hashes
+# include this path — building one on the host and the other inside Docker
+# produces mismatched hashes and a completely broken app.
 #
 # Self-hosted quickstart:
 #   docker run -v kyomi-data:/data -p 3000:3000 -e ANTHROPIC_API_KEY=sk-... kyomi
@@ -20,42 +26,10 @@
 # chartml spec. No runtime data files needed.
 # ---------------------------------------------------------------------------
 
-# ===== Stage 0: Build Rust binary =====
-FROM rust:1-bookworm AS builder
+# ===== Stage 0: Collect runtime dependencies =====
+FROM rust:1-bookworm AS deps
 
-WORKDIR /build
-
-# Copy Cargo workspace and crates
-COPY Cargo.toml Cargo.lock ./
-COPY crates/ ./crates/
-COPY apps/server/ ./apps/server/
-COPY enterprise/ ./enterprise/
-
-# Remove desktop from workspace members (not built in server Docker image)
-RUN sed -i '/"apps\/desktop",/d' Cargo.toml
-
-# Strip the local-dev [patch.crates-io] block — prod uses crates.io versions.
-RUN sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
-
-# Copy files needed for include_str!/include_bytes! paths. The Leptos WASM
-# frontend (crates/kyomi-ui/dist/) is pre-built on the host and COPY'd in —
-# keeps this Dockerfile cross-arch friendly since the heavy trunk/wasm-bindgen
-# tooling runs on the native amd64 host, not inside QEMU-emulated containers.
-COPY data/ ./data/
-COPY apps/mcp-chart-app-wasm/chart_app.html ./apps/mcp-chart-app-wasm/chart_app.html
-COPY assets/kyomi_email_logo.png ./assets/kyomi_email_logo.png
-COPY crates/kyomi-ui/dist/ ./crates/kyomi-ui/dist/
-
-# All SQL queries use runtime string-based sqlx::query() — no compile-time
-# checking, no .sqlx/ cache, and no DATABASE_URL needed at build time.
-
-# Build the binary. The BGE-small-en-v1.5 model is downloaded by build.rs
-# and embedded via include_bytes!() — no runtime model files needed.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    cargo build --release -p kyomi-server && \
-    cp target/release/kyomi /tmp/kyomi
+COPY target/release/kyomi /tmp/kyomi
 
 # Collect the minimal shared libraries the binary needs at runtime.
 # ring crypto requires libstdc++ and glibc.
@@ -75,20 +49,20 @@ RUN mkdir -p /tmp/scratch-tmp && touch /tmp/scratch-tmp/.keep
 FROM scratch
 
 # Dynamic linker + shared libraries
-COPY --from=builder /tmp/runtime-libs/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
-COPY --from=builder /tmp/runtime-libs/ /lib/x86_64-linux-gnu/
+COPY --from=deps /tmp/runtime-libs/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+COPY --from=deps /tmp/runtime-libs/ /lib/x86_64-linux-gnu/
 
 # CA certificates (for outbound TLS to Anthropic, Stripe, HuggingFace, etc.)
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=deps /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # DNS config — glibc needs nsswitch.conf to know how to resolve hostnames
-COPY --from=builder /etc/nsswitch.conf /etc/nsswitch.conf
+COPY --from=deps /etc/nsswitch.conf /etc/nsswitch.conf
 
 # Binary
-COPY --from=builder /tmp/kyomi /app/kyomi
+COPY --from=deps /tmp/kyomi /app/kyomi
 
 # Writable /tmp
-COPY --from=builder --chown=1000:1000 /tmp/scratch-tmp /tmp
+COPY --from=deps --chown=1000:1000 /tmp/scratch-tmp /tmp
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     HOME=/tmp \
