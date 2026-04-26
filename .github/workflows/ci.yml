@@ -65,7 +65,7 @@ jobs:
   # ---------------------------------------------------------------------------
   trivy-scan:
     name: Trivy Security Scan
-    runs-on: ubuntu-latest
+    runs-on: kyomi-ci
     steps:
       - uses: actions/checkout@v4
 
