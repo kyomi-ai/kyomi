@@ -650,15 +650,18 @@ pub fn ChartBuilderModal(
     // ── Derived signals for Visual-tab inputs ───────────────────────────
     // Each getter reads only the slice of the AST it needs, so an edit to
     // e.g. the title doesn't invalidate the chart-type <DynSelect>.
-    // Use try_with so these Signal::derive closures gracefully handle
-    // disposal — they can fire during the <Show> teardown cascade.
-    let title_sig = Signal::derive(move || ast.try_with(ast_get_title).unwrap_or_default());
-    let datasource_slug_sig = Signal::derive(move || ast.try_with(ast_get_datasource).unwrap_or_default());
-    let sql_sig = Signal::derive(move || ast.try_with(ast_get_query).unwrap_or_default());
-    let chart_type_sig = Signal::derive(move || ast.try_with(ast_get_chart_type).unwrap_or_else(|| "bar".to_string()));
-    let x_field_sig = Signal::derive(move || ast.try_with(ast_get_x_field).unwrap_or_default());
-    let orientation_sig = Signal::derive(move || ast.try_with(ast_get_orientation).unwrap_or_default());
-    let mode_sig = Signal::derive(move || ast.try_with(ast_get_mode).unwrap_or_default());
+    // Use Memo::new (not Signal::derive) so subscribers are only notified
+    // when the derived value actually changes — prevents cascading re-renders
+    // that destroy DOM nodes and cause input focus loss on every keystroke.
+    // Use try_with so these Memo closures gracefully handle disposal — they
+    // can fire during the <Show> teardown cascade.
+    let title_sig = Memo::new(move |_| ast.try_with(ast_get_title).unwrap_or_default());
+    let datasource_slug_sig = Memo::new(move |_| ast.try_with(ast_get_datasource).unwrap_or_default());
+    let sql_sig = Memo::new(move |_| ast.try_with(ast_get_query).unwrap_or_default());
+    let chart_type_sig = Memo::new(move |_| ast.try_with(ast_get_chart_type).unwrap_or_else(|| "bar".to_string()));
+    let x_field_sig = Memo::new(move |_| ast.try_with(ast_get_x_field).unwrap_or_default());
+    let orientation_sig = Memo::new(move |_| ast.try_with(ast_get_orientation).unwrap_or_default());
+    let mode_sig = Memo::new(move |_| ast.try_with(ast_get_mode).unwrap_or_default());
 
     // ── Helper: mutate AST and refresh the YAML text buffer atomically ──
     // Used by every Visual-tab / AI-tab handler that touches the AST. Keeping
@@ -982,8 +985,9 @@ pub fn ChartBuilderModal(
 
                 // ── SQL Editor tab ──────────────────────────────────────
                 // React: px-6 py-4 flex-1 min-h-0 flex flex-col gap-4
-                {move || {
-                    (active_tab.get() == "sql").then(|| view! {
+                // Always rendered — visibility toggled via `hidden` class so the
+                // SQL editor DOM node is never destroyed while the tab is inactive.
+                <div class:hidden=move || active_tab.get() != "sql">
                         // Horizontal layout: editor area + optional catalog sidebar
                         // min-h-[70vh] gives the SQL code editor real vertical space.
                         <div class="flex flex-1 min-h-[70vh]">
@@ -998,7 +1002,7 @@ pub fn ChartBuilderModal(
                                             <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
                                         }>
                                             <DynSelect
-                                                value=datasource_slug_sig
+                                                value=datasource_slug_sig.into()
                                                 options=datasource_options
                                                 on_change=move |slug: String| {
                                                     mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
@@ -1029,7 +1033,7 @@ pub fn ChartBuilderModal(
                                 // SQL query editor — fills remaining space
                                 <div class="flex-1 min-h-0">
                                     <SqlEditorSection
-                                        content=sql_sig
+                                        content=sql_sig.into()
                                         on_change=sql_on_change.get_value()
                                     />
                                 </div>
@@ -1238,13 +1242,14 @@ pub fn ChartBuilderModal(
                                 }
                             }
                         </div>
-                    })
-                }}
+                </div>
 
                 // ── Chart Config tab — 50/50 split pane ────────────────
                 // React: flex-1 min-h-0 flex → left 50% editing, right 50% preview
-                {move || {
-                    (active_tab.get() == "chart").then(|| view! {
+                // Always rendered — visibility toggled via `hidden` class so all
+                // sub-tab DOM nodes (Visual / AI / YAML) are preserved across tab
+                // switches, preventing focus loss on inputs during re-renders.
+                <div class:hidden=move || active_tab.get() != "chart">
                         <div class="flex flex-1 min-h-[70vh]">
                             // ── Left: Editing Panel (50%) ──────────────
                             <div class="w-1/2 border-r border-border flex flex-col min-h-0">
@@ -1276,13 +1281,14 @@ pub fn ChartBuilderModal(
                                 // Sub-tab content
                                 <div class="flex-1 min-h-0 overflow-auto">
                                     // ── Visual sub-tab ──────────────────
-                                    {move || (config_tab.get() == "visual").then(|| view! {
-                                        <div class="p-4 space-y-6">
+                                    // Always rendered — hidden class toggled so inputs keep
+                                    // DOM focus when switching between Visual / AI / YAML tabs.
+                                    <div class="p-4 space-y-6" class:hidden=move || config_tab.get() != "visual">
                                             // Chart Type
                                             <div class="space-y-2">
                                                 <label class=LABEL_CLASS>"Chart Type"</label>
                                                 <DynSelect
-                                                    value=chart_type_sig
+                                                    value=chart_type_sig.into()
                                                     options=Signal::stored(
                                                         CHART_TYPES
                                                             .iter()
@@ -1305,76 +1311,78 @@ pub fn ChartBuilderModal(
 
                                                 // Modifier chips — contextual based on chart type
                                                 // React: ChartVisualEditor lines 216-258
-                                                {move || {
-                                                    let ct = chart_type_sig.get();
-                                                    (ct == "bar" || ct == "area").then(|| view! {
-                                                        <div class="flex flex-wrap gap-2 mt-2">
-                                                            // Horizontal chip (bar only)
-                                                            {move || (chart_type_sig.get() == "bar").then(|| view! {
-                                                                <button
-                                                                    type="button"
-                                                                    class=move || {
-                                                                        if orientation_sig.get().as_deref() == Some("horizontal") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                // Always rendered — hidden class toggled so chip DOM
+                                                // nodes are preserved as chart type changes.
+                                                <div class="flex flex-wrap gap-2 mt-2"
+                                                    class:hidden=move || {
+                                                        let ct = chart_type_sig.get();
+                                                        ct != "bar" && ct != "area"
+                                                    }
+                                                >
+                                                    // Horizontal chip (bar only)
+                                                    <div class:hidden=move || chart_type_sig.get() != "bar">
+                                                        <button
+                                                            type="button"
+                                                            class=move || {
+                                                                if orientation_sig.get().as_deref() == Some("horizontal") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                            }
+                                                            on:click=move |_| {
+                                                                let is_horizontal = orientation_sig.get_untracked().as_deref() == Some("horizontal");
+                                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                    if is_horizontal {
+                                                                        ast_set_orientation(a, None);
+                                                                    } else {
+                                                                        ast_set_orientation(a, Some("horizontal"));
                                                                     }
-                                                                    on:click=move |_| {
-                                                                        let is_horizontal = orientation_sig.get_untracked().as_deref() == Some("horizontal");
-                                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                                            if is_horizontal {
-                                                                                ast_set_orientation(a, None);
-                                                                            } else {
-                                                                                ast_set_orientation(a, Some("horizontal"));
-                                                                            }
-                                                                        });
+                                                                });
+                                                            }
+                                                        >
+                                                            "Horizontal"
+                                                        </button>
+                                                    </div>
+                                                    // Grouped chip (bar only)
+                                                    <div class:hidden=move || chart_type_sig.get() != "bar">
+                                                        <button
+                                                            type="button"
+                                                            class=move || {
+                                                                if mode_sig.get().as_deref() == Some("grouped") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                            }
+                                                            on:click=move |_| {
+                                                                let is_grouped = mode_sig.get_untracked().as_deref() == Some("grouped");
+                                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                    if is_grouped {
+                                                                        ast_set_mode(a, None);
+                                                                    } else {
+                                                                        ast_set_mode(a, Some("grouped"));
                                                                     }
-                                                                >
-                                                                    "Horizontal"
-                                                                </button>
-                                                            })}
-                                                            // Grouped chip (bar only)
-                                                            {move || (chart_type_sig.get() == "bar").then(|| view! {
-                                                                <button
-                                                                    type="button"
-                                                                    class=move || {
-                                                                        if mode_sig.get().as_deref() == Some("grouped") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                                });
+                                                            }
+                                                        >
+                                                            "Grouped"
+                                                        </button>
+                                                    </div>
+                                                    // Normalized chip (area only)
+                                                    <div class:hidden=move || chart_type_sig.get() != "area">
+                                                        <button
+                                                            type="button"
+                                                            class=move || {
+                                                                if mode_sig.get().as_deref() == Some("normalized") { CHIP_ACTIVE } else { CHIP_INACTIVE }
+                                                            }
+                                                            on:click=move |_| {
+                                                                let is_normalized = mode_sig.get_untracked().as_deref() == Some("normalized");
+                                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                                    if is_normalized {
+                                                                        ast_set_mode(a, None);
+                                                                    } else {
+                                                                        ast_set_mode(a, Some("normalized"));
                                                                     }
-                                                                    on:click=move |_| {
-                                                                        let is_grouped = mode_sig.get_untracked().as_deref() == Some("grouped");
-                                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                                            if is_grouped {
-                                                                                ast_set_mode(a, None);
-                                                                            } else {
-                                                                                ast_set_mode(a, Some("grouped"));
-                                                                            }
-                                                                        });
-                                                                    }
-                                                                >
-                                                                    "Grouped"
-                                                                </button>
-                                                            })}
-                                                            // Normalized chip (area only)
-                                                            {move || (chart_type_sig.get() == "area").then(|| view! {
-                                                                <button
-                                                                    type="button"
-                                                                    class=move || {
-                                                                        if mode_sig.get().as_deref() == Some("normalized") { CHIP_ACTIVE } else { CHIP_INACTIVE }
-                                                                    }
-                                                                    on:click=move |_| {
-                                                                        let is_normalized = mode_sig.get_untracked().as_deref() == Some("normalized");
-                                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                                            if is_normalized {
-                                                                                ast_set_mode(a, None);
-                                                                            } else {
-                                                                                ast_set_mode(a, Some("normalized"));
-                                                                            }
-                                                                        });
-                                                                    }
-                                                                >
-                                                                    "Normalized"
-                                                                </button>
-                                                            })}
-                                                        </div>
-                                                    })
-                                                }}
+                                                                });
+                                                            }
+                                                        >
+                                                            "Normalized"
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             </div>
 
                                             // Title
@@ -1395,27 +1403,27 @@ pub fn ChartBuilderModal(
                                             </div>
 
                                             // X Axis Field — hidden for pie/doughnut/metric
-                                            {move || {
-                                                let ct = chart_type_sig.get();
-                                                let needs_axes = !matches!(ct.as_str(), "metric" | "pie" | "doughnut");
-                                                needs_axes.then(|| view! {
-                                                    <div class="space-y-2">
-                                                        <label class=LABEL_CLASS>"X Axis Field"</label>
-                                                        <input
-                                                            type="text"
-                                                            class=INPUT_CLASS
-                                                            prop:value=move || x_field_sig.get()
-                                                            on:input=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
-                                                                    ast_set_x_field(a, &val);
-                                                                });
-                                                            }
-                                                            placeholder="e.g. date, category, name..."
-                                                        />
-                                                    </div>
-                                                })
-                                            }}
+                                            // Always rendered — hidden class toggled so the input
+                                            // keeps DOM focus when the chart type changes.
+                                            <div class="space-y-2"
+                                                class:hidden=move || {
+                                                    matches!(chart_type_sig.get().as_str(), "metric" | "pie" | "doughnut")
+                                                }
+                                            >
+                                                <label class=LABEL_CLASS>"X Axis Field"</label>
+                                                <input
+                                                    type="text"
+                                                    class=INPUT_CLASS
+                                                    prop:value=move || x_field_sig.get()
+                                                    on:input=move |ev| {
+                                                        let val = event_target_value(&ev);
+                                                        mutate_ast(ast, yaml_text, yaml_parse_error, move |a| {
+                                                            ast_set_x_field(a, &val);
+                                                        });
+                                                    }
+                                                    placeholder="e.g. date, category, name..."
+                                                />
+                                            </div>
 
                                             // Series (Y Axis)
                                             <div class="space-y-3">
@@ -1507,10 +1515,11 @@ pub fn ChartBuilderModal(
                                                 </For>
                                             </div>
                                         </div>
-                                    })}
 
                                     // ── AI sub-tab ─────────────────────
-                                    {move || (config_tab.get() == "ai").then(|| view! {
+                                    // Always rendered — hidden class toggled so ChartCopilot
+                                    // maintains its internal state across tab switches.
+                                    <div class:hidden=move || config_tab.get() != "ai">
                                         <ChartCopilot
                                             chart_yaml=preview_yaml
                                             on_chart_update=Callback::new(move |new_yaml: String| {
@@ -1535,11 +1544,12 @@ pub fn ChartBuilderModal(
                                                 }
                                             })
                                         />
-                                    })}
+                                    </div>
 
                                     // ── YAML sub-tab ────────────────────
-                                    {move || (config_tab.get() == "yaml").then(|| view! {
-                                        <div class="flex flex-col h-full min-h-[400px]">
+                                    // Always rendered — hidden class toggled so the YAML
+                                    // editor input keeps focus across tab switches.
+                                    <div class="flex flex-col h-full min-h-[400px]" class:hidden=move || config_tab.get() != "yaml">
                                             // Inline parse error banner — shown only while the buffer
                                             // fails to parse. The AST keeps showing the last-known-good
                                             // state to the Visual tab in the meantime.
@@ -1556,7 +1566,6 @@ pub fn ChartBuilderModal(
                                                 />
                                             </div>
                                         </div>
-                                    })}
                                 </div>
                             </div>
 
@@ -1683,8 +1692,7 @@ pub fn ChartBuilderModal(
                                 </div>
                             </div>
                         </div>
-                    })
-                }}
+                </div>
             </div>
         </Modal>
     }

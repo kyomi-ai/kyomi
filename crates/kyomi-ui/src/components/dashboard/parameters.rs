@@ -267,46 +267,43 @@ fn MultiSelectDropdown(
                 </svg>
             </button>
 
-            {move || {
-                let on_change = on_change.clone();
-                is_open.get().then(|| {
-                    let option_views = options.iter().map(|option| {
-                        let option_val = option.clone();
-                        let option_display = option.clone();
-                        let option_for_check = option.clone();
-                        let on_change = on_change.clone();
-                        view! {
-                            <label class=MULTISELECT_OPTION_CLASS>
-                                <input
-                                    type="checkbox"
-                                    prop:checked=move || {
-                                        selected_set.get().contains(&option_for_check)
-                                    }
-                                    class=MULTISELECT_CHECKBOX_CLASS
-                                    on:change=move |_| {
-                                        let current = selected_set.get();
-                                        let new_values: Vec<String> = if current.contains(&option_val) {
-                                            current.into_iter().filter(|v| *v != option_val).collect()
-                                        } else {
-                                            let mut v = current;
-                                            v.push(option_val.clone());
-                                            v
-                                        };
-                                        on_change(new_values.join(","));
-                                    }
-                                />
-                                <span class="text-sm text-foreground">{option_display}</span>
-                            </label>
-                        }
-                    }).collect_view();
-
+            // Always rendered — visibility toggled via `hidden` class to avoid
+            // destroying and recreating DOM nodes on each re-render, which would
+            // cause focus loss on checkbox inputs.
+            <div
+                class=MULTISELECT_DROPDOWN_CLASS
+                class:hidden=move || !is_open.get()
+            >
+                {options.iter().map(|option| {
+                    let option_val = option.clone();
+                    let option_display = option.clone();
+                    let option_for_check = option.clone();
+                    let on_change = on_change.clone();
                     view! {
-                        <div class=MULTISELECT_DROPDOWN_CLASS>
-                            {option_views}
-                        </div>
+                        <label class=MULTISELECT_OPTION_CLASS>
+                            <input
+                                type="checkbox"
+                                prop:checked=move || {
+                                    selected_set.get().contains(&option_for_check)
+                                }
+                                class=MULTISELECT_CHECKBOX_CLASS
+                                on:change=move |_| {
+                                    let current = selected_set.get();
+                                    let new_values: Vec<String> = if current.contains(&option_val) {
+                                        current.into_iter().filter(|v| *v != option_val).collect()
+                                    } else {
+                                        let mut v = current;
+                                        v.push(option_val.clone());
+                                        v
+                                    };
+                                    on_change(new_values.join(","));
+                                }
+                            />
+                            <span class="text-sm text-foreground">{option_display}</span>
+                        </label>
                     }
-                })
-            }}
+                }).collect_view()}
+            </div>
         </div>
     }
 }

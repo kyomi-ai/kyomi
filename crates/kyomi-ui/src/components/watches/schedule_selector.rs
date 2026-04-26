@@ -636,31 +636,29 @@ pub fn ScheduleSelector(
                                 on_change=Callback::new(handle_schedule_type_change)
                             />
 
-                            // Time selector (not for hourly)
-                            {move || {
-                                (schedule_type.get() != "hourly").then(|| view! {
-                                    <div class="flex items-center gap-2">
-                                        <span class="text-sm text-muted-foreground">"At"</span>
-                                        // Hour (12-hour format)
-                                        <Hour12Select
-                                            value=Signal::derive(move || get_hour_12(hour.get()).to_string())
-                                            on_change=Callback::new(handle_hour_12_change)
-                                        />
-                                        <span class="text-muted-foreground">":"</span>
-                                        // Minute
-                                        <MinuteSelect
-                                            value=Signal::derive(move || minute.get().to_string())
-                                            on_change=Callback::new(handle_minute_change)
-                                            hourly_mode=false
-                                        />
-                                        // AM/PM
-                                        <AmPmSelect
-                                            value=Signal::derive(move || get_am_pm(hour.get()).to_string())
-                                            on_change=Callback::new(handle_am_pm_change)
-                                        />
-                                    </div>
-                                })
-                            }}
+                            // Time selector (not for hourly) — always rendered to
+                            // prevent DOM destruction that causes focus loss on
+                            // schedule type changes. Visibility toggled via CSS.
+                            <div class="flex items-center gap-2" class:hidden=move || schedule_type.get() == "hourly">
+                                <span class="text-sm text-muted-foreground">"At"</span>
+                                // Hour (12-hour format)
+                                <Hour12Select
+                                    value=Signal::derive(move || get_hour_12(hour.get()).to_string())
+                                    on_change=Callback::new(handle_hour_12_change)
+                                />
+                                <span class="text-muted-foreground">":"</span>
+                                // Minute
+                                <MinuteSelect
+                                    value=Signal::derive(move || minute.get().to_string())
+                                    on_change=Callback::new(handle_minute_change)
+                                    hourly_mode=false
+                                />
+                                // AM/PM
+                                <AmPmSelect
+                                    value=Signal::derive(move || get_am_pm(hour.get()).to_string())
+                                    on_change=Callback::new(handle_am_pm_change)
+                                />
+                            </div>
 
                             // Hourly mode: hour selection + minute
                             {move || {
@@ -757,63 +755,59 @@ pub fn ScheduleSelector(
                                 })
                             }}
 
-                            // Weekday selector for weekly
-                            {move || {
-                                (schedule_type.get() == "weekly").then(|| view! {
-                                    <div class="space-y-2">
-                                        <span class="text-sm text-muted-foreground">"On"</span>
-                                        <div class="flex flex-wrap gap-1">
-                                            {WEEKDAY_OPTIONS.iter().map(|&(val, label, _full_label)| {
-                                                view! {
-                                                    <button
-                                                        type="button"
-                                                        class=move || {
-                                                            let variant = if weekdays.get().contains(&val) {
-                                                                BTN_DEFAULT
-                                                            } else {
-                                                                BTN_OUTLINE
-                                                            };
-                                                            format!("{BTN_BASE} {variant} {BTN_SM} w-10")
-                                                        }
-                                                        on:click=move |_| {
-                                                            user_has_interacted.set(true);
-                                                            let mut wd = weekdays.get();
-                                                            if wd.contains(&val) {
-                                                                wd.retain(|&d| d != val);
-                                                            } else {
-                                                                wd.push(val);
-                                                                wd.sort();
-                                                            }
-                                                            weekdays.set(wd);
-                                                        }
-                                                    >
-                                                        {label}
-                                                    </button>
+                            // Weekday selector for weekly — always rendered to
+                            // prevent DOM destruction that causes focus loss.
+                            // Visibility toggled via CSS.
+                            <div class="space-y-2" class:hidden=move || schedule_type.get() != "weekly">
+                                <span class="text-sm text-muted-foreground">"On"</span>
+                                <div class="flex flex-wrap gap-1">
+                                    {WEEKDAY_OPTIONS.iter().map(|&(val, label, _full_label)| {
+                                        view! {
+                                            <button
+                                                type="button"
+                                                class=move || {
+                                                    let variant = if weekdays.get().contains(&val) {
+                                                        BTN_DEFAULT
+                                                    } else {
+                                                        BTN_OUTLINE
+                                                    };
+                                                    format!("{BTN_BASE} {variant} {BTN_SM} w-10")
                                                 }
-                                            }).collect_view()}
-                                        </div>
-                                        {move || {
-                                            weekdays.get().is_empty().then(|| view! {
-                                                <p class="text-xs text-warning-foreground">"Select at least one day"</p>
-                                            })
-                                        }}
-                                    </div>
-                                })
-                            }}
+                                                on:click=move |_| {
+                                                    user_has_interacted.set(true);
+                                                    let mut wd = weekdays.get();
+                                                    if wd.contains(&val) {
+                                                        wd.retain(|&d| d != val);
+                                                    } else {
+                                                        wd.push(val);
+                                                        wd.sort();
+                                                    }
+                                                    weekdays.set(wd);
+                                                }
+                                            >
+                                                {label}
+                                            </button>
+                                        }
+                                    }).collect_view()}
+                                </div>
+                                {move || {
+                                    weekdays.get().is_empty().then(|| view! {
+                                        <p class="text-xs text-warning-foreground">"Select at least one day"</p>
+                                    })
+                                }}
+                            </div>
 
-                            // Day of month selector for monthly
-                            {move || {
-                                (schedule_type.get() == "monthly").then(|| view! {
-                                    <div class="flex items-center gap-2">
-                                        <span class="text-sm text-muted-foreground">"On the"</span>
-                                        <DayOfMonthSelect
-                                            value=Signal::derive(move || day_of_month.get().to_string())
-                                            on_change=Callback::new(handle_day_of_month_change)
-                                        />
-                                        <span class="text-sm text-muted-foreground">"of each month"</span>
-                                    </div>
-                                })
-                            }}
+                            // Day of month selector for monthly — always rendered
+                            // to prevent DOM destruction that causes focus loss.
+                            // Visibility toggled via CSS.
+                            <div class="flex items-center gap-2" class:hidden=move || schedule_type.get() != "monthly">
+                                <span class="text-sm text-muted-foreground">"On the"</span>
+                                <DayOfMonthSelect
+                                    value=Signal::derive(move || day_of_month.get().to_string())
+                                    on_change=Callback::new(handle_day_of_month_change)
+                                />
+                                <span class="text-sm text-muted-foreground">"of each month"</span>
+                            </div>
                         </div>
                     }.into_any()
                 }
