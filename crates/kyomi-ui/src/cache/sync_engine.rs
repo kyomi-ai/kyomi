@@ -113,6 +113,9 @@ pub fn start_sync_engine(
                             entity_types::CHAT_SESSION,
                             entity_types::WATCH,
                             entity_types::WORKSPACE_SETTINGS,
+                            // Tier 2 detail caches (KYO-215)
+                            entity_types::DASHBOARD_DETAIL,
+                            entity_types::CHAT_MESSAGES,
                         ] {
                             if let Err(e) =
                                 crate::cache::db::delete_all_of_type(&db, et, &wid).await
@@ -279,6 +282,30 @@ fn apply_sync_action(
                             "sync_action: failed to deserialize dashboard: {e}"
                         ),
                     }
+                    // Tier 2 invalidation (KYO-215): any mutation to the dashboard
+                    // list entry means the cached detail may be stale.  Evict it so
+                    // the next visit re-fetches from the server.
+                    {
+                        let wid_inv = workspace_id.to_string();
+                        let eid_inv = entity_id.clone();
+                        spawn_local(async move {
+                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
+                                if let Err(e) = crate::cache::db::delete(
+                                    &db,
+                                    entity_types::DASHBOARD_DETAIL,
+                                    &eid_inv,
+                                    &wid_inv,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        entity_id = %eid_inv,
+                                        "sync_action: dashboard_detail cache invalidation failed: {e}"
+                                    );
+                                }
+                            }
+                        });
+                    }
                 }
                 et if et == entity_types::KNOWLEDGE => {
                     match serde_json::from_value::<DashboardListItem>(entity_data.clone()) {
@@ -289,6 +316,29 @@ fn apply_sync_action(
                             "sync_action: failed to deserialize knowledge doc: {e}"
                         ),
                     }
+                    // Tier 2 invalidation (KYO-215): knowledge docs share the
+                    // DASHBOARD_DETAIL cache store (same viewer page).
+                    {
+                        let wid_inv = workspace_id.to_string();
+                        let eid_inv = entity_id.clone();
+                        spawn_local(async move {
+                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
+                                if let Err(e) = crate::cache::db::delete(
+                                    &db,
+                                    entity_types::DASHBOARD_DETAIL,
+                                    &eid_inv,
+                                    &wid_inv,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        entity_id = %eid_inv,
+                                        "sync_action: dashboard_detail cache invalidation (knowledge) failed: {e}"
+                                    );
+                                }
+                            }
+                        });
+                    }
                 }
                 et if et == entity_types::CHAT_SESSION => {
                     match serde_json::from_value::<ChatSessionItem>(entity_data.clone()) {
@@ -298,6 +348,30 @@ fn apply_sync_action(
                             entity_id = %entity_id,
                             "sync_action: failed to deserialize chat session: {e}"
                         ),
+                    }
+                    // Tier 2 invalidation (KYO-215): a session metadata change
+                    // (rename, share/unshare, etc.) means the cached messages may
+                    // be out of date.  Evict so next visit is fresh.
+                    {
+                        let wid_inv = workspace_id.to_string();
+                        let eid_inv = entity_id.clone();
+                        spawn_local(async move {
+                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
+                                if let Err(e) = crate::cache::db::delete(
+                                    &db,
+                                    entity_types::CHAT_MESSAGES,
+                                    &eid_inv,
+                                    &wid_inv,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        entity_id = %eid_inv,
+                                        "sync_action: chat_messages cache invalidation failed: {e}"
+                                    );
+                                }
+                            }
+                        });
                     }
                 }
                 et if et == entity_types::WATCH => {
@@ -348,6 +422,43 @@ fn apply_sync_action(
                     }
                 }
             });
+
+            // Tier 2 invalidation on delete (KYO-215): when the Tier 1 entity is
+            // deleted, also remove any Tier 2 detail cache entries so stale content
+            // doesn't survive a later recreate-with-the-same-id scenario.
+            match entity_type {
+                et if et == entity_types::DASHBOARD || et == entity_types::KNOWLEDGE => {
+                    let wid_inv = workspace_id.to_string();
+                    let eid_inv = entity_id.clone();
+                    spawn_local(async move {
+                        if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
+                            let _ = crate::cache::db::delete(
+                                &db,
+                                entity_types::DASHBOARD_DETAIL,
+                                &eid_inv,
+                                &wid_inv,
+                            )
+                            .await;
+                        }
+                    });
+                }
+                et if et == entity_types::CHAT_SESSION => {
+                    let wid_inv = workspace_id.to_string();
+                    let eid_inv = entity_id.clone();
+                    spawn_local(async move {
+                        if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
+                            let _ = crate::cache::db::delete(
+                                &db,
+                                entity_types::CHAT_MESSAGES,
+                                &eid_inv,
+                                &wid_inv,
+                            )
+                            .await;
+                        }
+                    });
+                }
+                _ => {}
+            }
 
             // Remove from the reactive store.
             match entity_type {

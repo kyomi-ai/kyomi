@@ -197,6 +197,94 @@ pub fn DashboardViewerPage() -> impl IntoView {
         get_dashboard,
     );
 
+    // ── Tier 2 cache: cached dashboard detail signal (KYO-215) ──────────
+    // Populated from IndexedDB on WASM before the server response arrives,
+    // giving the page instant content on revisit.  Stays None on SSR.
+    // Uses spawn_local (not Resource::new) to avoid desyncing resource IDs.
+    let cached_dashboard: RwSignal<Option<crate::server_fns::dashboards::DashboardDetail>> =
+        RwSignal::new(None);
+
+    // On WASM: read cache immediately when component mounts.  We read the
+    // user context untracked so this fires once on mount, not on every ctx
+    // change.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let dash_id = dashboard_id.get_untracked();
+        let ws_id = user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.workspace_id)
+            .unwrap_or_else(|| "default".to_string());
+        leptos::task::spawn_local(async move {
+            if let Ok(db) = crate::cache::db::init_cache_db(&ws_id).await {
+                if let Ok(entries) = crate::cache::db::read_all(
+                    &db,
+                    kyomi_types::sync::entity_types::DASHBOARD_DETAIL,
+                    &ws_id,
+                )
+                .await
+                {
+                    if let Some((_id, json, _ts)) =
+                        entries.iter().find(|(id, _, _)| id == &dash_id)
+                    {
+                        if let Ok(detail) = serde_json::from_str::<
+                            crate::server_fns::dashboards::DashboardDetail,
+                        >(json)
+                        {
+                            cached_dashboard.set(Some(detail));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // On WASM: when the server response resolves, write it to IndexedDB so the
+    // next visit can use it immediately.
+    #[cfg(target_arch = "wasm32")]
+    Effect::new(move |_| {
+        let Some(Ok(ref detail)) = dashboard_resource.get() else {
+            return;
+        };
+        let detail_clone = detail.clone();
+        // Read untracked — workspace_id doesn't change, and tracking it here
+        // would re-run this write effect on every user-ctx change.
+        let ws_id = user_ctx_resource
+            .get_untracked()
+            .and_then(|r| r.ok())
+            .and_then(|ctx| ctx.workspace_id)
+            .unwrap_or_else(|| "default".to_string());
+        leptos::task::spawn_local(async move {
+            if let Ok(db) = crate::cache::db::init_cache_db(&ws_id).await {
+                match serde_json::to_string(&detail_clone) {
+                    Ok(json) => {
+                        if let Err(e) = crate::cache::db::upsert(
+                            &db,
+                            kyomi_types::sync::entity_types::DASHBOARD_DETAIL,
+                            &detail_clone.dashboard_id,
+                            &ws_id,
+                            &json,
+                            &detail_clone.updated_at,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                dashboard_id = %detail_clone.dashboard_id,
+                                "dashboard_detail cache write failed: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            dashboard_id = %detail_clone.dashboard_id,
+                            "dashboard_detail serialization failed: {e}"
+                        );
+                    }
+                }
+            }
+        });
+    });
+
     // ── Default dashboard state ─────────────────────────────────────────
     let user_default_resource = Resource::new(|| (), |_| get_user_default_dashboard());
     let workspace_default_resource = Resource::new(|| (), |_| get_workspace_default_dashboard());
@@ -313,9 +401,18 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 let dashboard_result = dashboard_resource.get();
                 let user_ctx_result = user_ctx_resource.get();
 
-                // Wait for both resources
+                // Tier 2 cache (KYO-215): if the server resource hasn't resolved yet
+                // but user context is ready and we have a cached dashboard, render it
+                // immediately — no skeleton flash for returning visitors.
                 let (dashboard_result, user_ctx_result) = match (dashboard_result, user_ctx_result) {
                     (Some(d), Some(u)) => (d, u),
+                    (None, Some(u)) => {
+                        // Server not ready yet — use cached version if available.
+                        match cached_dashboard.get() {
+                            Some(cached) => (Ok(cached), u),
+                            None => return None,
+                        }
+                    }
                     _ => return None,
                 };
 

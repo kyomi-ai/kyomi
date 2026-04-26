@@ -45,4 +45,15 @@ pub mod entity_types {
     pub const CHAT_SESSION: &str = "chat_session";
     pub const WATCH: &str = "watch";
     pub const WORKSPACE_SETTINGS: &str = "workspace_settings";
+
+    // Tier 2 — on-demand detail caches (KYO-215).
+    // These are written when a detail page resolves a server response and
+    // read back on the next visit to skip the loading skeleton.
+    // They are invalidated by the sync engine whenever the corresponding
+    // Tier 1 list entry is touched (insert/update/delete).
+
+    /// Full dashboard/knowledge-document content payload.
+    pub const DASHBOARD_DETAIL: &str = "dashboard_detail";
+    /// Ordered messages for a single chat session.
+    pub const CHAT_MESSAGES: &str = "chat_messages";
 }

@@ -346,6 +346,136 @@ pub fn ChatPage() -> impl IntoView {
         },
     );
 
+    // ── Tier 2 cache: warm messages from IndexedDB before server responds ─
+    // (KYO-215) On WASM, whenever url_session_id changes to a known session,
+    // we immediately read any cached messages from IndexedDB and populate the
+    // engine.  This means returning visitors see their previous messages
+    // instantly — no skeleton — while the server fetch runs in background.
+    //
+    // Rule: use spawn_local inside a wasm32 block, never Resource::new, to
+    // avoid desyncing Leptos serialized resource IDs (SSR_HYDRATION_GUIDE.md).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let engine_for_cache_read = engine.clone();
+        let user_ctx_for_cache = user_ctx_resource;
+        Effect::new(move |prev_sid: Option<Option<String>>| {
+            let session_id = url_session_id.get();
+
+            // Only run when we navigate TO a session (not away from one).
+            let Some(ref sid) = session_id else {
+                return session_id;
+            };
+
+            // Skip if the session ID hasn't changed since last run.
+            if prev_sid.as_ref().and_then(|p| p.as_ref()) == Some(sid) {
+                return session_id;
+            }
+
+            let sid = sid.clone();
+            let engine_inner = engine_for_cache_read.clone();
+            let ws_id = user_ctx_for_cache
+                .get()
+                .and_then(|r| r.ok())
+                .and_then(|ctx| ctx.workspace_id)
+                .unwrap_or_else(|| "default".to_string());
+
+            leptos::task::spawn_local(async move {
+                let Ok(db) =
+                    crate::cache::db::init_cache_db(&ws_id).await
+                else {
+                    return;
+                };
+
+                let Ok(entries) = crate::cache::db::read_all(
+                    &db,
+                    kyomi_types::sync::entity_types::CHAT_MESSAGES,
+                    &ws_id,
+                )
+                .await
+                else {
+                    return;
+                };
+
+                let Some((_id, json, _ts)) =
+                    entries.iter().find(|(id, _, _)| id == &sid)
+                else {
+                    return;
+                };
+
+                let Ok(cached_messages) =
+                    serde_json::from_str::<Vec<ChatMessageItem>>(json)
+                else {
+                    return;
+                };
+
+                // Only hydrate if the resource hasn't already resolved with
+                // fresh data (checked untracked to avoid reactive dependency).
+                if !cached_messages.is_empty() && is_loading.get_untracked() {
+                    engine_inner.set_messages(cached_messages);
+                    set_is_loading.set(false);
+                }
+            });
+
+            session_id
+        });
+    }
+
+    // ── Tier 2 cache: write messages to IndexedDB after server load ───────
+    // (KYO-215) After the resource resolves with fresh server data, persist
+    // the messages so the next visit can load from cache.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let user_ctx_for_cache_write = user_ctx_resource;
+        Effect::new(move |_| {
+            let Some(Some((ref sid, Ok(ref response)))) = session_messages_resource.get() else {
+                return;
+            };
+
+            let sid = sid.clone();
+            let messages_to_cache = response.messages.clone();
+            // Read untracked — workspace_id doesn't change within a session, and
+            // tracking it here would re-run the write effect on every user-ctx
+            // change unrelated to the messages themselves.
+            let ws_id = user_ctx_for_cache_write
+                .get_untracked()
+                .and_then(|r| r.ok())
+                .and_then(|ctx| ctx.workspace_id)
+                .unwrap_or_else(|| "default".to_string());
+
+            leptos::task::spawn_local(async move {
+                let Ok(db) = crate::cache::db::init_cache_db(&ws_id).await else {
+                    return;
+                };
+
+                let Ok(json) = serde_json::to_string(&messages_to_cache) else {
+                    return;
+                };
+
+                // Use current timestamp as updated_at for the cache entry.
+                let updated_at = {
+                    let ts = js_sys::Date::now() as u64;
+                    format!("{ts}")
+                };
+
+                if let Err(e) = crate::cache::db::upsert(
+                    &db,
+                    kyomi_types::sync::entity_types::CHAT_MESSAGES,
+                    &sid,
+                    &ws_id,
+                    &json,
+                    &updated_at,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        session_id = %sid,
+                        "chat_messages cache write failed: {e}"
+                    );
+                }
+            });
+        });
+    }
+
     // ── State management effect: clear / reset on URL change ────────────
     // Handles the two navigation cases:
     //   1. Navigating TO a session — set is_loading, clear messages
