@@ -999,7 +999,10 @@ fn DashboardEditorInner(
                         // renders inside the WYSIWYG editor inherit them via
                         // `use_context` — no per-mode re-registration required.
                         view! {
-                            <div class="flex flex-1 min-h-0 overflow-hidden">
+                            // dashboard-wysiwyg scopes the shared-grid CSS that
+                            // lets col-span-6 charts from separate fenced blocks
+                            // sit side-by-side (KYO-211).
+                            <div class="flex flex-1 min-h-0 overflow-hidden dashboard-wysiwyg">
                                 <div class="flex-1 min-h-0 overflow-hidden">
                                     <DashboardWysiwygEditor
                                         content=effective_editor_content
