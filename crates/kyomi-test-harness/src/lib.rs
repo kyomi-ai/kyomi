@@ -98,11 +98,13 @@ pub async fn setup_server() -> TestServer {
     let app = kyomi_server::build_service(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
+        .expect("failed to bind test server");
+    let addr = listener.local_addr().expect("failed to get local addr");
 
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, app)
+            .await
+            .expect("test server exited with error");
     });
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
