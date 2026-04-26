@@ -254,9 +254,9 @@ pub fn SaveDashboardModal(
                 })
             }}
 
-            // React: body — flex-1 overflow-y-auto, max-h bounds the list so the
-            // modal doesn't grow unboundedly when many dashboards exist.
-            <div class="flex-1 overflow-y-auto max-h-[420px]">
+            // Fixed-height scrollable list — persists across the Suspense
+            // skeleton→loaded transition to prevent layout shift.
+            <div class="flex-1 overflow-y-auto h-[420px]">
                 <Suspense fallback=move || view! { <ModalListSkeleton /> }>
                     {move || {
                         dashboards_resource.get().map(|result| {

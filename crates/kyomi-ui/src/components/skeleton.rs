@@ -81,7 +81,7 @@ pub fn SettingsPageSkeleton() -> impl IntoView {
 #[component]
 pub fn ModalListSkeleton() -> impl IntoView {
     view! {
-        <div class="space-y-2 min-h-[420px]">
+        <div class="space-y-2">
             // "Create new" card placeholder — taller (matches the bordered card with icon + 2 text lines)
             <div class="border-2 border-border rounded-lg p-4">
                 <div class="flex items-center gap-3">
