@@ -132,10 +132,10 @@ pub async fn submit_feedback(
         serde_json::json!({})
     };
 
-    // Handle screenshot in context
-    if let Some(ref screenshot_b64) = input.screenshot
-        && input.include_context
-    {
+    // Handle screenshot in context — screenshots are an explicit user action
+    // (Capture Screen / Upload Image) and are forwarded unconditionally,
+    // regardless of whether the user opted in to "Include technical details".
+    if let Some(ref screenshot_b64) = input.screenshot {
         // Estimate decoded size: base64 is ~4/3 of original
         let estimated_size = screenshot_b64.len() * 3 / 4;
         if estimated_size <= MAX_SCREENSHOT_BYTES {
@@ -287,6 +287,34 @@ pub async fn submit_feedback(
 }
 
 // ---------------------------------------------------------------------------
+// Content type helpers
+// ---------------------------------------------------------------------------
+
+/// Extract MIME type from a data URL prefix. Returns `"image/png"` as default.
+///
+/// Example: `data:image/jpeg;base64,...` → `"image/jpeg"`
+fn detect_screenshot_content_type(data_url: &str) -> &str {
+    if let Some(after_data) = data_url.strip_prefix("data:")
+        && let Some((mime, _)) = after_data.split_once(';')
+    {
+        return match mime {
+            "image/jpeg" | "image/png" | "image/webp" => mime,
+            _ => "image/png",
+        };
+    }
+    "image/png"
+}
+
+/// Map a MIME type to a file extension.
+fn extension_for_content_type(content_type: &str) -> &str {
+    match content_type {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "png",
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Linear issue creation
 // ---------------------------------------------------------------------------
 
@@ -315,15 +343,17 @@ async fn create_linear_issue_from_feedback(
         }
     };
 
-    // Decode screenshot bytes if available
-    let screenshot_bytes = context
+    // Decode screenshot bytes if available, preserving the content type from
+    // the data URL prefix so Linear receives the correct MIME type and extension.
+    let screenshot_with_type: Option<(Vec<u8>, String)> = context
         .as_object()
         .and_then(|obj| obj.get("screenshot_base64"))
         .and_then(|v| v.as_str())
         .and_then(|b64| {
+            let content_type = detect_screenshot_content_type(b64).to_string();
             // Strip data URL prefix if present
             let data = if let Some((_prefix, d)) = b64.split_once(',') { d } else { b64 };
-            base64_decode(data).ok()
+            base64_decode(data).ok().map(|bytes| (bytes, content_type))
         });
 
     let input = crate::linear_service::FeedbackIssueInput {
@@ -366,7 +396,9 @@ async fn create_linear_issue_from_feedback(
         api_key,
         team_id,
         &input,
-        screenshot_bytes.as_deref(),
+        screenshot_with_type
+            .as_ref()
+            .map(|(bytes, ct)| (bytes.as_slice(), ct.as_str())),
     )
     .await
     {
@@ -668,7 +700,11 @@ async fn upload_screenshot_to_slack(config: &Config, feedback_id: &str, screensh
         return;
     };
 
-    // Strip data URL prefix if present (e.g., "data:image/png;base64,...")
+    // Detect content type from data URL prefix before stripping it.
+    let content_type = detect_screenshot_content_type(screenshot_b64).to_string();
+    let extension = extension_for_content_type(&content_type);
+
+    // Strip data URL prefix if present (e.g., "data:image/jpeg;base64,...")
     let b64_data = if let Some((_prefix, data)) = screenshot_b64.split_once(',') {
         data
     } else {
@@ -683,7 +719,7 @@ async fn upload_screenshot_to_slack(config: &Config, feedback_id: &str, screensh
         }
     };
 
-    let filename = format!("feedback_{feedback_id}.png");
+    let filename = format!("feedback_{feedback_id}.{extension}");
 
     let http = match crate::http_client() {
         Ok(c) => c,
@@ -744,7 +780,7 @@ async fn upload_screenshot_to_slack(config: &Config, feedback_id: &str, screensh
     // Step 2: Upload file bytes to the URL
     let upload_resp = match http
         .post(upload_url)
-        .header("Content-Type", "image/png")
+        .header("Content-Type", content_type.as_str())
         .body(image_bytes)
         .timeout(std::time::Duration::from_secs(30))
         .send()

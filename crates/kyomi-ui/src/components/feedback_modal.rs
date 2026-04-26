@@ -38,7 +38,9 @@ const PILL_INACTIVE: &str = "px-3 py-1.5 text-sm rounded-lg transition-colors fl
 /// JS interop for screen capture via `getDisplayMedia`.
 ///
 /// Uses a canvas to grab a single frame from the display media stream,
-/// converts to a PNG data URL, and stops all tracks immediately.
+/// converts to a JPEG data URL (85% quality — 5-10x smaller than PNG for
+/// screenshots, well within the 2MB server limit even on HiDPI displays),
+/// and stops all tracks immediately.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
 export async function captureScreenshot() {
@@ -64,7 +66,7 @@ export async function captureScreenshot() {
 
     stream.getTracks().forEach(t => t.stop());
 
-    return canvas.toDataURL('image/png');
+    return canvas.toDataURL('image/jpeg', 0.85);
 }
 "#)]
 extern "C" {
@@ -194,8 +196,17 @@ pub fn FeedbackModal(
                 match capture_screenshot_js().await {
                     Ok(val) => {
                         if let Some(data_url) = val.as_string() {
-                            set_screenshot_preview.set(Some(data_url.clone()));
-                            set_screenshot_data.set(Some(data_url));
+                            // Validate size: base64 length * 3/4 estimates decoded bytes.
+                            // Reject anything that exceeds the server's MAX_SCREENSHOT_BYTES (2MB).
+                            let estimated_bytes = data_url.len() * 3 / 4;
+                            if estimated_bytes > 2 * 1024 * 1024 {
+                                set_error.set(Some(
+                                    "Image too large (max 2MB). Try \"Upload Image\" instead.".to_string(),
+                                ));
+                            } else {
+                                set_screenshot_preview.set(Some(data_url.clone()));
+                                set_screenshot_data.set(Some(data_url));
+                            }
                         }
                     }
                     Err(e) => {

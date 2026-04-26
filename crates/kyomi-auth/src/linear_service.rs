@@ -107,15 +107,24 @@ struct UploadHeader {
 ///
 /// Uploads screenshot first (if provided), then creates the issue with
 /// the screenshot embedded in the description markdown.
+///
+/// `screenshot_bytes` carries both the raw bytes and the MIME type so Linear
+/// receives the correct content type and file extension.
 pub async fn create_feedback_issue(
     api_key: &str,
     team_id: &str,
     feedback: &FeedbackIssueInput,
-    screenshot_bytes: Option<&[u8]>,
+    screenshot_bytes: Option<(&[u8], &str)>,
 ) -> Result<LinearIssueResult, String> {
     // Upload screenshot if available
-    let screenshot_url = if let Some(bytes) = screenshot_bytes {
-        match upload_screenshot(api_key, bytes, &format!("feedback_{}.png", feedback.feedback_id))
+    let screenshot_url = if let Some((bytes, content_type)) = screenshot_bytes {
+        let ext = match content_type {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            _ => "png",
+        };
+        let filename = format!("feedback_{}.{ext}", feedback.feedback_id);
+        match upload_screenshot(api_key, bytes, &filename, content_type)
             .await
         {
             Ok(url) => Some(url),
@@ -223,6 +232,7 @@ async fn upload_screenshot(
     api_key: &str,
     image_bytes: &[u8],
     filename: &str,
+    content_type: &str,
 ) -> Result<String, String> {
     let http = crate::http_client()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -240,7 +250,7 @@ async fn upload_screenshot(
     "#;
 
     let variables = serde_json::json!({
-        "contentType": "image/png",
+        "contentType": content_type,
         "filename": filename,
         "size": image_bytes.len(),
     });
