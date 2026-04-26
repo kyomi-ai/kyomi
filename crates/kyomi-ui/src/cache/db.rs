@@ -33,6 +33,7 @@
 
 use indexed_db_futures::{
     Build,
+    BuildPrimitive,
     BuildSerde,
     database::Database,
     prelude::QuerySource,
@@ -64,62 +65,35 @@ pub struct CacheDb {
 /// Value record stored in the `entity_cache` object store.
 #[derive(Serialize, Deserialize)]
 struct EntityRecord {
-    /// Matches the `entity_id` component of the IDB key — stored inline so
-    /// callers that iterate all records of a type don't have to parse the key.
     entity_id: String,
-    /// Serialised JSON blob for the entity (opaque to the cache layer).
     data: String,
-    /// ISO-8601 timestamp of the last server-side update.
     updated_at: String,
 }
 
 // ── Key encoding ─────────────────────────────────────────────────────────────
 
-/// Encode the composite key for an entity record.
-///
-/// Format: `"{entity_type}\x00{workspace_id}\x00{entity_id}"`
-///
-/// The NUL byte separator sorts below every printable Unicode code point, which
-/// lets us compute prefix range bounds cheaply (see [`prefix_range`]).
 fn entity_key(entity_type: &str, workspace_id: &str, entity_id: &str) -> String {
     format!("{entity_type}\x00{workspace_id}\x00{entity_id}")
 }
 
-/// Build a `KeyRange` that matches all keys for a given `(entity_type, workspace_id)` prefix.
-///
-/// The lower bound is `"{entity_type}\x00{workspace_id}\x00"` (inclusive).
-/// The upper bound is `"{entity_type}\x00{workspace_id}\x01"` (exclusive) — `\x01`
-/// is the next code point after `\x00`, so any entity_id value falls within.
 fn prefix_range(entity_type: &str, workspace_id: &str) -> KeyRange<String> {
     let lower = format!("{entity_type}\x00{workspace_id}\x00");
     let upper = format!("{entity_type}\x00{workspace_id}\x01");
-    // lower inclusive, upper exclusive
     KeyRange::Bound(lower, false, upper, true)
 }
 
 // ── Initialisation ────────────────────────────────────────────────────────────
 
-/// Open (or create) the local cache database.
-///
-/// This is async because IndexedDB `open` is async.  Call once at sync engine
-/// startup; hold the returned `CacheDb` for the duration.
-///
-/// # Errors
-///
-/// Returns [`CacheDbError`] if the browser's IndexedDB API is unavailable or if
-/// the schema upgrade fails.
 pub async fn init_cache_db(_workspace_id: &str) -> Result<CacheDb, CacheDbError> {
     let db = Database::open(DB_NAME)
         .with_version(DB_VERSION)
         .with_on_upgrade_needed(|_event, db| {
-            // Create entity_cache store (out-of-line keys — we supply keys explicitly).
             if !db.object_store_names().any(|n| n == STORE_ENTITIES) {
                 db.create_object_store(STORE_ENTITIES)
                     .build()
                     .map_err(|e| wasm_bindgen::JsValue::from(e.to_string()))?;
             }
 
-            // Create sync_cursors store.
             if !db.object_store_names().any(|n| n == STORE_CURSORS) {
                 db.create_object_store(STORE_CURSORS)
                     .build()
@@ -136,10 +110,6 @@ pub async fn init_cache_db(_workspace_id: &str) -> Result<CacheDb, CacheDbError>
 
 // ── Read operations ───────────────────────────────────────────────────────────
 
-/// Read all cached entities of `entity_type` for `workspace_id`.
-///
-/// Returns a `Vec` of `(entity_id, data_json, updated_at)` tuples in
-/// key-sort order (which is `entity_id` alphabetical order).
 pub async fn read_all(
     db: &CacheDb,
     entity_type: &str,
@@ -155,25 +125,22 @@ pub async fn read_all(
     let store = tx.object_store(STORE_ENTITIES).map_err(CacheDbError::Transaction)?;
 
     let range = prefix_range(entity_type, workspace_id);
-    let records: Vec<EntityRecord> = store
+    let records = store
         .get_all::<EntityRecord>()
-        .with_query(range)
+        .with_query::<String, KeyRange<String>>(range)
         .serde()
         .map_err(CacheDbError::Serde)?
         .await
         .map_err(CacheDbError::Transaction)?;
 
     Ok(records
-        .into_iter()
+        .filter_map(|r| r.ok())
         .map(|r| (r.entity_id, r.data, r.updated_at))
         .collect())
 }
 
 // ── Write operations ──────────────────────────────────────────────────────────
 
-/// Insert or update a single entity in the cache.
-///
-/// Uses IndexedDB `put` semantics (upsert — overwrites if the key already exists).
 pub async fn upsert(
     db: &CacheDb,
     entity_type: &str,
@@ -200,7 +167,7 @@ pub async fn upsert(
 
     store
         .put(record)
-        .with_key(key.as_str())
+        .with_key(key)
         .serde()
         .map_err(CacheDbError::Serde)?
         .await
@@ -211,7 +178,6 @@ pub async fn upsert(
     Ok(())
 }
 
-/// Delete a single entity from the cache.
 pub async fn delete(
     db: &CacheDb,
     entity_type: &str,
@@ -229,7 +195,7 @@ pub async fn delete(
 
     let key = entity_key(entity_type, workspace_id, entity_id);
     store
-        .delete(KeyRange::Only(key))
+        .delete::<String, KeyRange<String>>(KeyRange::Only(key))
         .primitive()
         .map_err(CacheDbError::Serde)?
         .await
@@ -240,10 +206,6 @@ pub async fn delete(
     Ok(())
 }
 
-/// Delete all cached entities of `entity_type` for `workspace_id`.
-///
-/// Typically called when the sync engine performs a full-refresh reset
-/// (`last_sync_id = null`).
 pub async fn delete_all_of_type(
     db: &CacheDb,
     entity_type: &str,
@@ -260,7 +222,7 @@ pub async fn delete_all_of_type(
 
     let range = prefix_range(entity_type, workspace_id);
     store
-        .delete(range)
+        .delete::<String, KeyRange<String>>(range)
         .primitive()
         .map_err(CacheDbError::Serde)?
         .await
@@ -273,10 +235,6 @@ pub async fn delete_all_of_type(
 
 // ── Sync cursor ───────────────────────────────────────────────────────────────
 
-/// Return the last successfully processed sync ID for `workspace_id`.
-///
-/// Returns `None` if no sync has completed yet (first load or after a reset),
-/// signalling the sync engine to fetch the full initial dataset.
 pub async fn get_last_sync_id(
     db: &CacheDb,
     workspace_id: &str,
@@ -291,7 +249,7 @@ pub async fn get_last_sync_id(
     let store = tx.object_store(STORE_CURSORS).map_err(CacheDbError::Transaction)?;
 
     let value: Option<String> = store
-        .get::<String, _, _>(KeyRange::Only(workspace_id.to_owned()))
+        .get::<String, String, KeyRange<String>>(KeyRange::Only(workspace_id.to_owned()))
         .primitive()
         .map_err(CacheDbError::Serde)?
         .await
@@ -300,11 +258,6 @@ pub async fn get_last_sync_id(
     Ok(value)
 }
 
-/// Persist the last successfully processed sync ID for `workspace_id`.
-///
-/// The cursor is read on the next startup so the sync engine can request only
-/// events that occurred after the last known state (delta sync), avoiding a
-/// full re-fetch.
 pub async fn set_last_sync_id(
     db: &CacheDb,
     workspace_id: &str,
@@ -320,8 +273,8 @@ pub async fn set_last_sync_id(
     let store = tx.object_store(STORE_CURSORS).map_err(CacheDbError::Transaction)?;
 
     store
-        .put(sync_id.to_owned())
-        .with_key(workspace_id.to_owned())
+        .put::<String>(sync_id.to_owned())
+        .with_key::<String>(workspace_id.to_owned())
         .primitive()
         .map_err(CacheDbError::Serde)?
         .await
@@ -334,14 +287,10 @@ pub async fn set_last_sync_id(
 
 // ── Error type ────────────────────────────────────────────────────────────────
 
-/// Errors that can occur during cache database operations.
 #[derive(Debug)]
 pub enum CacheDbError {
-    /// The IndexedDB database could not be opened or upgraded.
     Open(indexed_db_futures::error::OpenDbError),
-    /// An IndexedDB transaction (or request within one) failed.
     Transaction(indexed_db_futures::error::Error),
-    /// Serde serialisation/deserialisation of a record failed.
     Serde(indexed_db_futures::error::Error),
 }
 
