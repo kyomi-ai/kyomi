@@ -469,6 +469,35 @@ async fn serve() {
         tracing::info!("SQLite backend — analytics background jobs disabled");
     }
 
+    // Sync log pruning — startup + every 24 hours
+    {
+        let db = state.db.clone();
+        let shutdown = shutdown_token.child_token();
+        tokio::spawn(async move {
+            match kyomi_auth::sync_log_service::prune_old_entries(&db, 30).await {
+                Ok(count) if count > 0 => tracing::info!(deleted = count, "Pruned old sync_log entries"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "Sync log pruning failed"),
+            }
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        match kyomi_auth::sync_log_service::prune_old_entries(&db, 30).await {
+                            Ok(count) if count > 0 => tracing::info!(deleted = count, "Pruned old sync_log entries"),
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(error = %e, "Sync log pruning failed"),
+                        }
+                    }
+                }
+            }
+            tracing::info!("Sync log pruning task stopped");
+        });
+        tracing::info!("Sync log pruning started (startup + 24h interval, 30-day retention)");
+    }
+
     // Register Leptos server functions before building the router.
     kyomi_ui::register_server_functions();
 
