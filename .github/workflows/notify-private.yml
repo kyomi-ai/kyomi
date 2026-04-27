@@ -22,7 +22,7 @@ on:
 
 jobs:
   notify:
-    runs-on: ubuntu-latest
+    runs-on: kyomi-ci
     steps:
       - name: Dispatch to kyomi-private
         uses: peter-evans/repository-dispatch@v3
