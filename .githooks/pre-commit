@@ -79,9 +79,8 @@ else
     if [ -z "$staged_crates" ]; then
         echo "✅ Clippy skipped (no crate detected)."
     else
-        warnings=$(cargo clippy $staged_crates 2>&1 \
-            | grep "^warning:" \
-            | grep -v "cargo:warning\|generated\|Model file\|Downloaded\|Downloading\|too many arguments" \
+        warnings=$(cargo clippy $staged_crates -- -D warnings 2>&1 \
+            | grep "^error\[" \
             || true)
 
         if [ -n "$warnings" ]; then
@@ -94,7 +93,30 @@ else
             exit 1
         fi
 
-        echo "✅ Clippy clean."
+        echo "✅ Clippy clean (host)."
+    fi
+
+    # --- Check 3b: wasm32 clippy for kyomi-ui (matches CI) ---
+    has_kyomi_ui=$(echo "$staged_rs_files" | grep '^crates/kyomi-ui/' || true)
+
+    if [ -n "$has_kyomi_ui" ]; then
+        echo "🔍 Running clippy (wasm32)..."
+
+        wasm_errors=$(cargo clippy -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings 2>&1 \
+            | grep "^error\[" \
+            || true)
+
+        if [ -n "$wasm_errors" ]; then
+            echo ""
+            echo "❌ Clippy warnings found (wasm32) — commit blocked."
+            echo ""
+            echo "$wasm_errors"
+            echo ""
+            echo "Fix warnings and try again."
+            exit 1
+        fi
+
+        echo "✅ Clippy clean (wasm32)."
     fi
 fi
 
