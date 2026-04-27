@@ -98,11 +98,13 @@ jobs:
         if: matrix.arch == 'arm64'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
 
-      # Same local-dev [patch.crates-io] strip as ci.yml / Dockerfile.
-      - name: Strip local-dev patch.crates-io block
+      # Same local-dev strips as ci.yml / Dockerfile.
+      - name: Strip local-dev blocks
         run: |
           sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
           sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+          sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          sed -i '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
 
       - name: Install brotli (Trunk post_build hook dependency)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
@@ -251,11 +253,13 @@ jobs:
         if: matrix.os == 'linux' && matrix.arch == 'arm64'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
 
-      # Same local-dev [patch.crates-io] strip as ci.yml / Dockerfile.
-      - name: Strip local-dev patch.crates-io block
+      # Same local-dev strips as ci.yml / Dockerfile.
+      - name: Strip local-dev blocks
         run: |
           ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
           ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          ${{ matrix.sed_inplace }} '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
 
       - name: Install brotli (Trunk post_build hook dependency)
         run: |
