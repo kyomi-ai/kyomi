@@ -51,8 +51,19 @@ const STORE_ENTITIES: &str = "entity_cache";
 /// Object store for per-workspace sync cursors.
 const STORE_CURSORS: &str = "sync_cursors";
 
-/// Schema version — increment when adding new object stores or indexes.
-const DB_VERSION: u8 = 1;
+/// Object store for sync metadata (schema hash).
+const STORE_META: &str = "_meta";
+
+/// IDB schema version — bump when adding/removing object stores.
+const DB_VERSION: u8 = 3;
+
+/// Schema hash — change this whenever the sync data format changes.
+/// A mismatch between the stored hash and this constant triggers a full
+/// wipe + re-bootstrap, ensuring clients never run with stale data shapes.
+///
+/// Bump this when: fields added/removed from list item structs, server-side
+/// sync queries change shape, entity types added/removed from bootstrap.
+pub const SCHEMA_HASH: &str = "2026-04-26-v2-session-type-filter";
 
 /// Handle to the open IndexedDB database.
 ///
@@ -88,24 +99,104 @@ pub async fn init_cache_db(_workspace_id: &str) -> Result<CacheDb, CacheDbError>
     let db = Database::open(DB_NAME)
         .with_version(DB_VERSION)
         .with_on_upgrade_needed(|_event, db| {
-            if !db.object_store_names().any(|n| n == STORE_ENTITIES) {
-                db.create_object_store(STORE_ENTITIES)
-                    .build()
+            for name in db.object_store_names() {
+                db.delete_object_store(&name)
                     .map_err(|e| wasm_bindgen::JsValue::from(e.to_string()))?;
             }
 
-            if !db.object_store_names().any(|n| n == STORE_CURSORS) {
-                db.create_object_store(STORE_CURSORS)
-                    .build()
-                    .map_err(|e| wasm_bindgen::JsValue::from(e.to_string()))?;
-            }
+            db.create_object_store(STORE_ENTITIES)
+                .build()
+                .map_err(|e| wasm_bindgen::JsValue::from(e.to_string()))?;
+
+            db.create_object_store(STORE_CURSORS)
+                .build()
+                .map_err(|e| wasm_bindgen::JsValue::from(e.to_string()))?;
+
+            db.create_object_store(STORE_META)
+                .build()
+                .map_err(|e| wasm_bindgen::JsValue::from(e.to_string()))?;
 
             Ok(())
         })
         .await
         .map_err(CacheDbError::Open)?;
 
-    Ok(CacheDb { inner: db })
+    let cache_db = CacheDb { inner: db };
+
+    // Check schema hash — mismatch means cached data was written by a
+    // different code version and may not deserialize. Wipe everything.
+    let needs_wipe = match get_meta_raw(&cache_db.inner, "schemaHash").await {
+        Some(stored) => stored != SCHEMA_HASH,
+        None => false,
+    };
+
+    if needs_wipe {
+        tracing::info!("schema hash mismatch — wiping cache for re-bootstrap");
+        wipe_all_data(&cache_db.inner).await;
+    }
+
+    Ok(cache_db)
+}
+
+async fn get_meta_raw(db: &Database, key: &str) -> Option<String> {
+    let tx = db
+        .transaction(STORE_META)
+        .with_mode(TransactionMode::Readonly)
+        .build()
+        .ok()?;
+    let store = tx.object_store(STORE_META).ok()?;
+    store
+        .get::<String, String, KeyRange<String>>(KeyRange::Only(key.to_owned()))
+        .primitive()
+        .ok()?
+        .await
+        .ok()?
+}
+
+/// Store a metadata key-value pair.
+pub async fn set_meta(db: &CacheDb, key: &str, value: &str) -> Result<(), CacheDbError> {
+    let tx = db.inner
+        .transaction(STORE_META)
+        .with_mode(TransactionMode::Readwrite)
+        .build()
+        .map_err(CacheDbError::Transaction)?;
+    let store = tx.object_store(STORE_META).map_err(CacheDbError::Transaction)?;
+    store
+        .put::<String>(value.to_owned())
+        .with_key::<String>(key.to_owned())
+        .primitive()
+        .map_err(CacheDbError::Serde)?
+        .await
+        .map_err(CacheDbError::Transaction)?;
+    tx.commit().await.map_err(CacheDbError::Transaction)?;
+    Ok(())
+}
+
+async fn wipe_all_data(db: &Database) {
+    let tx = match db
+        .transaction([STORE_ENTITIES, STORE_CURSORS].as_slice())
+        .with_mode(TransactionMode::Readwrite)
+        .build()
+    {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!("wipe_all_data: failed to open transaction: {e}");
+            return;
+        }
+    };
+    {
+        if let Ok(entities) = tx.object_store(STORE_ENTITIES)
+            && let Err(e) = entities.clear()
+        {
+            tracing::warn!("wipe_all_data: failed to clear entity_cache: {e}");
+        }
+        if let Ok(cursors) = tx.object_store(STORE_CURSORS)
+            && let Err(e) = cursors.clear()
+        {
+            tracing::warn!("wipe_all_data: failed to clear sync_cursors: {e}");
+        }
+        let _ = tx.commit().await;
+    }
 }
 
 // ── Read operations ───────────────────────────────────────────────────────────

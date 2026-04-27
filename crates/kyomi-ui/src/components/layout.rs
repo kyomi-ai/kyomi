@@ -240,7 +240,8 @@ pub fn Layout(children: Children) -> impl IntoView {
     // The Effect watches `ws_workspace_id` reactively — hydration runs once the
     // workspace ID is available (after auth resolves) and re-runs if the user
     // switches workspace. On SSR the block is absent; the store stays empty and
-    // pages show a loading state until `initialized()` becomes `true`.
+    // Hydrate the SyncStore from IndexedDB on mount (client-only). This gives
+    // instant rendering on return visits while the sync engine catches up.
     #[cfg(target_arch = "wasm32")]
     {
         use leptos::task::spawn_local;
@@ -258,7 +259,7 @@ pub fn Layout(children: Children) -> impl IntoView {
             store.reset();
             spawn_local(async move {
                 if let Ok(cache_db) = crate::cache::db::init_cache_db(&workspace_id).await {
-                    hydrate_store_from_cache(&cache_db, &workspace_id, &store).await;
+                    crate::cache::sync_engine::hydrate_store_from_db(&cache_db, &workspace_id, &store).await;
                 }
             });
         });
@@ -460,70 +461,8 @@ pub fn Layout(children: Children) -> impl IntoView {
     }
 }
 
-/// Populate [`crate::cache::store::SyncStore`] from the local IndexedDB cache.
-///
-/// Called once per workspace on WASM startup (from the Layout hydration
-/// Effect). For each entity type it reads all cached records, deserialises
-/// them, and bulk-sets the corresponding list on the store. If a sync cursor
-/// already exists (previous session completed at least one delta sync), the
-/// store is also marked as initialised so pages stop showing loading state
-/// immediately.
-///
-/// Errors from individual entity types are silently ignored — the sync engine
-/// will fetch missing data from the server on its next run.
-#[cfg(target_arch = "wasm32")]
-async fn hydrate_store_from_cache(
-    db: &crate::cache::db::CacheDb,
-    workspace_id: &str,
-    store: &crate::cache::store::SyncStore,
-) {
-    use kyomi_types::sync::entity_types;
-
-    fn deserialize_entries<T: serde::de::DeserializeOwned>(
-        entries: &[(String, String, String)],
-        entity_type: &str,
-    ) -> Vec<T> {
-        let mut items = Vec::with_capacity(entries.len());
-        for (id, json, _ts) in entries {
-            match serde_json::from_str(json) {
-                Ok(item) => items.push(item),
-                Err(e) => {
-                    tracing::warn!(entity_type, entity_id = %id, error = %e, "cache deserialization failed — skipping entry");
-                }
-            }
-        }
-        items
-    }
-
-    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::DASHBOARD, workspace_id).await {
-        store.set_dashboards(deserialize_entries(&entries, entity_types::DASHBOARD));
-    }
-
-    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::KNOWLEDGE, workspace_id).await {
-        store.set_knowledge_docs(deserialize_entries(&entries, entity_types::KNOWLEDGE));
-    }
-
-    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::CHAT_SESSION, workspace_id).await {
-        store.set_chat_sessions(deserialize_entries(&entries, entity_types::CHAT_SESSION));
-    }
-
-    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WATCH, workspace_id).await {
-        store.set_watches(deserialize_entries(&entries, entity_types::WATCH));
-    }
-
-    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WORKSPACE_SETTINGS, workspace_id).await {
-        if let Some((_id, json, _ts)) = entries.first() {
-            match serde_json::from_str::<crate::types::WorkspaceSettingsData>(json) {
-                Ok(settings) => store.set_workspace_settings(Some(settings)),
-                Err(e) => tracing::warn!(entity_type = entity_types::WORKSPACE_SETTINGS, error = %e, "cache deserialization failed"),
-            }
-        }
-    }
-
-    if let Ok(Some(_cursor)) = crate::cache::db::get_last_sync_id(db, workspace_id).await {
-        store.mark_initialized();
-    }
-}
+// Hydration from IndexedDB is handled by sync_engine::hydrate_store_from_db,
+// called from the Layout hydration Effect above.
 
 /// Bridges the Layout-level [`QueryCache`] to relevant WebSocket channels.
 ///

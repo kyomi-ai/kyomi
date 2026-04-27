@@ -1892,7 +1892,7 @@ pub async fn list_sessions_for_sync(
                   COALESCE(u.name, u.email, 'Unknown') AS display_name
            FROM chat_sessions cs
            LEFT JOIN users u ON cs.user_id = u.user_id
-           WHERE cs.workspace_id = $1
+           WHERE cs.workspace_id = $1 AND cs.session_type = 'chat'
            ORDER BY cs.updated_at DESC"#
     );
 

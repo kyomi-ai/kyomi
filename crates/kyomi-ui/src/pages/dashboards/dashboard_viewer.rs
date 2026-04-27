@@ -216,25 +216,20 @@ pub fn DashboardViewerPage() -> impl IntoView {
             .and_then(|ctx| ctx.workspace_id)
             .unwrap_or_else(|| "default".to_string());
         leptos::task::spawn_local(async move {
-            if let Ok(db) = crate::cache::db::init_cache_db(&ws_id).await {
-                if let Ok(entries) = crate::cache::db::read_all(
+            if let Ok(db) = crate::cache::db::init_cache_db(&ws_id).await
+                && let Ok(entries) = crate::cache::db::read_all(
                     &db,
                     kyomi_types::sync::entity_types::DASHBOARD_DETAIL,
                     &ws_id,
                 )
                 .await
-                {
-                    if let Some((_id, json, _ts)) =
-                        entries.iter().find(|(id, _, _)| id == &dash_id)
-                    {
-                        if let Ok(detail) = serde_json::from_str::<
-                            crate::server_fns::dashboards::DashboardDetail,
-                        >(json)
-                        {
-                            cached_dashboard.set(Some(detail));
-                        }
-                    }
-                }
+                && let Some((_id, json, _ts)) =
+                    entries.iter().find(|(id, _, _)| id == &dash_id)
+                && let Ok(detail) = serde_json::from_str::<
+                    crate::server_fns::dashboards::DashboardDetail,
+                >(json)
+            {
+                cached_dashboard.set(Some(detail));
             }
         });
     }

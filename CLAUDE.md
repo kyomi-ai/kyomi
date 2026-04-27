@@ -57,6 +57,10 @@ PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
 
 **NEVER run `tailwindcss` manually.** Trunk runs it as a pre-build hook. Running it separately breaks content hashes in `index.html`.
 
+## Sync Engine (Local-First Cache)
+
+**Read `docs/SYNC_ENGINE_ARCHITECTURE.md` before touching any sync/cache code.** That document is the authoritative reference — if the code doesn't match it, the code is wrong. Key rules: schema hash gates re-bootstrap on format changes, `session_type = 'chat'` filter on chat sync queries, IDB is a cache not source of truth.
+
 ## SSR + Hydration
 
 Some pages are server-side rendered for instant load. **Read `docs/SSR_HYDRATION_GUIDE.md` before touching SSR code.**

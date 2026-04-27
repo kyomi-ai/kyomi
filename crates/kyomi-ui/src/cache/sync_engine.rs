@@ -53,9 +53,11 @@ pub fn start_sync_engine(
     store: SyncStore,
     workspace_id: String,
 ) {
+    // In-memory cursor — updated by sync_complete, used by reconnect logic.
+    let in_memory_cursor: StoredValue<i64> = StoredValue::new(0);
+
     // ── Subscribe to sync_action ──────────────────────────────────────────────
     let unsub_action = ws.subscribe("sync_action", {
-        let store = store;
         let workspace_id = workspace_id.clone();
         move |msg| {
             if let Some(data) = &msg.data {
@@ -66,11 +68,14 @@ pub fn start_sync_engine(
 
     // ── Subscribe to sync_complete ────────────────────────────────────────────
     let unsub_complete = ws.subscribe("sync_complete", {
-        let store = store;
         let workspace_id = workspace_id.clone();
         move |msg| {
-            if let Some(data) = &msg.data {
-                if let Some(sync_id) = data.get("last_sync_id").and_then(|v| v.as_i64()) {
+            if let Some(data) = &msg.data
+                && let Some(sync_id) = data.get("last_sync_id").and_then(|v| v.as_i64())
+            {
+                    in_memory_cursor.set_value(sync_id);
+
+                    // Persist cursor + schema hash to IDB.
                     let wid = workspace_id.clone();
                     spawn_local(async move {
                         match crate::cache::db::init_cache_db(&wid).await {
@@ -81,15 +86,17 @@ pub fn start_sync_engine(
                                 {
                                     tracing::warn!("sync_complete: failed to persist cursor: {e}");
                                 }
+                                let _ = crate::cache::db::set_meta(
+                                    &db, "schemaHash", crate::cache::db::SCHEMA_HASH
+                                ).await;
                             }
                             Err(e) => {
                                 tracing::warn!("sync_complete: failed to open cache db: {e}");
                             }
                         }
                         store.mark_initialized();
-                        tracing::info!(last_sync_id = sync_id, "sync_complete: cursor persisted, store initialized");
+                        tracing::info!(last_sync_id = sync_id, "sync_complete: store initialized");
                     });
-                }
             }
         }
     });
@@ -97,7 +104,6 @@ pub fn start_sync_engine(
     // ── Subscribe to sync_reset ───────────────────────────────────────────────
     let unsub_reset = ws.subscribe("sync_reset", {
         let ws = ws.clone();
-        let store = store;
         let workspace_id = workspace_id.clone();
         move |_msg| {
             tracing::info!("sync_reset: nuking local cache and re-bootstrapping");
@@ -152,12 +158,17 @@ pub fn start_sync_engine(
         unsub_reset.take()();
     });
 
-    // ── Watch connection state to (re-)send bootstrap/delta on connect ────────
-    // This Effect tracks `connection_state`. Every time the socket transitions
-    // to `Connected` (initial connect or reconnect) it sends the appropriate
-    // sync request.
+    // ── Watch connection state to send bootstrap or delta on connect ────────
+    //
+    // On each connect/reconnect, read the IDB cursor to decide:
+    //   cursor == 0 → full bootstrap (first visit or after schema wipe)
+    //   cursor > 0  → delta catch-up (return visit or reconnect)
+    //
+    // The in-memory cursor (set by sync_complete) is preferred for reconnects
+    // within the same tab to avoid an IDB read.
     let ws_for_state = ws.clone();
     let wid_for_state = workspace_id.clone();
+
     Effect::new(move |_| {
         let state = ws_for_state.connection_state.get();
         if state != ConnectionState::Connected {
@@ -165,38 +176,98 @@ pub fn start_sync_engine(
         }
         let ws_send = ws_for_state.clone();
         let wid = wid_for_state.clone();
-        spawn_local(async move {
-            request_sync(&ws_send, &wid).await;
-        });
+        let mem_cursor = in_memory_cursor.get_value();
+
+        if mem_cursor > 0 {
+            tracing::info!(mem_cursor, "sync: reconnect — sending sync_delta");
+            ws_send.send(serde_json::json!({
+                "type": "sync_delta",
+                "last_sync_id": mem_cursor
+            }));
+        } else {
+            spawn_local(async move {
+                let idb_cursor = match crate::cache::db::init_cache_db(&wid).await {
+                    Ok(db) => crate::cache::db::get_last_sync_id(&db, &wid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0),
+                    Err(_) => 0,
+                };
+
+                if idb_cursor == 0 {
+                    tracing::info!("sync: no cursor — sending sync_bootstrap");
+                    ws_send.send(serde_json::json!({"type": "sync_bootstrap"}));
+                } else {
+                    tracing::info!(idb_cursor, "sync: IDB cursor found — sending sync_delta");
+                    ws_send.send(serde_json::json!({
+                        "type": "sync_delta",
+                        "last_sync_id": idb_cursor
+                    }));
+                }
+            });
+        }
     });
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Determine which sync request to send based on the stored cursor, then send it.
-async fn request_sync(ws: &WebSocketContext, workspace_id: &str) {
-    let last_sync_id = match crate::cache::db::init_cache_db(workspace_id).await {
-        Ok(db) => crate::cache::db::get_last_sync_id(&db, workspace_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0),
-        Err(e) => {
-            tracing::warn!("request_sync: failed to open cache db: {e}");
-            0
-        }
-    };
+/// Read all entity types from IndexedDB and populate the store.
+pub async fn hydrate_store_from_db(
+    db: &crate::cache::db::CacheDb,
+    workspace_id: &str,
+    store: &SyncStore,
+) {
+    use crate::server_fns::chat::ChatSessionItem;
+    use crate::server_fns::dashboards::DashboardListItem;
+    use crate::types::WatchListItem;
+    use kyomi_types::sync::entity_types;
 
-    if last_sync_id == 0 {
-        tracing::info!("sync: no cursor — sending sync_bootstrap");
-        ws.send(serde_json::json!({"type": "sync_bootstrap"}));
-    } else {
-        tracing::info!(last_sync_id, "sync: cursor found — sending sync_delta");
-        ws.send(serde_json::json!({
-            "type": "sync_delta",
-            "last_sync_id": last_sync_id
-        }));
+    fn deser<T: serde::de::DeserializeOwned>(
+        entries: &[(String, String, String)],
+        entity_type: &str,
+    ) -> Vec<T> {
+        let mut items = Vec::with_capacity(entries.len());
+        for (id, json, _ts) in entries {
+            match serde_json::from_str(json) {
+                Ok(item) => items.push(item),
+                Err(e) => tracing::warn!(
+                    entity_type,
+                    entity_id = %id,
+                    "hydration deser failed: {e}"
+                ),
+            }
+        }
+        items
+    }
+
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::DASHBOARD, workspace_id).await {
+        store.set_dashboards(deser::<DashboardListItem>(&entries, entity_types::DASHBOARD));
+    }
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::KNOWLEDGE, workspace_id).await {
+        store.set_knowledge_docs(deser::<DashboardListItem>(&entries, entity_types::KNOWLEDGE));
+    }
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::CHAT_SESSION, workspace_id).await {
+        store.set_chat_sessions(deser::<ChatSessionItem>(&entries, entity_types::CHAT_SESSION));
+    }
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WATCH, workspace_id).await {
+        store.set_watches(deser::<WatchListItem>(&entries, entity_types::WATCH));
+    }
+    if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WORKSPACE_SETTINGS, workspace_id).await
+        && let Some((_id, json, _ts)) = entries.first()
+    {
+        match serde_json::from_str::<crate::types::WorkspaceSettingsData>(json) {
+            Ok(settings) => store.set_workspace_settings(Some(settings)),
+            Err(e) => tracing::warn!(
+                entity_type = entity_types::WORKSPACE_SETTINGS,
+                "hydration deser failed: {e}"
+            ),
+        }
+    }
+
+    if let Ok(Some(_cursor)) = crate::cache::db::get_last_sync_id(db, workspace_id).await {
+        store.mark_initialized();
     }
 }
 
@@ -289,8 +360,8 @@ fn apply_sync_action(
                         let wid_inv = workspace_id.to_string();
                         let eid_inv = entity_id.clone();
                         spawn_local(async move {
-                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
-                                if let Err(e) = crate::cache::db::delete(
+                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await
+                                && let Err(e) = crate::cache::db::delete(
                                     &db,
                                     entity_types::DASHBOARD_DETAIL,
                                     &eid_inv,
@@ -303,7 +374,6 @@ fn apply_sync_action(
                                         "sync_action: dashboard_detail cache invalidation failed: {e}"
                                     );
                                 }
-                            }
                         });
                     }
                 }
@@ -322,8 +392,8 @@ fn apply_sync_action(
                         let wid_inv = workspace_id.to_string();
                         let eid_inv = entity_id.clone();
                         spawn_local(async move {
-                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
-                                if let Err(e) = crate::cache::db::delete(
+                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await
+                                && let Err(e) = crate::cache::db::delete(
                                     &db,
                                     entity_types::DASHBOARD_DETAIL,
                                     &eid_inv,
@@ -336,7 +406,6 @@ fn apply_sync_action(
                                         "sync_action: dashboard_detail cache invalidation (knowledge) failed: {e}"
                                     );
                                 }
-                            }
                         });
                     }
                 }
@@ -356,8 +425,8 @@ fn apply_sync_action(
                         let wid_inv = workspace_id.to_string();
                         let eid_inv = entity_id.clone();
                         spawn_local(async move {
-                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await {
-                                if let Err(e) = crate::cache::db::delete(
+                            if let Ok(db) = crate::cache::db::init_cache_db(&wid_inv).await
+                                && let Err(e) = crate::cache::db::delete(
                                     &db,
                                     entity_types::CHAT_MESSAGES,
                                     &eid_inv,
@@ -370,7 +439,6 @@ fn apply_sync_action(
                                         "sync_action: chat_messages cache invalidation failed: {e}"
                                     );
                                 }
-                            }
                         });
                     }
                 }
