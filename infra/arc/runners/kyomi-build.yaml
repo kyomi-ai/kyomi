@@ -10,8 +10,10 @@
 githubConfigUrl: "https://github.com/kyomi-ai"
 githubConfigSecret: arc-github-app
 
+# Capped at 1: two concurrent cold-cache cargo builds would leave <4 cores
+# for system services on the 16-core prod node, risking Longhorn iSCSI timeouts.
 minRunners: 0
-maxRunners: 2
+maxRunners: 1
 
 runnerGroup: "default"
 runnerScaleSetName: "kyomi-build"
@@ -50,8 +52,8 @@ template:
             value: /opt/cargo-cache
         resources:
           limits:
-            cpu: "14"
-            memory: 24Gi
+            cpu: "8"
+            memory: 16Gi
           requests:
             cpu: "2"
             memory: 4Gi
@@ -64,6 +66,13 @@ template:
         image: docker:dind
         securityContext:
           privileged: true
+        resources:
+          limits:
+            cpu: "2"
+            memory: 4Gi
+          requests:
+            cpu: "1"
+            memory: 1Gi
         volumeMounts:
           - name: work
             mountPath: /home/runner/_work

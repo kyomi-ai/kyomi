@@ -73,7 +73,23 @@ EXT4-fs (sde): error count since last fsck: 3
 EXT4-fs (sdb): error count since last fsck: 1
 ```
 
-All errors cluster around epoch `1777119985` (~Feb 22, 2026), coinciding with the unsafe shutdowns during setup. The Longhorn volumes (`sdb`, `sdc`, `sde`) had in-flight writes that were corrupted when the node lost power.
+**Initial (wrong) theory:** errors were from unsafe shutdowns during server setup in Jan/Feb. Epoch timestamps seemed to match, but converting them correctly revealed the errors occurred **Sat Apr 25, 22:26–23:22 AEST** — during the deploy we were running to fix the server_fn hash mismatch.
+
+### 5b. Corrected timeline — CPU starvation from CI build runner
+
+Deeper investigation of `journalctl` and `dmesg -T` revealed the true sequence:
+
+1. **22:20** — Docker network churn (deploy-related container restarts)
+2. **22:24** — All iSCSI connections start timing out: `ISCSI_ERR_NOP_TIMEDOUT: A NOP has timed out` on connections 1–15
+3. **22:42:37** — `systemd-udevd` watchdog timeout (had consumed 2m15s CPU, killed with SIGABRT)
+4. **22:42:40** — All Longhorn iSCSI connections report `conn error (1022)` simultaneously
+5. **22:42:41** — I/O errors cascade across `sda`, `sdb`, `sdc`, `sde` — in-flight writes lost
+6. **22:42:42** — `systemd-journald` watchdog timeout (killed with SIGABRT, journal file corrupted)
+7. **22:42:42** — EXT4 journal aborts on `sdb`, `sdc`, `sde`
+
+**Root cause:** The ARC build runner pod (`kyomi-build`) had `cpu: "14"` limits on a 16-core machine. During `cargo build --release` with cold sccache (triggered by the server_fn hash fix deploy), it pegged 14 cores for ~15 minutes. This left only 2 cores for the entire system — k8s, Longhorn engines, iSCSI daemons, systemd services, and all production workloads. The iSCSI NOP keepalives timed out because the iscsid couldn't get CPU time, causing all Longhorn volumes to lose their connections. In-flight writes were dropped, corrupting the EXT4 journals.
+
+The `dind` sidecar (Docker-in-Docker) had NO resource limits at all, potentially consuming even more.
 
 **Note:** The kernel errors on the local dev machine (`nuc`) showing `ata3` / `sda` UNC errors are a SEPARATE issue — that's the dev machine's own disk, not the prod node.
 
@@ -133,13 +149,23 @@ ClickHouse started clean. The `site_c034dde57a4b3b46` database will be auto-prov
 
 ## Root Cause
 
-**Unsafe shutdowns during initial server setup (Jan–Feb 2026) corrupted EXT4 journal writes on multiple Longhorn volumes.** The analytics ClickHouse volume (`sde`) was the worst affected. The corruption was latent — reads worked for months because the damaged sectors weren't accessed. ClickHouse's background merge process eventually tried to read/write across the corrupted region, surfacing the errors on 2026-04-27.
+**CPU starvation from the CI build runner crashed Longhorn's iSCSI connections, causing in-flight write loss and EXT4 journal corruption on multiple volumes.**
+
+The ARC runner pod (`kyomi-build`) was configured with `cpu: "14"` limits on a 16-core node. A `cargo build --release` with cold sccache pegged all 14 cores for ~15 minutes, leaving only 2 cores for the entire system. Longhorn's iSCSI NOP keepalives timed out, all volume connections dropped simultaneously, and in-flight writes were lost. The `dind` sidecar had no CPU limits at all.
 
 ## What Was NOT the Cause
 
-- **NVMe hardware failure** — SMART is clean, 0 media errors
-- **Ongoing disk degradation** — no new I/O errors since the setup period
-- **Longhorn bug** — Longhorn correctly reported the volume as "healthy" because the replica was running; it has no mechanism to detect latent EXT4 corruption within a volume
+- **NVMe hardware failure** — SMART is clean, 0 media errors, 0 data integrity errors
+- **Unsafe shutdowns during setup** — initial theory was wrong; the epoch timestamps in EXT4 errors converted to Apr 25 2026, not Jan/Feb
+- **Longhorn bug** — Longhorn correctly reported volumes as "healthy" because replicas were running; it has no mechanism to detect latent EXT4 corruption within a volume
+
+## Remediation Applied
+
+1. **Reduced ARC runner CPU limits** from 14 → 8 cores (runner) and added 2-core limit to the dind sidecar. Combined maximum is 10 cores, leaving 6+ cores for system services during builds. `maxRunners` reduced from 2 → 1 to prevent concurrent builds from saturating the node.
+   - File: `infra/arc/runners/kyomi-build.yaml`
+   - Applied via: `helm upgrade kyomi-build ...`
+2. **Reprovisioned the corrupted analytics ClickHouse volume** (fresh PVC, empty database)
+3. **Fixed Longhorn replica counts** — set all volumes to `replicas: 1` (single-node cluster)
 
 ## Unresolved Concerns
 
