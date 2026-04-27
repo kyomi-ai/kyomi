@@ -42,6 +42,11 @@ pub async fn auth_refresh_middleware(
     let access_cookie_name = cookie_names.access_token_name.as_str();
     let refresh_cookie_name = cookie_names.refresh_token_name.as_str();
 
+    // Never refresh tokens on logout — the handler will clear them.
+    if req.uri().path() == "/leptos-api/logout" {
+        return next.run(req).await;
+    }
+
     // Fast path: if access_token is present AND valid, pass through with no
     // work. This is the common case on every request and must stay cheap.
     let access_ok = extract_cookie(req.headers(), access_cookie_name)
