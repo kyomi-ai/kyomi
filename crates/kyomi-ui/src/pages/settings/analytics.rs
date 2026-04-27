@@ -59,51 +59,45 @@ pub fn AnalyticsPage() -> impl IntoView {
     view! {
         <div class="p-4 sm:p-6">
             <h2 class="text-xl font-display text-foreground mb-6">"Analytics"</h2>
+            <Transition fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
+                {move || Suspend::new(async move {
+                    let is_self_hosted = user_ctx.await
+                        .map(|ctx| ctx.is_self_hosted)
+                        .unwrap_or(false);
 
-            // If the user context indicates self-hosted mode, show an informational
-            // message instead of making ClickHouse-backed server calls.
-            {move || {
-                if let Some(Ok(ctx)) = user_ctx.get()
-                    && ctx.is_self_hosted
-                {
-                    return view! {
-                        <Card>
-                            <CardContent>
-                                <p class="text-muted-foreground py-6">
-                                    "Analytics requires a Postgres and ClickHouse configuration. \
-                                     Not available in self-hosted mode with SQLite."
-                                </p>
-                            </CardContent>
-                        </Card>
-                    }.into_any();
-                }
-                view! {
-                    <Transition fallback=move || view! { <AnalyticsLoadingSkeleton/> }>
-                        {move || Suspend::new(async move {
-                            match sites_resource.await {
-                                Ok(sites) => {
-                                    view! {
-                                        <AnalyticsContent
-                                            initial_sites=sites
-                                            sites_resource=sites_resource
-                                        />
-                                    }.into_any()
-                                }
-                                Err(_) => {
-                                    // Match React: show the page layout with empty state even
-                                    // when the backend errors (e.g. no ClickHouse configured).
-                                    view! {
-                                        <AnalyticsContent
-                                            initial_sites=vec![]
-                                            sites_resource=sites_resource
-                                        />
-                                    }.into_any()
-                                }
-                            }
-                        })}
-                    </Transition>
-                }.into_any()
-            }}
+                    if is_self_hosted {
+                        return view! {
+                            <Card>
+                                <CardContent>
+                                    <p class="text-muted-foreground py-6">
+                                        "Analytics requires a Postgres and ClickHouse configuration. \
+                                         Not available in self-hosted mode with SQLite."
+                                    </p>
+                                </CardContent>
+                            </Card>
+                        }.into_any();
+                    }
+
+                    match sites_resource.await {
+                        Ok(sites) => {
+                            view! {
+                                <AnalyticsContent
+                                    initial_sites=sites
+                                    sites_resource=sites_resource
+                                />
+                            }.into_any()
+                        }
+                        Err(_) => {
+                            view! {
+                                <AnalyticsContent
+                                    initial_sites=vec![]
+                                    sites_resource=sites_resource
+                                />
+                            }.into_any()
+                        }
+                    }
+                })}
+            </Transition>
         </div>
     }
 }
@@ -446,7 +440,7 @@ fn AnalyticsContent(
         <ConfirmDialog
             open=Signal::from(dialog_open)
             title="Delete Analytics Site?"
-            message=delete_target.get_untracked().map_or(String::new(), |(_, name)| format!("Delete \"{name}\"? This cannot be undone."))
+            message=Signal::derive(move || delete_target.get().map_or(String::new(), |(_, name)| format!("Delete \"{name}\"? This cannot be undone.")))
             confirm_text="Delete"
             on_confirm=on_confirm_delete
             on_cancel=on_cancel_delete
