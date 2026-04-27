@@ -25,6 +25,7 @@
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast as _;
 use phosphor_leptos::Icon;
 use leptos_router::hooks::use_params_map;
 

@@ -14,6 +14,7 @@
 //! - Tip alert when only one passkey is registered
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast as _;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonSize, ButtonVariant, Card, CardContent,

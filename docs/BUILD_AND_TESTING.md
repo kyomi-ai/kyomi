@@ -49,17 +49,15 @@ cargo check --workspace   # ~7-15s incremental
 
 If this fails, the PR is broken. Do not continue — report the compile error in your verification comment.
 
-### 3. Build the WASM release (required for Playwright)
-
-Debug WASM is 253MB and will timeout Playwright. Every verification run needs release WASM.
+### 3. Build the WASM frontend
 
 ```bash
 cd "$WORKTREE/crates/kyomi-ui"
-trunk build --release && gzip -9 -k dist/*_bg.wasm
+trunk build
 cd "$WORKTREE"
 ```
 
-Stable toolchain works — `src/wasm_math_shims.rs` provides the `libm` forwarders that let the linker resolve `acosh`/`asinh`/`atanh` without `build-std` + nightly.
+Uses the `wasm-dev` profile configured in `Trunk.toml` (LTO off, 16 CGUs). Produces ~60MB WASM — fast to build (~5 min incremental) and loads fine in Playwright. Do NOT pass `--release` unless building production artifacts.
 
 **Never pipe `trunk build` through `tail` or truncate its output** — post-processing happens after compilation. Interruption leaves `dist/` with a 2.8KB `index.html` and no WASM. Let it finish.
 
@@ -144,7 +142,7 @@ const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } }
 const page = await ctx.newPage();
 
 await page.goto(`http://localhost:${PORT}/login`);
-await page.waitForTimeout(3000);  // release WASM loads in 2-3s; debug needs 8-15s
+await page.waitForTimeout(3000);  // wasm-dev WASM (~60MB) loads in 2-3s
 await page.fill('input[type="email"]', 'e2e-test@kyomi.dev');
 await page.fill('input[type="password"]', 'E2eTestPass123!');
 await page.click('button[type="submit"]');
@@ -265,9 +263,9 @@ Only time you need to restart the server.
 #### Both frontend + backend changed — do both
 
 ```bash
-# Frontend first (so server doesn't embed stale WASM if you accidentally use release)
+# Frontend first
 cd crates/kyomi-ui
-trunk build --release && gzip -9 -k dist/*_bg.wasm
+trunk build
 
 # Then server
 cd /home/jason/repos/kyomi
@@ -330,7 +328,7 @@ trunk serve --port 8080 --address 0.0.0.0 --proxy-backend=http://localhost:3000/
 
 - Auto-rebuilds WASM on `.rs` file changes (~27s incremental debug builds)
 - **DOES NOT proxy `/leptos-api/`** — server functions won't work
-- Debug WASM is ~253MB — takes 8-15 seconds to load
+- wasm-dev WASM is ~60MB — takes 2-3 seconds to load
 - Good for CSS/layout iteration only
 
 ---
@@ -363,7 +361,7 @@ await page.waitForTimeout(5000);
 
 ### Key Gotchas
 
-1. **Debug WASM is huge (253MB).** Wait 8-15 seconds after navigation. Blank page = still loading.
+1. **wasm-dev WASM is ~60MB.** Wait 2-3 seconds after navigation. Blank page = still loading.
 2. **Use `.cjs` extension** for Playwright scripts (repo has `"type": "module"`).
 3. **Set `NODE_PATH=/home/jason/repos/kyomi/node_modules`** to find Playwright.
 4. **Screenshots must be 1920x1080.** Full page, never element-level.

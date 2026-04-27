@@ -241,6 +241,14 @@ lto = false
 codegen-units = 16
 debug-assertions = true
 
+# Fast WASM builds for dev iteration. Saves ~5 min per incremental build vs release
+# at a cost of ~1.4 MB extra brotli transfer. Use for dev.kyomi.ai; use release for prod.
+[profile.wasm-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = "s"
+
 # Uncomment to use a local checkout of kyomi-connect for development:
 # [patch.crates-io]
 # kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }

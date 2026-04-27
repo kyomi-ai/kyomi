@@ -422,6 +422,39 @@ The Leptos `#[server]` surface and the REST API surface are *two callers of the 
 
 - **Rule**: One caller ≠ one implementation. If two entrypoints do the same thing, they call the same function. If the DI isn't in `ServerContext`, it won't be there at runtime.
 
+### 14. Resource `.get()` Gating Component Subtrees (Disposal Panics)
+
+Reactive closures that call `.get()` on a `Resource` or `LocalResource` and conditionally render component subtrees cause disposal panics. When the resource resolves, the closure re-runs, Leptos disposes the previous child scope, and any `Effect::new()` / signals inside the disposed subtree read already-disposed values → panic.
+
+**The dangerous pattern:**
+```rust
+// BAD: reactive closure gates a component subtree via .get()
+{move || {
+    if let Some(Ok(ctx)) = some_resource.get() {
+        view! { <BigComponentWithEffects/> }.into_any()
+    } else {
+        view! { <Loading/> }.into_any()
+    }
+}}
+```
+
+**The safe pattern:**
+```rust
+// GOOD: Suspend awaits the resource, component lives in a stable scope
+<Transition fallback=move || view! { <Loading/> }>
+    {move || Suspend::new(async move {
+        let ctx = some_resource.await;
+        view! { <BigComponentWithEffects/> }.into_any()
+    })}
+</Transition>
+```
+
+**How to spot it:** Look for `move ||` closures that (1) call `.get()` on a Resource/LocalResource, (2) branch on the result, and (3) return `.into_any()` from different branches containing components (not just text or attribute toggles).
+
+**Not dangerous:** Simple leaf reactivity like toggling text content or CSS classes based on a signal — these don't create/destroy component scopes.
+
+- **Rule**: Never gate component subtrees on `resource.get()` in a reactive closure. Use `Suspend::new(async move { resource.await ... })` inside `<Transition>` instead.
+
 ## Critical Principles:
 
 - **Be Objective**: Base critiques on project standards (CLAUDE.md), not personal preferences

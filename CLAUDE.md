@@ -72,16 +72,16 @@ Critical rules (violations cause silent hydration panics):
 
 ## Browser Testing — Verifying UI Changes
 
-**Use Playwright, not the browse/gstack tool.** The browse tool doesn't work reliably with Leptos inputs and can't load debug WASM (253MB, 8-15s load time).
+**Use Playwright, not the browse/gstack tool.** The browse tool doesn't work reliably with Leptos inputs.
 
-### Release WASM for Playwright
-
-Debug WASM is too large for Playwright timeouts. Build release WASM first:
+### Build WASM for Playwright
 
 ```bash
 cd crates/kyomi-ui
-trunk build --release && gzip -9 -k dist/*_bg.wasm
+trunk build
 ```
+
+Uses the `wasm-dev` profile from `Trunk.toml` (~60MB WASM, ~5 min incremental). Do NOT pass `--release` — that's only for production deploys and takes 3-4x longer.
 
 ### Seed test users (one-time)
 

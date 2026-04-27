@@ -8,6 +8,7 @@
 //! functions (`get_auth_config`, `login_with_password`).
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast as _;
 use phosphor_leptos::Icon;
 #[cfg(target_arch = "wasm32")]
 use leptos_router::hooks::{use_navigate, use_query_map};

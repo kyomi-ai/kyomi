@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast as _;
 
 use crate::components::select::DynSelect;
 use crate::parser::ParamDef;

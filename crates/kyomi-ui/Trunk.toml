@@ -4,6 +4,10 @@
 [build]
 # Output directory for trunk build artifacts
 dist = "dist"
+# Use wasm-dev profile by default (lto=false, cgu=16, opt-level=s): saves ~5 min
+# per incremental build at the cost of ~1.4 MB extra brotli. Override with
+# --release for production artifacts (uses the release profile instead).
+cargo_profile = "wasm-dev"
 
 [[hooks]]
 # Run Tailwind CSS build before trunk processes assets.
