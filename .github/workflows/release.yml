@@ -92,10 +92,7 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
-      # arm64 runner (ubuntu-24.04-arm) is a clean GitHub-hosted runner and
-      # needs build deps. The kyomi-build runner (amd64) already has them.
-      - name: Install build dependencies (arm64 only)
-        if: matrix.arch == 'arm64'
+      - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
 
       # Same local-dev strips as ci.yml / Dockerfile.
@@ -247,10 +244,8 @@ jobs:
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
-      # GitHub-hosted Linux runners (ubuntu-24.04-arm) need build deps.
-      # The kyomi-build runner (linux/amd64) already has them.
       - name: Install build dependencies (Linux only)
-        if: matrix.os == 'linux' && matrix.arch == 'arm64'
+        if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
 
       # Same local-dev strips as ci.yml / Dockerfile.
