@@ -564,24 +564,24 @@ pub fn AlertsHistory(
             yaml=chart_info_yaml
             on_close=on_chart_info_close
         />
-        <Suspense fallback=move || view! { <AlertsListSkeleton /> }>
+        <Transition fallback=move || view! { <AlertsListSkeleton /> }>
             {move || {
                 let alerts_result = alerts_resource.get();
                 let watches_result = watches_resource.get();
 
-                // Loading state
+                // Still loading — let <Transition> show the fallback skeleton.
+                let alerts_result = alerts_result?;
+
+                // Error state
                 let alerts_page = match alerts_result {
-                    Some(Ok(data)) => data,
-                    Some(Err(e)) => {
-                        return view! {
+                    Ok(data) => data,
+                    Err(e) => {
+                        return Some(view! {
                             <div class="rounded-lg border border-error-border bg-error text-error-foreground p-4 flex items-center gap-2">
                                 <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                                 <span>{format!("Failed to load alerts: {e}")}</span>
                             </div>
-                        }.into_any();
-                    }
-                    None => {
-                        return view! { <AlertsListSkeleton /> }.into_any();
+                        }.into_any());
                     }
                 };
 
@@ -605,7 +605,7 @@ pub fn AlertsHistory(
                 let _is_all_selected = selectable_count > 0 && current_selected.len() == selectable_count;
 
                 // Render the full component
-                view! {
+                Some(view! {
                     <div class="space-y-4">
                         // Toolbar — swaps between filters and bulk actions based on selection
                         <div class="flex items-center gap-3 flex-wrap min-h-10">
@@ -966,8 +966,8 @@ pub fn AlertsHistory(
                             }
                         })}
                     </div>
-                }.into_any()
+                }.into_any())
             }}
-        </Suspense>
+        </Transition>
     }
 }

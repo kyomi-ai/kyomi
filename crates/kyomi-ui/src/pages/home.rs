@@ -162,8 +162,8 @@ pub fn HomePage() -> impl IntoView {
                 <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-12 h-12" />
             </div>
         }>
-            {move || {
-                config_resource.get().map(|result| match result {
+            {move || Suspend::new(async move {
+                match config_resource.await {
                     Err(e) => {
                         // Server error — show message rather than blank screen
                         let msg = format!("Failed to load landing configuration: {e}");
@@ -181,8 +181,8 @@ pub fn HomePage() -> impl IntoView {
                             </div>
                         }.into_any()
                     }
-                })
-            }}
+                }
+            })}
         </Transition>
     }
 }

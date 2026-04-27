@@ -640,9 +640,12 @@ pub fn ChatsListPage() -> impl IntoView {
             // Chats List
             <div class="flex-1 overflow-y-auto p-4 md:p-6">
                 <Transition fallback=move || view! { <ChatsLoadingSkeleton /> }>
-                    {move || {
-                        // Wait for user context to be available
-                        let _user_ctx = user_ctx_resource.get();
+                    {move || Suspend::new(async move {
+                        // Wait for user context to be available before rendering
+                        // the list. Awaiting the resource (rather than calling
+                        // `.get()`) prevents disposal panics when the resource
+                        // resolves and Leptos re-runs the reactive closure.
+                        let _ = user_ctx_resource.await;
 
                         // Show skeleton until the SyncStore has been hydrated
                         // from IndexedDB (or a search is in progress).
@@ -847,7 +850,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                 </div>
                             </div>
                         }.into_any()
-                    }}
+                    })}
                 </Transition>
             </div>
 

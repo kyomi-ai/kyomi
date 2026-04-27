@@ -29,13 +29,13 @@ pub fn SlackConnectionCard() -> impl IntoView {
 
     view! {
         <Transition fallback=|| ()>
-            {move || {
-                slack_status.get().map(|result| match result {
+            {move || Suspend::new(async move {
+                match slack_status.await {
                     Ok(status) => view! { <SlackConnectionInner status=status/> }.into_any(),
                     // Tier error or unavailable — hide the card entirely
                     Err(_) => view! { <span class="hidden"></span> }.into_any(),
-                })
-            }}
+                }
+            })}
         </Transition>
     }
 }

@@ -401,8 +401,8 @@ fn TeamPageInner() -> impl IntoView {
                         <Skeleton class="h-14 w-full"/>
                     </div>
                 }>
-                    {move || {
-                        invitations.get().map(|result| match result {
+                    {move || Suspend::new(async move {
+                        match invitations.await {
                             Ok(invs) if invs.is_empty() => {
                                 view! {
                                     <EmptyState
@@ -427,24 +427,24 @@ fn TeamPageInner() -> impl IntoView {
                                     <p class="text-error-foreground text-sm">{msg}</p>
                                 }.into_any()
                             },
-                        })
-                    }}
+                        }
+                    })}
                 </Transition>
             </div>
 
             // Pending Ownership Transfers
             <Transition fallback=|| ()>
-                {move || {
-                    let current_user_id = user_ctx.get()
-                        .and_then(|r| r.ok())
+                {move || Suspend::new(async move {
+                    let current_user_id = user_ctx.await
+                        .ok()
                         .map(|u| u.user_id.clone())
                         .unwrap_or_default();
-                    let is_owner = members.get()
-                        .and_then(|r| r.ok())
+                    let is_owner = members.await
+                        .ok()
                         .map(|m| m.iter().any(|member| member.user_id == current_user_id && member.is_owner))
                         .unwrap_or(false);
 
-                    transfers.get().map(|result| match result {
+                    match transfers.await {
                         Ok(t) if !t.is_empty() => {
                             let title = if is_owner {
                                 "Pending Ownership Transfers"
@@ -463,8 +463,8 @@ fn TeamPageInner() -> impl IntoView {
                             }.into_any()
                         },
                         _ => view! { <span></span> }.into_any(),
-                    })
-                }}
+                    }
+                })}
             </Transition>
 
             // Workspace Members
@@ -480,12 +480,12 @@ fn TeamPageInner() -> impl IntoView {
                         <Skeleton class="h-14 w-full"/>
                     </div>
                 }>
-                    {move || {
-                        let current_user_id = user_ctx.get()
-                            .and_then(|r| r.ok())
+                    {move || Suspend::new(async move {
+                        let current_user_id = user_ctx.await
+                            .ok()
                             .map(|u| u.user_id.clone())
                             .unwrap_or_default();
-                        members.get().map(|result| match result {
+                        match members.await {
                             Ok(m) if m.is_empty() => {
                                 view! {
                                     <EmptyState
@@ -518,8 +518,8 @@ fn TeamPageInner() -> impl IntoView {
                                     <p class="text-error-foreground text-sm">{msg}</p>
                                 }.into_any()
                             },
-                        })
-                    }}
+                        }
+                    })}
                 </Transition>
             </div>
 

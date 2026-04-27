@@ -391,9 +391,9 @@ pub fn ExecutionLogViewer(
                             <div class="flex flex-col items-start">
                                 <div class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden">
                                     // Agent thinking trace (above the response markdown)
-                                    {move || {
-                                        thinking_events_resource.get().map(|events| {
-                                            let events: Vec<ThinkingEvent> = events.to_vec();
+                                    <Transition fallback=|| ()>
+                                        {move || Suspend::new(async move {
+                                            let events: Vec<ThinkingEvent> = thinking_events_resource.await.to_vec();
                                             if events.is_empty() {
                                                 None
                                             } else {
@@ -404,8 +404,8 @@ pub fn ExecutionLogViewer(
                                                     />
                                                 })
                                             }
-                                        })
-                                    }}
+                                        })}
+                                    </Transition>
                                     {if let Some(response) = agent_response {
                                         // KYO-119: Pass workspace_id so `MarkdownRenderer`
                                         // can register `KyomiDatasourceProvider` on its

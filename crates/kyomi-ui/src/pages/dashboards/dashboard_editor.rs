@@ -120,38 +120,36 @@ pub fn DashboardEditorPage() -> impl IntoView {
                 // Existing dashboard: fetch then render
                 view! {
                     <Transition fallback=move || view! { <DetailPageSkeleton /> }>
-                        {move || {
-                            dashboard_resource
-                                .get()
-                                .map(|result| match result {
-                                    Err(e) => {
-                                        view! {
-                                            <div class="flex h-full items-center justify-center bg-background">
-                                                <div class="text-center">
-                                                    <h2 class="text-lg font-semibold text-foreground mb-4">
-                                                        {if is_knowledge.get() { "Knowledge Document Not Found" } else { "Dashboard Not Found" }}
-                                                    </h2>
-                                                    <p class="text-muted-foreground mb-6">{e.to_string()}</p>
-                                                    <ButtonLink href=(if is_knowledge.get() { "/knowledge" } else { "/dashboards" }).to_string()>
-                                                        {if is_knowledge.get() { "Back to Knowledge" } else { "Back to Dashboards" }}
-                                                    </ButtonLink>
-                                                </div>
+                        {move || Suspend::new(async move {
+                            match dashboard_resource.await {
+                                Err(e) => {
+                                    view! {
+                                        <div class="flex h-full items-center justify-center bg-background">
+                                            <div class="text-center">
+                                                <h2 class="text-lg font-semibold text-foreground mb-4">
+                                                    {if is_knowledge.get() { "Knowledge Document Not Found" } else { "Dashboard Not Found" }}
+                                                </h2>
+                                                <p class="text-muted-foreground mb-6">{e.to_string()}</p>
+                                                <ButtonLink href=(if is_knowledge.get() { "/knowledge" } else { "/dashboards" }).to_string()>
+                                                    {if is_knowledge.get() { "Back to Knowledge" } else { "Back to Dashboards" }}
+                                                </ButtonLink>
                                             </div>
-                                        }
-                                        .into_any()
+                                        </div>
                                     }
-                                    Ok(dashboard) => {
-                                        view! {
-                                            <DashboardEditorInner
-                                                dashboard_id=Some(dashboard.dashboard_id.clone())
-                                                initial_title=dashboard.title.clone()
-                                                initial_content=dashboard.content.clone()
-                                            />
-                                        }
-                                        .into_any()
+                                    .into_any()
+                                }
+                                Ok(dashboard) => {
+                                    view! {
+                                        <DashboardEditorInner
+                                            dashboard_id=Some(dashboard.dashboard_id.clone())
+                                            initial_title=dashboard.title.clone()
+                                            initial_content=dashboard.content.clone()
+                                        />
                                     }
-                                })
-                        }}
+                                    .into_any()
+                                }
+                            }
+                        })}
                     </Transition>
                 }
                 .into_any()

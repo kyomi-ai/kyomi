@@ -51,8 +51,8 @@ pub fn WorkspacePage() -> impl IntoView {
                     </Card>
                 </div>
             }>
-                {move || {
-                    settings.get().map(|result| match result {
+                {move || Suspend::new(async move {
+                    match settings.await {
                         Ok(data) => {
                             view! {
                                 <div class="space-y-6">
@@ -71,8 +71,8 @@ pub fn WorkspacePage() -> impl IntoView {
                                 </Card>
                             }.into_any()
                         },
-                    })
-                }}
+                    }
+                })}
             </Transition>
         </div>
     }
@@ -246,8 +246,8 @@ fn WorkspaceSlackCard() -> impl IntoView {
                         <span>"Loading Slack status..."</span>
                     </div>
                 }>
-                    {move || {
-                        slack_status.get().map(|result| match result {
+                    {move || Suspend::new(async move {
+                        match slack_status.await {
                             Ok(status) if status.installed => {
                                 let team_name = status.team_name.clone().unwrap_or_default();
                                 view! {
@@ -327,8 +327,8 @@ fn WorkspaceSlackCard() -> impl IntoView {
                                     }.into_any()
                                 }
                             },
-                        })
-                    }}
+                        }
+                    })}
                 </Transition>
             </CardContent>
         </Card>

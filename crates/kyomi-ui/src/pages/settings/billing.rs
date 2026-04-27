@@ -401,128 +401,135 @@ pub fn BillingPage() -> impl IntoView {
         <div class="p-6">
         // Check user context for self-hosted mode and owner gate.
         // Billing is owner-only — non-owners see a helpful message instead.
-        {move || {
-            if let Some(Ok(ctx)) = user_ctx.get() {
-                if ctx.is_self_hosted {
-                    return view! {
-                        <Card>
-                            <CardContent>
-                                <p class="text-muted-foreground py-6">
-                                    "Billing is not available in self-hosted mode."
-                                </p>
-                            </CardContent>
-                        </Card>
-                    }.into_any();
+        <Transition fallback=move || view! {
+            <div class="flex items-center justify-center p-8">
+                <Skeleton class="h-8 w-8 rounded-full"/>
+            </div>
+        }>
+            {move || Suspend::new(async move {
+                let ctx_result = user_ctx.await;
+                if let Ok(ctx) = ctx_result {
+                    if ctx.is_self_hosted {
+                        return view! {
+                            <Card>
+                                <CardContent>
+                                    <p class="text-muted-foreground py-6">
+                                        "Billing is not available in self-hosted mode."
+                                    </p>
+                                </CardContent>
+                            </Card>
+                        }.into_any();
+                    }
+                    if !ctx.is_owner {
+                        let is_expired = matches!(
+                            ctx.subscription_status.as_str(),
+                            "past_due" | "cancelled" | "canceled" | "unpaid" | "incomplete_expired"
+                        );
+                        let (heading, body) = if is_expired {
+                            (
+                                "Workspace subscription expired",
+                                "Your workspace subscription has lapsed. Contact your workspace owner to reactivate it — only the owner can make billing changes.",
+                            )
+                        } else {
+                            (
+                                "Billing is owner-only",
+                                "Only the workspace owner can manage subscriptions and purchases. Contact your workspace owner for billing changes.",
+                            )
+                        };
+                        return view! {
+                            <Card>
+                                <CardContent>
+                                    <div class="py-6 text-center space-y-2">
+                                        <p class="text-foreground font-medium">{heading}</p>
+                                        <p class="text-muted-foreground text-sm">{body}</p>
+                                    </div>
+                                </CardContent>
+                            </Card>
+                        }.into_any();
+                    }
                 }
-                if !ctx.is_owner {
-                    let is_expired = matches!(
-                        ctx.subscription_status.as_str(),
-                        "past_due" | "cancelled" | "canceled" | "unpaid" | "incomplete_expired"
-                    );
-                    let (heading, body) = if is_expired {
-                        (
-                            "Workspace subscription expired",
-                            "Your workspace subscription has lapsed. Contact your workspace owner to reactivate it — only the owner can make billing changes.",
-                        )
-                    } else {
-                        (
-                            "Billing is owner-only",
-                            "Only the workspace owner can manage subscriptions and purchases. Contact your workspace owner for billing changes.",
-                        )
-                    };
-                    return view! {
-                        <Card>
-                            <CardContent>
-                                <div class="py-6 text-center space-y-2">
-                                    <p class="text-foreground font-medium">{heading}</p>
-                                    <p class="text-muted-foreground text-sm">{body}</p>
-                                </div>
-                            </CardContent>
-                        </Card>
-                    }.into_any();
-                }
-            }
-            view! {
-                <div class="space-y-6" style:display="block">
-                    // Alerts
-                    {move || error.get().map(|msg| view! {
-                        <Alert variant=AlertVariant::Error class="mb-4">
-                            <AlertDescription>{msg}</AlertDescription>
-                        </Alert>
-                    })}
-                    {move || success.get().map(|msg| view! {
-                        <Alert variant=AlertVariant::Success class="mb-4">
-                            <AlertDescription>{msg}</AlertDescription>
-                        </Alert>
-                    })}
-
-                    // Embedded checkout modal — center-overlay with backdrop
-                    <Modal
-                        show=Signal::derive(move || checkout_open.get())
-                        on_close=Callback::new(move |()| {
-                            // Destroy the Stripe form and close the modal
-                            checkout_handle.set_value(None);
-                            set_checkout_open.set(false);
-                            set_checkout_session_id.set(None);
-                        })
-                        title="Complete Payment".to_string()
-                        size=ModalSize::Lg
-                    >
-                        <div id="stripe-checkout-mount" class="min-h-[400px]"/>
-                    </Modal>
-
-                    // Main content
-                    <Transition fallback=move || view! {
-                        <div class="flex items-center justify-center p-8">
-                            <Skeleton class="h-8 w-8 rounded-full"/>
-                        </div>
-                    }>
-                        {move || Suspend::new(async move {
-                            match subscription.await {
-                                Ok(info) => {
-                                    view! {
-                                        <BillingContent
-                                            info=info
-                                            invoices=invoices
-                                            checkout_loading=checkout_loading
-                                            handle_subscribe=handle_subscribe
-                                            handle_manage_billing=handle_manage_billing
-                                            handle_purchase_ai=handle_purchase_ai
-                                            handle_purchase_analytics=handle_purchase_analytics
-                                            dialog_open=dialog_open
-                                            set_dialog_title=set_dialog_title
-                                            set_dialog_message=set_dialog_message
-                                            set_dialog_confirm_text=set_dialog_confirm_text
-                                            set_dialog_destructive=set_dialog_destructive
-                                            set_pending_confirm_action=set_pending_confirm_action
-                                            set_sub_version=set_sub_version
-                                        />
-                                    }.into_any()
-                                }
-                                Err(e) => {
-                                    view! {
-                                        <Alert variant=AlertVariant::Error>
-                                            <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
-                                        </Alert>
-                                    }.into_any()
-                                }
-                            }
+                view! {
+                    <div class="space-y-6" style:display="block">
+                        // Alerts
+                        {move || error.get().map(|msg| view! {
+                            <Alert variant=AlertVariant::Error class="mb-4">
+                                <AlertDescription>{msg}</AlertDescription>
+                            </Alert>
                         })}
-                    </Transition>
+                        {move || success.get().map(|msg| view! {
+                            <Alert variant=AlertVariant::Success class="mb-4">
+                                <AlertDescription>{msg}</AlertDescription>
+                            </Alert>
+                        })}
 
-                    // Confirm Dialog
-                    <ConfirmDialog
-                        open=Signal::from(dialog_open)
-                        title=dialog_title.get_untracked()
-                        message=dialog_message.get_untracked()
-                        confirm_text=dialog_confirm_text.get_untracked()
-                        destructive=dialog_destructive.get_untracked()
-                        on_confirm=on_confirm
-                        on_cancel=on_cancel_dialog
-                    />
-                </div>
-            }.into_any()
-        }}
+                        // Embedded checkout modal — center-overlay with backdrop
+                        <Modal
+                            show=Signal::derive(move || checkout_open.get())
+                            on_close=Callback::new(move |()| {
+                                // Destroy the Stripe form and close the modal
+                                checkout_handle.set_value(None);
+                                set_checkout_open.set(false);
+                                set_checkout_session_id.set(None);
+                            })
+                            title="Complete Payment".to_string()
+                            size=ModalSize::Lg
+                        >
+                            <div id="stripe-checkout-mount" class="min-h-[400px]"/>
+                        </Modal>
+
+                        // Main content
+                        <Transition fallback=move || view! {
+                            <div class="flex items-center justify-center p-8">
+                                <Skeleton class="h-8 w-8 rounded-full"/>
+                            </div>
+                        }>
+                            {move || Suspend::new(async move {
+                                match subscription.await {
+                                    Ok(info) => {
+                                        view! {
+                                            <BillingContent
+                                                info=info
+                                                invoices=invoices
+                                                checkout_loading=checkout_loading
+                                                handle_subscribe=handle_subscribe
+                                                handle_manage_billing=handle_manage_billing
+                                                handle_purchase_ai=handle_purchase_ai
+                                                handle_purchase_analytics=handle_purchase_analytics
+                                                dialog_open=dialog_open
+                                                set_dialog_title=set_dialog_title
+                                                set_dialog_message=set_dialog_message
+                                                set_dialog_confirm_text=set_dialog_confirm_text
+                                                set_dialog_destructive=set_dialog_destructive
+                                                set_pending_confirm_action=set_pending_confirm_action
+                                                set_sub_version=set_sub_version
+                                            />
+                                        }.into_any()
+                                    }
+                                    Err(e) => {
+                                        view! {
+                                            <Alert variant=AlertVariant::Error>
+                                                <AlertDescription>{format!("Failed to load subscription information: {e}")}</AlertDescription>
+                                            </Alert>
+                                        }.into_any()
+                                    }
+                                }
+                            })}
+                        </Transition>
+
+                        // Confirm Dialog
+                        <ConfirmDialog
+                            open=Signal::from(dialog_open)
+                            title=dialog_title.get_untracked()
+                            message=dialog_message.get_untracked()
+                            confirm_text=dialog_confirm_text.get_untracked()
+                            destructive=dialog_destructive.get_untracked()
+                            on_confirm=on_confirm
+                            on_cancel=on_cancel_dialog
+                        />
+                    </div>
+                }.into_any()
+            })}
+        </Transition>
         </div>
     }
 }
