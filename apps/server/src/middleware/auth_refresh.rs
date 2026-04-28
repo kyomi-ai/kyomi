@@ -43,7 +43,10 @@ pub async fn auth_refresh_middleware(
     let refresh_cookie_name = cookie_names.refresh_token_name.as_str();
 
     // Never refresh tokens on logout — the handler will clear them.
-    if req.uri().path() == "/leptos-api/logout" {
+    // Leptos #[server] appends a hash suffix to function names, so we use
+    // prefix matching to cover both logout and logout_all_sessions.
+    let path = req.uri().path();
+    if path.starts_with("/leptos-api/logout") {
         return next.run(req).await;
     }
 

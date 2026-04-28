@@ -351,6 +351,16 @@ pub async fn logout_all_sessions() -> Result<String, ServerFnError> {
             .await
             .into_sfn()?;
 
+    // Clear both HTTPOnly cookies so the browser forgets the current session.
+    let response_options = leptos::prelude::expect_context::<leptos_axum::ResponseOptions>();
+    let mut cookie_headers = axum::http::HeaderMap::new();
+    kyomi_auth::cookies::clear_token_cookies(&mut cookie_headers);
+    for (name, value) in cookie_headers.iter() {
+        if name == axum::http::header::SET_COOKIE {
+            response_options.append_header(name.clone(), value.clone());
+        }
+    }
+
     Ok(format!(
         "Logged out from all devices successfully ({revoked_count} sessions revoked)"
     ))
