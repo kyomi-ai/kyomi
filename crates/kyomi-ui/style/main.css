@@ -1157,3 +1157,18 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
 .dashboard-wysiwyg [data-kode-extension="chartml"] + .kode-block-gap:has(+ [data-kode-extension="chartml"]) {
   display: none;
 }
+
+/* PWA standalone safe-area insets — prevents OS chrome (status bar,
+   home indicator, navigation bar) from overlapping app content.
+   Only applies in installed/standalone mode, not normal browser tabs. */
+@media (display-mode: standalone) {
+  .app-shell {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Fixed mobile header must offset below the status bar in PWA mode */
+  .mobile-header {
+    top: env(safe-area-inset-top);
+  }
+}

@@ -402,9 +402,9 @@ pub fn Layout(children: Children) -> impl IntoView {
                 // Drives the bootstrap/delta/live sync protocol over WebSocket
                 // and keeps SyncStore + IndexedDB current. See [KYO-169].
                 <SyncEngineStarter workspace_id=ws_workspace_id.into()/>
-                <div class="h-screen flex flex-col bg-background">
+                <div class="h-dvh flex flex-col bg-background app-shell">
                     // ── Mobile header bar (md:hidden) — matches React Sidebar.jsx line 266 ──
-                    <div class="md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
+                    <div class="mobile-header md:hidden fixed top-0 left-0 right-0 h-16 bg-background border-b border-border z-40 flex items-center px-4">
                         <button
                             on:click=move |_| set_mobile_open.update(|o| *o = !*o)
                             class="p-2 hover:bg-secondary rounded-lg transition-colors relative z-10"
