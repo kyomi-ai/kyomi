@@ -187,6 +187,7 @@ struct SessionSnapshotRow {
     user_id: String,
     workspace_id: String,
     title: Option<String>,
+    session_type: String,
     updated_at: String,
     created_at: String,
 }
@@ -202,10 +203,11 @@ async fn fetch_session_snapshot(
     let row = kyomi_core::db_fetch_optional!(
         db,
         SessionSnapshotRow,
-        r#"SELECT session_id, user_id, workspace_id, title,
+        r#"SELECT session_id, user_id, workspace_id, title, session_type,
                   CAST(updated_at AS TEXT) AS updated_at,
                   CAST(created_at AS TEXT) AS created_at
-           FROM chat_sessions WHERE session_id = $1"#,
+           FROM chat_sessions
+           WHERE session_id = $1 AND session_type = 'chat'"#,
         session_id
     )
     .ok()?;
@@ -217,6 +219,7 @@ async fn fetch_session_snapshot(
         "user_id": row.user_id,
         "workspace_id": row.workspace_id,
         "title": row.title,
+        "session_type": row.session_type,
         "updated_at": row.updated_at,
         "created_at": row.created_at,
     });
@@ -1048,7 +1051,7 @@ pub async fn delete_session(
             let row = kyomi_core::db_fetch_optional!(
                 db,
                 SessionSnapshotRow,
-                r#"SELECT session_id, user_id, workspace_id, title,
+                r#"SELECT session_id, user_id, workspace_id, title, session_type,
                           CAST(updated_at AS TEXT) AS updated_at,
                           CAST(created_at AS TEXT) AS created_at
                    FROM chat_sessions WHERE session_id = $1"#,

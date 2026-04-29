@@ -411,7 +411,17 @@ fn apply_sync_action(
                 }
                 et if et == entity_types::CHAT_SESSION => {
                     match serde_json::from_value::<ChatSessionItem>(entity_data.clone()) {
-                        Ok(item) => store.upsert_chat_session(item),
+                        Ok(item) => {
+                            if item.session_type.as_deref() != Some("chat") && item.session_type.is_some() {
+                                tracing::debug!(
+                                    entity_id = %entity_id,
+                                    session_type = ?item.session_type,
+                                    "sync_action: skipping non-chat session"
+                                );
+                            } else {
+                                store.upsert_chat_session(item);
+                            }
+                        }
                         Err(e) => tracing::warn!(
                             entity_type,
                             entity_id = %entity_id,
