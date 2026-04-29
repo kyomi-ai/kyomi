@@ -1,11 +1,13 @@
 # =============================================================================
 # Kyomi — Release Workflow
 # =============================================================================
-# Triggered by version tags (v*). Builds linux/amd64 and linux/arm64 Docker
-# images natively (no QEMU) via a matrix strategy, combines them with
-# `docker manifest create`, produces standalone kyomi binaries for
-# linux/amd64, linux/arm64, macos/arm64, and macos/amd64, then creates a
-# GitHub Release with all artifacts attached.
+# Triggered by version tags (v*). Builds a linux/amd64 Docker image on the
+# self-hosted kyomi-build runner, tags it via docker manifest, produces a
+# standalone kyomi binary for linux/amd64, then creates a GitHub Release
+# with all artifacts attached.
+#
+# arm64 and macOS targets are disabled until self-hosted runners are
+# provisioned for those platforms.
 #
 # Usage:
 #   git tag v2026.04.19.2
@@ -72,13 +74,10 @@ jobs:
             wasm_bindgen_arch: x86_64-unknown-linux-musl
             tailwind_binary: tailwindcss-linux-x64
             binaryen_arch: x86_64-linux
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            trunk_target: aarch64-unknown-linux-gnu
-            trunk_arch: aarch64
-            wasm_bindgen_arch: aarch64-unknown-linux-musl
-            tailwind_binary: tailwindcss-linux-arm64
-            binaryen_arch: aarch64-linux
+          # arm64 disabled — no self-hosted arm64 runner available (KYO-113)
+          # - arch: arm64
+          #   runner: ubuntu-24.04-arm
+          #   ...
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
@@ -176,8 +175,7 @@ jobs:
           docker buildx imagetools create \
             --tag ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION} \
             --tag ${{ env.GHCR_REGISTRY }}/kyomi:latest \
-            ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION}-amd64 \
-            ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION}-arm64
+            ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION}-amd64
 
   # ---------------------------------------------------------------------------
   # Binaries: per-platform standalone kyomi binary tarballs
@@ -201,36 +199,8 @@ jobs:
             tailwind_binary: tailwindcss-linux-x64
             binaryen_arch: x86_64-linux
             sed_inplace: "sed -i"
-          - os: linux
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            rust_target: aarch64-unknown-linux-gnu
-            trunk_arch: aarch64
-            trunk_os_suffix: unknown-linux-gnu
-            wasm_bindgen_arch: aarch64-unknown-linux-musl
-            tailwind_binary: tailwindcss-linux-arm64
-            binaryen_arch: aarch64-linux
-            sed_inplace: "sed -i"
-          - os: macos
-            arch: arm64
-            runner: macos-14
-            rust_target: aarch64-apple-darwin
-            trunk_arch: aarch64
-            trunk_os_suffix: apple-darwin
-            wasm_bindgen_arch: aarch64-apple-darwin
-            tailwind_binary: tailwindcss-macos-arm64
-            binaryen_arch: arm64-macos
-            sed_inplace: "sed -i ''"
-          - os: macos
-            arch: amd64
-            runner: macos-13
-            rust_target: x86_64-apple-darwin
-            trunk_arch: x86_64
-            trunk_os_suffix: apple-darwin
-            wasm_bindgen_arch: x86_64-apple-darwin
-            tailwind_binary: tailwindcss-macos-x64
-            binaryen_arch: x86_64-macos
-            sed_inplace: "sed -i ''"
+          # arm64 + macOS disabled — no self-hosted runners available
+          # Re-enable when arm64 and macOS runners are provisioned
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
@@ -362,7 +332,7 @@ jobs:
               ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
             ```
 
-            The image supports linux/amd64 and linux/arm64 and is fully
+            The image supports linux/amd64 and is fully
             self-contained — frontend, ML model, and server in a single binary.
             Requires an LLM API key (Anthropic, OpenAI, or Gemini).
 

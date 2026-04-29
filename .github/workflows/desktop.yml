@@ -12,9 +12,11 @@
 name: Desktop
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Disabled — kyomi-desktop runner not provisioned yet
+  # push:
+  #   tags:
+  #     - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
