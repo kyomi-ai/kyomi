@@ -1078,7 +1078,11 @@ fn provider_result_to_query_result(
         })
         .collect();
 
-    let rows = result.rows.unwrap_or_default();
+    let rows = if let Some(ref batch) = result.record_batch {
+        super::datasources::record_batch_to_json_rows(batch)
+    } else {
+        result.rows.unwrap_or_default()
+    };
     let row_count = rows.len();
 
     let total_rows = result.total_rows.map(|t| t as usize);

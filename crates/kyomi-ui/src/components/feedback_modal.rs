@@ -11,7 +11,6 @@
 
 use leptos::ev;
 use leptos::prelude::*;
-use wasm_bindgen::JsCast as _;
 use phosphor_leptos::{Icon, IconWeight};
 
 use crate::components::alert::{Alert, AlertDescription, AlertVariant};

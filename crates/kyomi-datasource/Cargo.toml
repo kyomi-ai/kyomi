@@ -8,6 +8,9 @@ license.workspace = true
 kyomi-core = { workspace = true }
 kyomi-connect-protocol = { workspace = true }
 kyomi-datasource-drivers = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
 
 # HTTP client (for re-export wrapper)
 reqwest = { workspace = true }

@@ -779,13 +779,31 @@ pub async fn query_datasource_arrow(
         ));
     }
 
-    let columns = result.columns.as_deref().unwrap_or(&[]);
-    let rows = result.rows.as_deref().unwrap_or(&[]);
     let execution_time_ms = result.execution_time_ms;
-    let num_rows = rows.len();
 
-    // Convert to Arrow IPC
-    let ipc_bytes = query_result_to_arrow_ipc(columns, rows)?;
+    // Arrow-native path: serialize the RecordBatch directly into IPC bytes.
+    // All Connect providers populate record_batch; non-Connect providers do not
+    // support this endpoint (they expose JSON-only rows for the SQL editor path).
+    let batch = result.record_batch.ok_or_else(|| {
+        ServerFnError::new(
+            "Provider returned no Arrow RecordBatch — this datasource does not support the Arrow query endpoint".to_string(),
+        )
+    })?;
+    let num_rows = batch.num_rows();
+    let ipc_bytes = {
+        use arrow_ipc::writer::StreamWriter;
+        let mut buf = Vec::new();
+        let mut writer = StreamWriter::try_new(&mut buf, &batch.schema())
+            .map_err(|e| ServerFnError::new(format!("Arrow writer init failed: {e}")))?;
+        writer
+            .write(&batch)
+            .map_err(|e| ServerFnError::new(format!("Arrow write failed: {e}")))?;
+        writer
+            .finish()
+            .map_err(|e| ServerFnError::new(format!("Arrow writer finish failed: {e}")))?;
+        buf
+    };
+
     let ipc_base64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         &ipc_bytes,
@@ -798,205 +816,152 @@ pub async fn query_datasource_arrow(
     })
 }
 
-/// Convert query result columns + rows into Arrow IPC stream bytes.
+/// Convert an Arrow `RecordBatch` into JSON rows for display in the SQL editor.
 ///
-/// Maps each `SimpleType` to the corresponding Arrow `DataType`, builds typed
-/// arrays from the JSON row data, and serializes the resulting `RecordBatch`
-/// into the IPC streaming format.
+/// This is a display-layer conversion: the SQL editor table component expects
+/// `Vec<Vec<serde_json::Value>>` (one inner `Vec` per row), so data that arrived
+/// as Arrow must be translated back to JSON for rendering. Each Arrow column type
+/// is mapped to the most natural JSON representation:
+///
+/// - Numeric types → `json!(value)`
+/// - Boolean → `json!(value)`
+/// - String/Large-string → `json!(value)`
+/// - Date32 → `"YYYY-MM-DD"` string
+/// - Time64Microsecond → `"HH:MM:SS"` string
+/// - TimestampMicrosecond → ISO 8601 string
+/// - Decimal128 → decimal string (preserves precision, avoids float rounding)
+/// - Null → `Value::Null`
+/// - Unknown/unsupported type → `Value::Null`
 #[cfg(feature = "ssr")]
-fn query_result_to_arrow_ipc(
-    columns: &[kyomi_datasource_server::ColumnInfo],
-    rows: &[Vec<serde_json::Value>],
-) -> Result<Vec<u8>, ServerFnError> {
-    use arrow_array::builder::*;
-    use arrow_array::*;
-    use arrow_ipc::writer::StreamWriter;
-    use arrow_schema::{DataType, Field, Schema, TimeUnit};
-    use kyomi_datasource_server::SimpleType;
-    use std::sync::Arc;
+pub(crate) fn record_batch_to_json_rows(batch: &arrow_array::RecordBatch) -> Vec<Vec<serde_json::Value>> {
+    use arrow_array::Array;
+    use arrow_array::cast::AsArray;
+    use arrow_schema::DataType;
 
-    // Build Arrow schema from ColumnInfo
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|col| {
-            let dt = match col.col_type {
-                SimpleType::Number => DataType::Float64,
-                SimpleType::Boolean => DataType::Boolean,
-                SimpleType::String => DataType::Utf8,
-                SimpleType::Date => DataType::Date32,
-                SimpleType::Time => DataType::Time64(TimeUnit::Microsecond),
-                SimpleType::Timestamp => DataType::Timestamp(TimeUnit::Microsecond, None),
-                SimpleType::TimestampTz => {
-                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+    let num_rows = batch.num_rows();
+    let num_cols = batch.num_columns();
+    let mut result = vec![Vec::with_capacity(num_cols); num_rows];
+
+    for col_idx in 0..num_cols {
+        let col = batch.column(col_idx);
+        let data_type = col.data_type();
+
+        for (row_idx, row) in result.iter_mut().enumerate() {
+            let value = if col.is_null(row_idx) {
+                serde_json::Value::Null
+            } else {
+                match data_type {
+                    DataType::Float64 => {
+                        let v = col.as_primitive::<arrow_array::types::Float64Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Float32 => {
+                        let v = col.as_primitive::<arrow_array::types::Float32Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Int64 => {
+                        let v = col.as_primitive::<arrow_array::types::Int64Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Int32 => {
+                        let v = col.as_primitive::<arrow_array::types::Int32Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Int16 => {
+                        let v = col.as_primitive::<arrow_array::types::Int16Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Int8 => {
+                        let v = col.as_primitive::<arrow_array::types::Int8Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::UInt64 => {
+                        let v = col.as_primitive::<arrow_array::types::UInt64Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::UInt32 => {
+                        let v = col.as_primitive::<arrow_array::types::UInt32Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::UInt16 => {
+                        let v = col.as_primitive::<arrow_array::types::UInt16Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::UInt8 => {
+                        let v = col.as_primitive::<arrow_array::types::UInt8Type>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Boolean => {
+                        let v = col.as_boolean().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Utf8 => {
+                        let v = col.as_string::<i32>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::LargeUtf8 => {
+                        let v = col.as_string::<i64>().value(row_idx);
+                        serde_json::json!(v)
+                    }
+                    DataType::Date32 => {
+                        let days = col.as_primitive::<arrow_array::types::Date32Type>().value(row_idx);
+                        // Days since Unix epoch (1970-01-01)
+                        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or_default();
+                        let date = epoch.checked_add_signed(chrono::Duration::days(days as i64));
+                        match date {
+                            Some(d) => serde_json::json!(d.format("%Y-%m-%d").to_string()),
+                            None => serde_json::Value::Null,
+                        }
+                    }
+                    DataType::Time64(arrow_schema::TimeUnit::Microsecond) => {
+                        let micros = col.as_primitive::<arrow_array::types::Time64MicrosecondType>().value(row_idx);
+                        let secs = micros / 1_000_000;
+                        let h = secs / 3600;
+                        let m = (secs % 3600) / 60;
+                        let s = secs % 60;
+                        serde_json::json!(format!("{h:02}:{m:02}:{s:02}"))
+                    }
+                    DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, tz) => {
+                        let micros = col.as_primitive::<arrow_array::types::TimestampMicrosecondType>().value(row_idx);
+                        match chrono::DateTime::from_timestamp_micros(micros) {
+                            Some(d) => {
+                                let suffix = if tz.is_some() { "Z" } else { "" };
+                                serde_json::json!(format!("{}{suffix}", d.format("%Y-%m-%dT%H:%M:%S%.6f")))
+                            }
+                            None => serde_json::Value::Null,
+                        }
+                    }
+                    DataType::Decimal128(_precision, scale) => {
+                        let raw = col.as_primitive::<arrow_array::types::Decimal128Type>().value(row_idx);
+                        // Format as a decimal string to preserve full precision.
+                        // `scale` is the number of fractional digits; use it as
+                        // the zero-pad width for the fractional part.
+                        let sign = if raw < 0 { "-" } else { "" };
+                        let abs_raw = raw.unsigned_abs();
+                        let s = if *scale <= 0 {
+                            let shifted = abs_raw * 10u128.pow((-*scale) as u32);
+                            format!("{sign}{shifted}")
+                        } else {
+                            let scale_u32 = *scale as u32;
+                            let divisor = 10u128.pow(scale_u32);
+                            let int_part = abs_raw / divisor;
+                            let frac_part = abs_raw % divisor;
+                            format!("{sign}{int_part}.{frac_part:0>width$}", width = scale_u32 as usize)
+                        };
+                        serde_json::json!(s)
+                    }
+                    _ => {
+                        // Unsupported type — return null rather than
+                        // attempting lossy display formatting
+                        serde_json::Value::Null
+                    }
                 }
-                SimpleType::Unknown => DataType::Utf8,
             };
-            Field::new(&col.name, dt, true)
-        })
-        .collect();
-    let schema = Arc::new(Schema::new(fields));
-
-    // Build typed arrays from JSON rows
-    let num_rows = rows.len();
-    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
-
-    for (col_idx, col) in columns.iter().enumerate() {
-        let array: ArrayRef = match col.col_type {
-            SimpleType::Number => {
-                let mut builder = Float64Builder::with_capacity(num_rows);
-                for row in rows {
-                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
-                    if val.is_null() {
-                        builder.append_null();
-                    } else if let Some(n) = val.as_f64() {
-                        builder.append_value(n);
-                    } else if let Some(s) = val.as_str() {
-                        if let Ok(n) = s.parse::<f64>() {
-                            builder.append_value(n);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            SimpleType::Boolean => {
-                let mut builder = BooleanBuilder::with_capacity(num_rows);
-                for row in rows {
-                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
-                    if val.is_null() {
-                        builder.append_null();
-                    } else if let Some(b) = val.as_bool() {
-                        builder.append_value(b);
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            SimpleType::Date => {
-                let mut builder = Date32Builder::with_capacity(num_rows);
-                for row in rows {
-                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
-                    if let Some(s) = val.as_str() {
-                        if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                            let epoch = chrono::NaiveDate::default();
-                            let days = d.signed_duration_since(epoch).num_days() as i32;
-                            builder.append_value(days);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            SimpleType::Timestamp | SimpleType::TimestampTz => {
-                let mut builder = TimestampMicrosecondBuilder::with_capacity(num_rows);
-                for row in rows {
-                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
-                    if let Some(s) = val.as_str() {
-                        // Try RFC 3339 first, then common formats.
-                        // Sub-second variants (%.f) must come before their
-                        // non-fractional counterparts so "12:34:56.789" is not
-                        // truncated to whole seconds.
-                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
-                            builder.append_value(dt.timestamp_micros());
-                        } else if let Ok(dt) =
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
-                        {
-                            builder.append_value(dt.and_utc().timestamp_micros());
-                        } else if let Ok(dt) =
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                        {
-                            builder.append_value(dt.and_utc().timestamp_micros());
-                        } else if let Ok(dt) =
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-                        {
-                            builder.append_value(dt.and_utc().timestamp_micros());
-                        } else if let Ok(dt) =
-                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                        {
-                            builder.append_value(dt.and_utc().timestamp_micros());
-                        } else {
-                            builder.append_null();
-                        }
-                    } else if let Some(n) = val.as_f64() {
-                        // Epoch seconds (BigQuery)
-                        builder.append_value((n * 1_000_000.0) as i64);
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                let arr = builder.finish();
-                if col.col_type == SimpleType::TimestampTz {
-                    Arc::new(arr.with_timezone("UTC"))
-                } else {
-                    Arc::new(arr)
-                }
-            }
-            SimpleType::Time => {
-                let mut builder = Time64MicrosecondBuilder::with_capacity(num_rows);
-                for row in rows {
-                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
-                    if let Some(s) = val.as_str() {
-                        // Try sub-second format first, then whole-second.
-                        let parsed = chrono::NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
-                            .or_else(|_| chrono::NaiveTime::parse_from_str(s, "%H:%M:%S"));
-                        if let Ok(t) = parsed {
-                            let micros = t
-                                .signed_duration_since(
-                                    chrono::NaiveTime::default(),
-                                )
-                                .num_microseconds()
-                                .unwrap_or(0);
-                            builder.append_value(micros);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-            SimpleType::String | SimpleType::Unknown => {
-                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
-                for row in rows {
-                    let val = row.get(col_idx).unwrap_or(&serde_json::Value::Null);
-                    if val.is_null() {
-                        builder.append_null();
-                    } else if let Some(s) = val.as_str() {
-                        builder.append_value(s);
-                    } else {
-                        builder.append_value(val.to_string());
-                    }
-                }
-                Arc::new(builder.finish())
-            }
-        };
-        arrays.push(array);
+            row.push(value);
+        }
     }
 
-    let batch = RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| ServerFnError::new(format!("Arrow batch error: {e}")))?;
-
-    // Serialize to IPC stream format
-    let mut buf = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut buf, &schema)
-            .map_err(|e| ServerFnError::new(format!("IPC writer error: {e}")))?;
-        writer
-            .write(&batch)
-            .map_err(|e| ServerFnError::new(format!("IPC write error: {e}")))?;
-        writer
-            .finish()
-            .map_err(|e| ServerFnError::new(format!("IPC finish error: {e}")))?;
-    }
-    Ok(buf)
+    result
 }
 
 // ---------------------------------------------------------------------------

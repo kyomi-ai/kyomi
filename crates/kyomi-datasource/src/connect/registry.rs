@@ -318,6 +318,7 @@ impl ConnectRegistry {
                                 kyomi_core::connect_protocol::ConnectResponseBody::Result { .. }
                                     | kyomi_core::connect_protocol::ConnectResponseBody::Error { .. }
                                     | kyomi_core::connect_protocol::ConnectResponseBody::StreamComplete { .. }
+                                    | kyomi_core::connect_protocol::ConnectResponseBody::ArrowComplete { .. }
                             );
                             publish_response(&redis_pool_clone, &request_id, &response).await;
                             if is_terminal {
@@ -723,6 +724,7 @@ impl ConnectRegistry {
                             kyomi_core::connect_protocol::ConnectResponseBody::Result { .. }
                                 | kyomi_core::connect_protocol::ConnectResponseBody::Error { .. }
                                 | kyomi_core::connect_protocol::ConnectResponseBody::StreamComplete { .. }
+                                | kyomi_core::connect_protocol::ConnectResponseBody::ArrowComplete { .. }
                         );
 
                         if stream_tx.send(response).await.is_err() {

@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "chartml-chart-table"
-version = "5.0.1"
+version = "5.0.2"
 dependencies = [
  "chartml-core",
 ]
@@ -5901,10 +5901,11 @@ dependencies = [
 
 [[package]]
 name = "kyomi-connect-protocol"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11a5757d8c7d622b6062294780ac5bc6156d15e9c81641c6d5ae3c93bf9e7246"
+checksum = "3e3f7601c797b277b7ceb71b80ddda97968f474b8a0c49fa64e4bc263fe64cc6"
 dependencies = [
+ "base64 0.22.1",
  "futures-util",
  "serde",
  "serde_json",
@@ -5942,10 +5943,11 @@ dependencies = [
 
 [[package]]
 name = "kyomi-datasource"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2584409ca82847f605198a37c687e634bf60d05076edbe3d455462e9bd927d9"
+checksum = "af061f59edd639eb337dd6875266921f8de148ac0e5369bf4247d9866c304232"
 dependencies = [
+ "arrow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -5954,6 +5956,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken 9.3.1",
  "kyomi-connect-protocol",
+ "percent-encoding",
  "regex",
  "reqwest 0.12.28",
  "rsa",
@@ -5973,6 +5976,9 @@ dependencies = [
 name = "kyomi-datasource-server"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
  "async-trait",
  "chrono",
  "dashmap",

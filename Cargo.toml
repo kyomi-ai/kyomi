@@ -130,8 +130,8 @@ kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-server = { path = "apps/server" }
 kyomi-test-harness = { path = "crates/kyomi-test-harness" }
 kyomi-types = { path = "crates/kyomi-types" }
-kyomi-connect-protocol = "1"
-kyomi-datasource-drivers = { version = "1", package = "kyomi-datasource" }
+kyomi-connect-protocol = "1.1"
+kyomi-datasource-drivers = { version = "1.1", package = "kyomi-datasource" }
 
 # ChartML rendering — `"5"` pulls from crates.io for CI/CD + Docker builds
 # (after the chartml 5.0 release reaches the registry). Local dev redirects
