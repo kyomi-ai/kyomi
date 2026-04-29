@@ -126,6 +126,7 @@ pub fn ProfilePage() -> impl IntoView {
                                     <Show when=move || !is_personal && has_invitations>
                                         <InvitationsCard invitations=inv_list.clone()/>
                                     </Show>
+                                    <ClearLocalDataCard/>
                                 </div>
                             }.into_any()
                         },
@@ -837,6 +838,49 @@ fn InvitationsCard(invitations: Vec<crate::types::InvitationData>) -> impl IntoV
     }
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clear local data — wipes IndexedDB cache and reloads
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn ClearLocalDataCard() -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use leptos::task::spawn_local;
+
+        let on_clear = move |_: leptos::ev::MouseEvent| {
+            spawn_local(async move {
+                crate::cache::db::force_wipe_and_reload("").await;
+            });
+        };
+
+        view! {
+            <Card>
+                <CardHeader>
+                    <CardTitle>"Local Data"</CardTitle>
+                    <CardDescription>
+                        "Clear cached data stored in your browser. Use this if dashboards, chats, or other data appears missing or stale. Your account data is not affected."
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <crate::components::Button
+                        variant=crate::components::ButtonVariant::Secondary
+                        size=crate::components::ButtonSize::Sm
+                        on:click=on_clear
+                    >
+                        "Clear local data and reload"
+                    </crate::components::Button>
+                </CardContent>
+            </Card>
+        }.into_any()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        view! { <span></span> }.into_any()
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Slack section — feature-gated wrapper to avoid cfg inside view! macro

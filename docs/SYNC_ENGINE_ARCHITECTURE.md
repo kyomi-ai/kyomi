@@ -49,11 +49,11 @@ If the code doesn't match this document, the code is wrong.
 ### WebSocket reconnect (same tab, network blip)
 
 ```
-1. WebSocket reconnects → send sync_delta { last_sync_id: N }
-   (N is the in-memory cursor, always current)
-2. Server streams changes since N
-3. Client upserts into IDB + SyncStore
-4. sync_complete → update cursor
+1. WebSocket reconnects → read IDB cursor N
+2. Send sync_delta { last_sync_id: N }
+3. Server streams changes since N
+4. Client upserts into IDB + SyncStore
+5. sync_complete → persist cursor to IDB + mark initialized
 ```
 
 ### sync_reset (server says cursor too old / pruned)
@@ -155,21 +155,20 @@ server is the source of truth.
 | WS message type | Handler |
 |-----------------|---------|
 | `sync_action` | `apply_sync_action` — upserts entity into SyncStore + writes to IDB |
-| `sync_complete` | Updates in-memory cursor + persists to IDB + marks store initialized |
+| `sync_complete` | Persists cursor + schema hash to IDB, marks store initialized |
 | `sync_reset` | Wipes IDB entities + resets cursor + sends sync_bootstrap |
 
 ### Connection state handling
 
 The engine watches `WebSocketContext::connection_state`. On each transition to
-`Connected`:
+`Connected`, it reads the IDB cursor to decide the request:
 
-- **First connect** (in-memory cursor = 0): send `sync_bootstrap`
-- **Reconnect** (in-memory cursor > 0): send `sync_delta { last_sync_id: N }`
+- **IDB cursor = 0** (first visit, after schema wipe, or after "Clear local data"): send `sync_bootstrap`
+- **IDB cursor > 0** (return visit or reconnect): send `sync_delta { last_sync_id: N }`
 
-The in-memory cursor is set by `sync_complete` and lives for the tab's
-lifetime. It is NOT read from IDB on reconnect — IDB cursor is only for
-cross-session persistence (determining local bootstrap vs full bootstrap on
-page load).
+IDB is always the source of truth — there is no in-memory cursor. This ensures
+that a schema hash wipe (which clears IDB but cannot reach in-memory state)
+correctly triggers a full re-bootstrap on the next connect.
 
 ## Server-Side Components
 

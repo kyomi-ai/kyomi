@@ -138,6 +138,17 @@ pub async fn init_cache_db(_workspace_id: &str) -> Result<CacheDb, CacheDbError>
     Ok(cache_db)
 }
 
+/// Wipe all cached data and cursors, then reload the page.
+/// Used by the "Clear local data" UI action.
+pub async fn force_wipe_and_reload(_workspace_id: &str) {
+    if let Ok(db) = init_cache_db(_workspace_id).await {
+        wipe_all_data(&db.inner).await;
+    }
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().reload();
+    }
+}
+
 async fn get_meta_raw(db: &Database, key: &str) -> Option<String> {
     let tx = db
         .transaction(STORE_META)
@@ -174,7 +185,7 @@ pub async fn set_meta(db: &CacheDb, key: &str, value: &str) -> Result<(), CacheD
 
 async fn wipe_all_data(db: &Database) {
     let tx = match db
-        .transaction([STORE_ENTITIES, STORE_CURSORS].as_slice())
+        .transaction([STORE_ENTITIES, STORE_CURSORS, STORE_META].as_slice())
         .with_mode(TransactionMode::Readwrite)
         .build()
     {
@@ -194,6 +205,11 @@ async fn wipe_all_data(db: &Database) {
             && let Err(e) = cursors.clear()
         {
             tracing::warn!("wipe_all_data: failed to clear sync_cursors: {e}");
+        }
+        if let Ok(meta) = tx.object_store(STORE_META)
+            && let Err(e) = meta.clear()
+        {
+            tracing::warn!("wipe_all_data: failed to clear _meta: {e}");
         }
         let _ = tx.commit().await;
     }

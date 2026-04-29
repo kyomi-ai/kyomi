@@ -53,9 +53,6 @@ pub fn start_sync_engine(
     store: SyncStore,
     workspace_id: String,
 ) {
-    // In-memory cursor — updated by sync_complete, used by reconnect logic.
-    let in_memory_cursor: StoredValue<i64> = StoredValue::new(0);
-
     // ── Subscribe to sync_action ──────────────────────────────────────────────
     let unsub_action = ws.subscribe("sync_action", {
         let workspace_id = workspace_id.clone();
@@ -73,8 +70,6 @@ pub fn start_sync_engine(
             if let Some(data) = &msg.data
                 && let Some(sync_id) = data.get("last_sync_id").and_then(|v| v.as_i64())
             {
-                    in_memory_cursor.set_value(sync_id);
-
                     // Persist cursor + schema hash to IDB.
                     let wid = workspace_id.clone();
                     spawn_local(async move {
@@ -164,8 +159,9 @@ pub fn start_sync_engine(
     //   cursor == 0 → full bootstrap (first visit or after schema wipe)
     //   cursor > 0  → delta catch-up (return visit or reconnect)
     //
-    // The in-memory cursor (set by sync_complete) is preferred for reconnects
-    // within the same tab to avoid an IDB read.
+    // Always reads IDB rather than trusting an in-memory cursor — a schema
+    // hash wipe clears IDB but cannot reach in-memory state, so the
+    // in-memory value can be stale after a deploy.
     let ws_for_state = ws.clone();
     let wid_for_state = workspace_id.clone();
 
@@ -176,38 +172,29 @@ pub fn start_sync_engine(
         }
         let ws_send = ws_for_state.clone();
         let wid = wid_for_state.clone();
-        let mem_cursor = in_memory_cursor.get_value();
 
-        if mem_cursor > 0 {
-            tracing::info!(mem_cursor, "sync: reconnect — sending sync_delta");
-            ws_send.send(serde_json::json!({
-                "type": "sync_delta",
-                "last_sync_id": mem_cursor
-            }));
-        } else {
-            spawn_local(async move {
-                let idb_cursor = match crate::cache::db::init_cache_db(&wid).await {
-                    Ok(db) => crate::cache::db::get_last_sync_id(&db, &wid)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|s| s.parse::<i64>().ok())
-                        .unwrap_or(0),
-                    Err(_) => 0,
-                };
+        spawn_local(async move {
+            let idb_cursor = match crate::cache::db::init_cache_db(&wid).await {
+                Ok(db) => crate::cache::db::get_last_sync_id(&db, &wid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0),
+                Err(_) => 0,
+            };
 
-                if idb_cursor == 0 {
-                    tracing::info!("sync: no cursor — sending sync_bootstrap");
-                    ws_send.send(serde_json::json!({"type": "sync_bootstrap"}));
-                } else {
-                    tracing::info!(idb_cursor, "sync: IDB cursor found — sending sync_delta");
-                    ws_send.send(serde_json::json!({
-                        "type": "sync_delta",
-                        "last_sync_id": idb_cursor
-                    }));
-                }
-            });
-        }
+            if idb_cursor == 0 {
+                tracing::info!("sync: no cursor — sending sync_bootstrap");
+                ws_send.send(serde_json::json!({"type": "sync_bootstrap"}));
+            } else {
+                tracing::info!(idb_cursor, "sync: IDB cursor found — sending sync_delta");
+                ws_send.send(serde_json::json!({
+                    "type": "sync_delta",
+                    "last_sync_id": idb_cursor
+                }));
+            }
+        });
     });
 }
 
