@@ -43,7 +43,7 @@ pub use enums::{
 pub use error::{Error, Result};
 pub use kv_store::{KVPool, KVStore, create_kv_store};
 pub use redis::RedisPool;
-pub use stream::{ColumnInfo, QueryStream, QueryStreamEvent, SimpleType};
+pub use stream::{ColumnInfo, SimpleType};
 pub use websocket::{MessageType, WebSocketMessage};
 
 /// Current Terms of Service version. Updated when terms change.

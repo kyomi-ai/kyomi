@@ -5,7 +5,6 @@
 //! These replace the REST API calls:
 //! - `POST /api/v1/datasources/query/execute` → `execute_sql_query()` / `fetch_query_page()`
 //! - `POST /api/v1/datasources/query/execute` (dry_run=true) → `dry_run_sql()`
-//! - `POST /api/v1/datasources/query/stream` → `start_query_stream()`
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -69,18 +68,6 @@ pub struct DryRunResult {
     pub column: Option<u32>,
     /// Bytes that would be processed (BigQuery only). `None` for other providers.
     pub bytes_processed: Option<u64>,
-}
-
-/// Result from starting a streaming query.
-///
-/// The actual data arrives via WebSocket events (`query_stream_header`,
-/// `query_stream_chunk`, `query_stream_complete`, `query_stream_error`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StreamStartResult {
-    /// Always `"streaming"` on success.
-    pub status: String,
-    /// The request ID that correlates WebSocket events to this query.
-    pub request_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -749,8 +736,7 @@ fn bq_rest_to_query_result(
 /// `fetch_query_page`.
 ///
 /// Page size is clamped to 1..=1000 (matching the REST handler's limit for
-/// paginated table display). The streaming path (`start_query_stream`) has a
-/// separate higher limit of 10,000 rows since it streams progressively.
+/// paginated table display).
 #[cfg(feature = "ssr")]
 async fn run_paginated_query(
     provider: &dyn kyomi_datasource_server::DatasourceProvider,
@@ -856,202 +842,6 @@ pub async fn dry_run_sql(
     Ok(result)
 }
 
-// ---------------------------------------------------------------------------
-// Task 1.5: start_query_stream — streaming query via WebSocket
-// ---------------------------------------------------------------------------
-
-/// Start a streaming query execution.
-///
-/// Returns immediately with a `StreamStartResult` containing the `request_id`.
-/// The actual data is delivered via WebSocket events:
-/// - `query_stream_header` — column metadata + optional total row count
-/// - `query_stream_chunk` — batches of rows
-/// - `query_stream_complete` — execution time, bytes processed, totals
-/// - `query_stream_error` — error message if the query fails
-///
-/// The `request_id` correlates all WebSocket events to this specific query
-/// execution, allowing the frontend to match events to the correct tab.
-#[server(prefix = "/leptos-api")]
-pub async fn start_query_stream(
-    datasource_slug: String,
-    sql: String,
-    request_id: String,
-    limit: Option<u32>,
-) -> Result<StreamStartResult, ServerFnError> {
-    use futures_util::StreamExt;
-
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
-
-    let (_ds, provider) =
-        super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
-
-    // Clamp limit to 1..=10000, default 10000 if None.
-    let clamped_limit = limit.unwrap_or(10_000).clamp(1, 10_000);
-
-    // Use client-provided request ID if non-empty, otherwise generate one.
-    let request_id = if request_id.is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        request_id
-    };
-
-    let user_id = auth.user_id.clone();
-    let ws_manager = ctx.ws_manager.clone()
-        .ok_or_else(|| ServerFnError::new("WebSocket manager not available for streaming"))?;
-    let rid = request_id.clone();
-
-    // Spawn the streaming task — runs independently, sends WS messages as
-    // events arrive from the provider.
-    tokio::spawn(async move {
-        let start = std::time::Instant::now();
-
-        let mut stream = match provider
-            .execute_query_stream(
-                &sql,
-                Some(clamped_limit),
-                None,  // no offset
-                true,  // include total row count
-                None,  // default chunk size
-            )
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                let msg = kyomi_core::WebSocketMessage::new(
-                    kyomi_core::MessageType::QueryStreamError,
-                )
-                .with_data(serde_json::json!({
-                    "request_id": rid,
-                    "error": e.to_string(),
-                }));
-                ws_manager.send_to_user(&user_id, msg).await;
-                return;
-            }
-        };
-
-        // Per-event timeout: if no event arrives within 120s, the datasource
-        // is likely disconnected or the query is hung.
-        let event_timeout = std::time::Duration::from_secs(120);
-        let mut completed = false;
-
-        loop {
-            let next = tokio::time::timeout(event_timeout, stream.next()).await;
-
-            let event = match next {
-                Ok(Some(event)) => event,
-                Ok(None) => break, // Stream ended
-                Err(_) => {
-                    // Timeout waiting for next event
-                    let msg = kyomi_core::WebSocketMessage::new(
-                        kyomi_core::MessageType::QueryStreamError,
-                    )
-                    .with_data(serde_json::json!({
-                        "request_id": rid,
-                        "error": "Query timed out — the datasource may be disconnected or the query is taking too long",
-                    }));
-                    ws_manager.send_to_user(&user_id, msg).await;
-                    break;
-                }
-            };
-
-            match event {
-                Ok(kyomi_connect_protocol::QueryStreamEvent::Header {
-                    columns,
-                    total_rows,
-                }) => {
-                    let cols: Vec<serde_json::Value> = columns
-                        .iter()
-                        .map(|c| {
-                            serde_json::json!({
-                                "name": c.name,
-                                "type": c.col_type.as_str(),
-                            })
-                        })
-                        .collect();
-
-                    let msg = kyomi_core::WebSocketMessage::new(
-                        kyomi_core::MessageType::QueryStreamHeader,
-                    )
-                    .with_data(serde_json::json!({
-                        "request_id": rid,
-                        "columns": cols,
-                        "total_rows": total_rows,
-                    }));
-                    ws_manager.send_to_user(&user_id, msg).await;
-                }
-                Ok(kyomi_connect_protocol::QueryStreamEvent::Chunk {
-                    rows,
-                    chunk_index,
-                }) => {
-                    let msg = kyomi_core::WebSocketMessage::new(
-                        kyomi_core::MessageType::QueryStreamChunk,
-                    )
-                    .with_data(serde_json::json!({
-                        "request_id": rid,
-                        "rows": rows,
-                        "chunk_index": chunk_index,
-                    }));
-                    ws_manager.send_to_user(&user_id, msg).await;
-                }
-                Ok(kyomi_connect_protocol::QueryStreamEvent::Complete {
-                    execution_time_ms,
-                    bytes_processed,
-                    total_chunks,
-                    total_rows_returned,
-                }) => {
-                    completed = true;
-                    let elapsed = start.elapsed().as_millis() as i64;
-                    let msg = kyomi_core::WebSocketMessage::new(
-                        kyomi_core::MessageType::QueryStreamComplete,
-                    )
-                    .with_data(serde_json::json!({
-                        "request_id": rid,
-                        "execution_time_ms": execution_time_ms.unwrap_or(elapsed),
-                        "bytes_processed": bytes_processed,
-                        "total_chunks": total_chunks,
-                        "total_rows_returned": total_rows_returned,
-                    }));
-                    ws_manager.send_to_user(&user_id, msg).await;
-                    break;
-                }
-                Err(e) => {
-                    let msg = kyomi_core::WebSocketMessage::new(
-                        kyomi_core::MessageType::QueryStreamError,
-                    )
-                    .with_data(serde_json::json!({
-                        "request_id": rid,
-                        "error": e.to_string(),
-                    }));
-                    ws_manager.send_to_user(&user_id, msg).await;
-                    break;
-                }
-            }
-        }
-
-        // If the stream ended without a Complete event (e.g., datasource
-        // disconnected mid-query, handler dropped the channel), notify the
-        // frontend so it doesn't stay stuck in "streaming" state.
-        if !completed {
-            let msg = kyomi_core::WebSocketMessage::new(
-                kyomi_core::MessageType::QueryStreamError,
-            )
-            .with_data(serde_json::json!({
-                "request_id": rid,
-                "error": "Query stream ended unexpectedly — the datasource may have disconnected",
-            }));
-            ws_manager.send_to_user(&user_id, msg).await;
-        }
-
-        provider.close().await;
-    });
-
-    Ok(StreamStartResult {
-        status: "streaming".to_string(),
-        request_id,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Shared helper: convert provider QueryResult to our typed QueryResult
@@ -2225,8 +2015,8 @@ fn generate_chartml_with_rules(
 
 /// Connection info needed to build the WebSocket URL on the client side.
 ///
-/// The streaming handler (`use_query_stream_handler`) connects to
-/// `/ws/{workspace_id}_{user_id}?token=...` and needs both IDs.
+/// The WebSocket connects to `/ws/{workspace_id}_{user_id}?token=...`
+/// and needs both IDs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WsConnectionInfo {
     pub user_id: String,

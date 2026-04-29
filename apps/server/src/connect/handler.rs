@@ -388,8 +388,8 @@ async fn run_message_loop(
 ///
 /// For `ResponseChannel::Once`: sends the response and removes from pending.
 /// For `ResponseChannel::Stream`: routes based on response type:
-///   - `StreamHeader`/`StreamChunk`: send without removing (more messages coming)
-///   - `StreamComplete`: send and remove (stream finished, dropping tx signals end)
+///   - `ArrowHeader`/`ArrowBatch`: send without removing (more messages coming)
+///   - `ArrowComplete`: send and remove (stream finished, dropping tx signals end)
 ///   - `Result`/`Error`: send and remove (terminal messages)
 async fn route_response(
     pending: &mut HashMap<String, ResponseChannel>,
@@ -400,7 +400,7 @@ async fn route_response(
         &response.body,
         ConnectResponseBody::Result { .. }
             | ConnectResponseBody::Error { .. }
-            | ConnectResponseBody::StreamComplete { .. }
+            | ConnectResponseBody::ArrowComplete { .. }
     );
 
     match pending.get(&response.id) {

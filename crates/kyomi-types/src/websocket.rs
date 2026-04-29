@@ -38,11 +38,6 @@ pub enum MessageType {
     MemberJoined,
     OwnershipTransferCompleted,
     OwnershipTransferDeclined,
-    // Query streaming types (Rust-only — used for Connect streaming responses)
-    QueryStreamHeader,
-    QueryStreamChunk,
-    QueryStreamComplete,
-    QueryStreamError,
     // Live sync broadcast types (Rust-only — used for real-time cache invalidation)
     SyncAction,
     SyncComplete,

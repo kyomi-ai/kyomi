@@ -163,7 +163,6 @@ pub fn register_server_functions() {
     register_explicit::<ExecuteSqlQuery>();
     register_explicit::<FetchQueryPage>();
     register_explicit::<DryRunSql>();
-    register_explicit::<StartQueryStream>();
     register_explicit::<ListQueryHistory>();
     register_explicit::<SaveQueryHistory>();
     register_explicit::<UpdateQueryHistory>();

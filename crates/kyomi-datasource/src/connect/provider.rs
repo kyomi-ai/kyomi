@@ -13,15 +13,13 @@
 
 use std::time::Duration;
 
-use futures_util::StreamExt;
-
 use arrow_ipc::reader::StreamReader as ArrowStreamReader;
 
 use kyomi_core::connect_protocol::{
     CatalogResult, ConnectOp, ConnectRequest, ConnectResponse, ConnectResponseBody, DryRunParams,
     QueryParams,
 };
-use kyomi_connect_protocol::stream::{QueryFormat, QueryStream, QueryStreamEvent};
+use kyomi_connect_protocol::stream::QueryFormat;
 
 use crate::provider::{
     DatasourceProvider, DiscoveryResult, DryRunResult, QueryResult,
@@ -213,50 +211,12 @@ impl DatasourceProvider for ConnectProvider {
             } => {
                 collect_arrow_stream(columns, total_rows, &mut rx).await
             }
-            // (b) JSON streaming: re-inject the first event and collect the stream.
-            _ => {
-                let first_event = map_response_to_event(first)?;
-                let rest = async_stream(rx);
-                let combined: QueryStream = Box::pin(
-                    futures_util::stream::once(async move { Ok(first_event) })
-                        .chain(rest),
-                );
-                crate::stream::collect_stream_to_result(combined).await
+            other => {
+                Err(kyomi_connect_protocol::Error::Internal(format!(
+                    "Unexpected first response from Connect agent: {other:?}"
+                )))
             }
         }
-    }
-
-    async fn execute_query_stream(
-        &self,
-        sql: &str,
-        limit: Option<u32>,
-        offset: Option<u32>,
-        include_total: bool,
-        _chunk_size: Option<u32>,
-    ) -> kyomi_connect_protocol::Result<QueryStream> {
-        // execute_query_stream yields JSON QueryStreamEvents, not Arrow IPC.
-        let params = QueryParams {
-            sql: sql.to_string(),
-            limit,
-            offset,
-            include_total,
-            format: QueryFormat::Json,
-        };
-        let params_value = serde_json::to_value(&params)?;
-
-        let mut request = Self::build_request(ConnectOp::ExecuteQuery, Some(params_value));
-        request.streaming = true;
-
-        let rx = self
-            .registry
-            .send_command_streaming(&self.datasource_config_id, request, self.timeout)
-            .await
-            .map_err(|e| kyomi_connect_protocol::Error::Internal(e.to_string()))?;
-
-        // Wrap the mpsc receiver into a QueryStream that maps ConnectResponseBody
-        // variants back to QueryStreamEvent.
-        let stream = async_stream(rx);
-        Ok(Box::pin(stream))
     }
 
     async fn dry_run(&self, sql: &str) -> kyomi_connect_protocol::Result<DryRunResult> {
@@ -386,73 +346,6 @@ async fn collect_arrow_stream(
 }
 
 // ---------------------------------------------------------------------------
-// Stream adapter
-// ---------------------------------------------------------------------------
-
-/// Convert an `mpsc::Receiver<ConnectResponse>` into a `QueryStream`.
-///
-/// Maps each `ConnectResponseBody` variant to the corresponding `QueryStreamEvent`.
-/// Handles both streaming variants (StreamHeader, StreamChunk, StreamComplete)
-/// and the legacy single-Result response (splits it into Header + Chunk + Complete).
-fn async_stream(
-    rx: tokio::sync::mpsc::Receiver<ConnectResponse>,
-) -> impl futures_util::Stream<Item = kyomi_connect_protocol::Result<QueryStreamEvent>> {
-    futures_util::stream::unfold(rx, |mut rx| async move {
-        let response = rx.recv().await?;
-        let event = map_response_to_event(response);
-        Some((event, rx))
-    })
-}
-
-/// Map a single ConnectResponse to a QueryStreamEvent.
-fn map_response_to_event(
-    response: ConnectResponse,
-) -> kyomi_connect_protocol::Result<QueryStreamEvent> {
-    match response.body {
-        ConnectResponseBody::StreamHeader {
-            columns,
-            total_rows,
-        } => Ok(QueryStreamEvent::Header {
-            columns,
-            total_rows,
-        }),
-        ConnectResponseBody::StreamChunk { rows, chunk_index } => {
-            Ok(QueryStreamEvent::Chunk { rows, chunk_index })
-        }
-        ConnectResponseBody::StreamComplete {
-            execution_time_ms,
-            bytes_processed,
-            total_chunks,
-            total_rows_returned,
-        } => Ok(QueryStreamEvent::Complete {
-            execution_time_ms,
-            bytes_processed,
-            total_chunks,
-            total_rows_returned,
-        }),
-        ConnectResponseBody::Result { result } => {
-            // Legacy single-result response from an agent that doesn't support
-            // streaming. This path is unlikely since our agent sends streaming for
-            // large queries and buffered for small ones (which use execute_query).
-            let _ = result;
-            Err(kyomi_connect_protocol::Error::Internal(
-                "Unexpected single Result response on streaming channel".into(),
-            ))
-        }
-        ConnectResponseBody::Error { error } => Err(kyomi_connect_protocol::Error::Provider(error)),
-        // Arrow IPC variants are handled by collect_arrow_stream, not by the
-        // JSON stream path. If they appear here the caller has a routing bug.
-        ConnectResponseBody::ArrowHeader { .. }
-        | ConnectResponseBody::ArrowBatch { .. }
-        | ConnectResponseBody::ArrowComplete { .. } => {
-            Err(kyomi_connect_protocol::Error::Internal(
-                "Arrow IPC response received on JSON streaming channel".into(),
-            ))
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -545,81 +438,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // execute_query
     // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn execute_query_uses_streaming_and_collects() {
-        let dsid = "ds-provider-eq";
-        let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
-            assert_eq!(request.op, ConnectOp::ExecuteQuery);
-            assert!(request.streaming);
-            let params: QueryParams =
-                serde_json::from_value(request.params.unwrap()).expect("valid QueryParams");
-            assert_eq!(params.sql, "SELECT id, name FROM users");
-            assert_eq!(params.limit, Some(50));
-            assert_eq!(params.offset, Some(10));
-            assert!(params.include_total);
-
-            // Connect agent always streams: Header → Chunk → Complete
-            let id = request.id;
-            match response_tx {
-                ResponseChannel::Stream(tx) => {
-                    let _ = tx.try_send(ConnectResponse {
-                        id: id.clone(),
-                        body: ConnectResponseBody::StreamHeader {
-                            columns: vec![
-                                kyomi_connect_protocol::stream::ColumnInfo {
-                                    name: "id".into(),
-                                    col_type: kyomi_connect_protocol::stream::SimpleType::Number,
-                                },
-                                kyomi_connect_protocol::stream::ColumnInfo {
-                                    name: "name".into(),
-                                    col_type: kyomi_connect_protocol::stream::SimpleType::String,
-                                },
-                            ],
-                            total_rows: Some(100),
-                        },
-                    });
-                    let _ = tx.try_send(ConnectResponse {
-                        id: id.clone(),
-                        body: ConnectResponseBody::StreamChunk {
-                            rows: vec![
-                                vec![serde_json::json!(1), serde_json::json!("Alice")],
-                                vec![serde_json::json!(2), serde_json::json!("Bob")],
-                            ],
-                            chunk_index: 0,
-                        },
-                    });
-                    let _ = tx.try_send(ConnectResponse {
-                        id: id,
-                        body: ConnectResponseBody::StreamComplete {
-                            execution_time_ms: Some(42),
-                            bytes_processed: None,
-                            total_chunks: 1,
-                            total_rows_returned: 2,
-                        },
-                    });
-                }
-                _ => panic!("expected Stream channel for streaming query"),
-            }
-        })
-        .await;
-
-        let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
-        let result = provider
-            .execute_query("SELECT id, name FROM users", Some(50), Some(10), true)
-            .await
-            .expect("should succeed");
-
-        assert_eq!(result.status, crate::provider::QueryStatus::Success);
-        assert_eq!(result.columns.as_ref().unwrap().len(), 2);
-        assert_eq!(result.columns.as_ref().unwrap()[0].name, "id");
-        assert_eq!(result.rows.as_ref().unwrap().len(), 2);
-        assert_eq!(result.total_rows, Some(100));
-        assert_eq!(result.execution_time_ms, Some(42));
-
-        handle.await.unwrap();
-        registry.unregister(dsid, conn_id).await;
-    }
 
     /// Connect agent sends a single buffered Result for small queries.
     #[tokio::test]

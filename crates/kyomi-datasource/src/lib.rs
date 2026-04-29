@@ -28,6 +28,7 @@ pub use kyomi_datasource_drivers::{
     UserContext,
     DatasourceProvider, QueryResult, DryRunResult, DiscoveryResult,
     QueryStatus, ColumnInfo, SimpleType,
+    provider::extract_string_col_from_batch,
 };
 
 // Timeout constants
@@ -95,18 +96,3 @@ pub async fn ensure_valid_oauth_credentials(
     .map_err(Into::into)
 }
 
-/// Collect a query stream into a single QueryResult.
-pub async fn collect_stream_to_result(
-    stream: kyomi_connect_protocol::stream::QueryStream,
-) -> kyomi_core::Result<QueryResult> {
-    kyomi_datasource_drivers::collect_stream_to_result(stream)
-        .await
-        .map_err(Into::into)
-}
-
-/// Convert a QueryResult into a query stream.
-pub fn query_result_to_stream(
-    result: QueryResult,
-) -> kyomi_core::Result<kyomi_connect_protocol::stream::QueryStream> {
-    kyomi_datasource_drivers::query_result_to_stream(result).map_err(Into::into)
-}

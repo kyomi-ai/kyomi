@@ -63,16 +63,6 @@ mod tests {
             assert!(result.is_ok(), "failed to deserialize message type: {t}");
         }
 
-        // Verify Rust-only query streaming types
-        let stream_types = [
-            "query_stream_header", "query_stream_chunk",
-            "query_stream_complete", "query_stream_error",
-        ];
-        for t in stream_types {
-            let json = format!("\"{t}\"");
-            let result: Result<MessageType, _> = serde_json::from_str(&json);
-            assert!(result.is_ok(), "failed to deserialize message type: {t}");
-        }
     }
 
     #[test]

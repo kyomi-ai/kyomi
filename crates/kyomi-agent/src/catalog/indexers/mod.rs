@@ -47,13 +47,10 @@ use kyomi_datasource_server::QueryResult;
 /// Returns all non-null string values from the specified column index.
 /// Used by indexers to extract schema/database/table names from discovery queries.
 pub fn extract_string_column(result: &QueryResult, col_index: usize) -> Vec<String> {
-    let Some(rows) = &result.rows else {
-        return Vec::new();
-    };
-
-    rows.iter()
-        .filter_map(|row| row.get(col_index)?.as_str().map(String::from))
-        .collect()
+    kyomi_datasource_server::extract_string_col_from_batch(
+        result.record_batch.as_ref(),
+        col_index,
+    )
 }
 
 /// Escape single quotes in SQL string literals.

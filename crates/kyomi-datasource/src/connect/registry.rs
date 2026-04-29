@@ -317,7 +317,6 @@ impl ConnectRegistry {
                                 &response.body,
                                 kyomi_core::connect_protocol::ConnectResponseBody::Result { .. }
                                     | kyomi_core::connect_protocol::ConnectResponseBody::Error { .. }
-                                    | kyomi_core::connect_protocol::ConnectResponseBody::StreamComplete { .. }
                                     | kyomi_core::connect_protocol::ConnectResponseBody::ArrowComplete { .. }
                             );
                             publish_response(&redis_pool_clone, &request_id, &response).await;
@@ -555,13 +554,13 @@ impl ConnectRegistry {
 
     /// Send a streaming command and return a receiver for multiple responses.
     ///
-    /// Used by `ConnectProvider::execute_query_stream()` to receive streaming
-    /// responses (Header → Chunk* → Complete) from the Connect agent.
+    /// Used by `ConnectProvider::execute_query()` to receive streaming
+    /// responses (ArrowHeader → ArrowBatch* → ArrowComplete) from the Connect agent.
     ///
     /// The local path creates an mpsc channel and sends it through the command
     /// channel. The handler routes each response message through the mpsc.
     /// The receiver is closed when the handler removes the pending entry
-    /// (on StreamComplete or Error) or the WebSocket disconnects.
+    /// (on ArrowComplete or Error) or the WebSocket disconnects.
     pub async fn send_command_streaming(
         &self,
         datasource_config_id: &str,
@@ -614,7 +613,7 @@ impl ConnectRegistry {
     /// Send a streaming command to a Connect instance on another pod via Redis pub/sub.
     ///
     /// Similar to `send_command_remote`, but keeps the subscription open for multiple
-    /// response messages (StreamHeader → StreamChunk* → StreamComplete). Returns an
+    /// response messages (ArrowHeader → ArrowBatch* → ArrowComplete). Returns an
     /// mpsc receiver that the caller consumes as a stream. A background task reads
     /// from Redis pub/sub and forwards each message until a terminal response arrives.
     async fn send_command_streaming_remote(
@@ -723,7 +722,6 @@ impl ConnectRegistry {
                             &response.body,
                             kyomi_core::connect_protocol::ConnectResponseBody::Result { .. }
                                 | kyomi_core::connect_protocol::ConnectResponseBody::Error { .. }
-                                | kyomi_core::connect_protocol::ConnectResponseBody::StreamComplete { .. }
                                 | kyomi_core::connect_protocol::ConnectResponseBody::ArrowComplete { .. }
                         );
 
