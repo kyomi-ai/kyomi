@@ -90,6 +90,8 @@ struct FileUploadResult {
 
 #[derive(Deserialize)]
 struct UploadFile {
+    #[serde(rename = "uploadUrl")]
+    upload_url: String,
     #[serde(rename = "assetUrl")]
     asset_url: String,
     headers: Vec<UploadHeader>,
@@ -242,6 +244,7 @@ async fn upload_screenshot(
         mutation FileUpload($contentType: String!, $filename: String!, $size: Int!) {
             fileUpload(contentType: $contentType, filename: $filename, size: $size) {
                 uploadFile {
+                    uploadUrl
                     assetUrl
                     headers { key value }
                 }
@@ -291,13 +294,16 @@ async fn upload_screenshot(
         .and_then(|d| d.file_upload.upload_file)
         .ok_or_else(|| "Linear fileUpload returned no uploadFile".to_string())?;
 
-    let asset_url = upload_file.asset_url.clone();
+    let upload_url = upload_file.upload_url;
+    let asset_url = upload_file.asset_url;
 
-    // Step 2: PUT the image bytes to the upload URL
-    // The asset_url doubles as the upload target — Linear returns headers
-    // that must be included in the PUT request.
+    // Step 2: PUT the image bytes to the presigned upload URL.
+    // Linear returns separate URLs: `upload_url` for the PUT target and
+    // `asset_url` for the permanent CDN location after upload completes.
+    // The presigned URL signs `content-type` so it must be present on the PUT.
     let mut put_request = http
-        .put(&asset_url)
+        .put(&upload_url)
+        .header("Content-Type", content_type)
         .body(image_bytes.to_vec())
         .timeout(std::time::Duration::from_secs(30));
 
