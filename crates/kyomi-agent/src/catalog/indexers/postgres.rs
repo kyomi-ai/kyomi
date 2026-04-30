@@ -94,6 +94,7 @@ impl SQLCatalogIndexer for PostgresIndexer {
                 None,
                 None,
                 false,
+                None,
             )
             .await?;
 
@@ -121,7 +122,7 @@ impl SQLCatalogIndexer for PostgresIndexer {
              ORDER BY table_name {limit_clause}"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
@@ -167,7 +168,7 @@ impl SQLCatalogIndexer for PostgresIndexer {
              ORDER BY c.ordinal_position"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());

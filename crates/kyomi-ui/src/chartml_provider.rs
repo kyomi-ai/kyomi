@@ -2,10 +2,10 @@
 
 //! Kyomi-side `DataSourceProvider` for the chartml 5.0 resolver.
 //!
-//! Wraps the existing `query_datasource_arrow` server function so the
-//! chartml resolver can dispatch any chart spec whose `data:` block carries
-//! a `datasource` slug + SQL `query` through Kyomi's normal auth + datasource
-//! plumbing — matching what the legacy bespoke fetch loop in
+//! Routes any chart spec whose `data:` block carries a `datasource` slug +
+//! SQL `query` through Kyomi's Arrow streaming endpoint
+//! (`POST /api/v1/query-arrow` via [`crate::arrow_fetch::fetch_arrow_stream`]),
+//! matching what the legacy bespoke fetch loop in
 //! `markdown_renderer::ChartBlock` used to do, but funneling through the
 //! shared resolver so caching, dedup, hooks, and cross-source registration
 //! all happen for free.
@@ -36,11 +36,11 @@
 //!
 //! # Testability
 //!
-//! The actual server-fn call is hidden behind a small [`DatasourceQuerier`]
-//! trait so tests can substitute a mock without standing up a Leptos server
-//! context (which `query_datasource_arrow` requires). Production callers use
+//! The actual browser fetch is hidden behind a small [`DatasourceQuerier`]
+//! trait so tests can substitute a mock that returns a `DataTable` directly
+//! without standing up browser APIs. Production callers use
 //! [`KyomiDatasourceProvider::new`], which wires the [`ServerFnDatasourceQuerier`]
-//! impl that delegates to the real server fn. Tests use
+//! impl that delegates to [`crate::arrow_fetch::fetch_arrow_stream`]. Tests use
 //! [`KyomiDatasourceProvider::with_querier`] to pass a mock that records calls.
 
 use std::collections::HashMap;
@@ -57,21 +57,17 @@ use chartml_core::{DataSourceProvider, FetchError, FetchRequest, FetchResult};
 use chartml_datafusion::DataFusionTransform;
 use chartml_leptos::{use_chartml_configured, ChartMLRef, HooksRef, ProviderRef};
 use leptos::prelude::*;
-use leptos::server_fn::ServerFnError;
 
-use crate::server_fns::datasources::{query_datasource_arrow, QueryArrowResult};
-
-/// Abstraction over the `query_datasource_arrow` server function so
-/// [`KyomiDatasourceProvider::fetch`] is unit-testable without a Leptos
-/// server context.
+/// Abstraction over the Arrow fetch path so [`KyomiDatasourceProvider::fetch`]
+/// is unit-testable without standing up browser APIs.
 ///
 /// The default production impl ([`ServerFnDatasourceQuerier`]) delegates
-/// straight through to [`query_datasource_arrow`]; tests substitute a mock
-/// via [`KyomiDatasourceProvider::with_querier`] to assert the slug, query,
-/// and limit forwarded by the provider.
+/// straight through to [`crate::arrow_fetch::fetch_arrow_stream`]; tests
+/// substitute a mock via [`KyomiDatasourceProvider::with_querier`] to assert
+/// the slug and query forwarded by the provider.
 ///
 /// `?Send` on WASM matches the `DataSourceProvider` trait — the underlying
-/// server-fn future is `!Send` in browser builds.
+/// fetch future is `!Send` in browser builds.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait DatasourceQuerier: Send + Sync {
@@ -79,13 +75,13 @@ pub trait DatasourceQuerier: Send + Sync {
         &self,
         datasource_slug: String,
         sql: String,
-        limit: Option<i32>,
-    ) -> Result<QueryArrowResult, ServerFnError>;
+    ) -> Result<DataTable, String>;
 }
 
-/// Production [`DatasourceQuerier`] impl. Forwards verbatim to
-/// [`query_datasource_arrow`] — no logic, just a trait bridge so the provider
-/// can be constructed with either the real server fn or a mock.
+/// Production [`DatasourceQuerier`] impl. Delegates to
+/// [`crate::arrow_fetch::fetch_arrow_stream`] on WASM. On native targets
+/// (SSR) this path is never exercised — charts always run in the browser —
+/// so we return an error rather than panicking.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ServerFnDatasourceQuerier;
 
@@ -96,9 +92,16 @@ impl DatasourceQuerier for ServerFnDatasourceQuerier {
         &self,
         datasource_slug: String,
         sql: String,
-        limit: Option<i32>,
-    ) -> Result<QueryArrowResult, ServerFnError> {
-        query_datasource_arrow(datasource_slug, sql, limit).await
+    ) -> Result<DataTable, String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::arrow_fetch::fetch_arrow_stream(&datasource_slug, &sql).await
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (datasource_slug, sql);
+            Err("fetch_arrow_stream is browser-only; SSR does not execute chartml queries".to_string())
+        }
     }
 }
 
@@ -192,50 +195,8 @@ fn extract_slug_and_query(
     Ok((slug, query))
 }
 
-/// Convert a [`crate::server_fns::datasources::QueryArrowResult`] into a
-/// [`FetchResult`]. Extracted so the base64 → IPC → DataTable decode chain
-/// is unit-testable in isolation from the (browser-only) server function.
-///
-/// All errors funnel into `FetchError::DecodeFailed` per the design doc:
-/// downstream classification (resolver `on_error` hook, UI fallbacks)
-/// distinguishes decode failures from network failures, and lumping them
-/// in with `Other` would lose that distinction.
-pub(crate) fn build_fetch_result(
-    ipc_base64: &str,
-    num_rows: usize,
-    execution_time_ms: Option<i64>,
-) -> Result<FetchResult, FetchError> {
-    let ipc_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        ipc_base64,
-    )
-    .map_err(|e| {
-        FetchError::DecodeFailed(format!("base64 decode of IPC bytes failed: {e}"))
-    })?;
-
-    let data = DataTable::from_ipc_bytes(&ipc_bytes)
-        .map_err(|e| FetchError::DecodeFailed(format!("Arrow IPC decode failed: {e}")))?;
-
-    // Surface every datum the server returned. Downstream consumers
-    // (`FetchMetadata`, `ResolverHooks`) read these by string key, so
-    // picking stable names matters more than picking pretty ones.
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        "rows_returned".to_string(),
-        serde_json::Value::from(num_rows),
-    );
-    if let Some(ms) = execution_time_ms {
-        metadata.insert(
-            "execution_time_ms".to_string(),
-            serde_json::Value::from(ms),
-        );
-    }
-
-    Ok(FetchResult { data, metadata })
-}
-
-// `?Send` on WASM matches the chartml-core trait; the server-fn future
-// returned by `query_datasource_arrow` is `!Send` in browser builds.
+// `?Send` on WASM matches the chartml-core trait; the `fetch_arrow_stream`
+// future is `!Send` in browser builds.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DataSourceProvider for KyomiDatasourceProvider {
@@ -247,17 +208,20 @@ impl DataSourceProvider for KyomiDatasourceProvider {
         // error rather than a panic.
         let (slug, query) = extract_slug_and_query(&request)?;
 
-        // The legacy bespoke path passed `None` for `limit` so the user's
-        // SQL is the only thing constraining row count. Preserve that —
-        // adding a default cap here would silently truncate dashboards
-        // that worked before Phase 6.
-        let result = self
+        let data = self
             .querier
-            .query(slug, query, None)
+            .query(slug, query)
             .await
-            .map_err(|e| FetchError::QueryFailed(e.to_string()))?;
+            .map_err(FetchError::QueryFailed)?;
 
-        build_fetch_result(&result.ipc_base64, result.num_rows, result.execution_time_ms)
+        let num_rows = data.num_rows();
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "rows_returned".to_string(),
+            serde_json::Value::from(num_rows),
+        );
+
+        Ok(FetchResult { data, metadata })
     }
 }
 
@@ -550,8 +514,6 @@ fn open_indexeddb_backend(workspace_id: &str) -> CacheBackendSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
-    use chartml_core::data::Row;
 
     // ── Constructor / accessor ─────────────────────────────────────────────
 
@@ -574,105 +536,5 @@ mod tests {
         // changing this string would orphan every previously-cached entry
         // in user browsers. Pinned via test so renames go through review.
         assert_eq!(KYOMI_CHARTML_CACHE_DB, "kyomi-chartml-cache");
-    }
-
-    // ── Decode pipeline — base64 → Arrow IPC → DataTable ───────────────────
-    //
-    // Lives in `#[cfg(test)] mod tests` (not in `tests/`) so
-    // `build_fetch_result` can stay `pub(crate)` — it's an implementation
-    // detail of the provider, not part of the crate's public API.
-
-    /// Build a `DataTable` of two rows {x: "A", y: 1} / {x: "B", y: 2} and
-    /// serialize it to base64-encoded Arrow IPC bytes — matching the wire
-    /// format `query_datasource_arrow` returns.
-    fn known_table_ipc_b64() -> String {
-        let rows: Vec<Row> = vec![
-            [
-                ("x".to_string(), serde_json::json!("A")),
-                ("y".to_string(), serde_json::json!(1)),
-            ]
-            .into_iter()
-            .collect(),
-            [
-                ("x".to_string(), serde_json::json!("B")),
-                ("y".to_string(), serde_json::json!(2)),
-            ]
-            .into_iter()
-            .collect(),
-        ];
-        let table = DataTable::from_rows(&rows).expect("from_rows must succeed for valid rows");
-        let bytes = table.to_ipc_bytes().expect("to_ipc_bytes must succeed");
-        base64::engine::general_purpose::STANDARD.encode(&bytes)
-    }
-
-    #[test]
-    fn build_fetch_result_decodes_known_ipc_bytes() {
-        let ipc_b64 = known_table_ipc_b64();
-        let result = build_fetch_result(&ipc_b64, 2, Some(123)).expect("decode must succeed");
-
-        // Schema: `x` (Utf8) and `y` (Float64) — both columns surface.
-        assert_eq!(result.data.num_rows(), 2, "row count survives the round trip");
-        let schema = result.data.schema();
-        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-        assert!(names.contains(&"x"), "x column survives: {names:?}");
-        assert!(names.contains(&"y"), "y column survives: {names:?}");
-
-        // Metadata: `rows_returned` mirrors the server's count, and
-        // `execution_time_ms` is propagated so downstream consumers (telemetry,
-        // resolver hooks) can see it.
-        assert_eq!(
-            result.metadata.get("rows_returned"),
-            Some(&serde_json::Value::from(2usize)),
-            "rows_returned metadata must round-trip",
-        );
-        assert_eq!(
-            result.metadata.get("execution_time_ms"),
-            Some(&serde_json::Value::from(123i64)),
-            "execution_time_ms metadata must propagate when present",
-        );
-    }
-
-    #[test]
-    fn build_fetch_result_omits_execution_time_when_none() {
-        let ipc_b64 = known_table_ipc_b64();
-        let result =
-            build_fetch_result(&ipc_b64, 2, None).expect("decode must succeed");
-
-        // Absent execution_time_ms = absent metadata key (not a null value).
-        // Telemetry consumers can then distinguish "we got 0ms" from "the
-        // server didn't measure timing on this one".
-        assert!(
-            !result.metadata.contains_key("execution_time_ms"),
-            "execution_time_ms key must be omitted when source had no timing",
-        );
-        // rows_returned still present.
-        assert!(result.metadata.contains_key("rows_returned"));
-    }
-
-    #[test]
-    fn build_fetch_result_corrupt_base64_returns_decode_failed() {
-        // Anything that isn't valid base64 → `DecodeFailed`, NOT `Other`. This
-        // matters for downstream error classification (resolver hooks, UI
-        // fallbacks) which dispatch on the error variant.
-        let err = build_fetch_result("not-base64-!!!", 0, None)
-            .expect_err("corrupt base64 must error");
-        assert!(
-            matches!(err, FetchError::DecodeFailed(_)),
-            "expected DecodeFailed for invalid base64, got: {err:?}",
-        );
-    }
-
-    #[test]
-    fn build_fetch_result_corrupt_ipc_returns_decode_failed() {
-        // Valid base64 but garbage IPC payload → still `DecodeFailed` (the
-        // `from_ipc_bytes` call surfaces the underlying Arrow error message
-        // wrapped in our variant).
-        let garbage = base64::engine::general_purpose::STANDARD.encode(b"not-arrow-ipc");
-        let err = build_fetch_result(&garbage, 0, None)
-            .expect_err("garbage IPC must error");
-        assert!(
-            matches!(err, FetchError::DecodeFailed(_)),
-            "expected DecodeFailed for invalid IPC, got: {err:?}",
-        );
     }
 }

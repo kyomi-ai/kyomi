@@ -159,7 +159,7 @@ impl AgentTool for ForecastDataTool {
                 .map_err(kyomi_core::Error::Internal)?;
 
         let result = provider
-            .execute_query(sql, Some(FORECAST_QUERY_LIMIT), None, false)
+            .execute_query(sql, Some(FORECAST_QUERY_LIMIT), None, false, None)
             .await?;
         provider.close().await;
 

@@ -93,7 +93,7 @@ impl SQLCatalogIndexer for ClickHouseIndexer {
              ORDER BY name"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
         let names = extract_string_column(&result, 0);
         // Double-filter in Rust for case-sensitive ClickHouse names
         Ok(names
@@ -121,7 +121,7 @@ impl SQLCatalogIndexer for ClickHouseIndexer {
              ORDER BY name {limit_clause}"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
@@ -161,7 +161,7 @@ impl SQLCatalogIndexer for ClickHouseIndexer {
              ORDER BY position"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());

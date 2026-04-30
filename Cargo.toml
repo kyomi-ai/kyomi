@@ -104,6 +104,7 @@ statrs = "0.18"
 arrow-schema = "57"
 arrow-array = "57"
 arrow-ipc = "57"
+arrow-select = "57"
 
 # SSH key generation (Ed25519)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -130,8 +131,8 @@ kyomi-ui = { path = "crates/kyomi-ui" }
 kyomi-server = { path = "apps/server" }
 kyomi-test-harness = { path = "crates/kyomi-test-harness" }
 kyomi-types = { path = "crates/kyomi-types" }
-kyomi-connect-protocol = "1.1"
-kyomi-datasource-drivers = { version = "1.1", package = "kyomi-datasource" }
+kyomi-connect-protocol = "1.2"
+kyomi-datasource-drivers = { version = "1.2", package = "kyomi-datasource" }
 
 # ChartML rendering — `"5"` pulls from crates.io for CI/CD + Docker builds
 # (after the chartml 5.0 release reaches the registry). Local dev redirects
@@ -250,15 +251,17 @@ codegen-units = 16
 opt-level = "s"
 
 # Uncomment to use a local checkout of kyomi-connect for development:
-# [patch.crates-io]
 # kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
 # kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
 
-# Local checkout of chartml and kode for development.
+# Local checkout of chartml, kode, and kyomi-connect for development.
+# kyomi-connect 1.2.0 is published; patches here are for local iteration only.
 # The Dockerfile strips everything between BEGIN_LOCAL_DEV_PATCHES and
 # END_LOCAL_DEV_PATCHES before `cargo build`, so prod always uses crates.io.
 # BEGIN_LOCAL_DEV_PATCHES
 [patch.crates-io]
+kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
+kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
 chartml-core = { path = "/home/jason/repos/chartml/crates/chartml-core" }
 chartml-render = { path = "/home/jason/repos/chartml/crates/chartml-render" }
 chartml-chart-cartesian = { path = "/home/jason/repos/chartml/crates/chartml-chart-cartesian" }

@@ -25,6 +25,9 @@ mod wasm_math_shims;
 #[cfg(target_arch = "wasm32")]
 pub mod panic_overlay;
 
+#[cfg(target_arch = "wasm32")]
+pub mod arrow_fetch;
+
 pub use app::App;
 
 /// Register all server functions with the Leptos runtime.
@@ -161,7 +164,6 @@ pub fn register_server_functions() {
 
     use server_fns::sql_editor::*;
     register_explicit::<ExecuteSqlQuery>();
-    register_explicit::<FetchQueryPage>();
     register_explicit::<DryRunSql>();
     register_explicit::<ListQueryHistory>();
     register_explicit::<SaveQueryHistory>();

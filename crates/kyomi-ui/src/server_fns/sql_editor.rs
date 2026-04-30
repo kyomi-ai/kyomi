@@ -3,7 +3,7 @@
 //! Server functions for SQL Editor query execution, dry-run validation, and streaming.
 //!
 //! These replace the REST API calls:
-//! - `POST /api/v1/datasources/query/execute` → `execute_sql_query()` / `fetch_query_page()`
+//! - `POST /api/v1/datasources/query/execute` → `execute_sql_query()`
 //! - `POST /api/v1/datasources/query/execute` (dry_run=true) → `dry_run_sql()`
 
 use leptos::prelude::*;
@@ -11,38 +11,6 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
-
-// ---------------------------------------------------------------------------
-// Query count cache — avoids redundant COUNT(*) queries during pagination
-// ---------------------------------------------------------------------------
-
-/// Cache key for a query's total row count.
-/// Keyed by datasource + SQL hash so different queries get separate counts.
-#[cfg(feature = "ssr")]
-fn count_cache_key(datasource_slug: &str, sql: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    sql.hash(&mut hasher);
-    let sql_hash = hasher.finish();
-    format!("sql_count:{datasource_slug}:{sql_hash:x}")
-}
-
-/// Cache a total row count in Redis (5 minute TTL).
-#[cfg(feature = "ssr")]
-async fn cache_total_rows(ctx: &super::ServerContext, datasource_slug: &str, sql: &str, total_rows: i64) {
-    if let Some(ref kv) = ctx.kv {
-        let key = count_cache_key(datasource_slug, sql);
-        let _ = kv.set(&key, &total_rows.to_string(), Some(300)).await;
-    }
-}
-
-/// Look up a cached total row count from Redis.
-#[cfg(feature = "ssr")]
-async fn get_cached_total_rows(ctx: &super::ServerContext, datasource_slug: &str, sql: &str) -> Option<i64> {
-    let kv = ctx.kv.as_ref()?;
-    let key = count_cache_key(datasource_slug, sql);
-    kv.get(&key).await.ok()?.and_then(|v| v.parse::<i64>().ok())
-}
 
 use crate::pages::sql_editor::types::{CatalogNode, QueryHistoryEntry, QueryResult};
 #[cfg(feature = "ssr")]
@@ -71,14 +39,14 @@ pub struct DryRunResult {
 }
 
 // ---------------------------------------------------------------------------
-// Task 1.3: execute_sql_query — paginated query execution
+// execute_sql_query — paginated query execution
 // ---------------------------------------------------------------------------
 
 /// Execute a SQL query with server-side pagination.
 ///
 /// Replaces `POST /api/v1/datasources/query/execute` for the Leptos SQL Editor.
-/// Returns typed `QueryResult` with column metadata, rows, and a `QueryHandle`
-/// for subsequent page fetches. Always requests total row count on first page.
+/// Returns typed `QueryResult` with column metadata, rows, and a `QueryHandle`.
+/// Always requests total row count.
 #[server(prefix = "/leptos-api")]
 pub async fn execute_sql_query(
     datasource_slug: String,
@@ -134,115 +102,12 @@ pub async fn execute_sql_query(
     let (ds, provider) =
         super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
 
-    // First-page execution always requests the total row count.
+    // Always request total row count.
     let (result, elapsed) = run_paginated_query(&*provider, &sql, page_size, page, true).await?;
 
-    // Cache the total row count so subsequent page fetches skip the COUNT query.
-    if let Some(total) = result.total_rows {
-        cache_total_rows(&ctx, &datasource_slug, &sql, total).await;
-    }
-
     provider_result_to_query_result(result, elapsed, &ds.slug, ds.datasource_type.as_ref(), &sql)
 }
 
-// ---------------------------------------------------------------------------
-// Task 1.3: fetch_query_page — subsequent page fetches
-// ---------------------------------------------------------------------------
-
-/// Fetch a specific page of query results.
-///
-/// For BigQuery, `job_id` enables instant random page access without
-/// re-executing the query. For all other providers, re-executes with
-/// LIMIT/OFFSET. `include_total` controls whether the provider computes the
-/// total row count (defaults to `false` to avoid expensive COUNT queries on
-/// subsequent pages).
-#[server(prefix = "/leptos-api")]
-pub async fn fetch_query_page(
-    datasource_slug: String,
-    sql: String,
-    page: u32,
-    page_size: u32,
-    job_id: Option<String>,
-    include_total: Option<bool>,
-) -> Result<QueryResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
-
-    // Resolve datasource to check type.
-    let ds = kyomi_auth::datasource_service::resolve_datasource(
-        &ctx.db,
-        &datasource_slug,
-        ws_id,
-        false,
-    )
-    .await
-    .into_sfn()?;
-
-    // BigQuery job_id pagination: fetch page directly from a completed job
-    // without re-executing the query. Only for direct BigQuery connections.
-    if let Some(ref bq_job_id) = job_id
-        && ds.datasource_type.as_ref() == "bigquery" && ds.connection_type != "connect"
-    {
-        let encryption_key = ctx
-            .encryption_key
-            .as_deref()
-            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
-
-        let start = std::time::Instant::now();
-
-        let (access_token, billing_project) = resolve_bq_access_for_datasource(
-            &ctx.db,
-            &ctx.config,
-            encryption_key,
-            &ds,
-            &auth.user_id,
-        )
-        .await?;
-
-        let clamped_page_size = page_size.clamp(1, 1000);
-        let start_index = (page.saturating_sub(1) as u64) * (clamped_page_size as u64);
-
-        let (columns, rows, total_rows) = fetch_bq_job_page(
-            &access_token,
-            &billing_project,
-            bq_job_id,
-            start_index,
-            clamped_page_size,
-        )
-        .await?;
-
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-        return bq_rest_to_query_result(
-            columns,
-            rows,
-            total_rows,
-            job_id.clone(),
-            &ds.slug,
-            &sql,
-            elapsed_ms,
-        );
-    }
-
-    // All other datasource types: re-execute with LIMIT/OFFSET.
-    let (_ds, provider) =
-        super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
-
-    // Check cache for total row count — avoids a redundant COUNT(*) query.
-    let cached_total = get_cached_total_rows(&ctx, &datasource_slug, &sql).await;
-    let need_total = include_total.unwrap_or(false) && cached_total.is_none();
-
-    let (mut result, elapsed) = run_paginated_query(&*provider, &sql, page_size, page, need_total).await?;
-
-    // Use cached total if available, otherwise cache what the provider returned.
-    if let Some(cached) = cached_total {
-        result.total_rows = Some(cached);
-    } else if let Some(total) = result.total_rows {
-        cache_total_rows(&ctx, &datasource_slug, &sql, total).await;
-    }
-
-    provider_result_to_query_result(result, elapsed, &ds.slug, ds.datasource_type.as_ref(), &sql)
-}
 
 // ===========================================================================
 // BigQuery REST API helpers (SSR-only)
@@ -568,54 +433,6 @@ async fn poll_bigquery_job_completion(
     }
 }
 
-/// Fetch a specific page from a completed BigQuery job.
-///
-/// GET `https://bigquery.googleapis.com/bigquery/v2/projects/{project}/queries/{job_id}?startIndex={start_index}&maxResults={max_results}`
-///
-/// Returns `(columns, rows, total_rows)`.
-#[cfg(feature = "ssr")]
-async fn fetch_bq_job_page(
-    access_token: &str,
-    project_id: &str,
-    job_id: &str,
-    start_index: u64,
-    max_results: u32,
-) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>, usize), ServerFnError> {
-    let client = kyomi_datasource_server::http_client()
-        .into_sfn()?;
-
-    let url = format!(
-        "{BIGQUERY_API_BASE}/projects/{project_id}/queries/{job_id}?startIndex={start_index}&maxResults={max_results}"
-    );
-
-    let response = tokio::time::timeout(
-        kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
-        client.get(&url).bearer_auth(access_token).send(),
-    )
-    .await
-    .map_err(|_| ServerFnError::new("BigQuery page fetch timed out"))?
-    .map_err(|e| ServerFnError::new(format!("BigQuery page fetch failed: {e}")))?;
-
-    let status_code = response.status();
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| {
-            ServerFnError::new(format!("Failed to parse BigQuery page response: {e}"))
-        })?;
-
-    if status_code.is_client_error() || status_code.is_server_error() {
-        let msg = body
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("BigQuery page fetch failed");
-        return Err(ServerFnError::new(format!("BigQuery error: {msg}")));
-    }
-
-    parse_bq_query_response(&body)
-}
-
 /// Parse a BigQuery query response JSON into `(columns, rows, total_rows)`.
 ///
 /// Handles the BigQuery response format:
@@ -714,6 +531,7 @@ fn bq_rest_to_query_result(
     };
 
     Ok(QueryResult {
+        data: None,
         columns: col_metadata,
         rows,
         row_count,
@@ -732,9 +550,6 @@ fn bq_rest_to_query_result(
 /// Execute a paginated query against a provider, handling timeout and error
 /// status. Returns the provider `QueryResult` and elapsed time in milliseconds.
 ///
-/// Consolidates the shared execution logic from `execute_sql_query` and
-/// `fetch_query_page`.
-///
 /// Page size is clamped to 1..=1000 (matching the REST handler's limit for
 /// paginated table display).
 #[cfg(feature = "ssr")]
@@ -752,7 +567,7 @@ async fn run_paginated_query(
 
     let result = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
-        provider.execute_query(sql, Some(page_size), Some(offset), include_total),
+        provider.execute_query(sql, Some(page_size), Some(offset), include_total, None),
     )
     .await
     {
@@ -892,6 +707,7 @@ fn provider_result_to_query_result(
     let bytes_processed = result.bytes_processed.map(|b| b as u64);
 
     Ok(QueryResult {
+        data: None,
         columns,
         rows,
         row_count,

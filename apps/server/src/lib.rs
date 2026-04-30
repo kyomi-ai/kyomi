@@ -130,6 +130,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
         .merge(routes::oauth::well_known_routes())
         .nest("/api/v1/oauth", routes::oauth::routes())
         .nest("/api/v1/chartml", routes::chartml::routes())
+        .nest("/api/v1", routes::query_arrow::routes())
         // Subscribe routes (public, no auth required)
         .nest("/api/v1", routes::subscribe::routes())
         // System config route (public, no auth required — frontend needs this before login)

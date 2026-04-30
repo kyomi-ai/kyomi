@@ -14,7 +14,10 @@
 use std::time::Duration;
 
 use arrow_ipc::reader::StreamReader as ArrowStreamReader;
+use arrow_ipc::writer::StreamWriter as ArrowStreamWriter;
+use arrow_select::concat::concat_batches;
 
+use kyomi_connect_protocol::ArrowStreamEvent;
 use kyomi_core::connect_protocol::{
     CatalogResult, ConnectOp, ConnectRequest, ConnectResponse, ConnectResponseBody, DryRunParams,
     QueryParams,
@@ -161,6 +164,7 @@ impl DatasourceProvider for ConnectProvider {
         limit: Option<u32>,
         offset: Option<u32>,
         include_total: bool,
+        job_id: Option<&str>,
     ) -> kyomi_connect_protocol::Result<QueryResult> {
         // Request Arrow format so the Connect binary sends IPC bytes instead of
         // JSON rows. Falls back gracefully: if the Connect binary is older and
@@ -172,6 +176,7 @@ impl DatasourceProvider for ConnectProvider {
             offset,
             include_total,
             format: QueryFormat::Arrow,
+            job_id: job_id.map(str::to_string),
         };
         let params_value = serde_json::to_value(&params)?;
 
@@ -209,7 +214,88 @@ impl DatasourceProvider for ConnectProvider {
                 total_rows,
                 schema_ipc: _, // schema is embedded per-batch in each ArrowBatch IPC stream
             } => {
-                collect_arrow_stream(columns, total_rows, &mut rx).await
+                // Collect all ArrowBatch messages until ArrowComplete signals end of stream.
+                let mut all_batches: Vec<arrow_array::RecordBatch> = Vec::new();
+                let mut schema: Option<std::sync::Arc<arrow_schema::Schema>> = None;
+
+                let (execution_time_ms, bytes_processed, result_job_id) = loop {
+                    let msg = rx.recv().await.ok_or_else(|| {
+                        kyomi_connect_protocol::Error::Internal(
+                            "Connect channel closed before ArrowComplete".into(),
+                        )
+                    })?;
+
+                    match msg.body {
+                        ConnectResponseBody::ArrowBatch { ipc_bytes, .. } => {
+                            let reader =
+                                ArrowStreamReader::try_new(std::io::Cursor::new(ipc_bytes), None)
+                                    .map_err(|e| {
+                                        kyomi_connect_protocol::Error::Internal(format!(
+                                            "Failed to create Arrow StreamReader: {e}"
+                                        ))
+                                    })?;
+                            if schema.is_none() {
+                                schema = Some(reader.schema());
+                            }
+                            for batch_result in reader {
+                                let batch = batch_result.map_err(|e| {
+                                    kyomi_connect_protocol::Error::Internal(format!(
+                                        "Failed to decode Arrow RecordBatch: {e}"
+                                    ))
+                                })?;
+                                all_batches.push(batch);
+                            }
+                        }
+                        ConnectResponseBody::ArrowComplete {
+                            execution_time_ms,
+                            bytes_processed,
+                            job_id: complete_job_id,
+                            ..
+                        } => {
+                            break (execution_time_ms, bytes_processed, complete_job_id);
+                        }
+                        ConnectResponseBody::Error { error } => {
+                            return Err(kyomi_connect_protocol::Error::Provider(error));
+                        }
+                        other => {
+                            return Err(kyomi_connect_protocol::Error::Internal(format!(
+                                "Unexpected message in Arrow stream: {other:?}"
+                            )));
+                        }
+                    }
+                };
+
+                // Merge multiple batches into one using concat_batches.
+                let record_batch = if all_batches.is_empty() {
+                    None
+                } else if all_batches.len() == 1 {
+                    all_batches.into_iter().next()
+                } else {
+                    let batch_schema = schema.ok_or_else(|| {
+                        kyomi_connect_protocol::Error::Internal(
+                            "Arrow schema missing when concatenating batches".into(),
+                        )
+                    })?;
+                    let merged = concat_batches(&batch_schema, &all_batches).map_err(|e| {
+                        kyomi_connect_protocol::Error::Internal(format!(
+                            "Failed to concat Arrow batches: {e}"
+                        ))
+                    })?;
+                    Some(merged)
+                };
+
+                Ok(QueryResult {
+                    status: crate::provider::QueryStatus::Success,
+                    columns: Some(columns),
+                    rows: None,
+                    total_rows,
+                    has_more: false,
+                    bytes_processed,
+                    execution_time_ms,
+                    error: None,
+                    record_batch,
+                    job_id: result_job_id,
+                })
             }
             other => {
                 Err(kyomi_connect_protocol::Error::Internal(format!(
@@ -217,6 +303,152 @@ impl DatasourceProvider for ConnectProvider {
                 )))
             }
         }
+    }
+
+    async fn execute_query_stream_arrow(
+        &self,
+        sql: &str,
+        limit: Option<u32>,
+        offset: Option<u32>,
+        include_total: bool,
+        chunk_size: Option<u32>,
+    ) -> kyomi_connect_protocol::Result<kyomi_connect_protocol::ArrowStream> {
+        let params = QueryParams {
+            sql: sql.to_string(),
+            limit,
+            offset,
+            include_total,
+            format: QueryFormat::Arrow,
+            job_id: None,
+        };
+        let params_value = serde_json::to_value(&params)?;
+
+        let mut request = Self::build_request(ConnectOp::ExecuteQuery, Some(params_value));
+        request.streaming = true;
+
+        let mut rx = self
+            .registry
+            .send_command_streaming(&self.datasource_config_id, request, self.timeout)
+            .await
+            .map_err(|e| kyomi_connect_protocol::Error::Internal(e.to_string()))?;
+
+        // Peek at first message to handle non-Arrow fallback paths.
+        let first = rx.recv().await.ok_or_else(|| {
+            kyomi_connect_protocol::Error::Internal(
+                "Connect channel closed without a response".into(),
+            )
+        })?;
+
+        // Create an mpsc channel to bridge ConnectResponse messages into ArrowStreamEvents.
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel::<kyomi_connect_protocol::Result<ArrowStreamEvent>>(64);
+
+        match first.body {
+            ConnectResponseBody::Error { error } => {
+                return Err(kyomi_connect_protocol::Error::Provider(error));
+            }
+            // Buffered result path: wrap in a single-batch stream.
+            ConnectResponseBody::Result { result } => {
+                let query_result =
+                    serde_json::from_value::<QueryResult>(result).map_err(|e| {
+                        kyomi_connect_protocol::Error::Internal(format!(
+                            "Failed to deserialize QueryResult: {e}"
+                        ))
+                    })?;
+                return crate::stream::query_result_to_arrow_stream(query_result);
+            }
+            // Arrow IPC path: forward each message as an ArrowStreamEvent.
+            ConnectResponseBody::ArrowHeader {
+                schema_ipc,
+                columns,
+                total_rows,
+            } => {
+                let schema_event = Ok(ArrowStreamEvent::Schema {
+                    schema_ipc,
+                    columns,
+                    total_rows,
+                });
+                // If the channel is already closed, just return an error stream.
+                if event_tx.send(schema_event).await.is_err() {
+                    return Err(kyomi_connect_protocol::Error::Internal(
+                        "Arrow stream consumer closed before schema was sent".into(),
+                    ));
+                }
+
+                // Spawn a task that forwards the remaining messages into the channel.
+                tokio::spawn(async move {
+                    let _ = chunk_size; // chunk_size is advisory; the Connect binary controls batch sizing
+                    loop {
+                        let msg = match rx.recv().await {
+                            Some(m) => m,
+                            None => {
+                                let _ = event_tx
+                                    .send(Err(kyomi_connect_protocol::Error::Internal(
+                                        "Connect channel closed before ArrowComplete".into(),
+                                    )))
+                                    .await;
+                                break;
+                            }
+                        };
+
+                        match msg.body {
+                            ConnectResponseBody::ArrowBatch {
+                                ipc_bytes,
+                                chunk_index,
+                            } => {
+                                // Decode then re-encode each batch as a standalone IPC stream
+                                // so downstream readers get self-contained IPC bytes per batch.
+                                let event = decode_and_reencode_batch(ipc_bytes, chunk_index);
+                                let done = event.is_err();
+                                if event_tx.send(event).await.is_err() || done {
+                                    break;
+                                }
+                            }
+                            ConnectResponseBody::ArrowComplete {
+                                execution_time_ms,
+                                bytes_processed,
+                                total_chunks,
+                                total_rows_returned,
+                                ..
+                            } => {
+                                let _ = event_tx
+                                    .send(Ok(ArrowStreamEvent::Complete {
+                                        execution_time_ms,
+                                        bytes_processed,
+                                        total_chunks,
+                                        total_rows_returned,
+                                    }))
+                                    .await;
+                                break;
+                            }
+                            ConnectResponseBody::Error { error } => {
+                                let _ = event_tx
+                                    .send(Err(kyomi_connect_protocol::Error::Provider(error)))
+                                    .await;
+                                break;
+                            }
+                            other => {
+                                let _ = event_tx
+                                    .send(Err(kyomi_connect_protocol::Error::Internal(format!(
+                                        "Unexpected message in Arrow stream: {other:?}"
+                                    ))))
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            other => {
+                return Err(kyomi_connect_protocol::Error::Internal(format!(
+                    "Unexpected first response from Connect agent: {other:?}"
+                )));
+            }
+        }
+
+        let stream = futures_util::stream::unfold(event_rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+        Ok(Box::pin(stream))
     }
 
     async fn dry_run(&self, sql: &str) -> kyomi_connect_protocol::Result<DryRunResult> {
@@ -264,84 +496,55 @@ impl DatasourceProvider for ConnectProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Arrow IPC collector
+// Arrow IPC re-encode helper
 // ---------------------------------------------------------------------------
 
-/// Collect an Arrow IPC response stream (ArrowHeader already consumed) into a
-/// [`QueryResult`] with a populated `record_batch`.
+/// Decode one Arrow IPC stream (schema + one batch) and re-encode the batch as
+/// a fresh self-contained IPC stream.
 ///
-/// Reads `ArrowBatch` messages until `ArrowComplete` is received. Each
-/// `ArrowBatch` contains a full Arrow IPC stream (schema + one batch); we
-/// decode the batch from each message. The Connect binary sends exactly one
-/// batch per result — multiple batches are rejected as a protocol error.
-async fn collect_arrow_stream(
-    columns: Vec<kyomi_connect_protocol::stream::ColumnInfo>,
-    total_rows: Option<i64>,
-    rx: &mut tokio::sync::mpsc::Receiver<ConnectResponse>,
-) -> kyomi_connect_protocol::Result<QueryResult> {
-    let mut all_batches: Vec<arrow_array::RecordBatch> = Vec::new();
+/// This ensures the downstream consumer of `execute_query_stream_arrow` receives
+/// standalone IPC bytes per batch that include the schema, regardless of how the
+/// Connect binary structured its messages.
+fn decode_and_reencode_batch(
+    ipc_bytes: Vec<u8>,
+    chunk_index: u32,
+) -> kyomi_connect_protocol::Result<ArrowStreamEvent> {
+    let reader = ArrowStreamReader::try_new(std::io::Cursor::new(ipc_bytes), None).map_err(
+        |e| {
+            kyomi_connect_protocol::Error::Internal(format!(
+                "Failed to create Arrow StreamReader: {e}"
+            ))
+        },
+    )?;
+    let schema = reader.schema();
 
-    // Collect all ArrowBatch messages until ArrowComplete signals end of stream.
-    let (execution_time_ms, bytes_processed) = loop {
-        let msg = rx.recv().await.ok_or_else(|| {
-            kyomi_connect_protocol::Error::Internal(
-                "Connect channel closed before ArrowComplete".into(),
-            )
+    let mut out_buf = Vec::new();
+    let mut writer = ArrowStreamWriter::try_new(&mut out_buf, &schema).map_err(|e| {
+        kyomi_connect_protocol::Error::Internal(format!(
+            "Failed to create Arrow StreamWriter: {e}"
+        ))
+    })?;
+
+    for batch_result in reader {
+        let batch = batch_result.map_err(|e| {
+            kyomi_connect_protocol::Error::Internal(format!(
+                "Failed to decode Arrow RecordBatch: {e}"
+            ))
         })?;
-
-        match msg.body {
-            ConnectResponseBody::ArrowBatch { ipc_bytes, .. } => {
-                let reader = ArrowStreamReader::try_new(std::io::Cursor::new(ipc_bytes), None)
-                    .map_err(|e| {
-                        kyomi_connect_protocol::Error::Internal(format!(
-                            "Failed to create Arrow StreamReader: {e}"
-                        ))
-                    })?;
-                for batch_result in reader {
-                    let batch = batch_result.map_err(|e| {
-                        kyomi_connect_protocol::Error::Internal(format!(
-                            "Failed to decode Arrow RecordBatch: {e}"
-                        ))
-                    })?;
-                    all_batches.push(batch);
-                }
-            }
-            ConnectResponseBody::ArrowComplete {
-                execution_time_ms,
-                bytes_processed,
-                ..
-            } => {
-                break (execution_time_ms, bytes_processed);
-            }
-            ConnectResponseBody::Error { error } => {
-                return Err(kyomi_connect_protocol::Error::Provider(error));
-            }
-            other => {
-                return Err(kyomi_connect_protocol::Error::Internal(format!(
-                    "Unexpected message in Arrow stream: {other:?}"
-                )));
-            }
-        }
-    };
-
-    if all_batches.len() > 1 {
-        return Err(kyomi_connect_protocol::Error::Internal(format!(
-            "Expected at most one Arrow batch, got {}",
-            all_batches.len()
-        )));
+        writer.write(&batch).map_err(|e| {
+            kyomi_connect_protocol::Error::Internal(format!(
+                "Failed to write Arrow RecordBatch: {e}"
+            ))
+        })?;
     }
-    let record_batch = all_batches.into_iter().next();
 
-    Ok(QueryResult {
-        status: crate::provider::QueryStatus::Success,
-        columns: Some(columns),
-        rows: None,
-        total_rows,
-        has_more: false,
-        bytes_processed,
-        execution_time_ms,
-        error: None,
-        record_batch,
+    writer.finish().map_err(|e| {
+        kyomi_connect_protocol::Error::Internal(format!("Failed to finish Arrow stream: {e}"))
+    })?;
+
+    Ok(ArrowStreamEvent::Batch {
+        ipc_bytes: out_buf,
+        chunk_index,
     })
 }
 
@@ -460,6 +663,7 @@ mod tests {
                 execution_time_ms: Some(5),
                 error: None,
                 record_batch: None,
+                job_id: None,
             };
 
             match response_tx {
@@ -478,7 +682,7 @@ mod tests {
 
         let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
         let result = provider
-            .execute_query("SELECT 1", None, None, false)
+            .execute_query("SELECT 1", None, None, false, None)
             .await
             .expect("should succeed");
 
@@ -725,19 +929,23 @@ mod tests {
     async fn error_response_on_execute_query() {
         let dsid = "ds-provider-eq-err";
         let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
-            let response = ConnectResponse {
-                id: request.id,
-                body: ConnectResponseBody::Error {
-                    error: "relation \"nonexistent\" does not exist".into(),
-                },
-            };
-            let _ = response_tx.send(response);
+            match response_tx {
+                ResponseChannel::Stream(tx) => {
+                    let _ = tx.try_send(ConnectResponse {
+                        id: request.id,
+                        body: ConnectResponseBody::Error {
+                            error: "relation \"nonexistent\" does not exist".into(),
+                        },
+                    });
+                }
+                _ => panic!("expected Stream channel"),
+            }
         })
         .await;
 
         let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
         let result = provider
-            .execute_query("SELECT * FROM nonexistent", None, None, false)
+            .execute_query("SELECT * FROM nonexistent", None, None, false, None)
             .await;
 
         assert!(result.is_err());
@@ -786,7 +994,7 @@ mod tests {
 
         let provider = ConnectProvider::new(registry, "ds-offline-eq".to_string());
         let result = provider
-            .execute_query("SELECT 1", None, None, false)
+            .execute_query("SELECT 1", None, None, false, None)
             .await;
 
         assert!(result.is_err());
@@ -945,6 +1153,7 @@ mod tests {
                             bytes_processed: None,
                             total_chunks: 1,
                             total_rows_returned: 2,
+                            job_id: None,
                         },
                     });
                 }
@@ -955,7 +1164,7 @@ mod tests {
 
         let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
         let result = provider
-            .execute_query("SELECT id, name FROM users", Some(50), None, true)
+            .execute_query("SELECT id, name FROM users", Some(50), None, true, None)
             .await
             .expect("should succeed");
 
@@ -967,6 +1176,158 @@ mod tests {
         assert_eq!(result.total_rows, Some(2));
         assert_eq!(result.execution_time_ms, Some(15));
         assert!(result.rows.is_none());
+        assert_eq!(result.job_id, None);
+
+        handle.await.unwrap();
+        registry.unregister(dsid, conn_id).await;
+    }
+
+    #[tokio::test]
+    async fn execute_query_passes_job_id_in_params() {
+        let dsid = "ds-provider-eq-job-id";
+        let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
+            assert_eq!(request.op, ConnectOp::ExecuteQuery);
+            let params: QueryParams =
+                serde_json::from_value(request.params.unwrap()).expect("valid QueryParams");
+            // Verify job_id is forwarded in the wire params.
+            assert_eq!(params.job_id.as_deref(), Some("bq-job-abc123"));
+
+            match response_tx {
+                ResponseChannel::Stream(tx) => {
+                    let _ = tx.try_send(ConnectResponse {
+                        id: request.id.clone(),
+                        body: ConnectResponseBody::ArrowHeader {
+                            schema_ipc: {
+                                use arrow_schema::{DataType, Field, Schema};
+                                use std::sync::Arc;
+                                let schema = Arc::new(Schema::new(vec![
+                                    Field::new("n", DataType::Int64, false),
+                                ]));
+                                let mut buf = Vec::new();
+                                let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema).unwrap();
+                                w.finish().unwrap();
+                                buf
+                            },
+                            columns: vec![],
+                            total_rows: None,
+                        },
+                    });
+                    let _ = tx.try_send(ConnectResponse {
+                        id: request.id.clone(),
+                        body: ConnectResponseBody::ArrowComplete {
+                            execution_time_ms: None,
+                            bytes_processed: None,
+                            total_chunks: 0,
+                            total_rows_returned: 0,
+                            job_id: Some("bq-job-abc123".into()),
+                        },
+                    });
+                }
+                _ => panic!("expected Stream channel"),
+            }
+        })
+        .await;
+
+        let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
+        let result = provider
+            .execute_query("SELECT 1", None, None, false, Some("bq-job-abc123"))
+            .await
+            .expect("should succeed");
+
+        // job_id from ArrowComplete is propagated back to the caller.
+        assert_eq!(result.job_id.as_deref(), Some("bq-job-abc123"));
+
+        handle.await.unwrap();
+        registry.unregister(dsid, conn_id).await;
+    }
+
+    #[tokio::test]
+    async fn execute_query_merges_multiple_arrow_batches() {
+        use arrow_array::{Int64Array, RecordBatch};
+        use arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let dsid = "ds-provider-eq-multi-batch";
+        let (registry, conn_id, handle) = setup_mock_connect(dsid, |request, response_tx| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int64, false),
+            ]));
+
+            let make_ipc = |values: Vec<i64>| {
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(Int64Array::from(values))],
+                )
+                .unwrap();
+                let mut buf = Vec::new();
+                let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema).unwrap();
+                w.write(&batch).unwrap();
+                w.finish().unwrap();
+                buf
+            };
+
+            let schema_buf = {
+                let mut buf = Vec::new();
+                let mut w = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &schema).unwrap();
+                w.finish().unwrap();
+                buf
+            };
+
+            let id = request.id.clone();
+            match response_tx {
+                ResponseChannel::Stream(tx) => {
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id.clone(),
+                        body: ConnectResponseBody::ArrowHeader {
+                            schema_ipc: schema_buf,
+                            columns: vec![kyomi_connect_protocol::stream::ColumnInfo {
+                                name: "id".into(),
+                                col_type: kyomi_connect_protocol::stream::SimpleType::Number,
+                            }],
+                            total_rows: Some(4),
+                        },
+                    });
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id.clone(),
+                        body: ConnectResponseBody::ArrowBatch {
+                            ipc_bytes: make_ipc(vec![1, 2]),
+                            chunk_index: 0,
+                        },
+                    });
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id.clone(),
+                        body: ConnectResponseBody::ArrowBatch {
+                            ipc_bytes: make_ipc(vec![3, 4]),
+                            chunk_index: 1,
+                        },
+                    });
+                    let _ = tx.try_send(ConnectResponse {
+                        id: id,
+                        body: ConnectResponseBody::ArrowComplete {
+                            execution_time_ms: Some(20),
+                            bytes_processed: None,
+                            total_chunks: 2,
+                            total_rows_returned: 4,
+                            job_id: None,
+                        },
+                    });
+                }
+                _ => panic!("expected Stream channel"),
+            }
+        })
+        .await;
+
+        let provider = ConnectProvider::new(registry.clone(), dsid.to_string());
+        let result = provider
+            .execute_query("SELECT id FROM t", None, None, false, None)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(result.status, crate::provider::QueryStatus::Success);
+        let batch = result.record_batch.expect("should have a record batch");
+        // concat_batches merges the two 2-row batches into one 4-row batch.
+        assert_eq!(batch.num_rows(), 4);
+        assert_eq!(batch.num_columns(), 1);
 
         handle.await.unwrap();
         registry.unregister(dsid, conn_id).await;

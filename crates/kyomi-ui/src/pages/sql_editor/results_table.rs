@@ -14,7 +14,15 @@
 //!
 //! ## Pagination
 //! Server-side pagination with page size dropdown and prev/next/first/last
-//! buttons. Changing page calls `fetch_query_page()` server function.
+//! buttons. Changing page calls `fetch_arrow_buffered()`.
+//!
+//! ## Data sources
+//! The component accepts a `QueryResult` which may carry data in two forms:
+//! - **Arrow path**: `result.data` is `Some(DataTable)` — rendered via
+//!   `DataTable::get_string` and numeric detection from the Arrow schema.
+//! - **JSON path** (legacy): `result.data` is `None`, rows come from
+//!   `result.rows` (Vec<Vec<Value>>).  Used by `chart_builder.rs` which
+//!   still calls the old server function.
 
 use std::collections::HashMap;
 
@@ -22,7 +30,7 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use wasm_bindgen::JsCast;
 
-use super::types::{ColumnMetadata, QueryResult};
+use super::types::QueryResult;
 use crate::components::{Button, ButtonSize, ButtonVariant, StyledSelect};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,18 +47,45 @@ const PAGE_SIZE_OPTIONS: [(&str, &str); 5] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cell rendering helpers
+// Cell rendering helpers — Arrow path
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Render a cell value as a display string.
+/// Detect whether a `DataTable` column is numeric by probing the first
+/// non-null value with `get_f64`.
 ///
-/// - `null` → italic "null"
+/// `DataTable::get_f64` returns `Some(_)` for all Arrow numeric types
+/// (int, uint, float, decimal) and `None` for strings, booleans, etc.
+/// This avoids a direct dependency on `arrow-schema::DataType`.
+pub(super) fn is_datatable_column_numeric(
+    data: &chartml_core::data::DataTable,
+    col_name: &str,
+) -> bool {
+    for row_idx in 0..data.num_rows() {
+        // Skip null values — get_f64 returns None for both null AND
+        // non-numeric types; get_string would also return None for null.
+        // We need to distinguish: try get_string first, then get_f64.
+        if data.get_string(row_idx, col_name).is_none() {
+            continue; // null — skip
+        }
+        // Non-null value: numeric if get_f64 succeeds.
+        return data.get_f64(row_idx, col_name).is_some();
+    }
+    false // all rows null or column empty — default to non-numeric
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cell rendering helpers — JSON path (legacy)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render a JSON cell value as a display string.
+///
+/// - `null` → italic "NULL" (matched by the template's null branch)
 /// - Numbers → right-aligned (handled by CSS class)
 /// - Objects/arrays → JSON-stringified
 /// - Strings → as-is, truncated by CSS
-fn format_cell(value: &serde_json::Value) -> (String, bool) {
+fn format_json_cell(value: &serde_json::Value) -> (String, bool) {
     match value {
-        serde_json::Value::Null => ("null".to_string(), true),
+        serde_json::Value::Null => ("NULL".to_string(), true),
         serde_json::Value::String(s) => (s.clone(), false),
         serde_json::Value::Number(n) => (n.to_string(), false),
         serde_json::Value::Bool(b) => (b.to_string(), false),
@@ -60,25 +95,111 @@ fn format_cell(value: &serde_json::Value) -> (String, bool) {
     }
 }
 
-/// Check if a value is numeric (for right-alignment).
-fn is_numeric(value: &serde_json::Value) -> bool {
+/// Check if a JSON value is numeric (for right-alignment in the JSON path).
+fn is_json_numeric(value: &serde_json::Value) -> bool {
     value.is_number()
 }
 
-/// Check if a column type suggests numeric data.
-fn is_numeric_type(col: &ColumnMetadata) -> bool {
-    col.col_type
-        .as_deref()
-        .map(|t| {
-            let t = t.to_lowercase();
-            t.contains("int")
-                || t.contains("float")
-                || t.contains("double")
-                || t.contains("decimal")
-                || t.contains("numeric")
-                || t == "number"
-        })
-        .unwrap_or(false)
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified row/column view types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single cell value ready for rendering.
+struct CellValue {
+    display: String,
+    is_null: bool,
+    align_right: bool,
+}
+
+/// A fully materialized row for rendering.
+type RenderedRow = Vec<CellValue>;
+
+/// Materialize all rows from a `QueryResult` into display-ready form.
+///
+/// Prefers the Arrow `data` field when present; falls back to the JSON `rows`
+/// field for the legacy path.
+fn materialize_rows(result: &QueryResult) -> (Vec<String>, Vec<RenderedRow>) {
+    if let Some(ref data) = result.data {
+        // ── Arrow path ────────────────────────────────────────────────────
+        let col_names = data.field_names();
+
+        // Precompute numeric flags per column by probing the first non-null
+        // value (avoids a direct arrow-schema dependency).
+        let numeric_flags: Vec<bool> = col_names
+            .iter()
+            .map(|name| is_datatable_column_numeric(data, name))
+            .collect();
+
+        let rows = (0..data.num_rows())
+            .map(|row_idx| {
+                col_names
+                    .iter()
+                    .zip(numeric_flags.iter())
+                    .map(|(col_name, &is_numeric)| {
+                        match data.get_string(row_idx, col_name) {
+                            None => CellValue {
+                                display: "NULL".to_string(),
+                                is_null: true,
+                                align_right: false,
+                            },
+                            Some(s) => CellValue {
+                                display: s,
+                                is_null: false,
+                                align_right: is_numeric,
+                            },
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        (col_names, rows)
+    } else {
+        // ── JSON path (legacy) ────────────────────────────────────────────
+        let col_names: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
+
+        // Build a per-column "is numeric type" flag from ColumnMetadata.
+        let numeric_type_flags: Vec<bool> = result
+            .columns
+            .iter()
+            .map(|col| {
+                col.col_type
+                    .as_deref()
+                    .map(|t| {
+                        let t = t.to_lowercase();
+                        t.contains("int")
+                            || t.contains("float")
+                            || t.contains("double")
+                            || t.contains("decimal")
+                            || t.contains("numeric")
+                            || t == "number"
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let rows = result
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .map(|(cell_idx, cell)| {
+                        let (display, is_null) = format_json_cell(cell);
+                        let align_right = is_json_numeric(cell)
+                            || numeric_type_flags.get(cell_idx).copied().unwrap_or(false);
+                        CellValue {
+                            display,
+                            is_null,
+                            align_right,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        (col_names, rows)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,14 +228,15 @@ pub fn ResultsTable(
     // NOTE: header_actions prop removed — chart button is rendered in TabBar instead.
     // ResultsTable focuses on data display only.
 ) -> impl IntoView {
+    // ── Materialize rows and column names ────────────────────────────────
+    let (col_names, rendered_rows) = materialize_rows(&result);
+    let num_columns = col_names.len();
+    let num_rows_this_page = rendered_rows.len();
+
     // ── Pagination calculations ──────────────────────────────────────────
 
     let has_known_total = result.total_rows.is_some();
-    // When total_rows is unknown but has_more is true, we know there's at
-    // least one more page. Use a large sentinel so the "next" button stays
-    // enabled — the server returns empty rows when we go past the end.
     let total_rows = result.total_rows.unwrap_or(if result.has_more {
-        // Unknown total — allow forward pagination
         usize::MAX
     } else {
         result.row_count
@@ -123,17 +245,14 @@ pub fn ResultsTable(
     let total_pages = if has_known_total {
         ((total_rows as f64) / (page_size as f64)).ceil().max(1.0) as u32
     } else if result.has_more {
-        u32::MAX // Unknown — don't limit
+        u32::MAX
     } else {
         1
     };
     let current_page = current_page.clamp(1, total_pages);
 
-    // Server-side paginated: rows contain only the current page's data.
-    // Display offset is calculated from page number for the "X-Y of Z" label.
     let display_start = ((current_page - 1) * page_size) as usize;
-    let display_end = (display_start + result.rows.len()).min(total_rows);
-    let num_columns = result.columns.len();
+    let display_end = (display_start + num_rows_this_page).min(total_rows);
 
     // ── Column widths (resizable) ────────────────────────────────────────
 
@@ -141,9 +260,6 @@ pub fn ResultsTable(
     let user_resized = RwSignal::new(false);
 
     // ── Resize state ─────────────────────────────────────────────────────
-    // Track which column is being resized. Using signals so that the
-    // mousedown handler can communicate with the document-level mousemove/mouseup
-    // handlers installed via web_sys.
 
     let resizing_col = RwSignal::new(None::<usize>);
     let resize_start_x = RwSignal::new(0.0_f64);
@@ -151,9 +267,6 @@ pub fn ResultsTable(
 
     let table_ref = NodeRef::<leptos::html::Table>::new();
 
-    // Style string for a column header/cell when user has resized.
-    // Uses reactive `.get()` so Leptos can track dependencies when called
-    // inside a reactive closure (e.g. `style=move || col_style(idx)`).
     let col_style = move |idx: usize| -> String {
         if user_resized.get()
             && let Some(w) = column_widths.get().get(&idx).copied()
@@ -173,11 +286,9 @@ pub fn ResultsTable(
 
         let start_x = ev.client_x() as f64;
 
-        // Get actual column width from the DOM.
         let current_width = table_ref.get().and_then(|table| {
             let el: &web_sys::HtmlElement = &table;
             let ths = el.query_selector_all("thead th").ok()?;
-            // +1 because first th is the row-number column
             let th = ths.item((col_idx + 1) as u32)?;
             let rect = th.unchecked_ref::<web_sys::Element>().get_bounding_client_rect();
             Some(rect.width())
@@ -187,14 +298,12 @@ pub fn ResultsTable(
         resize_start_x.set(start_x);
         resize_start_width.set(current_width);
 
-        // If this is the first-ever resize, capture all column widths from DOM.
         if !user_resized.get_untracked()
             && let Some(table) = table_ref.get()
         {
             let el: &web_sys::HtmlElement = &table;
             if let Ok(ths) = el.query_selector_all("thead th") {
                 let mut widths = HashMap::new();
-                // Skip index 0 (row number column)
                 for i in 1..ths.length() {
                     if let Some(th) = ths.item(i) {
                         let rect = th
@@ -208,9 +317,6 @@ pub fn ResultsTable(
             }
         }
 
-        // Install document-level mousemove/mouseup handlers.
-        // Both closures are stored in an Rc<RefCell<..>> so the up_handler
-        // can drop them after firing, preventing memory leaks.
         #[cfg(feature = "hydrate")]
         {
             use std::cell::RefCell;
@@ -221,8 +327,6 @@ pub fn ResultsTable(
             let Some(window) = web_sys::window() else { return };
             let Some(document) = window.document() else { return };
 
-            // Shared storage for both closures — the up_handler takes
-            // ownership and drops them when the mouseup fires.
             type ColResizeClosures = Rc<RefCell<Option<(Closure<dyn FnMut(web_sys::MouseEvent)>, Closure<dyn FnMut()>)>>>;
             let closures: ColResizeClosures = Rc::new(RefCell::new(None));
 
@@ -250,7 +354,6 @@ pub fn ResultsTable(
                 resizing_col.set(None);
                 let _ = document_clone
                     .remove_event_listener_with_callback("mousemove", &move_fn_clone);
-                // Remove the mouseup listener itself.
                 if let Some((_, ref up_closure)) = *closures_for_up.borrow() {
                     let up_fn: &js_sys::Function = up_closure.as_ref().unchecked_ref();
                     let _ = document_clone
@@ -260,11 +363,9 @@ pub fn ResultsTable(
                     let _ = body.style().set_property("cursor", "");
                     let _ = body.style().set_property("user-select", "");
                 }
-                // Drop both closures, freeing WASM memory.
                 closures_for_up.borrow_mut().take();
             });
 
-            // Set cursor + disable selection while resizing
             if let Some(body) = document.body() {
                 let _ = body.style().set_property("cursor", "col-resize");
                 let _ = body.style().set_property("user-select", "none");
@@ -275,17 +376,11 @@ pub fn ResultsTable(
             let _ = document
                 .add_event_listener_with_callback("mouseup", up_handler.as_ref().unchecked_ref());
 
-            // Store closures so they stay alive until the up_handler drops them.
             *closures.borrow_mut() = Some((move_handler, up_handler));
         }
     };
 
     // ── Render ───────────────────────────────────────────────────────────
-
-    let columns = result.columns.clone();
-    let rows: Vec<Vec<serde_json::Value>> = result.rows.clone();
-    let columns_for_header = columns.clone();
-    let columns_for_body = columns.clone();
 
     view! {
         <div class="flex-1 min-h-0 h-full flex flex-col rounded-md overflow-hidden relative border border-border bg-card">
@@ -332,11 +427,11 @@ pub fn ResultsTable(
                             <th class="resizable-table-row-number-header bg-muted border-b border-r-2 border-border text-center font-normal text-muted-foreground"
                                 style="flex: 0 0 50px; width: 50px; min-width: 50px; max-width: 50px; padding: 6px 4px; position: sticky; top: 0; font-size: 0.75rem;"
                             />
-                            {columns_for_header
+                            {col_names
                                 .iter()
                                 .enumerate()
-                                .map(|(idx, col)| {
-                                    let col_name = col.name.clone();
+                                .map(|(idx, col_name)| {
+                                    let col_name = col_name.clone();
                                     view! {
                                         <th
                                             class="resizable-table-header text-left relative transition-colors bg-muted border-b border-border font-semibold text-foreground"
@@ -368,11 +463,10 @@ pub fn ResultsTable(
                         </tr>
                     </thead>
                     <tbody>
-                        {rows
-                            .iter()
+                        {rendered_rows
+                            .into_iter()
                             .enumerate()
                             .map(|(row_idx, row)| {
-                                // Calculate actual row number with page offset
                                 let actual_row_num = display_start + row_idx + 1;
                                 let row_bg = if row_idx % 2 == 1 { "bg-muted" } else { "bg-card" };
 
@@ -389,20 +483,16 @@ pub fn ResultsTable(
                                             {actual_row_num}
                                         </td>
                                         {row
-                                            .iter()
+                                            .into_iter()
                                             .enumerate()
                                             .map(|(cell_idx, cell)| {
-                                                let (display_value, is_null) = format_cell(cell);
-                                                let align_right = is_numeric(cell)
-                                                    || columns_for_body
-                                                        .get(cell_idx)
-                                                        .map(is_numeric_type)
-                                                        .unwrap_or(false);
-                                                let text_align = if align_right {
+                                                let text_align = if cell.align_right {
                                                     "text-align: right;"
                                                 } else {
                                                     ""
                                                 };
+                                                let is_null = cell.is_null;
+                                                let display_value = cell.display;
 
                                                 view! {
                                                     <td
@@ -412,7 +502,7 @@ pub fn ResultsTable(
                                                         )
                                                     >
                                                         {if is_null {
-                                                            view! { <span class="italic text-muted-foreground">"null"</span> }
+                                                            view! { <span class="italic text-muted-foreground">"NULL"</span> }
                                                                 .into_any()
                                                         } else {
                                                             view! { <span>{display_value}</span> }.into_any()

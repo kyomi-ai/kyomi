@@ -96,13 +96,35 @@ pub struct QueryHandle {
 
 /// Represents the result of a query execution.
 ///
+/// ## Two data paths
+///
+/// - **Arrow path** (new): `data` is populated from `fetch_arrow_buffered`.
+///   `rows` and `columns` are empty.  `ResultsTable` renders from `data`.
+/// - **JSON path** (legacy server functions): `data` is `None`, `rows` and
+///   `columns` are populated.  `ResultsTable` falls back to `rows`.
+///
+/// `data` is skipped during (de)serialization because `DataTable` is not
+/// serde-serializable.  After restoring from localStorage, `data` is `None`
+/// and the tab shows "Results expired — click to re-run".
+///
 /// Mirrors `QueryResult` in the React types.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
-    #[serde(deserialize_with = "deserialize_columns")]
+    /// Arrow-backed columnar data for the current page.
+    ///
+    /// Populated by the Arrow path (`fetch_arrow_buffered`).
+    /// `None` after deserialization from localStorage — the tab shows an
+    /// expiry message and a re-run prompt.
+    #[serde(skip)]
+    pub data: Option<chartml_core::data::DataTable>,
+    /// Column metadata (populated by the legacy JSON path only).
+    #[serde(default, deserialize_with = "deserialize_columns")]
     pub columns: Vec<ColumnMetadata>,
+    /// JSON rows (populated by the legacy JSON path only; empty on Arrow path).
+    #[serde(default)]
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// Number of rows in the current page.
     pub row_count: usize,
     /// Total rows available (for server-side pagination).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,6 +141,25 @@ pub struct QueryResult {
     /// Whether more pages are available beyond the current result set.
     #[serde(default)]
     pub has_more: bool,
+}
+
+/// `DataTable` does not implement `PartialEq`, so we compare all other fields
+/// and treat two results as equal if everything except `data` matches.  This
+/// is sufficient for Leptos `Memo` change-detection — the memo fires when any
+/// metadata (rows, columns, pagination state) changes, which is what matters
+/// for re-renders.
+impl PartialEq for QueryResult {
+    fn eq(&self, other: &Self) -> bool {
+        // `data` is intentionally excluded — DataTable is not PartialEq.
+        self.columns == other.columns
+            && self.rows == other.rows
+            && self.row_count == other.row_count
+            && self.total_rows == other.total_rows
+            && self.query_handle == other.query_handle
+            && self.execution_time == other.execution_time
+            && self.bytes_processed == other.bytes_processed
+            && self.has_more == other.has_more
+    }
 }
 
 /// Represents an error from query execution.

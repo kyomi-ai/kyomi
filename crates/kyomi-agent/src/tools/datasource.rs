@@ -147,7 +147,7 @@ impl AgentTool for QueryDatasourceTool {
                 .await
                 .map_err(kyomi_core::Error::Internal)?;
 
-        let result = provider.execute_query(sql, Some(20), None, false).await?;
+        let result = provider.execute_query(sql, Some(20), None, false, None).await?;
         provider.close().await;
 
         match result.status {

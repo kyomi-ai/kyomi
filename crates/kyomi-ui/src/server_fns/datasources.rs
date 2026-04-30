@@ -753,7 +753,7 @@ pub async fn query_datasource_arrow(
     let query_limit = limit.map(|l| l.clamp(1, 10_000) as u32);
     let result = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_QUERY,
-        provider.execute_query(&sql, query_limit, None, false),
+        provider.execute_query(&sql, query_limit, None, false, None),
     )
     .await
     {

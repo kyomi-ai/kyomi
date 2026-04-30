@@ -584,7 +584,7 @@ async fn refresh_sql_based(
             continue;
         };
 
-        let table_rows = match provider.execute_query(&sql, None, None, false).await {
+        let table_rows = match provider.execute_query(&sql, None, None, false, None).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(
@@ -636,7 +636,7 @@ async fn refresh_sql_based(
             // can split "database.schema" for the INFORMATION_SCHEMA query.
             let columns_sql = get_columns_sql(ds_type_str, &effective_container, table_name);
             let columns = if let Some(sql) = columns_sql {
-                match provider.execute_query(&sql, None, None, false).await {
+                match provider.execute_query(&sql, None, None, false, None).await {
                     Ok(result) => result
                         .rows
                         .as_deref()

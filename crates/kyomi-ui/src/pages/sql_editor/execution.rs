@@ -8,15 +8,16 @@
 //! Flow:
 //! 1. Validate inputs (datasource selected, query non-empty)
 //! 2. Create a new tab in `Running` state
-//! 3. Call `execute_sql_query()` — returns first page of results
+//! 3. Call `fetch_arrow_buffered()` — returns first page of results as Arrow IPC
 //! 4. Update tab with results; subsequent pages fetched on demand
 //! 5. Fire-and-forget: save to query history
 
 use leptos::prelude::*;
 
 use super::state::SqlEditorState;
-use super::types::{NewTabData, QueryError, QueryStatus};
-use crate::server_fns::sql_editor::{execute_sql_query, save_query_history};
+use super::types::{NewTabData, QueryStatus};
+#[cfg(target_arch = "wasm32")]
+use crate::server_fns::sql_editor::save_query_history;
 
 /// Execute a query: validate, create a tab, run async, update tab on completion.
 ///
@@ -65,64 +66,98 @@ pub fn run_query(
 
     query_running.set(true);
 
-    // ── Execute via paginated server function ─────────────────────────────
-    // All datasource types use the same path: execute server-side, return
-    // one page of results, paginate on demand. No WebSocket streaming.
-    run_paginated_query(state, tab_id, query_text, datasource_slug, query_running);
+    // ── Execute via Arrow endpoint ────────────────────────────────────────
+    // All datasource types use the same path: POST to /api/v1/query-arrow,
+    // receive Arrow IPC bytes, paginate on demand with offset/limit.
+    run_arrow_query(state, tab_id, query_text, datasource_slug, datasource_type, query_running);
 }
 
-/// Execute a paginated query — calls `execute_sql_query` server function.
-fn run_paginated_query(
+/// Execute a query using the Arrow endpoint (`fetch_arrow_buffered`).
+///
+/// Calls `POST /api/v1/query-arrow` with `limit` / `offset` and decodes
+/// the response as Arrow IPC bytes via `DataTable`.
+#[cfg(target_arch = "wasm32")]
+fn run_arrow_query(
     state: SqlEditorState,
     tab_id: String,
     query_text: String,
     datasource_slug: String,
+    datasource_type: String,
     query_running: WriteSignal<bool>,
 ) {
-    let sql = query_text.clone();
-    let ds_slug = datasource_slug.clone();
+    use super::types::{QueryError, QueryHandle, QueryResult};
+
+    let sql = query_text;
+    let ds_slug = datasource_slug;
 
     leptos::task::spawn_local(async move {
         let start = instant_now();
 
-        match execute_sql_query(ds_slug.clone(), sql.clone(), 50, 1).await {
-            Ok(result) => {
-                let frontend_time_ms = elapsed_ms(start);
-                let execution_time = result.execution_time.or(Some(frontend_time_ms));
-                let _bytes_processed = result.bytes_processed;
-                let row_count = result.row_count;
-                let total_rows = result.total_rows;
+        // Default page size for the first page.
+        let page_size = state
+            .default_page_size
+            .get_untracked();
 
-                let history_result = result.clone();
+        match crate::arrow_fetch::fetch_arrow_buffered(
+            &ds_slug,
+            &sql,
+            page_size,
+            0,
+            true,
+            None,
+        )
+        .await
+        {
+            Ok(arrow_result) => {
+                let frontend_time_ms = elapsed_ms(start);
+                let row_count = arrow_result.data.num_rows();
+                let total_rows = arrow_result.total_rows.map(|t| t as usize);
+                let has_more = arrow_result.has_more;
+                let job_id = arrow_result.job_id.clone();
+
+                let query_handle = QueryHandle {
+                    datasource_type: datasource_type.clone(),
+                    datasource_slug: ds_slug.clone(),
+                    sql: sql.clone(),
+                    job_id,
+                };
+
+                let result = QueryResult {
+                    data: Some(arrow_result.data),
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    row_count,
+                    total_rows,
+                    query_handle: Some(query_handle),
+                    execution_time: Some(frontend_time_ms),
+                    bytes_processed: None,
+                    has_more,
+                };
+
+                let history_row_count = total_rows.unwrap_or(row_count);
+
                 state.update_tab(&tab_id, move |tab| {
                     tab.status = QueryStatus::Success;
                     tab.result = Some(result);
-                    // Overwrite execution_time with the best available value.
-                    if let Some(ref mut r) = tab.result {
-                        r.execution_time = execution_time;
-                    }
                 });
 
                 query_running.set(false);
 
-                // Fire-and-forget: save success to history, then bump the
-                // shared history refresh tick so the sidebar's QueryHistory
-                // panel refetches and shows this run without a page reload.
                 save_to_history(
                     state,
                     HistoryRecord {
                         query_text: sql,
-                        execution_time_ms: execution_time.map(|t| t as i32),
-                        bytes_processed: history_result.bytes_processed.map(|b| b as i64),
-                        row_count: Some(total_rows.unwrap_or(row_count) as i32),
+                        execution_time_ms: Some(frontend_time_ms as i32),
+                        bytes_processed: None,
+                        row_count: Some(history_row_count as i32),
                         status: "success".to_string(),
                         error_message: None,
                         datasource: Some(ds_slug),
                     },
                 );
             }
-            Err(e) => {
-                let error_msg = e.to_string();
+            Err(error_msg) => {
+                let error_msg_for_history = error_msg.clone();
                 state.update_tab(&tab_id, move |tab| {
                     tab.status = QueryStatus::Error;
                     tab.error = Some(QueryError {
@@ -135,9 +170,6 @@ fn run_paginated_query(
 
                 query_running.set(false);
 
-                // Fire-and-forget: save error to history, then bump the
-                // sidebar refresh tick (same reason as the success path —
-                // failed queries still appear in the history list).
                 save_to_history(
                     state,
                     HistoryRecord {
@@ -146,7 +178,7 @@ fn run_paginated_query(
                         bytes_processed: None,
                         row_count: None,
                         status: "error".to_string(),
-                        error_message: Some(e.to_string()),
+                        error_message: Some(error_msg_for_history),
                         datasource: Some(ds_slug),
                     },
                 );
@@ -155,10 +187,26 @@ fn run_paginated_query(
     });
 }
 
+/// Non-WASM stub — execution only runs in the browser.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_arrow_query(
+    _state: SqlEditorState,
+    _tab_id: String,
+    _query_text: String,
+    _datasource_slug: String,
+    _datasource_type: String,
+    _query_running: WriteSignal<bool>,
+) {
+    // No-op on SSR — query execution is WASM-only.
+}
+
+// ─── WASM-only helpers ──────────────────────────────────────────────────────
+
 /// A single query-history entry to be written asynchronously.
 ///
 /// Bundled as a struct so [`save_to_history`] stays under clippy's
 /// `too_many_arguments` threshold.
+#[cfg(target_arch = "wasm32")]
 pub(super) struct HistoryRecord {
     pub query_text: String,
     pub execution_time_ms: Option<i32>,
@@ -172,11 +220,12 @@ pub(super) struct HistoryRecord {
 /// Fire-and-forget helper to save a query execution to history.
 ///
 /// After the server acknowledges the write, bumps `state.history_refresh_tick`
-/// so the sidebar's QueryHistory panel refetches and shows the new entry
-/// without a page reload. The tick is bumped even on save failure — the row
-/// in the tab's result area is the source of truth for the user, and the
-/// tick bump is cheap; if the save itself failed the history list just won't
-/// contain a new row, which is the desired behaviour.
+/// so the sidebar's QueryHistory panel refetches and shows this run without a
+/// page reload. The tick is bumped even on save failure — the row in the tab's
+/// result area is the source of truth for the user, and the tick bump is cheap;
+/// if the save itself failed the history list just won't contain a new row,
+/// which is the desired behaviour.
+#[cfg(target_arch = "wasm32")]
 pub(super) fn save_to_history(state: SqlEditorState, record: HistoryRecord) {
     leptos::task::spawn_local(async move {
         let _ = save_query_history(
@@ -193,62 +242,21 @@ pub(super) fn save_to_history(state: SqlEditorState, record: HistoryRecord) {
     });
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/// Generate a UUID-like request ID for correlating WebSocket events.
-///
-/// Uses `crypto.randomUUID()` on WASM, falling back to a timestamp-based ID.
-fn _generate_request_id() -> String {
-    #[cfg(target_arch = "wasm32")]
-    {
-        if let Some(crypto) = web_sys::window().and_then(|w| w.crypto().ok()) {
-            return crypto.random_uuid();
-        }
-        // Fallback: timestamp + random suffix (matches React fallback).
-        let now = js_sys::Date::now() as u64;
-        let rand = js_sys::Math::random();
-        format!("{now}-{rand:.10}")
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("ssr-req-{n}")
-    }
-}
-
 /// Get an "instant" timestamp for measuring elapsed time.
+#[cfg(target_arch = "wasm32")]
 fn instant_now() -> f64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        web_sys::window()
-            .and_then(|w| w.performance())
-            .map(|p| p.now())
-            .unwrap_or(0.0)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        0.0
-    }
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
 }
 
 /// Compute elapsed milliseconds since `start`.
+#[cfg(target_arch = "wasm32")]
 fn elapsed_ms(start: f64) -> u64 {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let now = web_sys::window()
-            .and_then(|w| w.performance())
-            .map(|p| p.now())
-            .unwrap_or(0.0);
-        (now - start).round() as u64
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = start;
-        0
-    }
+    let now = web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0);
+    (now - start).round() as u64
 }

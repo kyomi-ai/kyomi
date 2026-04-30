@@ -90,7 +90,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
         provider: &dyn DatasourceProvider,
     ) -> Result<Vec<String>> {
         let result = provider
-            .execute_query("SHOW CATALOGS", None, None, false)
+            .execute_query("SHOW CATALOGS", None, None, false, None)
             .await?;
 
         if result.status != QueryStatus::Success {
@@ -125,7 +125,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
         // First get all schemas in the catalog
         let schema_sql = format!("SHOW SCHEMAS IN `{container_name}`");
         let schema_result = provider
-            .execute_query(&schema_sql, None, None, false)
+            .execute_query(&schema_sql, None, None, false, None)
             .await?;
 
         if schema_result.status != QueryStatus::Success {
@@ -149,7 +149,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             // Get tables in this schema
             let table_sql = format!("SHOW TABLES IN `{container_name}`.`{schema_name}`");
             let table_result = provider
-                .execute_query(&table_sql, None, None, false)
+                .execute_query(&table_sql, None, None, false, None)
                 .await;
 
             let table_result = match table_result {
@@ -208,7 +208,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             "DESCRIBE TABLE `{catalog_name}`.`{schema_name}`.`{table_name}`"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());

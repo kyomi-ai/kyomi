@@ -128,7 +128,7 @@ pub async fn execute_datasource_query(
     // 3. Execute query
     let limit = max_rows.unwrap_or(CHART_QUERY_MAX_ROWS);
     let result = provider
-        .execute_query(sql, Some(limit), None, false)
+        .execute_query(sql, Some(limit), None, false, None)
         .await
         .map_err(|e| format!("Query execution failed: {e}"))?;
     provider.close().await;

@@ -8,21 +8,29 @@
 //! - Loading / error / empty states
 //!
 //! ## Server-side pagination
-//! Page changes call `fetch_query_page()` via `spawn_local`. The page
-//! size change re-executes the query via `execute_sql_query()`.
+//! Page changes call `fetch_arrow_buffered()` with the appropriate offset.
+//! Page size changes re-execute from offset 0 with the new limit.
+//!
+//! ## Expired results (restored from localStorage)
+//! When a tab is restored from localStorage, `result.data` is `None` (DataTable
+//! is not serializable).  The tab is marked `needs_refresh = true` and shows
+//! "Results expired — click to re-run" via `ResultsError`.  The user must
+//! explicitly re-run — no auto-execute on restore.
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use super::state::SqlEditorState;
-use super::tab_bar::TabBar;
 use super::results_table::ResultsTable;
+use super::tab_bar::TabBar;
 use super::types::{QueryStatus, ResultTab};
 use crate::components::dashboard::chart_builder::ChartBuilderModal;
 use crate::components::{Button, ButtonVariant, ButtonSize, Spinner};
 #[cfg(target_arch = "wasm32")]
-use crate::server_fns::sql_editor::fetch_query_page;
-#[cfg(target_arch = "wasm32")]
 use crate::server_fns::sql_editor::generate_chart_from_results;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ResultsContainer component
@@ -32,15 +40,14 @@ use crate::server_fns::sql_editor::generate_chart_from_results;
 ///
 /// Renders a tab bar at the top and the active tab's content below:
 /// - **Loading** → spinner + "Running query..." message
+/// - **Needs refresh** → "Results expired — click to re-run" with re-run button
 /// - **Error** → error message + "Re-run Query" button
 /// - **Success** → `ResultsTable` with data
 /// - **Idle / no tab** → empty state
 ///
 /// # Props
 /// - `on_restore_query` — forwarded to `TabBar` for double-click restore.
-/// - `on_run_query` — called when the user clicks "Re-run Query" on an error tab.
-///   Receives the SQL text and should return a future that resolves when the query
-///   completes (tab update is the caller's responsibility).
+/// - `on_run_query` — called when the user clicks "Re-run Query" on an expired/errored tab.
 #[component]
 pub fn ResultsContainer(
     /// Called when a tab is double-clicked to restore its query + datasource.
@@ -64,72 +71,6 @@ pub fn ResultsContainer(
     // Local signal for re-run loading state (used by ResultsError button).
     let (is_rerunning, set_is_rerunning) = signal(false);
 
-    // ── Auto-refresh for tabs restored from localStorage ─────────────────
-    // Tabs with `needs_refresh = true` need their data re-fetched from the
-    // server. Without this effect they show a spinner forever.
-    #[cfg(target_arch = "wasm32")]
-    {
-        Effect::new(move |_| {
-            let Some(tab) = active_tab.get() else { return };
-            if !tab.needs_refresh { return; }
-
-            let Some(ref result) = tab.result else { return };
-            let Some(ref handle) = result.query_handle else { return };
-
-            let datasource_slug = handle.datasource_slug.clone();
-            let sql = handle.sql.clone();
-            let job_id = handle.job_id.clone();
-            let tab_id = tab.id.clone();
-            let ui_state = active_table_ui.get();
-
-            leptos::task::spawn_local(async move {
-                let fetch_result = fetch_query_page(
-                    datasource_slug,
-                    sql,
-                    ui_state.current_page,
-                    ui_state.page_size,
-                    job_id,
-                    Some(false),
-                )
-                .await;
-
-                match fetch_result {
-                    Ok(new_result) => {
-                        state.update_tab(&tab_id, |tab| {
-                            tab.status = QueryStatus::Success;
-                            tab.error = None;
-                            tab.needs_refresh = false;
-                            tab.result = Some(new_result);
-                        });
-                    }
-                    Err(err) => {
-                        let msg = format!("{err}");
-                        let error_msg = if msg.contains("Not found")
-                            || msg.contains("404")
-                            || msg.contains("not found")
-                            || msg.contains("expired")
-                        {
-                            "Query results expired. Please re-run the query.".to_string()
-                        } else {
-                            msg
-                        };
-
-                        state.update_tab(&tab_id, |tab| {
-                            tab.status = QueryStatus::Error;
-                            tab.needs_refresh = false;
-                            tab.error = Some(super::types::QueryError {
-                                message: error_msg,
-                                code: None,
-                                line: None,
-                                column: None,
-                            });
-                        });
-                    }
-                }
-            });
-        });
-    }
-
     // ── Page change handler ──────────────────────────────────────────────
 
     let handle_page_change = {
@@ -146,79 +87,91 @@ pub fn ResultsContainer(
 
             #[cfg(target_arch = "wasm32")]
             {
+                use super::types::QueryResult;
+
                 let datasource_slug = handle.datasource_slug.clone();
                 let sql = handle.sql.clone();
                 let job_id = handle.job_id.clone();
                 let page_size = active_table_ui.get().page_size;
                 let tab_id = tab.id.clone();
 
-                // Preserve fields from the existing result for the update.
-                let prev_columns = result.columns.clone();
+                // Offset is 0-based: page 1 starts at offset 0.
+                let offset = page.saturating_sub(1) * page_size;
+
+                // Preserve metadata from the original execution.
                 let prev_total_rows = result.total_rows;
                 let prev_execution_time = result.execution_time;
                 let prev_bytes_processed = result.bytes_processed;
                 let prev_query_handle = result.query_handle.clone();
 
                 leptos::task::spawn_local(async move {
-                    let result = fetch_query_page(
-                        datasource_slug,
-                        sql,
-                        page,
+                    let fetch_result = crate::arrow_fetch::fetch_arrow_buffered(
+                        &datasource_slug,
+                        &sql,
                         page_size,
-                        job_id,
-                        Some(false),
+                        offset,
+                        false,
+                        job_id.as_deref(),
                     )
                     .await;
 
-                match result {
-                    Ok(new_result) => {
-                        // Merge: use new rows but preserve metadata from original execution.
-                        state.update_tab(&tab_id, |tab| {
-                            tab.status = QueryStatus::Success;
-                            tab.error = None;
-                            tab.result = Some(super::types::QueryResult {
-                                columns: if new_result.columns.is_empty() {
-                                    prev_columns.clone()
-                                } else {
-                                    new_result.columns
-                                },
-                                rows: new_result.rows,
-                                row_count: new_result.row_count,
-                                total_rows: prev_total_rows,
-                                query_handle: prev_query_handle.clone(),
-                                execution_time: prev_execution_time,
-                                bytes_processed: prev_bytes_processed,
-                                has_more: new_result.has_more,
-                            });
-                        });
-                        state.set_table_ui_state(&tab_id, |ui| {
-                            ui.current_page = page;
-                        });
-                    }
-                    Err(err) => {
-                        let msg = format!("{err}");
-                        let is_expired = msg.contains("Not found")
-                            || msg.contains("404")
-                            || msg.contains("not found")
-                            || msg.contains("expired");
+                    match fetch_result {
+                        Ok(arrow_result) => {
+                            let row_count = arrow_result.data.num_rows();
+                            let new_job_id = arrow_result.job_id.clone();
+                            let has_more = arrow_result.has_more;
 
-                        let error_msg = if is_expired {
-                            "Query results expired. Please re-run the query.".to_string()
-                        } else {
-                            msg
-                        };
-
-                        state.update_tab(&tab_id, |tab| {
-                            tab.status = QueryStatus::Error;
-                            tab.error = Some(super::types::QueryError {
-                                message: error_msg.clone(),
-                                code: None,
-                                line: None,
-                                column: None,
+                            // Preserve job_id from the response if the server
+                            // returned a new one (BigQuery pagination).
+                            let updated_handle = prev_query_handle.map(|mut h| {
+                                if new_job_id.is_some() {
+                                    h.job_id = new_job_id;
+                                }
+                                h
                             });
-                        });
+
+                            state.update_tab(&tab_id, |tab| {
+                                tab.status = QueryStatus::Success;
+                                tab.error = None;
+                                tab.result = Some(QueryResult {
+                                    data: Some(arrow_result.data),
+                                    columns: Vec::new(),
+                                    rows: Vec::new(),
+                                    row_count,
+                                    total_rows: prev_total_rows,
+                                    query_handle: updated_handle,
+                                    execution_time: prev_execution_time,
+                                    bytes_processed: prev_bytes_processed,
+                                    has_more,
+                                });
+                            });
+                            state.set_table_ui_state(&tab_id, |ui| {
+                                ui.current_page = page;
+                            });
+                        }
+                        Err(err) => {
+                            let is_expired = {
+                                let msg = err.to_lowercase();
+                                msg.contains("not found")
+                                    || msg.contains("404")
+                                    || msg.contains("expired")
+                            };
+                            let error_msg = if is_expired {
+                                "Query results expired. Please re-run the query.".to_string()
+                            } else {
+                                err
+                            };
+                            state.update_tab(&tab_id, |tab| {
+                                tab.status = QueryStatus::Error;
+                                tab.error = Some(super::types::QueryError {
+                                    message: error_msg,
+                                    code: None,
+                                    line: None,
+                                    column: None,
+                                });
+                            });
+                        }
                     }
-                }
                     set_is_paginating.set(false);
                 });
             }
@@ -234,9 +187,7 @@ pub fn ResultsContainer(
             let Some(ref result) = tab.result else { return };
             let Some(ref handle) = result.query_handle else { return };
 
-            // Save as user's default preference.
             state.set_default_page_size(new_page_size);
-
             set_is_paginating.set(true);
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -244,27 +195,54 @@ pub fn ResultsContainer(
 
             #[cfg(target_arch = "wasm32")]
             {
+                use super::types::{QueryHandle, QueryResult};
+
                 let datasource_slug = handle.datasource_slug.clone();
+                let datasource_type = handle.datasource_type.clone();
                 let sql = handle.sql.clone();
+                let job_id = handle.job_id.clone();
                 let tab_id = tab.id.clone();
 
                 leptos::task::spawn_local(async move {
-                    use crate::server_fns::sql_editor::execute_sql_query;
-
-                    let result = execute_sql_query(
-                        datasource_slug,
-                        sql,
+                    // Re-execute from the beginning with the new page size.
+                    let fetch_result = crate::arrow_fetch::fetch_arrow_buffered(
+                        &datasource_slug,
+                        &sql,
                         new_page_size,
-                        1, // Reset to page 1
+                        0,
+                        true,
+                        job_id.as_deref(),
                     )
                     .await;
 
-                    match result {
-                        Ok(new_result) => {
+                    match fetch_result {
+                        Ok(arrow_result) => {
+                            let row_count = arrow_result.data.num_rows();
+                            let total_rows = arrow_result.total_rows.map(|t| t as usize);
+                            let new_job_id = arrow_result.job_id.clone();
+                            let has_more = arrow_result.has_more;
+
+                            let query_handle = Some(QueryHandle {
+                                datasource_type: datasource_type.clone(),
+                                datasource_slug: datasource_slug.clone(),
+                                sql: sql.clone(),
+                                job_id: new_job_id,
+                            });
+
                             state.update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Success;
                                 tab.error = None;
-                                tab.result = Some(new_result);
+                                tab.result = Some(QueryResult {
+                                    data: Some(arrow_result.data),
+                                    columns: Vec::new(),
+                                    rows: Vec::new(),
+                                    row_count,
+                                    total_rows,
+                                    query_handle,
+                                    execution_time: None,
+                                    bytes_processed: None,
+                                    has_more,
+                                });
                             });
                             state.set_table_ui_state(&tab_id, |ui| {
                                 ui.page_size = new_page_size;
@@ -275,7 +253,7 @@ pub fn ResultsContainer(
                             state.update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Error;
                                 tab.error = Some(super::types::QueryError {
-                                    message: format!("{err}"),
+                                    message: err,
                                     code: None,
                                     line: None,
                                     column: None,
@@ -332,7 +310,11 @@ pub fn ResultsContainer(
         Callback::new(move |_: ()| {
             let Some(tab) = active_tab.get() else { return };
             let Some(ref result) = tab.result else { return };
-            if result.columns.is_empty() || result.rows.is_empty() {
+
+            // Need at least some columns to generate a chart.
+            let has_data = result.data.as_ref().map(|d| !d.is_empty()).unwrap_or(false)
+                || !result.rows.is_empty();
+            if !has_data {
                 return;
             }
 
@@ -341,14 +323,49 @@ pub fn ResultsContainer(
 
             #[cfg(target_arch = "wasm32")]
             {
-                let columns: Vec<String> = result.columns.iter().map(|c| c.name.clone()).collect();
-                // Take first 100 rows as sample.
-                let sample_rows: Vec<Vec<serde_json::Value>> = result
-                    .rows
-                    .iter()
-                    .take(100)
-                    .cloned()
-                    .collect();
+                // Build column names and sample rows for the server function.
+                // For the Arrow path, convert DataTable to JSON rows (first 100).
+                // For the legacy JSON path, use the rows directly.
+                let (columns, sample_rows): (Vec<String>, Vec<Vec<serde_json::Value>>) =
+                    if let Some(ref data) = result.data {
+                        let col_names = data.field_names();
+                        // Precompute numeric flag per column by probing first
+                        // non-null value (avoids a direct arrow-schema dep).
+                        let numeric_flags: Vec<bool> = col_names
+                            .iter()
+                            .map(|name| super::results_table::is_datatable_column_numeric(data, name))
+                            .collect();
+
+                        let rows: Vec<Vec<serde_json::Value>> = (0..data.num_rows().min(100))
+                            .map(|row_idx| {
+                                col_names
+                                    .iter()
+                                    .zip(numeric_flags.iter())
+                                    .map(|(col_name, &is_numeric)| {
+                                        match data.get_string(row_idx, col_name) {
+                                            None => serde_json::Value::Null,
+                                            Some(s) => {
+                                                if is_numeric {
+                                                    s.parse::<f64>()
+                                                        .map(|n| serde_json::json!(n))
+                                                        .unwrap_or(serde_json::Value::String(s))
+                                                } else {
+                                                    serde_json::Value::String(s)
+                                                }
+                                            }
+                                        }
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        (col_names, rows)
+                    } else {
+                        let col_names =
+                            result.columns.iter().map(|c| c.name.clone()).collect();
+                        let rows = result.rows.iter().take(100).cloned().collect();
+                        (col_names, rows)
+                    };
+
                 let sql = tab.query.clone();
                 let ds_slug = tab.datasource_slug.clone().unwrap_or_default();
 
@@ -370,7 +387,6 @@ pub fn ResultsContainer(
 
     // ── Render ───────────────────────────────────────────────────────────
 
-    // Don't render at all if there are no tabs.
     move || {
         let current_tabs = tabs.get();
         if current_tabs.is_empty() {
@@ -471,13 +487,6 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
         is_rerunning,
         set_is_rerunning,
     } = props;
-    // Needs refresh → loading state
-    if tab.needs_refresh {
-        return view! {
-            <ResultsLoading message="Restoring query results..." />
-        }
-        .into_any();
-    }
 
     // Running → loading state
     if tab.status == QueryStatus::Running {
@@ -485,6 +494,34 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
             <ResultsLoading message="Running query..." />
         }
         .into_any();
+    }
+
+    // Needs refresh: data was not persisted (DataTable is not serializable).
+    // Show expiry message — the user clicks "Re-run Query" to fetch again.
+    if tab.needs_refresh
+        || tab.result.as_ref().map(|r| r.data.is_none() && r.rows.is_empty()).unwrap_or(false)
+    {
+        // Only show the expiry state if the tab actually had a result at some
+        // point (i.e. there is a query handle to re-run from).
+        if tab.result.as_ref().and_then(|r| r.query_handle.as_ref()).is_some()
+            || tab.needs_refresh
+        {
+            let query = tab.query.clone();
+            return view! {
+                <ResultsError
+                    message="Results expired — click to re-run.".to_string()
+                    on_rerun=on_run_query.map(move |cb| {
+                        let query = query.clone();
+                        Callback::new(move |_: ()| {
+                            set_is_rerunning.set(true);
+                            cb.run(query.clone());
+                        })
+                    })
+                    is_rerunning=is_rerunning
+                />
+            }
+            .into_any();
+        }
     }
 
     // Error → error display with optional re-run
@@ -536,8 +573,7 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
 // Loading state
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Loading state displayed while a query is running or results are being
-/// restored from localStorage.
+/// Loading state displayed while a query is running.
 #[component]
 fn ResultsLoading(
     /// Message to display below the spinner.
@@ -651,4 +687,3 @@ fn ResultsError(
         .into_any()
     }
 }
-

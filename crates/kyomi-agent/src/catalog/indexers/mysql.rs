@@ -93,7 +93,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
              ORDER BY schema_name"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
         let names = extract_string_column(&result, 0);
         // Double-filter in Rust for robustness
         Ok(names.into_iter().filter(|n| !is_system_database(n)).collect())
@@ -118,7 +118,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
              ORDER BY table_name {limit_clause}"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
@@ -158,7 +158,7 @@ impl SQLCatalogIndexer for MySqlIndexer {
              ORDER BY ordinal_position"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());

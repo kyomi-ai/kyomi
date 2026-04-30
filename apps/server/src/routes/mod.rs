@@ -23,5 +23,6 @@ pub mod billing;
 pub mod mcp;
 pub mod oauth;
 pub mod push;
+pub mod query_arrow;
 // Slack routes moved to enterprise/kyomi-slack crate (Phase 12).
 pub mod websocket;

@@ -82,7 +82,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
              ORDER BY schema_name"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
@@ -125,7 +125,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
              ORDER BY TABLE_NAME"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
@@ -168,7 +168,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
              ORDER BY c.ORDINAL_POSITION"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());

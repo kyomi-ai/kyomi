@@ -91,7 +91,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         provider: &dyn DatasourceProvider,
     ) -> Result<Vec<String>> {
         let result = provider
-            .execute_query("SHOW DATABASES", None, None, false)
+            .execute_query("SHOW DATABASES", None, None, false, None)
             .await?;
 
         if result.status != QueryStatus::Success {
@@ -144,7 +144,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
              ORDER BY TABLE_SCHEMA, TABLE_NAME {limit_clause}"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
@@ -199,7 +199,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
              ORDER BY ORDINAL_POSITION"
         );
 
-        let result = provider.execute_query(&sql, None, None, false).await?;
+        let result = provider.execute_query(&sql, None, None, false, None).await?;
 
         if result.status != QueryStatus::Success {
             return Ok(Vec::new());
