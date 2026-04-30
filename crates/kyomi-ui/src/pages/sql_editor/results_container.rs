@@ -462,6 +462,48 @@ struct TabContentProps {
     set_is_rerunning: WriteSignal<bool>,
 }
 
+/// Build a re-run callback that updates the existing tab in-place rather than
+/// creating a new one. Extracts the tab's query, datasource, and ID, then calls
+/// `rerun_query` which sets the tab to Running and re-executes.
+///
+/// Falls back to the parent's `on_run_query` callback if the tab doesn't have
+/// enough context for an in-place re-run (missing query handle or datasource).
+fn build_rerun_callback(
+    tab: &super::types::ResultTab,
+    on_run_query: Option<Callback<String>>,
+    set_is_rerunning: WriteSignal<bool>,
+) -> Option<Callback<()>> {
+    let query = tab.query.clone();
+    let tab_id = tab.id.clone();
+    let ds_slug = tab.datasource_slug.clone();
+    let ds_type = tab.datasource_type.clone();
+
+    if let (Some(slug), Some(dtype)) = (ds_slug, ds_type) {
+        let state = super::state::SqlEditorState::use_state();
+        Some(Callback::new(move |_: ()| {
+            set_is_rerunning.set(true);
+            let reset = set_is_rerunning;
+            super::execution::rerun_query(
+                state,
+                tab_id.clone(),
+                query.clone(),
+                slug.clone(),
+                dtype.clone(),
+                Some(Callback::new(move |_| reset.set(false))),
+            );
+        }))
+    } else {
+        // Fallback: no datasource context — use the parent callback.
+        // Don't set is_rerunning here — the parent callback (run_query) has
+        // no mechanism to reset it, which would leave the button stuck.
+        on_run_query.map(move |cb| {
+            Callback::new(move |_: ()| {
+                cb.run(query.clone());
+            })
+        })
+    }
+}
+
 /// Render the content area for the active tab based on its status.
 fn render_tab_content(props: TabContentProps) -> AnyView {
     let TabContentProps {
@@ -488,22 +530,14 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
     if tab.needs_refresh
         || tab.result.as_ref().map(|r| r.data.is_none() && r.rows.is_empty()).unwrap_or(false)
     {
-        // Only show the expiry state if the tab actually had a result at some
-        // point (i.e. there is a query handle to re-run from).
         if tab.result.as_ref().and_then(|r| r.query_handle.as_ref()).is_some()
             || tab.needs_refresh
         {
-            let query = tab.query.clone();
+            let rerun_cb = build_rerun_callback(&tab, on_run_query, set_is_rerunning);
             return view! {
                 <ResultsError
                     message="Results expired — click to re-run.".to_string()
-                    on_rerun=on_run_query.map(move |cb| {
-                        let query = query.clone();
-                        Callback::new(move |_: ()| {
-                            set_is_rerunning.set(true);
-                            cb.run(query.clone());
-                        })
-                    })
+                    on_rerun=rerun_cb
                     is_rerunning=is_rerunning
                 />
             }
@@ -514,17 +548,11 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
     // Error → error display with optional re-run
     if let Some(ref error) = tab.error {
         let error_message = error.message.clone();
-        let query = tab.query.clone();
+        let rerun_cb = build_rerun_callback(&tab, on_run_query, set_is_rerunning);
         return view! {
             <ResultsError
                 message=error_message
-                on_rerun=on_run_query.map(move |cb| {
-                    let query = query.clone();
-                    Callback::new(move |_: ()| {
-                        set_is_rerunning.set(true);
-                        cb.run(query.clone());
-                    })
-                })
+                on_rerun=rerun_cb
                 is_rerunning=is_rerunning
             />
         }

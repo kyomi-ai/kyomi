@@ -72,6 +72,37 @@ pub fn run_query(
     run_arrow_query(state, tab_id, query_text, datasource_slug, datasource_type, query_running);
 }
 
+/// Re-run a query in an existing tab (e.g. after "Results expired — click to re-run").
+///
+/// Unlike [`run_query`] which creates a new tab, this sets the existing tab to
+/// Running state and re-executes in place. The `on_complete` callback is called
+/// after execution finishes (success or error) so the caller can reset UI state.
+pub fn rerun_query(
+    state: SqlEditorState,
+    tab_id: String,
+    query_text: String,
+    datasource_slug: String,
+    datasource_type: String,
+    on_complete: Option<Callback<()>>,
+) {
+    if datasource_slug.is_empty() {
+        tracing::warn!("rerun_query: no datasource context on tab");
+        return;
+    }
+    if query_text.trim().is_empty() {
+        tracing::warn!("rerun_query: empty query text");
+        return;
+    }
+
+    state.update_tab(&tab_id, |tab| {
+        tab.status = QueryStatus::Running;
+        tab.error = None;
+        tab.needs_refresh = false;
+    });
+
+    rerun_arrow_query(state, tab_id, query_text, datasource_slug, datasource_type, on_complete);
+}
+
 /// Execute a query using the Arrow endpoint (`fetch_arrow_buffered`).
 ///
 /// Calls `POST /api/v1/query-arrow` with `limit` / `offset` and decodes
@@ -191,6 +222,112 @@ fn run_arrow_query(
     _query_running: WriteSignal<bool>,
 ) {
     // No-op on SSR — query execution is WASM-only.
+}
+
+/// Re-execute a query into an existing tab (WASM-only).
+///
+/// Same as `run_arrow_query` but does NOT create a new tab — updates the
+/// existing `tab_id` and calls `on_complete` when done so the caller can
+/// reset loading state.
+#[cfg(target_arch = "wasm32")]
+fn rerun_arrow_query(
+    state: SqlEditorState,
+    tab_id: String,
+    query_text: String,
+    datasource_slug: String,
+    datasource_type: String,
+    on_complete: Option<Callback<()>>,
+) {
+    use super::types::{QueryError, QueryHandle, QueryResult};
+
+    let sql = query_text;
+    let ds_slug = datasource_slug;
+
+    leptos::task::spawn_local(async move {
+        let start = instant_now();
+        let page_size = state.default_page_size.get_untracked();
+
+        match crate::arrow_fetch::fetch_arrow_buffered(&ds_slug, &sql, page_size, 0, true, None)
+            .await
+        {
+            Ok(arrow_result) => {
+                let frontend_time_ms = elapsed_ms(start);
+                let row_count = arrow_result.data.num_rows();
+                let total_rows = arrow_result.total_rows.map(|t| t as usize);
+                let job_id = arrow_result.job_id.clone();
+
+                let query_handle = QueryHandle {
+                    datasource_type,
+                    datasource_slug: ds_slug.clone(),
+                    sql: sql.clone(),
+                    job_id,
+                };
+
+                let result = QueryResult::from_arrow(arrow_result, Some(query_handle), Some(frontend_time_ms));
+
+                state.update_tab(&tab_id, move |tab| {
+                    tab.status = QueryStatus::Success;
+                    tab.error = None;
+                    tab.needs_refresh = false;
+                    tab.result = Some(result);
+                });
+
+                let history_row_count = total_rows.unwrap_or(row_count);
+                save_to_history(
+                    state,
+                    HistoryRecord {
+                        query_text: sql,
+                        execution_time_ms: Some(frontend_time_ms as i32),
+                        bytes_processed: None,
+                        row_count: Some(history_row_count as i32),
+                        status: "success".to_string(),
+                        error_message: None,
+                        datasource: Some(ds_slug),
+                    },
+                );
+            }
+            Err(error_msg) => {
+                let error_msg_for_history = error_msg.clone();
+                state.update_tab(&tab_id, move |tab| {
+                    tab.status = QueryStatus::Error;
+                    tab.error = Some(QueryError {
+                        message: error_msg,
+                        code: None,
+                        line: None,
+                        column: None,
+                    });
+                });
+
+                save_to_history(
+                    state,
+                    HistoryRecord {
+                        query_text: sql,
+                        execution_time_ms: None,
+                        bytes_processed: None,
+                        row_count: None,
+                        status: "error".to_string(),
+                        error_message: Some(error_msg_for_history),
+                        datasource: Some(ds_slug),
+                    },
+                );
+            }
+        }
+
+        if let Some(cb) = on_complete {
+            cb.run(());
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rerun_arrow_query(
+    _state: SqlEditorState,
+    _tab_id: String,
+    _query_text: String,
+    _datasource_slug: String,
+    _datasource_type: String,
+    _on_complete: Option<Callback<()>>,
+) {
 }
 
 // ─── WASM-only helpers ──────────────────────────────────────────────────────
