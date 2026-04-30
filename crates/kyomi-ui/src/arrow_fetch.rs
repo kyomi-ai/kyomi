@@ -177,19 +177,17 @@ async fn post_arrow_request(body: &serde_json::Value) -> Result<Response, String
 
     // --- Error path: extract message from JSON body if possible ---
     let status = resp.status();
-    if let Ok(text_promise) = resp.text() {
-        if let Ok(text_value) = JsFuture::from(text_promise).await {
-            if let Some(text) = text_value.as_string() {
-                // Try to parse {"error": "..."} envelope.
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(msg) = json.get("error").and_then(|v| v.as_str()) {
-                        return Err(msg.to_string());
-                    }
-                }
-                if !text.is_empty() {
-                    return Err(text);
-                }
-            }
+    if let Ok(text_promise) = resp.text()
+        && let Ok(text_value) = JsFuture::from(text_promise).await
+        && let Some(text) = text_value.as_string()
+    {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(msg) = json.get("error").and_then(|v| v.as_str())
+        {
+            return Err(msg.to_string());
+        }
+        if !text.is_empty() {
+            return Err(text);
         }
     }
     Err(format!("HTTP {status}"))
