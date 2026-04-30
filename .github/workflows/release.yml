@@ -138,6 +138,37 @@ jobs:
         working-directory: apps/mcp-chart-app-wasm
         run: bash build.sh
 
+      - name: Build release binary
+        run: cargo build --release -p kyomi-server
+
+      - name: Collect runtime libs
+        run: |
+          set -euo pipefail
+          LIBS_DIR=target/release/runtime-libs/libs
+          ETC_DIR=target/release/runtime-libs/etc
+          TMP_DIR=target/release/runtime-libs/tmp
+          mkdir -p "$LIBS_DIR" "$ETC_DIR" "$TMP_DIR"
+
+          # Shared libraries the binary links against
+          ldd target/release/kyomi | awk '/=>/ {print $3}' | while read lib; do
+            cp "$lib" "$LIBS_DIR/"
+          done
+
+          # Dynamic linker
+          cp /lib64/ld-linux-x86-64.so.2 "$LIBS_DIR/"
+
+          # NSS modules — glibc loads these via dlopen() for DNS resolution
+          cp /lib/x86_64-linux-gnu/libnss_dns.so.2 "$LIBS_DIR/"
+          cp /lib/x86_64-linux-gnu/libnss_files.so.2 "$LIBS_DIR/"
+          cp /lib/x86_64-linux-gnu/libresolv.so.2 "$LIBS_DIR/"
+
+          # CA certificates + DNS config
+          cp /etc/ssl/certs/ca-certificates.crt "$ETC_DIR/"
+          printf 'hosts: files dns\n' > "$ETC_DIR/nsswitch.conf"
+
+          # Writable /tmp placeholder
+          touch "$TMP_DIR/.keep"
+
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
