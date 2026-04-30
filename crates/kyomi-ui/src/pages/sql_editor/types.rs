@@ -98,8 +98,9 @@ pub struct QueryHandle {
 ///
 /// ## Two data paths
 ///
-/// - **Arrow path** (new): `data` is populated from `fetch_arrow_buffered`.
-///   `rows` and `columns` are empty.  `ResultsTable` renders from `data`.
+/// - **Arrow path** (new): `data`, `columns`, and `rows` are all populated
+///   from `fetch_arrow_buffered`.  `ResultsTable` renders from `data`; the
+///   JSON `columns`/`rows` survive localStorage serialization for persistence.
 /// - **JSON path** (legacy server functions): `data` is `None`, `rows` and
 ///   `columns` are populated.  `ResultsTable` falls back to `rows`.
 ///
@@ -118,10 +119,10 @@ pub struct QueryResult {
     /// expiry message and a re-run prompt.
     #[serde(skip)]
     pub data: Option<chartml_core::data::DataTable>,
-    /// Column metadata (populated by the legacy JSON path only).
+    /// Column metadata (populated by both Arrow and JSON paths).
     #[serde(default, deserialize_with = "deserialize_columns")]
     pub columns: Vec<ColumnMetadata>,
-    /// JSON rows (populated by the legacy JSON path only; empty on Arrow path).
+    /// JSON rows (populated by both Arrow and JSON paths; survives localStorage).
     #[serde(default)]
     pub rows: Vec<Vec<serde_json::Value>>,
     /// Number of rows in the current page.
@@ -141,6 +142,79 @@ pub struct QueryResult {
     /// Whether more pages are available beyond the current result set.
     #[serde(default)]
     pub has_more: bool,
+}
+
+impl QueryResult {
+    /// Build a `QueryResult` from a `BufferedArrowResult`, populating both the
+    /// Arrow `data` field (for rendering) and the JSON `columns`/`rows` fields
+    /// (for localStorage persistence). Without the JSON fields, results vanish
+    /// on page refresh because `data` is `#[serde(skip)]`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_arrow(
+        arrow: crate::arrow_fetch::BufferedArrowResult,
+        query_handle: Option<QueryHandle>,
+        execution_time: Option<u64>,
+    ) -> Self {
+        let row_count = arrow.data.num_rows();
+        let total_rows = arrow.total_rows.map(|t| t as usize);
+        let has_more = arrow.has_more;
+
+        let schema = arrow.data.schema();
+        let columns: Vec<ColumnMetadata> = schema
+            .fields()
+            .iter()
+            .map(|f| ColumnMetadata {
+                name: f.name().clone(),
+                col_type: Some(classify_arrow_type_str(&f.data_type().to_string())),
+                mode: None,
+            })
+            .collect();
+
+        let col_names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        let mut rows = Vec::with_capacity(row_count);
+        for row_idx in 0..row_count {
+            let row: Vec<serde_json::Value> = col_names
+                .iter()
+                .map(|name| {
+                    arrow.data
+                        .get_string(row_idx, name)
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect();
+            rows.push(row);
+        }
+
+        Self {
+            data: Some(arrow.data),
+            columns,
+            rows,
+            row_count,
+            total_rows,
+            query_handle,
+            execution_time,
+            bytes_processed: None,
+            has_more,
+        }
+    }
+}
+
+/// Classify an Arrow DataType display string (e.g. "Int64", "Utf8", "Timestamp")
+/// into a simplified type for ColumnMetadata.
+#[cfg(target_arch = "wasm32")]
+fn classify_arrow_type_str(type_str: &str) -> String {
+    let t = type_str.to_lowercase();
+    if t.starts_with("int") || t.starts_with("uint") || t.starts_with("float")
+        || t.starts_with("decimal")
+    {
+        "number".to_string()
+    } else if t.starts_with("bool") {
+        "boolean".to_string()
+    } else if t.starts_with("date") || t.starts_with("timestamp") || t.starts_with("time") {
+        "datetime".to_string()
+    } else {
+        "string".to_string()
+    }
 }
 
 /// `DataTable` does not implement `PartialEq`, so we compare all other fields

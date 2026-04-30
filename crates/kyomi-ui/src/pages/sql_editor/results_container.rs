@@ -87,7 +87,7 @@ pub fn ResultsContainer(
 
             #[cfg(target_arch = "wasm32")]
             {
-                use super::types::QueryResult;
+                use super::types::{QueryHandle, QueryResult};
 
                 let datasource_slug = handle.datasource_slug.clone();
                 let sql = handle.sql.clone();
@@ -117,12 +117,8 @@ pub fn ResultsContainer(
 
                     match fetch_result {
                         Ok(arrow_result) => {
-                            let row_count = arrow_result.data.num_rows();
                             let new_job_id = arrow_result.job_id.clone();
-                            let has_more = arrow_result.has_more;
 
-                            // Preserve job_id from the response if the server
-                            // returned a new one (BigQuery pagination).
                             let updated_handle = prev_query_handle.map(|mut h| {
                                 if new_job_id.is_some() {
                                     h.job_id = new_job_id;
@@ -130,20 +126,18 @@ pub fn ResultsContainer(
                                 h
                             });
 
+                            let mut result = QueryResult::from_arrow(
+                                arrow_result,
+                                updated_handle,
+                                prev_execution_time,
+                            );
+                            result.total_rows = prev_total_rows;
+                            result.bytes_processed = prev_bytes_processed;
+
                             state.update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Success;
                                 tab.error = None;
-                                tab.result = Some(QueryResult {
-                                    data: Some(arrow_result.data),
-                                    columns: Vec::new(),
-                                    rows: Vec::new(),
-                                    row_count,
-                                    total_rows: prev_total_rows,
-                                    query_handle: updated_handle,
-                                    execution_time: prev_execution_time,
-                                    bytes_processed: prev_bytes_processed,
-                                    has_more,
-                                });
+                                tab.result = Some(result);
                             });
                             state.set_table_ui_state(&tab_id, |ui| {
                                 ui.current_page = page;
@@ -217,32 +211,25 @@ pub fn ResultsContainer(
 
                     match fetch_result {
                         Ok(arrow_result) => {
-                            let row_count = arrow_result.data.num_rows();
-                            let total_rows = arrow_result.total_rows.map(|t| t as usize);
                             let new_job_id = arrow_result.job_id.clone();
-                            let has_more = arrow_result.has_more;
 
-                            let query_handle = Some(QueryHandle {
+                            let query_handle = QueryHandle {
                                 datasource_type: datasource_type.clone(),
                                 datasource_slug: datasource_slug.clone(),
                                 sql: sql.clone(),
                                 job_id: new_job_id,
-                            });
+                            };
+
+                            let result = QueryResult::from_arrow(
+                                arrow_result,
+                                Some(query_handle),
+                                None,
+                            );
 
                             state.update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Success;
                                 tab.error = None;
-                                tab.result = Some(QueryResult {
-                                    data: Some(arrow_result.data),
-                                    columns: Vec::new(),
-                                    rows: Vec::new(),
-                                    row_count,
-                                    total_rows,
-                                    query_handle,
-                                    execution_time: None,
-                                    bytes_processed: None,
-                                    has_more,
-                                });
+                                tab.result = Some(result);
                             });
                             state.set_table_ui_state(&tab_id, |ui| {
                                 ui.page_size = new_page_size;

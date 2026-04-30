@@ -112,7 +112,6 @@ fn run_arrow_query(
                 let frontend_time_ms = elapsed_ms(start);
                 let row_count = arrow_result.data.num_rows();
                 let total_rows = arrow_result.total_rows.map(|t| t as usize);
-                let has_more = arrow_result.has_more;
                 let job_id = arrow_result.job_id.clone();
 
                 let query_handle = QueryHandle {
@@ -122,17 +121,11 @@ fn run_arrow_query(
                     job_id,
                 };
 
-                let result = QueryResult {
-                    data: Some(arrow_result.data),
-                    columns: Vec::new(),
-                    rows: Vec::new(),
-                    row_count,
-                    total_rows,
-                    query_handle: Some(query_handle),
-                    execution_time: Some(frontend_time_ms),
-                    bytes_processed: None,
-                    has_more,
-                };
+                let result = QueryResult::from_arrow(
+                    arrow_result,
+                    Some(query_handle),
+                    Some(frontend_time_ms),
+                );
 
                 let history_row_count = total_rows.unwrap_or(row_count);
 
