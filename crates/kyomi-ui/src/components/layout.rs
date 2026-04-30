@@ -1056,7 +1056,7 @@ fn Sidebar(
         // standard app theme (Modal component handles bg-background).
         <FeedbackModal
             open=feedback_open
-            on_open_change=Callback::new(move |open: bool| set_feedback_open.set(open))
+            on_open_change=Callback::new(move |open: bool| { let _ = set_feedback_open.try_set(open); })
         />
     }
 }

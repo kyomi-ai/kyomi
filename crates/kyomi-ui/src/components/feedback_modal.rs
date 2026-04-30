@@ -200,12 +200,12 @@ pub fn FeedbackModal(
                             // Reject anything that exceeds the server's MAX_SCREENSHOT_BYTES (2MB).
                             let estimated_bytes = data_url.len() * 3 / 4;
                             if estimated_bytes > 2 * 1024 * 1024 {
-                                set_error.set(Some(
+                                let _ = set_error.try_set(Some(
                                     "Image too large (max 2MB). Try \"Upload Image\" instead.".to_string(),
                                 ));
                             } else {
-                                set_screenshot_preview.set(Some(data_url.clone()));
-                                set_screenshot_data.set(Some(data_url));
+                                let _ = set_screenshot_preview.try_set(Some(data_url.clone()));
+                                let _ = set_screenshot_data.try_set(Some(data_url));
                             }
                         }
                     }
@@ -219,13 +219,13 @@ pub fn FeedbackModal(
                             })
                             .unwrap_or_else(|| "Screen capture failed".to_string());
                         if !msg.contains("NotAllowedError") && !msg.contains("cancelled") {
-                            set_error.set(Some(
+                            let _ = set_error.try_set(Some(
                                 "Screen capture failed. Try \"Upload Image\" instead.".to_string(),
                             ));
                         }
                     }
                 }
-                set_capturing.set(false);
+                let _ = set_capturing.try_set(false);
 
                 // Reopen the modal after capture completes
                 on_open_change.run(true);
@@ -267,7 +267,7 @@ pub fn FeedbackModal(
                     && let Some(file) = files.get(0) {
                         // Validate size: 2MB decoded ~ 2.67MB base64 (matching REST route MAX_SCREENSHOT_BYTES)
                         if file.size() > 2.67 * 1024.0 * 1024.0 {
-                            set_err.set(Some("Image must be less than 2MB".to_string()));
+                            let _ = set_err.try_set(Some("Image must be less than 2MB".to_string()));
                             return;
                         }
                         let Ok(reader) = web_sys::FileReader::new() else { return };
@@ -276,8 +276,8 @@ pub fn FeedbackModal(
                             move |_: web_sys::Event| {
                                 if let Ok(result) = reader_clone.result()
                                     && let Some(data_url) = result.as_string() {
-                                        set_preview.set(Some(data_url.clone()));
-                                        set_data.set(Some(data_url));
+                                        let _ = set_preview.try_set(Some(data_url.clone()));
+                                        let _ = set_data.try_set(Some(data_url));
                                     }
                             },
                         );
