@@ -87,7 +87,7 @@ pub fn ResultsContainer(
 
             #[cfg(target_arch = "wasm32")]
             {
-                use super::types::{QueryHandle, QueryResult};
+                use super::types::QueryResult;
 
                 let datasource_slug = handle.datasource_slug.clone();
                 let sql = handle.sql.clone();
@@ -528,21 +528,18 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
     // Needs refresh: data was not persisted (DataTable is not serializable).
     // Show expiry message — the user clicks "Re-run Query" to fetch again.
     if tab.needs_refresh
-        || tab.result.as_ref().map(|r| r.data.is_none() && r.rows.is_empty()).unwrap_or(false)
+        || (tab.result.as_ref().map(|r| r.data.is_none() && r.rows.is_empty()).unwrap_or(false)
+            && tab.result.as_ref().and_then(|r| r.query_handle.as_ref()).is_some())
     {
-        if tab.result.as_ref().and_then(|r| r.query_handle.as_ref()).is_some()
-            || tab.needs_refresh
-        {
-            let rerun_cb = build_rerun_callback(&tab, on_run_query, set_is_rerunning);
-            return view! {
-                <ResultsError
-                    message="Results expired — click to re-run.".to_string()
-                    on_rerun=rerun_cb
-                    is_rerunning=is_rerunning
-                />
-            }
-            .into_any();
+        let rerun_cb = build_rerun_callback(&tab, on_run_query, set_is_rerunning);
+        return view! {
+            <ResultsError
+                message="Results expired — click to re-run.".to_string()
+                on_rerun=rerun_cb
+                is_rerunning=is_rerunning
+            />
         }
+        .into_any();
     }
 
     // Error → error display with optional re-run
