@@ -143,8 +143,10 @@ pub(crate) async fn extract_auth() -> Result<kyomi_auth::middleware::AuthUser, l
 /// Extract the server context (db, config, auth_state) from Leptos context.
 #[cfg(feature = "ssr")]
 pub(crate) fn extract_context() -> Result<ServerContext, leptos::prelude::ServerFnError> {
-    leptos::prelude::use_context::<ServerContext>()
-        .ok_or_else(|| leptos::prelude::ServerFnError::new("Server context not available"))
+    leptos::prelude::use_context::<ServerContext>().ok_or_else(|| {
+        tracing::error!("Server context not available");
+        leptos::prelude::ServerFnError::new("Server context not available")
+    })
 }
 
 /// Get workspace_id from the auth user, or error.
@@ -153,7 +155,10 @@ pub(crate) fn workspace_id(auth: &kyomi_auth::middleware::AuthUser) -> Result<&s
     auth.workspace
         .workspace_id
         .as_deref()
-        .ok_or_else(|| leptos::prelude::ServerFnError::new("Workspace context required"))
+        .ok_or_else(|| {
+            tracing::error!("Workspace context required");
+            leptos::prelude::ServerFnError::new("Workspace context required")
+        })
 }
 
 /// Extension trait that converts any `Result<T, E: Display>` into a server
@@ -167,6 +172,9 @@ pub(crate) trait IntoServerFnError<T> {
 #[cfg(feature = "ssr")]
 impl<T, E: std::fmt::Display> IntoServerFnError<T> for Result<T, E> {
     fn into_sfn(self) -> Result<T, leptos::prelude::ServerFnError> {
-        self.map_err(|e| leptos::prelude::ServerFnError::new(e.to_string()))
+        self.map_err(|e| {
+            tracing::error!(error = %e, "server function error");
+            leptos::prelude::ServerFnError::new(e.to_string())
+        })
     }
 }
