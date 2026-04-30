@@ -407,20 +407,14 @@ impl SqlEditorState {
             let active_right_tab_val = active_right_tab.get();
             let right_sidebar_percentage_val = right_sidebar_percentage.get();
 
-            // Strip row data from tabs before persisting.
-            // `data` (DataTable) is excluded by #[serde(skip)] automatically.
-            // `rows` and `data` are cleared here to free memory before the
-            // debounced serialization fires. `row_count` is kept so the UI
-            // can show "N rows" even after the data expires.
+            // Prepare tabs for persistence. `data` (DataTable) is excluded by
+            // #[serde(skip)] automatically. `rows` and `columns` are kept so
+            // the tab can render results from JSON on restore without re-executing.
             let persisted_tabs: Vec<ResultTab> = tabs_val
                 .into_iter()
                 .map(|mut tab| {
                     if let Some(ref mut result) = tab.result {
                         result.data = None;
-                        result.rows = Vec::new();
-                        // Keep row_count, columns, total_rows, query_handle,
-                        // execution_time, bytes_processed for metadata display.
-                        tab.needs_refresh = true;
                     }
                     tab
                 })
