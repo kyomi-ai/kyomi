@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info};
 
-use crate::types::{LLMResponse, Message, MessageRole, Tool, ToolCall, TokenUsage};
+use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -468,9 +468,9 @@ impl OpenAIProvider {
     }
 
     /// Parse the `usage` object from the OpenAI response.
-    fn parse_usage(response: &serde_json::Value) -> TokenUsage {
+    fn parse_usage(response: &serde_json::Value) -> AgentTokenUsage {
         let usage = response.get("usage");
-        TokenUsage {
+        AgentTokenUsage {
             input_tokens: usage
                 .and_then(|u| u.get("prompt_tokens"))
                 .and_then(|v| v.as_u64())
@@ -493,7 +493,7 @@ impl OpenAIProvider {
 /// Calculate estimated cost in USD for an OpenAI API call.
 /// Delegates to [`crate::pricing::calculate_cost_with_fallback`] with gpt-4o-mini pricing
 /// as the fallback for unknown models.
-pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
+pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
     crate::pricing::calculate_cost_with_fallback(
         model,
         usage,
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gpt4o() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gpt4o_mini() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gpt41() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gpt41_mini() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1033,7 +1033,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gpt41_nano() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1045,7 +1045,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_o3() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_o3_mini_not_confused_with_o3() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_o4_mini() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_unknown_model_uses_fallback() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             ..Default::default()
@@ -1095,7 +1095,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_zero_tokens() {
-        let usage = TokenUsage::default();
+        let usage = AgentTokenUsage::default();
         let cost = calculate_cost("gpt-4o", &usage);
         assert!((cost - 0.0).abs() < f64::EPSILON);
     }
@@ -1103,7 +1103,7 @@ mod tests {
     #[test]
     fn cost_calculation_substring_matching() {
         // Model names with extra suffixes should still match via substring.
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 0,
             ..Default::default()

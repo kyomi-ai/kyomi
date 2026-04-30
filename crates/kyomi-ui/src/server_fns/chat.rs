@@ -1163,7 +1163,7 @@ fn session_list_item_to_chat_session_item(
         unread_count: s.unread_count,
         created_by: s.created_by.map(|cb| SessionUser {
             user_id: cb.user_id,
-            display_name: cb.display_name,
+            display_name: cb.display_name.unwrap_or_default(),
         }),
         slack_channel_id,
     }
@@ -1182,24 +1182,24 @@ fn message_item_to_chat_message_item(
         pinned: m.pinned,
         sent_by: m.sent_by.map(|cb| SessionUser {
             user_id: cb.user_id,
-            display_name: cb.display_name,
+            display_name: cb.display_name.unwrap_or_default(),
         }),
         thinking_events: m.thinking_events,
         token_usage: m.token_usage,
     }
 }
 
-/// Convert a `chat_service::SessionDetail` to our `SessionDetail`.
+/// Convert a `chat_service::SessionMetadata` to our `SessionDetail`.
 #[cfg(feature = "ssr")]
 fn session_detail_to_session_detail(
-    s: &kyomi_auth::chat_service::SessionDetail,
+    s: &kyomi_auth::chat_service::SessionMetadata,
 ) -> SessionDetail {
     SessionDetail {
         title: s.title.clone(),
         shared: s.shared,
         created_by: s.created_by.as_ref().map(|cb| SessionUser {
             user_id: cb.user_id.clone(),
-            display_name: cb.display_name.clone(),
+            display_name: cb.display_name.clone().unwrap_or_default(),
         }),
         // Use platform_type as a truthy marker for Slack sessions.
         // SessionDetail doesn't carry platform_thread_key either.

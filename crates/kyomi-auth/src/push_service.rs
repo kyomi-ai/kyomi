@@ -20,9 +20,9 @@ pub struct SaveSubscriptionInput {
     pub device_label: Option<String>,
 }
 
-/// Lightweight subscription info for the settings UI.
+/// Lightweight push device record for the settings UI.
 #[derive(Debug, Serialize, sqlx::FromRow)]
-pub struct SubscriptionInfo {
+pub struct PushSubscriptionDevice {
     pub id: i32,
     pub device_label: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -133,10 +133,10 @@ pub async fn get_user_subscriptions(
 pub async fn list_user_subscriptions(
     db: &DbPool,
     user_id: &str,
-) -> kyomi_core::Result<Vec<SubscriptionInfo>> {
+) -> kyomi_core::Result<Vec<PushSubscriptionDevice>> {
     let rows = kyomi_core::db_fetch_all!(
         db,
-        SubscriptionInfo,
+        PushSubscriptionDevice,
         r#"
         SELECT id, device_label, created_at, last_used_at
         FROM push_subscriptions

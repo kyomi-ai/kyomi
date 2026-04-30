@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::encryption;
 use crate::sync_log_service;
 use kyomi_types::sync::{SyncActionType, entity_types};
+use kyomi_types::CreatedBy;
 
 // ---------------------------------------------------------------------------
 // Response structs
@@ -42,16 +43,9 @@ pub struct SessionListItem {
     pub platform_type: Option<String>,
 }
 
-/// Who created a session (user_id + display name).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreatedBy {
-    pub user_id: String,
-    pub display_name: String,
-}
-
 /// Full session detail (for get_session / get_session_info).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionDetail {
+pub struct SessionMetadata {
     pub session_id: String,
     pub user_id: String,
     pub workspace_id: String,
@@ -589,7 +583,8 @@ pub async fn get_user_sessions(
             unread_count,
             created_by: Some(CreatedBy {
                 user_id: s.owner_user_id.clone(),
-                display_name: s.owner_display_name.clone(),
+                display_name: Some(s.owner_display_name.clone()),
+                ..Default::default()
             }),
             platform_type: s.platform_type.clone(),
         });
@@ -602,7 +597,7 @@ pub async fn get_user_sessions(
 pub async fn get_session(
     db: &DbPool,
     session_id: &str,
-) -> kyomi_core::Result<Option<SessionDetail>> {
+) -> kyomi_core::Result<Option<SessionMetadata>> {
     let row = kyomi_core::db_fetch_optional!(
         db,
         SessionWithUserRow,
@@ -629,7 +624,7 @@ pub async fn get_session_info(
     user_id: &str,
     session_id: &str,
     workspace_id: Option<&str>,
-) -> kyomi_core::Result<Option<SessionDetail>> {
+) -> kyomi_core::Result<Option<SessionMetadata>> {
     let detail = match get_session(db, session_id).await? {
         Some(d) => d,
         None => return Ok(None),
@@ -729,7 +724,8 @@ pub async fn get_session_messages(
                 .unwrap_or_else(|| row.sender_email.clone().unwrap_or_default());
             Some(CreatedBy {
                 user_id: sender_user_id.clone(),
-                display_name,
+                display_name: Some(display_name),
+                ..Default::default()
             })
         } else {
             None
@@ -1348,7 +1344,8 @@ pub async fn search_sessions(
                 unread_count: 0, // Search results don't compute unread for simplicity
                 created_by: Some(CreatedBy {
                     user_id: s.owner_user_id.clone(),
-                    display_name: s.owner_display_name.clone(),
+                    display_name: Some(s.owner_display_name.clone()),
+                    ..Default::default()
                 }),
                 platform_type: s.platform_type.clone(),
             }
@@ -1936,9 +1933,9 @@ pub async fn list_sessions_for_sync(
     Ok(values)
 }
 
-/// Convert a `SessionWithUserRow` into a `SessionDetail`.
-fn session_row_to_detail(row: SessionWithUserRow) -> SessionDetail {
-    SessionDetail {
+/// Convert a `SessionWithUserRow` into a `SessionMetadata`.
+fn session_row_to_detail(row: SessionWithUserRow) -> SessionMetadata {
+    SessionMetadata {
         session_id: row.session_id,
         user_id: row.user_id,
         workspace_id: row.workspace_id,
@@ -1948,7 +1945,8 @@ fn session_row_to_detail(row: SessionWithUserRow) -> SessionDetail {
         shared_at: row.shared_at.map(|dt| dt.to_rfc3339()),
         created_by: Some(CreatedBy {
             user_id: row.owner_user_id,
-            display_name: row.owner_display_name,
+            display_name: Some(row.owner_display_name),
+            ..Default::default()
         }),
         created_at: Some(row.created_at.to_rfc3339()),
         updated_at: Some(row.updated_at.to_rfc3339()),

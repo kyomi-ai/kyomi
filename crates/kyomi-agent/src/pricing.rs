@@ -5,12 +5,12 @@
 //! Each provider (Anthropic, OpenAI, Gemini) has its own `get_model_pricing`
 //! function that returns a [`ModelPricing`] for the given model name. The
 //! shared [`calculate_cost`] function then computes the total USD cost from
-//! the pricing and [`TokenUsage`], including Anthropic-style cache tokens.
+//! the pricing and [`AgentTokenUsage`], including Anthropic-style cache tokens.
 //!
 //! Because OpenAI and Gemini always return 0 for the cache token fields,
 //! the formula is universal — the cache terms simply vanish for those providers.
 
-use crate::types::TokenUsage;
+use crate::types::AgentTokenUsage;
 
 // ---------------------------------------------------------------------------
 // ModelPricing
@@ -38,9 +38,9 @@ pub struct ModelPricing {
 ///
 /// For providers that do not support prompt caching (OpenAI, Gemini), the
 /// `cache_creation_input_tokens` and `cache_read_input_tokens` fields in
-/// [`TokenUsage`] are always 0, so the cache terms evaluate to zero and the
+/// [`AgentTokenUsage`] are always 0, so the cache terms evaluate to zero and the
 /// formula reduces to `input_cost + output_cost`.
-pub fn calculate_cost(pricing: &ModelPricing, usage: &TokenUsage) -> f64 {
+pub fn calculate_cost(pricing: &ModelPricing, usage: &AgentTokenUsage) -> f64 {
     let per_million = 1_000_000.0_f64;
 
     let input_cost = (f64::from(usage.input_tokens) / per_million) * pricing.input;
@@ -66,7 +66,7 @@ pub fn calculate_cost(pricing: &ModelPricing, usage: &TokenUsage) -> f64 {
 /// - Delegates to [`calculate_cost`] for the actual arithmetic.
 pub fn calculate_cost_with_fallback(
     model: &str,
-    usage: &TokenUsage,
+    usage: &AgentTokenUsage,
     lookup: impl FnOnce(&str) -> Option<ModelPricing>,
     fallback: ModelPricing,
     provider_name: &str,
@@ -90,8 +90,8 @@ pub fn calculate_cost_with_fallback(
 mod tests {
     use super::*;
 
-    fn make_usage(input: u32, output: u32) -> TokenUsage {
-        TokenUsage {
+    fn make_usage(input: u32, output: u32) -> AgentTokenUsage {
+        AgentTokenUsage {
             input_tokens: input,
             output_tokens: output,
             cache_creation_input_tokens: 0,
@@ -117,7 +117,7 @@ mod tests {
             input: 3.00,
             output: 15.00,
         };
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 100_000,
             output_tokens: 50_000,
             cache_creation_input_tokens: 200_000,
@@ -138,7 +138,7 @@ mod tests {
             input: 3.00,
             output: 15.00,
         };
-        let usage = TokenUsage::default();
+        let usage = AgentTokenUsage::default();
         let cost = calculate_cost(&pricing, &usage);
         assert!((cost - 0.0).abs() < f64::EPSILON);
     }

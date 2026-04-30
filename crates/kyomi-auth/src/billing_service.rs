@@ -66,11 +66,9 @@ pub struct UsageAllowed {
 }
 
 /// Per-user fair-share usage info.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerUserUsage {
-    pub percentage_used: f64,
-    pub fair_share_percentage: f64,
-}
+///
+/// Defined in `kyomi_types` and shared with the Leptos server_fn layer.
+pub use kyomi_types::PerUserUsage;
 
 /// Full AI usage status for a workspace/user, matching the Python
 /// `/billing/ai-usage-status` response shape.

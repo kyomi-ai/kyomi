@@ -70,7 +70,7 @@ pub struct Capabilities {
 
 /// Credit usage information for a workspace.
 #[derive(Debug, Serialize)]
-pub struct CreditsInfo {
+pub struct CapabilityCredits {
     pub limit_usd: f64,
     pub used_usd: f64,
     pub remaining_usd: f64,
@@ -128,7 +128,7 @@ pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64
 /// directly. For accurate billing-period-aware usage, call
 /// `BillingService::calculate_credits_info()` and pass the result to
 /// `compute_capabilities_with_credits()`.
-pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> CreditsInfo {
+pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> CapabilityCredits {
     // Total budget = tier budget (from AI_BUDGET_CLOUD) + purchased bundle balance
     let limit = get_credits_limit(tier, workspace.user_limit) + workspace.ai_bundle_balance_usd;
     let used = workspace.ai_credits_used_usd;
@@ -140,7 +140,7 @@ pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> Credit
         0.0 // No budget and no bundles — show 0% (not 100%)
     };
 
-    CreditsInfo {
+    CapabilityCredits {
         limit_usd: limit,
         used_usd: used,
         remaining_usd: remaining,
@@ -254,11 +254,11 @@ pub fn compute_capabilities(workspace: &Workspace) -> Capabilities {
 /// This is the **preferred** entry point when a database connection is available.
 /// Callers should:
 /// 1. Call `BillingService::calculate_credits_info()` to get real usage data
-/// 2. Convert the result to `CreditsInfo`
+/// 2. Convert the result to `CapabilityCredits`
 /// 3. Pass it here
 pub fn compute_capabilities_with_credits(
     workspace: &Workspace,
-    credits: &CreditsInfo,
+    credits: &CapabilityCredits,
 ) -> Capabilities {
     let tier = get_subscription_tier(workspace);
 
@@ -442,7 +442,7 @@ mod tests {
         // Use compute_capabilities_with_credits to provide explicit budget values,
         // independent of env-var-driven tier budgets.
         let ws = test_workspace(SubscriptionTier::Pro, 3.0);
-        let credits = CreditsInfo {
+        let credits = CapabilityCredits {
             limit_usd: 9.0,
             used_usd: 3.0,
             remaining_usd: 6.0,
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn test_compute_capabilities_free_tier_cloud() {
         let ws = test_workspace(SubscriptionTier::Free, 0.0);
-        let credits = CreditsInfo {
+        let credits = CapabilityCredits {
             limit_usd: 1.0,
             used_usd: 0.0,
             remaining_usd: 1.0,
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn test_compute_capabilities_pro_tier() {
         let ws = test_workspace(SubscriptionTier::Pro, 0.0);
-        let credits = CreditsInfo {
+        let credits = CapabilityCredits {
             limit_usd: 9.0,
             used_usd: 0.0,
             remaining_usd: 9.0,
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn test_compute_capabilities_with_credits() {
         let ws = test_workspace(SubscriptionTier::Pro, 0.0);
-        let credits = CreditsInfo {
+        let credits = CapabilityCredits {
             limit_usd: 9.0,
             used_usd: 4.5,
             remaining_usd: 4.5,
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn test_compute_capabilities_with_credits_exhausted() {
         let ws = test_workspace(SubscriptionTier::Pro, 0.0);
-        let credits = CreditsInfo {
+        let credits = CapabilityCredits {
             limit_usd: 9.0,
             used_usd: 9.5,
             remaining_usd: 0.0,

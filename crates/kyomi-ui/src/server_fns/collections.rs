@@ -22,7 +22,7 @@ use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 
 /// A dashboard entry within a collection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CollectionDashboard {
+pub struct CollectionDashboardView {
     pub dashboard_id: String,
     pub title: String,
     pub position: i32,
@@ -40,7 +40,7 @@ pub struct CollectionItem {
     pub description: Option<String>,
     pub color: Option<String>,
     pub is_public: bool,
-    pub dashboards: Vec<CollectionDashboard>,
+    pub dashboards: Vec<CollectionDashboardView>,
     pub dashboard_count: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -63,7 +63,7 @@ fn to_collection_item(
         dashboards: coll
             .dashboards
             .iter()
-            .map(|d| CollectionDashboard {
+            .map(|d| CollectionDashboardView {
                 dashboard_id: d.dashboard_id.clone(),
                 title: d.title.clone(),
                 position: d.position,

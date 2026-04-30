@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info};
 
-use crate::types::{LLMResponse, Message, MessageRole, Tool, ToolCall, TokenUsage};
+use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -477,9 +477,9 @@ impl AnthropicClient {
     }
 
     /// Parse the `usage` object from the Anthropic response.
-    fn parse_usage(response: &serde_json::Value) -> TokenUsage {
+    fn parse_usage(response: &serde_json::Value) -> AgentTokenUsage {
         let usage = response.get("usage");
-        TokenUsage {
+        AgentTokenUsage {
             input_tokens: usage
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(|v| v.as_u64())
@@ -507,7 +507,7 @@ impl AnthropicClient {
 /// Calculate estimated cost in USD for an Anthropic API call.
 /// Delegates to [`crate::pricing::calculate_cost_with_fallback`] with Haiku 4.5 pricing
 /// as the fallback for unknown models.
-pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
+pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
     crate::pricing::calculate_cost_with_fallback(
         model,
         usage,
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_sonnet() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_haiku() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 500_000,
             output_tokens: 100_000,
             cache_creation_input_tokens: 0,
@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_with_cache_tokens() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 100_000,
             output_tokens: 50_000,
             cache_creation_input_tokens: 200_000,
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_opus() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 100_000,
             output_tokens: 10_000,
             cache_creation_input_tokens: 0,
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_legacy_haiku() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 0,
             cache_creation_input_tokens: 0,
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_unknown_model_uses_fallback() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_zero_tokens() {
-        let usage = TokenUsage::default();
+        let usage = AgentTokenUsage::default();
         let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
         assert!((cost - 0.0).abs() < f64::EPSILON);
     }
@@ -804,7 +804,7 @@ mod tests {
     #[test]
     fn cost_calculation_duplicate_prefix_normalized() {
         // Tests the model name normalization (claude-claude- -> claude-).
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 0,
             ..Default::default()
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_only_cache_write_tokens() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 0,
             output_tokens: 0,
             cache_creation_input_tokens: 1_000_000,
@@ -1257,7 +1257,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_only_cache_read_tokens() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 0,
             output_tokens: 0,
             cache_creation_input_tokens: 0,

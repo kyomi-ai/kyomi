@@ -60,7 +60,7 @@ pub use execution::{
     deliver_response, execute_agent_chat, generate_session_title, AgentExecutionConfig,
     AgentExecutionEnv, AgentExecutionResult,
 };
-pub use thinking::{AgentThinkingTracker, ThinkingEvent, ThinkingEventType};
+pub use thinking::{AgentThinkingEvent, AgentThinkingTracker, ThinkingEventType};
 pub use tools::{
     create_default_registry, AgentTool, ToolContext, ToolFilter, ToolRegistry, WATCH_TOOLS,
 };

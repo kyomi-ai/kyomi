@@ -187,7 +187,7 @@ pub struct LLMResponse {
     /// Why the LLM stopped generating (e.g., "end_turn", "tool_use", "max_tokens").
     pub finish_reason: String,
     /// Token usage statistics for this call.
-    pub usage: TokenUsage,
+    pub usage: AgentTokenUsage,
     /// Tool calls requested by the LLM (present when finish_reason is "tool_use").
     pub tool_calls: Option<Vec<ToolCall>>,
     /// Estimated cost in USD for this API call.
@@ -195,14 +195,14 @@ pub struct LLMResponse {
 }
 
 // ---------------------------------------------------------------------------
-// TokenUsage
+// AgentTokenUsage
 // ---------------------------------------------------------------------------
 
 /// Token usage statistics from an LLM call.
 ///
 /// Includes prompt caching metrics from Anthropic's prompt caching beta.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TokenUsage {
+pub struct AgentTokenUsage {
     /// Number of input tokens (regular, non-cached).
     pub input_tokens: u32,
     /// Number of output tokens generated.
@@ -213,7 +213,7 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: u32,
 }
 
-impl TokenUsage {
+impl AgentTokenUsage {
     /// Total tokens consumed (input + output).
     pub fn total_tokens(&self) -> u32 {
         self.input_tokens + self.output_tokens
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn token_usage_default() {
-        let usage = TokenUsage::default();
+        let usage = AgentTokenUsage::default();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
         assert_eq!(usage.cache_creation_input_tokens, 0);
@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn token_usage_total_tokens() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1500,
             output_tokens: 500,
             cache_creation_input_tokens: 100,
@@ -631,13 +631,13 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- Contract: TokenUsage total_tokens only counts input + output --------
+    // -- Contract: AgentTokenUsage total_tokens only counts input + output --------
 
     #[test]
     fn token_usage_total_tokens_excludes_cache() {
         // total_tokens is defined as input + output (not including cache tokens).
         // This is an explicit contract: cache tokens are tracked separately.
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 500,
             output_tokens: 200,
             cache_creation_input_tokens: 1000,
@@ -718,18 +718,18 @@ mod tests {
         assert_eq!(restored.open_world_hint, Some(true));
     }
 
-    // -- Contract: TokenUsage serialization roundtrip ------------------------
+    // -- Contract: AgentTokenUsage serialization roundtrip ------------------------
 
     #[test]
     fn token_usage_serialization_roundtrip() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1500,
             output_tokens: 300,
             cache_creation_input_tokens: 5000,
             cache_read_input_tokens: 12000,
         };
         let json = serde_json::to_string(&usage).unwrap();
-        let restored: TokenUsage = serde_json::from_str(&json).unwrap();
+        let restored: AgentTokenUsage = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.input_tokens, 1500);
         assert_eq!(restored.output_tokens, 300);
         assert_eq!(restored.cache_creation_input_tokens, 5000);

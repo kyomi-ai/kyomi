@@ -86,12 +86,12 @@ pub enum ThinkingEventType {
 }
 
 // ---------------------------------------------------------------------------
-// ThinkingEvent
+// AgentThinkingEvent
 // ---------------------------------------------------------------------------
 
 /// A single event in the agent thinking timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThinkingEvent {
+pub struct AgentThinkingEvent {
     pub event_type: ThinkingEventType,
     /// ISO 8601 UTC timestamp.
     pub timestamp: String,
@@ -120,7 +120,7 @@ pub struct AgentThinkingTracker {
     message_id: String,
     workspace_user_ids: Vec<String>,
     context_type: Option<String>,
-    events: Vec<ThinkingEvent>,
+    events: Vec<AgentThinkingEvent>,
     start_time: tokio::time::Instant,
     /// Maps tool_name -> index into `events` for the start event.
     active_tools: HashMap<String, usize>,
@@ -185,7 +185,7 @@ impl AgentThinkingTracker {
     ///
     /// The WebSocket manager handles both standalone (direct local delivery)
     /// and multi-replica (Redis pub/sub) modes automatically.
-    async fn send_event(&self, event: &ThinkingEvent, is_update: bool) {
+    async fn send_event(&self, event: &AgentThinkingEvent, is_update: bool) {
         let thinking_data = serde_json::json!({
             "event": {
                 "event_id": event.event_id,
@@ -220,7 +220,7 @@ impl AgentThinkingTracker {
     ///
     /// Returns a clone of the event (with ID assigned) so callers can
     /// immediately pass it to [`send_event`] without a second lookup.
-    fn add_event(&mut self, mut event: ThinkingEvent) -> ThinkingEvent {
+    fn add_event(&mut self, mut event: AgentThinkingEvent) -> AgentThinkingEvent {
         if event.event_id.is_none() {
             event.event_id = Some(self.generate_event_id());
         }
@@ -235,7 +235,7 @@ impl AgentThinkingTracker {
 
     /// Record the start of the agent loop.
     pub async fn agent_started(&mut self, title: &str, description: &str) {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentStart,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: title.to_string(),
@@ -257,7 +257,7 @@ impl AgentThinkingTracker {
         let Some(text) = clean_thought(thought) else {
             return;
         };
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentThought,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: "Planning".to_string(),
@@ -289,7 +289,7 @@ impl AgentThinkingTracker {
         let friendly_name = get_friendly_name(tool_name);
         let schema = format_tool_schema(tool_name, tool_input, true);
 
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::ToolExecutionStart,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: format!("\u{23f3} {friendly_name}"), // hourglass emoji
@@ -370,7 +370,7 @@ impl AgentThinkingTracker {
             )
         };
 
-        let updated_event = ThinkingEvent {
+        let updated_event = AgentThinkingEvent {
             event_type: existing_event.event_type.clone(),
             timestamp: existing_event.timestamp.clone(),
             title,
@@ -395,7 +395,7 @@ impl AgentThinkingTracker {
 
     /// Record that the agent is preparing its final response.
     pub async fn preparing_response(&mut self) {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentThought,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: "Preparing your response".to_string(),
@@ -410,7 +410,7 @@ impl AgentThinkingTracker {
 
     /// Record that the agent is compacting conversation context.
     pub async fn compacting_context(&mut self) {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentThought,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: "Compacting conversation".to_string(),
@@ -426,7 +426,7 @@ impl AgentThinkingTracker {
     /// Record that the agent has completed its work.
     pub async fn agent_completed(&mut self, result: &str) {
         let total_duration = self.start_time.elapsed().as_millis() as u64;
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentComplete,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: "Analysis complete".to_string(),
@@ -497,7 +497,7 @@ impl AgentThinkingTracker {
     }
 
     /// Read-only access to the recorded events.
-    pub fn events(&self) -> &[ThinkingEvent] {
+    pub fn events(&self) -> &[AgentThinkingEvent] {
         &self.events
     }
 
@@ -994,11 +994,11 @@ mod tests {
         assert_eq!(event, ThinkingEventType::ToolExecutionEnd);
     }
 
-    // -- ThinkingEvent serialization tests ----------------------------------
+    // -- AgentThinkingEvent serialization tests ----------------------------------
 
     #[test]
     fn thinking_event_skips_none_fields() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentThought,
             timestamp: "2025-01-15T10:00:00Z".to_string(),
             title: "Planning".to_string(),
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn thinking_event_includes_some_fields() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::ToolExecutionStart,
             timestamp: "2025-01-15T10:00:00Z".to_string(),
             title: "Querying".to_string(),
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn thinking_event_round_trip() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentComplete,
             timestamp: "2025-01-15T10:00:00Z".to_string(),
             title: "Done".to_string(),
@@ -1047,7 +1047,7 @@ mod tests {
             duration_ms: Some(500),
         };
         let json = serde_json::to_string(&event).unwrap();
-        let deserialized: ThinkingEvent = serde_json::from_str(&json).unwrap();
+        let deserialized: AgentThinkingEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.event_type, ThinkingEventType::AgentComplete);
         assert_eq!(deserialized.title, "Done");
         assert_eq!(deserialized.event_id, Some("abc-001".to_string()));
@@ -1121,7 +1121,7 @@ mod tests {
     fn get_events_for_storage_produces_correct_json() {
         // Verify the serialization format without needing Redis.
         let events = vec![
-            ThinkingEvent {
+            AgentThinkingEvent {
                 event_type: ThinkingEventType::AgentStart,
                 timestamp: "2025-01-15T10:00:00Z".to_string(),
                 title: "Starting analysis".to_string(),
@@ -1130,7 +1130,7 @@ mod tests {
                 data: None,
                 duration_ms: None,
             },
-            ThinkingEvent {
+            AgentThinkingEvent {
                 event_type: ThinkingEventType::ToolExecutionStart,
                 timestamp: "2025-01-15T10:00:01Z".to_string(),
                 title: "Querying data".to_string(),
@@ -1139,7 +1139,7 @@ mod tests {
                 data: Some(serde_json::json!({"tool_name": "query_datasource"})),
                 duration_ms: None,
             },
-            ThinkingEvent {
+            AgentThinkingEvent {
                 event_type: ThinkingEventType::AgentComplete,
                 timestamp: "2025-01-15T10:00:05Z".to_string(),
                 title: "Analysis complete".to_string(),
@@ -1337,11 +1337,11 @@ mod tests {
         assert!(result.contains("C"));
     }
 
-    // -- Contract: ThinkingEvent with all event types -----------------------
+    // -- Contract: AgentThinkingEvent with all event types -----------------------
 
     #[test]
     fn thinking_event_agent_start_serializes() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentStart,
             timestamp: "2025-01-15T10:00:00Z".into(),
             title: "Starting".into(),
@@ -1356,7 +1356,7 @@ mod tests {
 
     #[test]
     fn thinking_event_agent_decision_serializes() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentDecision,
             timestamp: "2025-01-15T10:00:00Z".into(),
             title: "Deciding".into(),
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn thinking_event_error_serializes() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::Error,
             timestamp: "2025-01-15T10:00:00Z".into(),
             title: "Error occurred".into(),
@@ -1409,7 +1409,7 @@ mod tests {
 
     #[test]
     fn get_events_for_storage_empty_returns_empty() {
-        let events: Vec<ThinkingEvent> = vec![];
+        let events: Vec<AgentThinkingEvent> = vec![];
         let storage: Vec<serde_json::Value> = events
             .iter()
             .map(|event| {
@@ -1431,7 +1431,7 @@ mod tests {
 
     #[test]
     fn get_events_for_storage_always_includes_required_fields() {
-        let event = ThinkingEvent {
+        let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentThought,
             timestamp: "2025-06-01T12:00:00Z".into(),
             title: "Thinking about data".into(),

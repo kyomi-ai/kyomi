@@ -15,49 +15,17 @@
 use axum::http::HeaderMap;
 use kyomi_core::models::datasource::{DatasourceConfig, UserDatasourceCredential, UserDatasourcePreference};
 use kyomi_core::{Config, DbPool, KVPool};
-use serde::{Deserialize, Serialize};
 
 use crate::{datasource_auth_service, datasource_service, google_oauth, notifications, redis_ops, session, user_service};
 
 // ---------------------------------------------------------------------------
 // Public data types
 // ---------------------------------------------------------------------------
-
-/// Status of a single datasource's credentials for the current user.
-///
-/// Returned as part of [`OnboardingState`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CredentialStatusItem {
-    pub datasource_id: String,
-    pub datasource_name: String,
-    pub datasource_type: String,
-    pub slug: String,
-    /// `"valid"` | `"expired"` | `"missing"` | `"shared"`
-    pub status: String,
-    /// `"password"` | `"oauth"` | `"connect"` — determines the UI action button
-    pub auth_method: String,
-    /// For OAuth providers: `"google"` | `"snowflake"` | `"microsoft"` | `"databricks"`
-    pub oauth_provider: Option<String>,
-    /// The `auth_mode` from the datasource `connection_config`.
-    /// For BigQuery: `"kyomi_oauth"` | `"enterprise_oauth"` | `"service_account"`
-    pub auth_mode: Option<String>,
-    /// True if the user needs to take action (missing or expired).
-    pub needs_action: bool,
-}
-
-/// Combined onboarding state fetched in a single call.
-///
-/// The onboarding page uses this to decide which of the 5 states to show
-/// without making multiple sequential API calls.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OnboardingState {
-    pub has_datasources: bool,
-    pub is_admin: bool,
-    pub sample_available: bool,
-    pub needs_credentials: bool,
-    pub total_datasources: usize,
-    pub credential_status: Vec<CredentialStatusItem>,
-}
+//
+// `CredentialStatusItem` and `OnboardingState` are defined in `kyomi_types`
+// so they can be shared between this service and the Leptos server_fn layer
+// without a conversion step. Re-exported here for backwards compatibility.
+pub use kyomi_types::{CredentialStatusItem, OnboardingState};
 
 /// Outcome of the [`accept_terms`] flow.
 ///

@@ -27,12 +27,10 @@ struct BundleRow {
     analytics_bundle_events: i64,
 }
 
-/// Per-user fair-share usage info (mirrors `kyomi_auth::billing_service::PerUserUsage`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PerUserUsage {
-    pub percentage_used: f64,
-    pub fair_share_percentage: f64,
-}
+/// Per-user fair-share usage info.
+///
+/// Defined in `kyomi_types` and shared with `kyomi_auth::billing_service`.
+pub use kyomi_types::PerUserUsage;
 
 /// Full AI usage status for a workspace/user.
 ///

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
-use crate::types::{LLMResponse, Message, MessageRole, Tool, ToolCall, TokenUsage};
+use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -486,9 +486,9 @@ impl GeminiProvider {
     }
 
     /// Parse the `usageMetadata` object from the Gemini response.
-    fn parse_usage(response: &serde_json::Value) -> TokenUsage {
+    fn parse_usage(response: &serde_json::Value) -> AgentTokenUsage {
         let usage = response.get("usageMetadata");
-        TokenUsage {
+        AgentTokenUsage {
             input_tokens: usage
                 .and_then(|u| u.get("promptTokenCount"))
                 .and_then(|v| v.as_u64())
@@ -511,7 +511,7 @@ impl GeminiProvider {
 /// Delegates to [`crate::pricing::calculate_cost_with_fallback`]. Gemini's
 /// `get_model_pricing` always returns a value (fallback built in), so the
 /// dummy fallback here is never reached.
-pub fn calculate_cost(model: &str, usage: &TokenUsage) -> f64 {
+pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
     crate::pricing::calculate_cost_with_fallback(
         model,
         usage,
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gemini_25_flash() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -1136,7 +1136,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gemini_25_pro() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -1149,7 +1149,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_gemini_20_flash() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_unknown_model_uses_fallback() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
@@ -1175,14 +1175,14 @@ mod tests {
 
     #[test]
     fn cost_calculation_zero_tokens() {
-        let usage = TokenUsage::default();
+        let usage = AgentTokenUsage::default();
         let cost = calculate_cost("gemini-2.5-flash", &usage);
         assert!((cost - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn cost_calculation_input_only() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 500_000,
             output_tokens: 0,
             cache_creation_input_tokens: 0,
@@ -1195,7 +1195,7 @@ mod tests {
 
     #[test]
     fn cost_calculation_output_only() {
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 0,
             output_tokens: 100_000,
             cache_creation_input_tokens: 0,
@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn cost_calculation_substring_matching() {
         // Model names with version suffixes should still match via substring.
-        let usage = TokenUsage {
+        let usage = AgentTokenUsage {
             input_tokens: 1_000_000,
             output_tokens: 0,
             cache_creation_input_tokens: 0,

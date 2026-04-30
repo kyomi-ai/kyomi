@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ssr")]
 use super::extract_context;
 
+// `CredentialStatusItem` and `OnboardingState` are defined in `kyomi_types` and
+// shared with `kyomi_auth::onboarding_service`. Re-exported here so that UI
+// components can import them from this module.
+pub use kyomi_types::{CredentialStatusItem, OnboardingState};
+
 /// Result of the terms acceptance flow.
 ///
 /// Uses typed variants so the Leptos UI can pattern-match on outcomes.
@@ -26,79 +31,6 @@ pub enum AcceptTermsResult {
     Success,
     /// Error — display message to the user and allow retry.
     Error { message: String },
-}
-
-/// Status of a single datasource's credentials for the current user.
-///
-/// Used by the onboarding page to show which datasources need credential
-/// setup and what action the user should take (OAuth connect, password entry).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CredentialStatusItem {
-    pub datasource_id: String,
-    pub datasource_name: String,
-    pub datasource_type: String,
-    pub slug: String,
-    /// "valid" | "expired" | "missing" | "shared"
-    pub status: String,
-    /// "password" | "oauth" | "connect" — determines the UI action button
-    pub auth_method: String,
-    /// For OAuth providers: "google" | "snowflake" | "microsoft" | "databricks"
-    pub oauth_provider: Option<String>,
-    /// The `auth_mode` from the datasource connection_config.
-    /// For BigQuery: "kyomi_oauth" | "enterprise_oauth" | "service_account"
-    /// Needed by the frontend to construct the correct OAuth URL.
-    pub auth_mode: Option<String>,
-    /// True if the user needs to take action (missing or expired)
-    pub needs_action: bool,
-}
-
-/// Combined onboarding state fetched in a single server call.
-///
-/// The onboarding page uses this to decide which of the 5 states to show
-/// without making multiple sequential API calls.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OnboardingState {
-    pub has_datasources: bool,
-    pub is_admin: bool,
-    pub sample_available: bool,
-    pub needs_credentials: bool,
-    pub total_datasources: usize,
-    pub credential_status: Vec<CredentialStatusItem>,
-}
-
-// ---------------------------------------------------------------------------
-// From conversions — service types → server_fn types (ssr only)
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::onboarding_service::CredentialStatusItem> for CredentialStatusItem {
-    fn from(s: kyomi_auth::onboarding_service::CredentialStatusItem) -> Self {
-        Self {
-            datasource_id: s.datasource_id,
-            datasource_name: s.datasource_name,
-            datasource_type: s.datasource_type,
-            slug: s.slug,
-            status: s.status,
-            auth_method: s.auth_method,
-            oauth_provider: s.oauth_provider,
-            auth_mode: s.auth_mode,
-            needs_action: s.needs_action,
-        }
-    }
-}
-
-#[cfg(feature = "ssr")]
-impl From<kyomi_auth::onboarding_service::OnboardingState> for OnboardingState {
-    fn from(s: kyomi_auth::onboarding_service::OnboardingState) -> Self {
-        Self {
-            has_datasources: s.has_datasources,
-            is_admin: s.is_admin,
-            sample_available: s.sample_available,
-            needs_credentials: s.needs_credentials,
-            total_datasources: s.total_datasources,
-            credential_status: s.credential_status.into_iter().map(Into::into).collect(),
-        }
-    }
 }
 
 /// Accept terms of service, completing the signup or re-acceptance flow.
@@ -196,7 +128,6 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 
     kyomi_auth::onboarding_service::get_onboarding_state(&ctx.db, ws_id, &auth.user_id, is_admin, encryption_key)
         .await
-        .map(Into::into)
         .into_sfn()
 }
 

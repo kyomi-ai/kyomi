@@ -28,6 +28,7 @@ use std::sync::LazyLock;
 
 use crate::sync_log_service;
 use kyomi_types::sync::{SyncActionType, entity_types};
+use kyomi_types::CreatedBy;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -103,14 +104,6 @@ pub struct DashboardVersionSummary {
     pub created_by: CreatedBy,
     pub created_at: DateTime<Utc>,
     pub byte_size: Option<i32>,
-}
-
-/// User attribution in version summaries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreatedBy {
-    pub user_id: String,
-    pub name: Option<String>,
-    pub email: String,
 }
 
 // ─── Title validation ────────────────────────────────────────────────────────
@@ -1271,9 +1264,11 @@ fn version_summary_from_pg_row(row: &sqlx::postgres::PgRow) -> DashboardVersionS
         created_by: CreatedBy {
             user_id: user_id.unwrap_or(created_by_id),
             name: row.get("name"),
-            email: row
-                .get::<Option<String>, _>("email")
-                .unwrap_or_else(|| "(deleted user)".into()),
+            email: Some(
+                row.get::<Option<String>, _>("email")
+                    .unwrap_or_else(|| "(deleted user)".into()),
+            ),
+            ..Default::default()
         },
         created_at: row.get("created_at"),
         byte_size: row.get("byte_size"),
@@ -1292,9 +1287,11 @@ fn version_summary_from_sq_row(row: &sqlx::sqlite::SqliteRow) -> DashboardVersio
         created_by: CreatedBy {
             user_id: user_id.unwrap_or(created_by_id),
             name: row.get("name"),
-            email: row
-                .get::<Option<String>, _>("email")
-                .unwrap_or_else(|| "(deleted user)".into()),
+            email: Some(
+                row.get::<Option<String>, _>("email")
+                    .unwrap_or_else(|| "(deleted user)".into()),
+            ),
+            ..Default::default()
         },
         created_at: row.get("created_at"),
         byte_size: row.get("byte_size"),
