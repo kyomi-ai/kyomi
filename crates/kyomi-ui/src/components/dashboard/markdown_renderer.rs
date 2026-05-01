@@ -684,15 +684,13 @@ pub fn MarkdownRenderer(
 
     let palette_name = chart_palette.unwrap_or_else(|| "kyomi".to_string());
     let theme_state = crate::components::theme::use_theme();
-    // Reactive memo so charts re-render when the system theme changes.
-    // `ChartMLRef` is not `PartialEq`, so we cannot memo the chartml instance
-    // directly — instead we memo `is_dark` and create a fresh chartml inside
-    // each reactive closure, which forces a chart re-mount on theme toggle.
-    let is_dark_memo = Memo::new(move |_| {
-        theme_state
-            .map(|s| s.effective.get() == "dark")
-            .unwrap_or(false)
-    });
+    // Read once without tracking — charts render with the correct palette on
+    // mount but don't live-update on theme toggle (page refresh required).
+    // Using get_untracked avoids the double-render that occurred when a
+    // tracked Memo fired twice on page load (default then localStorage).
+    let is_dark = theme_state
+        .map(|s| s.effective.get_untracked() == "dark")
+        .unwrap_or(false);
     let extra_class = class.unwrap_or_default();
 
     let segments = Memo::new(move |_| {
@@ -768,25 +766,21 @@ pub fn MarkdownRenderer(
                                         .unwrap_or(12);
                                     let col_class = chart_col_span_class(col_span);
                                     let palette_clone = palette_for_charts.clone();
+                                    let chartml = configured_chartml(&palette_clone, is_dark);
                                     view! {
                                         <div class=col_class>
-                                            {move || {
-                                                let chartml = configured_chartml(&palette_clone, is_dark_memo.get());
-                                                view! {
-                                                    <KyomiChart
-                                                        yaml=chart_yaml.clone()
-                                                        block_index=block_index
-                                                        array_index=array_index
-                                                        parameters=parameters
-                                                        chartml=chartml
-                                                        on_edit_chart=edit
-                                                        on_delete_chart=delete
-                                                        on_save_to_dashboard=save
-                                                        on_chart_info=info
-                                                        on_ask_about_chart=ask
-                                                    />
-                                                }
-                                            }}
+                                            <KyomiChart
+                                                yaml=chart_yaml.clone()
+                                                block_index=block_index
+                                                array_index=array_index
+                                                parameters=parameters
+                                                chartml=chartml
+                                                on_edit_chart=edit
+                                                on_delete_chart=delete
+                                                on_save_to_dashboard=save
+                                                on_chart_info=info
+                                                on_ask_about_chart=ask
+                                            />
                                         </div>
                                     }
                                 })
