@@ -5,7 +5,7 @@
 //! All key patterns and TTLs come from `shared/constants.toml`.
 //! Operations use SETEX (store), GET (peek), and GETDEL (consume) patterns.
 
-use kyomi_core::KVPool;
+use kyomi_core::{KVPool, kv_consume_json, kv_peek_json, kv_store_json};
 
 // ---------------------------------------------------------------------------
 // OAuth state (Google login + Google account linking)
@@ -25,12 +25,7 @@ pub async fn store_oauth_state(
         .oauth_state
         .replace("{provider}", provider)
         .replace("{state}", state);
-    let ttl = constants.redis.ttls.oauth_state;
-
-    let json = serde_json::to_string(data)?;
-    kv.set(&key, &json, Some(ttl)).await?;
-
-    Ok(())
+    kv_store_json(kv, &key, data, constants.redis.ttls.oauth_state).await
 }
 
 /// Atomically get and delete OAuth state (GETDEL). Returns None if expired or absent.
@@ -46,13 +41,7 @@ pub async fn verify_oauth_state(
         .oauth_state
         .replace("{provider}", provider)
         .replace("{state}", state);
-
-    let value = kv.getdel(&key).await?;
-
-    match value {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-        None => Ok(None),
-    }
+    kv_consume_json(kv, &key).await
 }
 
 // ---------------------------------------------------------------------------
@@ -71,12 +60,7 @@ pub async fn store_pending_signup(
         .key_prefixes
         .pending_signup
         .replace("{token}", token);
-    let ttl = constants.redis.ttls.pending_signup;
-
-    let json = serde_json::to_string(data)?;
-    kv.set(&key, &json, Some(ttl)).await?;
-
-    Ok(())
+    kv_store_json(kv, &key, data, constants.redis.ttls.pending_signup).await
 }
 
 /// Atomically get and delete pending signup data (GETDEL).
@@ -90,13 +74,7 @@ pub async fn get_pending_signup(
         .key_prefixes
         .pending_signup
         .replace("{token}", token);
-
-    let value = kv.getdel(&key).await?;
-
-    match value {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-        None => Ok(None),
-    }
+    kv_consume_json(kv, &key).await
 }
 
 // ---------------------------------------------------------------------------
@@ -116,12 +94,7 @@ pub async fn store_pending_terms(
         .pending_terms
         .replace("{token}", token);
     // pending_terms uses same TTL as pending_signup
-    let ttl = constants.redis.ttls.pending_signup;
-
-    let json = serde_json::to_string(data)?;
-    kv.set(&key, &json, Some(ttl)).await?;
-
-    Ok(())
+    kv_store_json(kv, &key, data, constants.redis.ttls.pending_signup).await
 }
 
 /// Atomically get and delete pending terms data (GETDEL).
@@ -135,13 +108,7 @@ pub async fn get_pending_terms(
         .key_prefixes
         .pending_terms
         .replace("{token}", token);
-
-    let value = kv.getdel(&key).await?;
-
-    match value {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-        None => Ok(None),
-    }
+    kv_consume_json(kv, &key).await
 }
 
 // ---------------------------------------------------------------------------
@@ -163,12 +130,7 @@ pub async fn store_webauthn_challenge(
         .key_prefixes
         .webauthn_challenge
         .replace("{challenge_id}", challenge_id);
-    let ttl = constants.redis.ttls.webauthn_challenge;
-
-    let json = serde_json::to_string(data)?;
-    kv.set(&key, &json, Some(ttl)).await?;
-
-    Ok(())
+    kv_store_json(kv, &key, data, constants.redis.ttls.webauthn_challenge).await
 }
 
 /// Get WebAuthn challenge data (non-destructive read).
@@ -186,30 +148,18 @@ pub async fn get_webauthn_challenge(
         .key_prefixes
         .webauthn_challenge
         .replace("{challenge_id}", challenge_id);
-
-    let value = kv.get(&key).await?;
-
-    match value {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-        None => Ok(None),
-    }
+    kv_peek_json(kv, &key).await
 }
 
 /// Delete WebAuthn challenge after successful verification (replay prevention).
-pub async fn delete_webauthn_challenge(
-    kv: &KVPool,
-    challenge_id: &str,
-) -> kyomi_core::Result<()> {
+pub async fn delete_webauthn_challenge(kv: &KVPool, challenge_id: &str) -> kyomi_core::Result<()> {
     let constants = kyomi_core::constants::get();
     let key = constants
         .redis
         .key_prefixes
         .webauthn_challenge
         .replace("{challenge_id}", challenge_id);
-
-    kv.del(&key).await?;
-
-    Ok(())
+    kv.del(&key).await
 }
 
 // ---------------------------------------------------------------------------
@@ -220,39 +170,25 @@ pub async fn delete_webauthn_challenge(
 ///
 /// The secret is stored temporarily while the user scans the QR code and enters
 /// a verification code. Once confirmed, the secret moves to `user_auth_methods`.
-pub async fn store_pending_totp(
-    kv: &KVPool,
-    user_id: &str,
-    secret: &str,
-) -> kyomi_core::Result<()> {
+pub async fn store_pending_totp(kv: &KVPool, user_id: &str, secret: &str) -> kyomi_core::Result<()> {
     let constants = kyomi_core::constants::get();
     let key = constants
         .redis
         .key_prefixes
         .totp_setup
         .replace("{user_id}", user_id);
-    let ttl = constants.redis.ttls.totp_setup;
-
-    kv.set(&key, secret, Some(ttl)).await?;
-
-    Ok(())
+    kv.set(&key, secret, Some(constants.redis.ttls.totp_setup)).await
 }
 
 /// Atomically get and delete pending TOTP secret (GETDEL). Returns None if expired or absent.
-pub async fn get_pending_totp(
-    kv: &KVPool,
-    user_id: &str,
-) -> kyomi_core::Result<Option<String>> {
+pub async fn get_pending_totp(kv: &KVPool, user_id: &str) -> kyomi_core::Result<Option<String>> {
     let constants = kyomi_core::constants::get();
     let key = constants
         .redis
         .key_prefixes
         .totp_setup
         .replace("{user_id}", user_id);
-
-    let value = kv.getdel(&key).await?;
-
-    Ok(value)
+    kv.getdel(&key).await
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +210,7 @@ pub async fn store_recovery_session(
         .key_prefixes
         .recovery_session
         .replace("{session_id}", session_id);
-    let ttl = constants.redis.ttls.recovery_session;
-
-    kv.set(&key, user_id, Some(ttl)).await?;
-
-    Ok(())
+    kv.set(&key, user_id, Some(constants.redis.ttls.recovery_session)).await
 }
 
 /// Read a recovery session without consuming it. Returns the user_id if valid.
@@ -295,27 +227,18 @@ pub async fn peek_recovery_session(
         .key_prefixes
         .recovery_session
         .replace("{session_id}", session_id);
-
-    let value = kv.get(&key).await?;
-
-    Ok(value)
+    kv.get(&key).await
 }
 
 /// Delete a recovery session after successful use.
-pub async fn delete_recovery_session(
-    kv: &KVPool,
-    session_id: &str,
-) -> kyomi_core::Result<()> {
+pub async fn delete_recovery_session(kv: &KVPool, session_id: &str) -> kyomi_core::Result<()> {
     let constants = kyomi_core::constants::get();
     let key = constants
         .redis
         .key_prefixes
         .recovery_session
         .replace("{session_id}", session_id);
-
-    kv.del(&key).await?;
-
-    Ok(())
+    kv.del(&key).await
 }
 
 /// Atomically get and delete a recovery session (GETDEL). Returns the user_id if valid.
@@ -331,10 +254,7 @@ pub async fn get_recovery_session(
         .key_prefixes
         .recovery_session
         .replace("{session_id}", session_id);
-
-    let value = kv.getdel(&key).await?;
-
-    Ok(value)
+    kv.getdel(&key).await
 }
 
 /// Generate a cryptographically random token (URL-safe, 32 bytes).

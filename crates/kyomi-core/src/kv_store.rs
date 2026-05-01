@@ -68,6 +68,43 @@ pub trait KVStore: Send + Sync {
 /// in-memory implementations are interchangeable at runtime.
 pub type KVPool = Arc<dyn KVStore>;
 
+/// Serialize `data` as JSON and store it under `key` with the given TTL in seconds.
+pub async fn kv_store_json<T: serde::Serialize>(
+    kv: &KVPool,
+    key: &str,
+    data: &T,
+    ttl: u64,
+) -> crate::Result<()> {
+    let json = serde_json::to_string(data)?;
+    kv.set(key, &json, Some(ttl)).await
+}
+
+/// Atomically get-and-delete `key`, deserializing the value as `T`.
+///
+/// Returns `None` if the key is absent or expired.
+pub async fn kv_consume_json<T: serde::de::DeserializeOwned>(
+    kv: &KVPool,
+    key: &str,
+) -> crate::Result<Option<T>> {
+    match kv.getdel(key).await? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+/// Get `key` without deleting it, deserializing the value as `T`.
+///
+/// Returns `None` if the key is absent or expired.
+pub async fn kv_peek_json<T: serde::de::DeserializeOwned>(
+    kv: &KVPool,
+    key: &str,
+) -> crate::Result<Option<T>> {
+    match kv.get(key).await? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
 /// Create the appropriate [`KVPool`] based on the optional Redis URL.
 ///
 /// - `Some(url)` → [`crate::kv_store_redis::RedisKVStore`] (connects to Redis)

@@ -41,7 +41,7 @@ pub use enums::{
     WorkspaceStatus,
 };
 pub use error::{Error, Result};
-pub use kv_store::{KVPool, KVStore, create_kv_store};
+pub use kv_store::{KVPool, KVStore, create_kv_store, kv_consume_json, kv_peek_json, kv_store_json};
 pub use redis::RedisPool;
 pub use stream::{ColumnInfo, SimpleType};
 pub use websocket::{MessageType, WebSocketMessage};
