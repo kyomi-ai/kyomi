@@ -124,10 +124,10 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
     )?;
 
     // ------------------------------------------------------------------
-    // 4. Animated Kyomi logo
+    // 4. Kyomi logo (static — error is a settled state, not a loading state)
     // ------------------------------------------------------------------
     let logo = document.create_element("img")?;
-    logo.set_attribute("src", "/kyomi_animated_logo.svg")?;
+    logo.set_attribute("src", "/kyomi_small_logo.svg")?;
     logo.set_attribute("alt", "Kyomi")?;
     logo.set_attribute(
         "style",
