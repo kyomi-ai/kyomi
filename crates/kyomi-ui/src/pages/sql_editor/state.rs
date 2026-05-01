@@ -215,6 +215,34 @@ impl SqlEditorState {
         });
     }
 
+    /// Update properties of an existing tab — safe for use inside `spawn_local`
+    /// and other deferred contexts where the component may have been unmounted.
+    ///
+    /// Uses `try_update` internally so it silently no-ops if the signal is
+    /// already disposed instead of panicking.
+    pub fn try_update_tab(&self, tab_id: &str, updater: impl FnOnce(&mut ResultTab)) {
+        let now = js_now();
+        self.tabs.try_update(|tabs| {
+            if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
+                updater(tab);
+                tab.updated_at = now;
+            }
+        });
+    }
+
+    /// Update the table UI state for a specific tab — safe for use inside
+    /// `spawn_local` and other deferred contexts where the component may have
+    /// been unmounted.
+    ///
+    /// Uses `try_update` internally so it silently no-ops if the signal is
+    /// already disposed instead of panicking.
+    pub fn try_set_table_ui_state(&self, tab_id: &str, updater: impl FnOnce(&mut TableUIState)) {
+        self.table_ui_state.try_update(|ui| {
+            let entry = ui.entry(tab_id.to_owned()).or_default();
+            updater(entry);
+        });
+    }
+
     /// Remove a tab. If the removed tab was active, select the adjacent tab
     /// (preferring the right neighbor, falling back to last).
     pub fn remove_tab(&self, tab_id: &str) {

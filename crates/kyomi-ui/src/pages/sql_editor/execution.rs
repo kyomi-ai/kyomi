@@ -160,12 +160,12 @@ fn run_arrow_query(
 
                 let history_row_count = total_rows.unwrap_or(row_count);
 
-                state.update_tab(&tab_id, move |tab| {
+                state.try_update_tab(&tab_id, move |tab| {
                     tab.status = QueryStatus::Success;
                     tab.result = Some(result);
                 });
 
-                query_running.set(false);
+                query_running.try_set(false);
 
                 save_to_history(
                     state,
@@ -182,7 +182,7 @@ fn run_arrow_query(
             }
             Err(error_msg) => {
                 let error_msg_for_history = error_msg.clone();
-                state.update_tab(&tab_id, move |tab| {
+                state.try_update_tab(&tab_id, move |tab| {
                     tab.status = QueryStatus::Error;
                     tab.error = Some(QueryError {
                         message: error_msg,
@@ -192,7 +192,7 @@ fn run_arrow_query(
                     });
                 });
 
-                query_running.set(false);
+                query_running.try_set(false);
 
                 save_to_history(
                     state,
@@ -265,7 +265,7 @@ fn rerun_arrow_query(
 
                 let result = QueryResult::from_arrow(arrow_result, Some(query_handle), Some(frontend_time_ms));
 
-                state.update_tab(&tab_id, move |tab| {
+                state.try_update_tab(&tab_id, move |tab| {
                     tab.status = QueryStatus::Success;
                     tab.error = None;
                     tab.needs_refresh = false;
@@ -288,7 +288,7 @@ fn rerun_arrow_query(
             }
             Err(error_msg) => {
                 let error_msg_for_history = error_msg.clone();
-                state.update_tab(&tab_id, move |tab| {
+                state.try_update_tab(&tab_id, move |tab| {
                     tab.status = QueryStatus::Error;
                     tab.error = Some(QueryError {
                         message: error_msg,
@@ -368,7 +368,7 @@ pub(super) fn save_to_history(state: SqlEditorState, record: HistoryRecord) {
             record.datasource,
         )
         .await;
-        state.history_refresh_tick.update(|n| *n += 1);
+        state.history_refresh_tick.try_update(|n| *n += 1);
     });
 }
 

@@ -134,12 +134,12 @@ pub fn ResultsContainer(
                             result.total_rows = prev_total_rows;
                             result.bytes_processed = prev_bytes_processed;
 
-                            state.update_tab(&tab_id, |tab| {
+                            state.try_update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Success;
                                 tab.error = None;
                                 tab.result = Some(result);
                             });
-                            state.set_table_ui_state(&tab_id, |ui| {
+                            state.try_set_table_ui_state(&tab_id, |ui| {
                                 ui.current_page = page;
                             });
                         }
@@ -155,7 +155,7 @@ pub fn ResultsContainer(
                             } else {
                                 err
                             };
-                            state.update_tab(&tab_id, |tab| {
+                            state.try_update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Error;
                                 tab.error = Some(super::types::QueryError {
                                     message: error_msg,
@@ -166,7 +166,7 @@ pub fn ResultsContainer(
                             });
                         }
                     }
-                    set_is_paginating.set(false);
+                    set_is_paginating.try_set(false);
                 });
             }
         })
@@ -226,18 +226,18 @@ pub fn ResultsContainer(
                                 None,
                             );
 
-                            state.update_tab(&tab_id, |tab| {
+                            state.try_update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Success;
                                 tab.error = None;
                                 tab.result = Some(result);
                             });
-                            state.set_table_ui_state(&tab_id, |ui| {
+                            state.try_set_table_ui_state(&tab_id, |ui| {
                                 ui.page_size = new_page_size;
                                 ui.current_page = 1;
                             });
                         }
                         Err(err) => {
-                            state.update_tab(&tab_id, |tab| {
+                            state.try_update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Error;
                                 tab.error = Some(super::types::QueryError {
                                     message: err,
@@ -248,7 +248,7 @@ pub fn ResultsContainer(
                             });
                         }
                     }
-                    set_is_paginating.set(false);
+                    set_is_paginating.try_set(false);
                 });
             }
         })
@@ -359,14 +359,14 @@ pub fn ResultsContainer(
                 leptos::task::spawn_local(async move {
                     match generate_chart_from_results(columns, sample_rows, sql, ds_slug).await {
                         Ok(chart) => {
-                            set_chart_yaml.set(Some(chart.chartml_yaml));
-                            set_show_chart_modal.set(true);
+                            set_chart_yaml.try_set(Some(chart.chartml_yaml));
+                            set_show_chart_modal.try_set(true);
                         }
                         Err(err) => {
-                            set_chart_error.set(Some(format!("{err}")));
+                            set_chart_error.try_set(Some(format!("{err}")));
                         }
                     }
-                    set_chart_generating.set(false);
+                    set_chart_generating.try_set(false);
                 });
             }
         })

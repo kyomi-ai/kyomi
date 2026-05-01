@@ -201,8 +201,9 @@ fn use_debounced_dry_run(
                 .filter(|s| !s.is_empty())
                 .unwrap_or(sql_trimmed);
 
-            // Mark as validating.
-            dry_run_status.set(DryRunStatus::Validating);
+            // Mark as validating. Use try_set — the component may have been
+            // unmounted during the 1-second debounce delay.
+            dry_run_status.try_set(DryRunStatus::Validating);
 
             // Spawn the server function call.
             leptos::task::spawn_local(async move {
@@ -210,10 +211,10 @@ fn use_debounced_dry_run(
                     Ok(result) => {
                         // Set error markers when position info is available.
                         apply_dry_run_markers(editor_handle, &result);
-                        dry_run_status.set(DryRunStatus::Complete(result));
+                        dry_run_status.try_set(DryRunStatus::Complete(result));
                     }
                     Err(e) => {
-                        dry_run_status.set(DryRunStatus::Complete(DryRunResult {
+                        dry_run_status.try_set(DryRunStatus::Complete(DryRunResult {
                             valid: false,
                             message: format!("Validation error: {e}"),
                             line: None,

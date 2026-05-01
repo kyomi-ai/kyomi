@@ -126,9 +126,9 @@ pub fn SqlEditorSidebar(
         leptos::task::spawn_local(async move {
             let result = crate::server_fns::sql_editor::refresh_catalog(slug).await;
             if result.is_ok() {
-                set_catalog_refresh_trigger.update(|n| *n += 1);
+                set_catalog_refresh_trigger.try_update(|n| *n += 1);
             }
-            set_refreshing_catalog.set(false);
+            set_refreshing_catalog.try_set(false);
         });
     };
 

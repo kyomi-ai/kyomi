@@ -86,20 +86,20 @@ pub fn QueryHistory(
                 Ok(new_data) => {
                     let count = new_data.len() as u32;
                     if reset {
-                        set_entries.set(new_data);
-                        set_offset.set(count);
+                        set_entries.try_set(new_data);
+                        set_offset.try_set(count);
                     } else {
-                        set_entries.update(|list| list.extend(new_data));
-                        set_offset.update(|o| *o += count);
+                        set_entries.try_update(|list| list.extend(new_data));
+                        set_offset.try_update(|o| *o += count);
                     }
-                    set_has_more.set(count == ITEMS_PER_PAGE);
+                    set_has_more.try_set(count == ITEMS_PER_PAGE);
                 }
                 Err(e) => {
-                    set_error.set(Some(e.to_string()));
+                    set_error.try_set(Some(e.to_string()));
                 }
             }
-            set_loading.set(false);
-            set_loading_more.set(false);
+            set_loading.try_set(false);
+            set_loading_more.try_set(false);
         });
     };
 
@@ -182,7 +182,7 @@ pub fn QueryHistory(
         leptos::task::spawn_local(async move {
             if let Err(_e) = update_query_history(query_id.clone(), Some(!currently_saved)).await {
                 // Revert on failure.
-                set_entries.update(|list| {
+                set_entries.try_update(|list| {
                     if let Some(entry) = list.iter_mut().find(|e| e.id == query_id) {
                         entry.is_saved = currently_saved;
                     }
