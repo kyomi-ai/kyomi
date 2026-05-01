@@ -528,29 +528,17 @@ pub async fn update_dashboard(
     );
 
     let now = Utc::now();
-    // Dynamic SQL with variable bind count — use match pool directly
-    let result = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(dashboard_id).bind(workspace_id);
-            if let Some(t) = title { query = query.bind(t.trim()); }
-            if let Some(c) = content { query = query.bind(c); }
-            query = query.bind(&auto_summary);
-            query = query.bind(user_id);
-            if let Some(ref hash) = new_content_hash { query = query.bind(hash); }
-            query = query.bind(now);
-            query.execute(pg).await.map(kyomi_core::db::DbQueryResult::from_pg)
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(dashboard_id).bind(workspace_id);
-            if let Some(t) = title { query = query.bind(t.trim()); }
-            if let Some(c) = content { query = query.bind(c); }
-            query = query.bind(&auto_summary);
-            query = query.bind(user_id);
-            if let Some(ref hash) = new_content_hash { query = query.bind(hash); }
-            query = query.bind(now);
-            query.execute(sq).await.map(kyomi_core::db::DbQueryResult::from_sqlite)
-        }
-    }
+    // Dynamic SQL with variable bind count — identical logic for both backends.
+    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(dashboard_id).bind(workspace_id);
+        if let Some(t) = title { query = query.bind(t.trim()); }
+        if let Some(c) = content { query = query.bind(c); }
+        query = query.bind(&auto_summary);
+        query = query.bind(user_id);
+        if let Some(ref hash) = new_content_hash { query = query.bind(hash); }
+        query = query.bind(now);
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to update dashboard: {e}"))
     })?;
@@ -558,7 +546,7 @@ pub async fn update_dashboard(
     tracing::info!(dashboard_id = %dashboard_id, "Updated dashboard");
 
     // Rechunk documents after content update (all doc types) — fire-and-forget
-    if result.rows_affected() > 0
+    if rows_affected > 0
         && let Some(c) = content
     {
         if let Some(embed_svc) = embed {
@@ -578,7 +566,7 @@ pub async fn update_dashboard(
     }
 
     // Sync log — best-effort: log a warning and continue on failure.
-    if result.rows_affected() > 0 {
+    if rows_affected > 0 {
         let entity_type = if current_doc_type.is_dashboard() {
             entity_types::DASHBOARD
         } else {
@@ -599,7 +587,7 @@ pub async fn update_dashboard(
         }
     }
 
-    Ok(result.rows_affected() > 0)
+    Ok(rows_affected > 0)
 }
 
 // ─── Delete dashboard ────────────────────────────────────────────────────────
@@ -745,87 +733,43 @@ pub async fn search_dashboards(
         "#
     );
 
-    // NOTE: The row-mapping closures for Postgres and SQLite are intentionally
-    // duplicated because `sqlx::PgRow` and `sqlx::SqliteRow` are distinct types
-    // that both implement `sqlx::Row` but cannot be unified without trait objects
-    // or a generic helper.  The mapping logic is identical; if you change one arm,
-    // update the other to match.
-    let rows: Vec<DashboardSearchResult> = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let raw_rows = sqlx::query(&popularity_sql)
-                .bind(workspace_id)
-                .bind(recent_cutoff)
-                .bind(medium_cutoff)
-                .bind(old_cutoff)
-                .bind(query_param)
-                .bind(doc_type_str)
-                .fetch_all(pg)
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
+    let rows: Vec<DashboardSearchResult> = kyomi_core::db_with_pool!(db, |p| {
+        let raw_rows = sqlx::query(&popularity_sql)
+            .bind(workspace_id)
+            .bind(recent_cutoff)
+            .bind(medium_cutoff)
+            .bind(old_cutoff)
+            .bind(query_param)
+            .bind(doc_type_str)
+            .fetch_all(p)
+            .await
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
 
-            raw_rows.iter().map(|row| {
-                let content: String = row.get("content");
-                let preview = extract_summary(&content).or_else(|| {
-                    let clean = CHARTML_BLOCK_PATTERN.replace_all(&content, "");
-                    let clean = SUMMARY_PATTERN.replace(&clean, "");
-                    let clean = clean.trim();
-                    if clean.is_empty() { None } else { Some(clean.chars().take(200).collect()) }
-                });
-                DashboardSearchResult {
-                    dashboard_id: row.get("dashboard_id"),
-                    user_id: row.get("user_id"),
-                    workspace_id: row.get("workspace_id"),
-                    title: row.get("title"),
-                    content,
-                    doc_type: row.get("doc_type"),
-                    last_change_summary: row.get("last_change_summary"),
-                    created_at: row.get("created_at"),
-                    updated_at: row.get("updated_at"),
-                    popularity_score: row.get::<Option<f64>, _>("popularity_score").unwrap_or(0.0),
-                    content_preview: preview,
-                    view_count: row.get::<Option<i64>, _>("view_count").unwrap_or(0),
-                    recent_views: row.get::<Option<i64>, _>("recent_views").unwrap_or(0),
-                }
-            }).collect()
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let raw_rows = sqlx::query(&popularity_sql)
-                .bind(workspace_id)
-                .bind(recent_cutoff)
-                .bind(medium_cutoff)
-                .bind(old_cutoff)
-                .bind(query_param)
-                .bind(doc_type_str)
-                .fetch_all(sq)
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(format!("failed to search dashboards: {e}")))?;
-
-            raw_rows.iter().map(|row| {
-                let content: String = row.get("content");
-                let preview = extract_summary(&content).or_else(|| {
-                    let clean = CHARTML_BLOCK_PATTERN.replace_all(&content, "");
-                    let clean = SUMMARY_PATTERN.replace(&clean, "");
-                    let clean = clean.trim();
-                    if clean.is_empty() { None } else { Some(clean.chars().take(200).collect()) }
-                });
-                DashboardSearchResult {
-                    dashboard_id: row.get("dashboard_id"),
-                    user_id: row.get("user_id"),
-                    workspace_id: row.get("workspace_id"),
-                    title: row.get("title"),
-                    content,
-                    doc_type: row.get("doc_type"),
-                    last_change_summary: row.get("last_change_summary"),
-                    created_at: row.get("created_at"),
-                    updated_at: row.get("updated_at"),
-                    popularity_score: row.get::<Option<f64>, _>("popularity_score").unwrap_or(0.0),
-                    content_preview: preview,
-                    view_count: row.get::<Option<i64>, _>("view_count").unwrap_or(0),
-                    recent_views: row.get::<Option<i64>, _>("recent_views").unwrap_or(0),
-                }
-            }).collect()
-        }
-    };
+        raw_rows.iter().map(|row| {
+            let content: String = row.get("content");
+            let preview = extract_summary(&content).or_else(|| {
+                let clean = CHARTML_BLOCK_PATTERN.replace_all(&content, "");
+                let clean = SUMMARY_PATTERN.replace(&clean, "");
+                let clean = clean.trim();
+                if clean.is_empty() { None } else { Some(clean.chars().take(200).collect()) }
+            });
+            DashboardSearchResult {
+                dashboard_id: row.get("dashboard_id"),
+                user_id: row.get("user_id"),
+                workspace_id: row.get("workspace_id"),
+                title: row.get("title"),
+                content,
+                doc_type: row.get("doc_type"),
+                last_change_summary: row.get("last_change_summary"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                popularity_score: row.get::<Option<f64>, _>("popularity_score").unwrap_or(0.0),
+                content_preview: preview,
+                view_count: row.get::<Option<i64>, _>("view_count").unwrap_or(0),
+                recent_views: row.get::<Option<i64>, _>("recent_views").unwrap_or(0),
+            }
+        }).collect()
+    });
 
     let mut results = rows;
 
@@ -1224,59 +1168,31 @@ pub async fn list_versions(
         LIMIT $2 OFFSET $3
     "#;
 
-    let versions = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let rows = sqlx::query(sql)
-                .bind(dashboard_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pg)
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(format!("failed to list versions: {e}")))?;
-
-            rows.iter().map(version_summary_from_pg_row).collect()
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let rows = sqlx::query(sql)
-                .bind(dashboard_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(sq)
-                .await
-                .map_err(|e| kyomi_core::Error::Internal(format!("failed to list versions: {e}")))?;
-
-            rows.iter().map(version_summary_from_sq_row).collect()
-        }
-    };
+    let versions: Vec<DashboardVersionSummary> = kyomi_core::db_with_pool!(db, |p| {
+        let rows = sqlx::query(sql)
+            .bind(dashboard_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(p)
+            .await
+            .map_err(|e| kyomi_core::Error::Internal(format!("failed to list versions: {e}")))?;
+        rows.iter().map(version_summary_from_row).collect()
+    });
 
     Ok(versions)
 }
 
-/// Extract a DashboardVersionSummary from a Postgres row.
-fn version_summary_from_pg_row(row: &sqlx::postgres::PgRow) -> DashboardVersionSummary {
-    let user_id: Option<String> = row.get("user_id");
-    let created_by_id: String = row.get("created_by");
-    DashboardVersionSummary {
-        version_id: row.get("version_id"),
-        version_number: row.get("version_number"),
-        title: row.get("title"),
-        change_summary: row.get("change_summary"),
-        created_by: CreatedBy {
-            user_id: user_id.unwrap_or(created_by_id),
-            name: row.get("name"),
-            email: Some(
-                row.get::<Option<String>, _>("email")
-                    .unwrap_or_else(|| "(deleted user)".into()),
-            ),
-            ..Default::default()
-        },
-        created_at: row.get("created_at"),
-        byte_size: row.get("byte_size"),
-    }
-}
-
-/// Extract a DashboardVersionSummary from a SQLite row.
-fn version_summary_from_sq_row(row: &sqlx::sqlite::SqliteRow) -> DashboardVersionSummary {
+/// Extract a [`DashboardVersionSummary`] from any sqlx row type.
+fn version_summary_from_row<'r, R>(row: &'r R) -> DashboardVersionSummary
+where
+    R: sqlx::Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<i32>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    DateTime<Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
     let user_id: Option<String> = row.get("user_id");
     let created_by_id: String = row.get("created_by");
     DashboardVersionSummary {

@@ -323,53 +323,33 @@ pub async fn get_all_learnings(
         "#
     );
 
-    let items: Vec<LearningRecord> = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut q = sqlx::query(&data_sql).bind(workspace_id);
-            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
-            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
-            if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
-            q = q.bind(limit).bind(offset);
-            let rows = q.fetch_all(pg).await
-                .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
-            rows.iter().map(learning_record_from_pg_row).collect()
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut q = sqlx::query(&data_sql).bind(workspace_id);
-            if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
-            if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
-            if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
-            q = q.bind(limit).bind(offset);
-            let rows = q.fetch_all(sq).await
-                .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
-            rows.iter().map(learning_record_from_sq_row).collect()
-        }
-    };
+    let items: Vec<LearningRecord> = kyomi_core::db_with_pool!(db, |p| {
+        let mut q = sqlx::query(&data_sql).bind(workspace_id);
+        if let Some(s) = search.filter(|_| bind_search) { q = q.bind(s.trim()); }
+        if let Some(s) = scope.filter(|_| bind_scope) { q = q.bind(s); }
+        if let Some(ref ds_id) = bind_ds_id { q = q.bind(ds_id); }
+        q = q.bind(limit).bind(offset);
+        let rows = q.fetch_all(p).await
+            .map_err(|e| kyomi_core::Error::Internal(format!("data query failed: {e}")))?;
+        rows.iter().map(learning_record_from_row).collect()
+    });
 
     Ok((items, total))
 }
 
-/// Extract a LearningRecord from a Postgres row.
-fn learning_record_from_pg_row(row: &sqlx::postgres::PgRow) -> LearningRecord {
-    LearningRecord {
-        learning_id: row.get("learning_id"),
-        insight: row.get("insight"),
-        context: row.get("context"),
-        enabled: row.get("enabled"),
-        times_used: row.get("times_used"),
-        last_used_at: row.get("last_used_at"),
-        created_at: row.get("created_at"),
-        learned_from_user: row.get("learned_from_user"),
-        learned_from_session: row.get("learned_from_session"),
-        scope: row.get("scope"),
-        learning_type: row.get("learning_type"),
-        datasource_config_id: row.get("datasource_config_id"),
-        reference_queries: row.get("reference_queries"),
-    }
-}
-
-/// Extract a LearningRecord from a SQLite row.
-fn learning_record_from_sq_row(row: &sqlx::sqlite::SqliteRow) -> LearningRecord {
+/// Extract a [`LearningRecord`] from any sqlx row type.
+fn learning_record_from_row<'r, R>(row: &'r R) -> LearningRecord
+where
+    R: sqlx::Row,
+    &'r str: sqlx::ColumnIndex<R>,
+    String: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<String>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    bool: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    i32: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<DateTime<Utc>>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    DateTime<Utc>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+    Option<serde_json::Value>: sqlx::Decode<'r, R::Database> + sqlx::Type<R::Database>,
+{
     LearningRecord {
         learning_id: row.get("learning_id"),
         insight: row.get("insight"),
@@ -1341,56 +1321,30 @@ pub async fn get_learning_by_id(
         "#
     );
 
-    let row: Option<LearningRecord> = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            sqlx::query(&sql)
-                .bind(learning_id)
-                .bind(workspace_id)
-                .fetch_optional(pg)
-                .await
-                .map(|opt| opt.map(|r| {
-                    LearningRecord {
-                        learning_id: r.get("learning_id"),
-                        insight: r.get("insight"),
-                        context: r.get("context"),
-                        enabled: r.get::<Option<bool>, _>("enabled").unwrap_or(true),
-                        times_used: r.get::<Option<i32>, _>("times_used").unwrap_or(0),
-                        last_used_at: r.get("last_used_at"),
-                        created_at: r.get::<Option<DateTime<Utc>>, _>("created_at").unwrap_or_else(Utc::now),
-                        learned_from_user: r.get("learned_from_user"),
-                        learned_from_session: r.get("learned_from_session"),
-                        scope: r.get("scope"),
-                        learning_type: r.get("learning_type"),
-                        datasource_config_id: r.get("datasource_config_id"),
-                        reference_queries: r.get("reference_queries"),
-                    }
-                }))
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            sqlx::query(&sql)
-                .bind(learning_id)
-                .bind(workspace_id)
-                .fetch_optional(sq)
-                .await
-                .map(|opt| opt.map(|r| {
-                    LearningRecord {
-                        learning_id: r.get("learning_id"),
-                        insight: r.get("insight"),
-                        context: r.get("context"),
-                        enabled: r.get::<Option<bool>, _>("enabled").unwrap_or(true),
-                        times_used: r.get::<Option<i32>, _>("times_used").unwrap_or(0),
-                        last_used_at: r.get("last_used_at"),
-                        created_at: r.get::<Option<DateTime<Utc>>, _>("created_at").unwrap_or_else(Utc::now),
-                        learned_from_user: r.get("learned_from_user"),
-                        learned_from_session: r.get("learned_from_session"),
-                        scope: r.get("scope"),
-                        learning_type: r.get("learning_type"),
-                        datasource_config_id: r.get("datasource_config_id"),
-                        reference_queries: r.get("reference_queries"),
-                    }
-                }))
-        }
-    }
+    let row: Option<LearningRecord> = kyomi_core::db_with_pool!(db, |p| {
+        sqlx::query(&sql)
+            .bind(learning_id)
+            .bind(workspace_id)
+            .fetch_optional(p)
+            .await
+            .map(|opt| opt.map(|r| {
+                LearningRecord {
+                    learning_id: r.get("learning_id"),
+                    insight: r.get("insight"),
+                    context: r.get("context"),
+                    enabled: r.get::<Option<bool>, _>("enabled").unwrap_or(true),
+                    times_used: r.get::<Option<i32>, _>("times_used").unwrap_or(0),
+                    last_used_at: r.get("last_used_at"),
+                    created_at: r.get::<Option<DateTime<Utc>>, _>("created_at").unwrap_or_else(Utc::now),
+                    learned_from_user: r.get("learned_from_user"),
+                    learned_from_session: r.get("learned_from_session"),
+                    scope: r.get("scope"),
+                    learning_type: r.get("learning_type"),
+                    datasource_config_id: r.get("datasource_config_id"),
+                    reference_queries: r.get("reference_queries"),
+                }
+            }))
+    })
     .map_err(|e| kyomi_core::Error::Internal(format!("get learning failed: {e}")))?;
 
     Ok(row)

@@ -881,35 +881,27 @@ pub async fn update_message(
         set_parts.join(", ")
     );
 
-    let result = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(message_id);
-            if let Some(c) = content {
-                let encrypted = encryption::encrypt(c, encryption_key)?;
-                query = query.bind(encrypted);
-            }
-            if let Some(m) = metadata {
-                let encrypted = encryption::encrypt_json(m, encryption_key)?;
-                query = query.bind(encrypted);
-            }
-            query.execute(pg).await
-                .map(kyomi_core::db::DbQueryResult::from_pg)?
-        }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(message_id);
-            if let Some(c) = content {
-                let encrypted = encryption::encrypt(c, encryption_key)?;
-                query = query.bind(encrypted);
-            }
-            if let Some(m) = metadata {
-                let encrypted = encryption::encrypt_json(m, encryption_key)?;
-                query = query.bind(encrypted);
-            }
-            query.execute(sq).await
-                .map(kyomi_core::db::DbQueryResult::from_sqlite)?
-        }
+    // Dynamic SQL — encrypt fields before binding so both arms are identical.
+    let encrypted_content: Option<String> = match content {
+        Some(c) => Some(encryption::encrypt(c, encryption_key)?),
+        None => None,
     };
-    Ok(result.rows_affected() > 0)
+    let encrypted_metadata_dyn: Option<String> = match metadata {
+        Some(m) => Some(encryption::encrypt_json(m, encryption_key)?),
+        None => None,
+    };
+    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(message_id);
+        if let Some(ref enc) = encrypted_content {
+            query = query.bind(enc);
+        }
+        if let Some(ref enc) = encrypted_metadata_dyn {
+            query = query.bind(enc);
+        }
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to update message: {e}")))?;
+    Ok(rows_affected > 0)
 }
 
 /// Update session title, model, and/or config.
@@ -945,41 +937,24 @@ pub async fn update_session(
         set_parts.join(", ")
     );
 
-    let result = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(session_id);
-            if let Some(t) = title {
-                query = query.bind(t);
-            }
-            if let Some(m) = model {
-                query = query.bind(m);
-            }
-            if let Some(c) = config {
-                query = query.bind(c);
-            }
-            query = query.bind(now);
-            query.execute(pg).await
-                .map(kyomi_core::db::DbQueryResult::from_pg)?
+    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(session_id);
+        if let Some(t) = title {
+            query = query.bind(t);
         }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(session_id);
-            if let Some(t) = title {
-                query = query.bind(t);
-            }
-            if let Some(m) = model {
-                query = query.bind(m);
-            }
-            if let Some(c) = config {
-                query = query.bind(c);
-            }
-            query = query.bind(now);
-            query.execute(sq).await
-                .map(kyomi_core::db::DbQueryResult::from_sqlite)?
+        if let Some(m) = model {
+            query = query.bind(m);
         }
-    };
+        if let Some(c) = config {
+            query = query.bind(c);
+        }
+        query = query.bind(now);
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to update session: {e}")))?;
 
     // Sync log — best-effort: log a warning and continue on failure.
-    if result.rows_affected() > 0
+    if rows_affected > 0
         && let Some((workspace_id, snapshot)) = fetch_session_snapshot(db, session_id).await
         && let Err(e) = sync_log_service::write_sync_entry(
             db,
@@ -994,7 +969,7 @@ pub async fn update_session(
         tracing::warn!(error = %e, session_id = %session_id, "Failed to write sync log entry");
     }
 
-    Ok(result.rows_affected() > 0)
+    Ok(rows_affected > 0)
 }
 
 /// Convenience: update session title only.

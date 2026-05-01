@@ -1666,28 +1666,18 @@ pub async fn bulk_delete_alerts(
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    // Dynamic SQL with variable-length bind chain — need manual match dispatch
-    let result = match db {
-        DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(workspace_id).bind(user_id);
-            for id in execution_ids {
-                query = query.bind(id);
-            }
-            query.execute(pg).await.map(kyomi_core::db::DbQueryResult::from_pg)
+    // Dynamic SQL with variable-length bind chain — identical for both backends.
+    let count = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(workspace_id).bind(user_id);
+        for id in execution_ids {
+            query = query.bind(id);
         }
-        DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(workspace_id).bind(user_id);
-            for id in execution_ids {
-                query = query.bind(id);
-            }
-            query.execute(sq).await.map(kyomi_core::db::DbQueryResult::from_sqlite)
-        }
-    }
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to bulk delete alerts: {e}"))
     })?;
 
-    let count = result.rows_affected();
     tracing::info!(count, "Bulk deleted alerts");
     Ok(count)
 }
@@ -1722,28 +1712,18 @@ pub async fn bulk_mark_alerts_read(
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    // Dynamic SQL with variable-length bind chain — need manual match dispatch
-    let result = match db {
-        DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(workspace_id);
-            for id in execution_ids {
-                query = query.bind(id);
-            }
-            query.execute(pg).await.map(kyomi_core::db::DbQueryResult::from_pg)
+    // Dynamic SQL with variable-length bind chain — identical for both backends.
+    let count = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(workspace_id);
+        for id in execution_ids {
+            query = query.bind(id);
         }
-        DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(workspace_id);
-            for id in execution_ids {
-                query = query.bind(id);
-            }
-            query.execute(sq).await.map(kyomi_core::db::DbQueryResult::from_sqlite)
-        }
-    }
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to bulk mark alerts read: {e}"))
     })?;
 
-    let count = result.rows_affected();
     tracing::info!(count, "Bulk marked alerts as read");
     Ok(count)
 }
@@ -1777,28 +1757,18 @@ pub async fn bulk_mark_alerts_unread(
         true_val = sql_compat::bool_true(is_pg),
     );
 
-    // Dynamic SQL with variable-length bind chain — need manual match dispatch
-    let result = match db {
-        DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(workspace_id);
-            for id in execution_ids {
-                query = query.bind(id);
-            }
-            query.execute(pg).await.map(kyomi_core::db::DbQueryResult::from_pg)
+    // Dynamic SQL with variable-length bind chain — identical for both backends.
+    let count = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(workspace_id);
+        for id in execution_ids {
+            query = query.bind(id);
         }
-        DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(workspace_id);
-            for id in execution_ids {
-                query = query.bind(id);
-            }
-            query.execute(sq).await.map(kyomi_core::db::DbQueryResult::from_sqlite)
-        }
-    }
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to bulk mark alerts unread: {e}"))
     })?;
 
-    let count = result.rows_affected();
     tracing::info!(count, "Bulk marked alerts as unread");
     Ok(count)
 }

@@ -94,26 +94,15 @@ fn validate_color(color: &str) -> Result<()> {
 
 /// Check if a row exists. Returns true if the query returns at least one row.
 async fn row_exists(db: &DbPool, sql: &str, binds: &[&str]) -> Result<bool> {
-    match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut q = sqlx::query_scalar::<_, i32>(sql);
-            for b in binds {
-                q = q.bind(*b);
-            }
-            Ok(q.fetch_optional(pg).await
-                .map_err(|e| kyomi_core::Error::Internal(format!("exists check failed: {e}")))?
-                .is_some())
+    kyomi_core::db_with_pool!(db, |p| {
+        let mut q = sqlx::query_scalar::<_, i32>(sql);
+        for b in binds {
+            q = q.bind(*b);
         }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut q = sqlx::query_scalar::<_, i32>(sql);
-            for b in binds {
-                q = q.bind(*b);
-            }
-            Ok(q.fetch_optional(sq).await
-                .map_err(|e| kyomi_core::Error::Internal(format!("exists check failed: {e}")))?
-                .is_some())
-        }
-    }
+        q.fetch_optional(p).await
+            .map_err(|e| kyomi_core::Error::Internal(format!("exists check failed: {e}")))
+            .map(|opt| opt.is_some())
+    })
 }
 
 // ─── Create collection ──────────────────────────────────────────────────────
@@ -373,48 +362,29 @@ pub async fn update_collection(
     );
 
     let now = chrono::Utc::now();
-    // Dynamic SQL with variable bind count — use match pool directly
-    let result = match db {
-        kyomi_core::db::DbPool::Postgres(pg) => {
-            let mut query = sqlx::query(&sql).bind(collection_id).bind(workspace_id);
-            if let Some(ref name) = updates.name {
-                query = query.bind(name.trim());
-            }
-            if let Some(ref description) = updates.description {
-                query = query.bind(description);
-            }
-            if let Some(ref color) = updates.color {
-                query = query.bind(color);
-            }
-            if let Some(is_public) = updates.is_public {
-                query = query.bind(is_public);
-            }
-            query = query.bind(now);
-            query.execute(pg).await.map(kyomi_core::db::DbQueryResult::from_pg)
+    // Dynamic SQL with variable bind count — identical for both backends.
+    let rows_affected = kyomi_core::db_with_pool!(db, |p| {
+        let mut query = sqlx::query(&sql).bind(collection_id).bind(workspace_id);
+        if let Some(ref name) = updates.name {
+            query = query.bind(name.trim());
         }
-        kyomi_core::db::DbPool::Sqlite(sq) => {
-            let mut query = sqlx::query(&sql).bind(collection_id).bind(workspace_id);
-            if let Some(ref name) = updates.name {
-                query = query.bind(name.trim());
-            }
-            if let Some(ref description) = updates.description {
-                query = query.bind(description);
-            }
-            if let Some(ref color) = updates.color {
-                query = query.bind(color);
-            }
-            if let Some(is_public) = updates.is_public {
-                query = query.bind(is_public);
-            }
-            query = query.bind(now);
-            query.execute(sq).await.map(kyomi_core::db::DbQueryResult::from_sqlite)
+        if let Some(ref description) = updates.description {
+            query = query.bind(description);
         }
-    }
+        if let Some(ref color) = updates.color {
+            query = query.bind(color);
+        }
+        if let Some(is_public) = updates.is_public {
+            query = query.bind(is_public);
+        }
+        query = query.bind(now);
+        query.execute(p).await.map(|r| r.rows_affected())
+    })
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to update collection: {e}"))
     })?;
 
-    if result.rows_affected() == 0 {
+    if rows_affected == 0 {
         return Err(kyomi_core::Error::NotFound(format!(
             "Collection {collection_id} not found"
         )));
