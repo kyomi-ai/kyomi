@@ -39,8 +39,7 @@ use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
 use crate::pages::sql_editor::results_table::ResultsTable;
 use crate::pages::sql_editor::types::QueryResult;
-use crate::server_fns::datasources::{list_datasources, query_datasource_arrow};
-use crate::server_fns::sql_editor::execute_sql_query;
+use crate::server_fns::datasources::list_datasources;
 
 use crate::chartml_provider::configured_chartml;
 use super::markdown_renderer::{kyomi_palette, kyomi_theme};
@@ -865,30 +864,17 @@ pub fn ChartBuilderModal(
         if !initial_ds.is_empty() && !initial_sql.trim().is_empty() {
             set_preview_loading.set(true);
             leptos::task::spawn_local(async move {
-                match query_datasource_arrow(initial_ds, initial_sql, None).await {
-                    Ok(query_result) => {
-                        use base64::Engine;
-                        match base64::engine::general_purpose::STANDARD
-                            .decode(&query_result.ipc_base64)
-                        {
-                            Ok(ipc_bytes) => {
-                                match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
-                                    Ok(data_table) => {
-                                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
-                                        set_preview_chartml.set(Some(send_wrapper::SendWrapper::new(
-                                            chartml_leptos::ChartMLRef::new(chartml_inst),
-                                        )));
-                                    }
-                                    Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
-                                }
-                            }
-                            Err(e) => set_preview_error.set(Some(format!("Base64 decode error: {e}"))),
-                        }
-                        set_preview_loading.set(false);
+                match crate::arrow_fetch::fetch_arrow_stream(&initial_ds, &initial_sql).await {
+                    Ok(data_table) => {
+                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
+                        set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
+                            chartml_leptos::ChartMLRef::new(chartml_inst),
+                        )));
+                        set_preview_loading.try_set(false);
                     }
                     Err(e) => {
-                        set_preview_error.set(Some(format!("Query error: {e}")));
-                        set_preview_loading.set(false);
+                        set_preview_error.try_set(Some(format!("Query error: {e}")));
+                        set_preview_loading.try_set(false);
                     }
                 }
             });
@@ -1069,16 +1055,18 @@ pub fn ChartBuilderModal(
                                             set_query_error.set(None);
                                             set_query_result.set(None);
 
+                                            #[cfg(target_arch = "wasm32")]
                                             leptos::task::spawn_local(async move {
-                                                match execute_sql_query(ds_slug, query_text, 50, 1).await {
-                                                    Ok(result) => {
-                                                        set_query_result.set(Some(result));
+                                                match crate::arrow_fetch::fetch_arrow_buffered(&ds_slug, &query_text, 50, 0, true, None).await {
+                                                    Ok(arrow_result) => {
+                                                        let result = QueryResult::from_arrow(arrow_result, None, None);
+                                                        set_query_result.try_set(Some(result));
                                                     }
                                                     Err(e) => {
-                                                        set_query_error.set(Some(e.to_string()));
+                                                        set_query_error.try_set(Some(e));
                                                     }
                                                 }
-                                                set_query_running.set(false);
+                                                set_query_running.try_set(false);
                                             });
                                         }
                                     >
@@ -1588,30 +1576,19 @@ pub fn ChartBuilderModal(
                                             set_preview_loading.set(true);
                                             set_preview_error.set(None);
 
+                                            #[cfg(target_arch = "wasm32")]
                                             leptos::task::spawn_local(async move {
-                                                match query_datasource_arrow(ds_slug, query_text, None).await {
-                                                    Ok(query_result) => {
-                                                        use base64::Engine;
-                                                        match base64::engine::general_purpose::STANDARD
-                                                            .decode(&query_result.ipc_base64) {
-                                                            Ok(ipc_bytes) => {
-                                                                match chartml_core::data::DataTable::from_ipc_bytes(&ipc_bytes) {
-                                                                    Ok(data_table) => {
-                                                                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
-                                                                        set_preview_chartml.set(Some(send_wrapper::SendWrapper::new(
-                                                                            chartml_leptos::ChartMLRef::new(chartml_inst),
-                                                                        )));
-                                                                    }
-                                                                    Err(e) => set_preview_error.set(Some(format!("Arrow decode error: {e}"))),
-                                                                }
-                                                            }
-                                                            Err(e) => set_preview_error.set(Some(format!("Base64 decode error: {e}"))),
-                                                        }
-                                                        set_preview_loading.set(false);
+                                                match crate::arrow_fetch::fetch_arrow_stream(&ds_slug, &query_text).await {
+                                                    Ok(data_table) => {
+                                                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
+                                                        set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
+                                                            chartml_leptos::ChartMLRef::new(chartml_inst),
+                                                        )));
+                                                        set_preview_loading.try_set(false);
                                                     }
                                                     Err(e) => {
-                                                        set_preview_error.set(Some(format!("Query error: {e}")));
-                                                        set_preview_loading.set(false);
+                                                        set_preview_error.try_set(Some(format!("Query error: {e}")));
+                                                        set_preview_loading.try_set(false);
                                                     }
                                                 }
                                             });

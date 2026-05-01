@@ -11,7 +11,6 @@ pub mod app;
 pub mod cache;
 pub mod chartml_provider;
 pub mod components;
-pub mod datasource;
 pub mod pages;
 pub mod parser;
 pub mod query_cache;
@@ -163,7 +162,6 @@ pub fn register_server_functions() {
     register_explicit::<SetWorkspaceDefaultDashboard>();
 
     use server_fns::sql_editor::*;
-    register_explicit::<ExecuteSqlQuery>();
     register_explicit::<DryRunSql>();
     register_explicit::<ListQueryHistory>();
     register_explicit::<SaveQueryHistory>();
@@ -188,7 +186,6 @@ pub fn register_server_functions() {
     register_explicit::<TestDatasourceStandalone>();
     register_explicit::<TestExistingDatasource>();
     register_explicit::<DiscoverDatasourceResources>();
-    register_explicit::<QueryDatasourceArrow>();
 
     use server_fns::billing::*;
     register_explicit::<GetSubscriptionInfo>();
