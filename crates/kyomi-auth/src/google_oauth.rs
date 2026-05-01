@@ -318,6 +318,66 @@ pub async fn ensure_valid_google_token(
 }
 
 // ---------------------------------------------------------------------------
+// Datasource provider helpers
+// ---------------------------------------------------------------------------
+
+/// Build a `UserContext` for datasource provider creation (Google OAuth path).
+///
+/// Loads the user's Google OAuth tokens from the DB, refreshes if expired, and
+/// returns a populated `UserContext`. If Google OAuth is not configured
+/// (`client_id` / `client_secret` are `None`) or the user has no tokens, the
+/// `oauth_data` field is `None` — providers that support multiple auth modes
+/// (e.g. BigQuery with service-account auth) will fall back automatically.
+///
+/// # Parameters
+///
+/// - `db` — database pool
+/// - `user_id` — user whose OAuth tokens to resolve
+/// - `encryption_key` — key used to decrypt stored OAuth data; only consulted
+///   when `google_client_id` and `google_client_secret` are both `Some`.
+///   Pass `None` in environments where the key is not configured — the function
+///   returns an error only if the key is needed but absent.
+/// - `google_client_id` / `google_client_secret` — OAuth app credentials; both
+///   must be `Some` for token resolution to proceed
+/// - `user_email` — passed through verbatim into `UserContext`
+/// - `workspace_id` — passed through verbatim into `UserContext`
+pub async fn build_datasource_user_context(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    encryption_key: Option<&[u8; 32]>,
+    google_client_id: Option<&str>,
+    google_client_secret: Option<&str>,
+    user_email: String,
+    workspace_id: String,
+) -> kyomi_core::Result<Option<kyomi_datasource_server::UserContext>> {
+    let oauth_data = if let (Some(client_id), Some(client_secret)) =
+        (google_client_id, google_client_secret)
+    {
+        let key = encryption_key.ok_or_else(|| {
+            kyomi_core::Error::Internal("Encryption key not configured".into())
+        })?;
+        match ensure_valid_google_token(db, user_id, key, client_id, client_secret).await {
+            Ok(tokens) => {
+                let data = OAuthData {
+                    google_oauth_tokens: Some(tokens),
+                    ..Default::default()
+                };
+                serde_json::to_value(data).ok()
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(Some(kyomi_datasource_server::UserContext {
+        oauth_data,
+        user_email,
+        workspace_id,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // User info
 // ---------------------------------------------------------------------------
 

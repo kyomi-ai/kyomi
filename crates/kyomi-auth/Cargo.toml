@@ -9,6 +9,7 @@ kyomi-core = { workspace = true }
 kyomi-embed = { workspace = true }
 kyomi-types = { workspace = true }
 kyomi-knowledge = { workspace = true }
+kyomi-datasource-server = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 pgvector = { workspace = true }

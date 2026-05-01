@@ -136,89 +136,70 @@ async fn query_arrow(
     };
 
     // ------------------------------------------------------------------
-    // 4. Create provider — replicates create_query_provider from
-    //    crates/kyomi-ui/src/server_fns/datasources.rs:983-1080.
+    // 4. Resolve per-user credentials (decrypt from DB).
     // ------------------------------------------------------------------
-    let provider: Box<dyn kyomi_datasource_server::DatasourceProvider> =
-        if ds.connection_type == "connect" {
-            Box::new(kyomi_datasource_server::ConnectProvider::new(
-                state.connect_registry.clone(),
-                ds.id.clone(),
-            ))
-        } else {
-            let ds_type: kyomi_core::datasource_registry::DatasourceType =
-                ds.datasource_type.into();
-
-            let user_cred = match kyomi_auth::datasource_service::get_user_credential(
-                &state.db,
-                &auth.user_id,
-                &ds.id,
-            )
-            .await
-            {
-                Ok(cred) => cred,
-                Err(e) => {
-                    tracing::error!("failed to load user credential: {e}");
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal server error",
-                    );
-                }
-            };
-
-            let credentials = if let Some(ref cred) = user_cred {
-                kyomi_auth::encryption::decrypt_json(&cred.credentials, &state.encryption_key)
-                    .unwrap_or(serde_json::json!({}))
-            } else {
-                serde_json::json!({})
-            };
-
-            let credentials = match kyomi_datasource_server::ensure_valid_oauth_credentials(
-                &credentials,
-                &ds.connection_config,
-                &ds_type,
-            )
-            .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!("OAuth credential refresh failed: {e}");
-                    return error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "failed to refresh credentials",
-                    );
-                }
-            };
-
-            // Build user context for BigQuery OAuth (kyomi_oauth auth mode).
-            let user_context = build_user_context(&state, &auth).await;
-
-            match tokio::time::timeout(
-                kyomi_datasource_server::DATASOURCE_TIMEOUT_CONNECT,
-                kyomi_datasource_server::create_provider(
-                    &ds_type,
-                    &ds.connection_config,
-                    &credentials,
-                    user_context.as_ref(),
-                ),
-            )
-            .await
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(e)) => {
-                    return error_response(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        format!("failed to connect to datasource: {e}"),
-                    );
-                }
-                Err(_) => {
-                    return error_response(StatusCode::UNPROCESSABLE_ENTITY, "connection timed out");
-                }
+    let credentials = if ds.connection_type != "connect" {
+        let user_cred = match kyomi_auth::datasource_service::get_user_credential(
+            &state.db,
+            &auth.user_id,
+            &ds.id,
+        )
+        .await
+        {
+            Ok(cred) => cred,
+            Err(e) => {
+                tracing::error!("failed to load user credential: {e}");
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error",
+                );
             }
         };
+        if let Some(ref cred) = user_cred {
+            kyomi_auth::encryption::decrypt_json(&cred.credentials, &state.encryption_key)
+                .unwrap_or(serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        }
+    } else {
+        serde_json::json!({})
+    };
 
     // ------------------------------------------------------------------
-    // 5. Dispatch — paginated vs. streaming path.
+    // 5. Build user context for BigQuery OAuth (kyomi_oauth auth mode).
+    // ------------------------------------------------------------------
+    let user_context = build_user_context(&state, &auth).await;
+
+    // ------------------------------------------------------------------
+    // 6. Create provider (Connect-vs-direct branching, timeout).
+    // ------------------------------------------------------------------
+    let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
+    let provider = match kyomi_datasource_server::create_provider_from_parts(
+        &ds.id,
+        &ds.connection_type,
+        &ds.connection_config,
+        ds_type,
+        credentials,
+        user_context,
+        Some(&state.connect_registry),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("timed out") {
+                return error_response(StatusCode::UNPROCESSABLE_ENTITY, "connection timed out");
+            }
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("failed to connect to datasource: {e}"),
+            );
+        }
+    };
+
+    // ------------------------------------------------------------------
+    // 7. Dispatch — paginated vs. streaming path.
     // ------------------------------------------------------------------
     if limit.is_some() {
         execute_paginated(provider, &req.sql, limit, offset, include_total, req.job_id.as_deref()).await
@@ -517,47 +498,26 @@ async fn drive_arrow_stream(
 
 /// Build a `UserContext` for BigQuery provider creation (OAuth path).
 ///
-/// Loads the user's Google OAuth tokens from the DB, refreshes if expired,
-/// and returns a `UserContext`. If Google OAuth is not configured or the user
-/// has no tokens, returns `None` oauth_data — BigQuery falls back to other
-/// auth modes.
+/// Delegates to `kyomi_auth::google_oauth::build_datasource_user_context`.
+/// Errors are swallowed — a missing or expired token causes `oauth_data`
+/// to be `None`, and BigQuery falls back to other auth modes.
 async fn build_user_context(
     state: &AppState,
     auth: &kyomi_auth::middleware::AuthUser,
 ) -> Option<kyomi_datasource_server::UserContext> {
-    let oauth_data = if let (Some(client_id), Some(client_secret)) = (
+    let workspace_id = auth.workspace.workspace_id.clone().unwrap_or_default();
+    kyomi_auth::google_oauth::build_datasource_user_context(
+        &state.db,
+        &auth.user_id,
+        Some(&state.encryption_key),
         state.config.google_oauth_client_id.as_deref(),
         state.config.google_oauth_client_secret.as_deref(),
-    ) {
-        match kyomi_auth::google_oauth::ensure_valid_google_token(
-            &state.db,
-            &auth.user_id,
-            &state.encryption_key,
-            client_id,
-            client_secret,
-        )
-        .await
-        {
-            Ok(tokens) => {
-                let data = kyomi_auth::google_oauth::OAuthData {
-                    google_oauth_tokens: Some(tokens),
-                    ..Default::default()
-                };
-                serde_json::to_value(data).ok()
-            }
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
-    let workspace_id = auth.workspace.workspace_id.clone().unwrap_or_default();
-
-    Some(kyomi_datasource_server::UserContext {
-        oauth_data,
-        user_email: auth.email.clone(),
+        auth.email.clone(),
         workspace_id,
-    })
+    )
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Map a `SimpleType` to an Arrow `Field` with the appropriate data type.

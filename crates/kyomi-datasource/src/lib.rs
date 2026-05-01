@@ -96,3 +96,75 @@ pub async fn ensure_valid_oauth_credentials(
     .map_err(Into::into)
 }
 
+/// Create a datasource provider from pre-resolved parts.
+///
+/// Centralises the Connect-vs-direct branching and connection timeout logic
+/// that was previously duplicated in `query_arrow.rs` and
+/// `server_fns/datasources.rs`.
+///
+/// # Parameters
+///
+/// - `datasource_id` — config ID of the datasource (used by `ConnectProvider`)
+/// - `connection_type` — `"connect"` routes through the registry; anything else
+///   goes through the driver factory
+/// - `connection_config` — full JSON connection config from the datasource record
+/// - `datasource_type` — resolved datasource type (e.g. BigQuery, ClickHouse)
+/// - `credentials` — already-decrypted credentials JSON (pass `json!({})` if none)
+/// - `user_context` — pre-built user context for OAuth-based providers (may be
+///   `None` when the auth mode doesn't require it)
+/// - `connect_registry` — registry for Connect-type datasource routing; only
+///   required when `connection_type == "connect"` — pass `None` to signal that
+///   Connect is not available (returns an error if the datasource needs it)
+///
+/// # Errors
+///
+/// Returns `kyomi_core::Error` on connection failure or timeout. The caller is
+/// responsible for mapping this to the appropriate response type
+/// (`StatusCode`, `ServerFnError`, etc.).
+pub async fn create_provider_from_parts(
+    datasource_id: &str,
+    connection_type: &str,
+    connection_config: &serde_json::Value,
+    datasource_type: kyomi_core::datasource_registry::DatasourceType,
+    credentials: serde_json::Value,
+    user_context: Option<UserContext>,
+    connect_registry: Option<&ConnectRegistry>,
+) -> kyomi_core::Result<Box<dyn DatasourceProvider>> {
+    if connection_type == "connect" {
+        let registry = connect_registry.ok_or_else(|| {
+            kyomi_core::Error::Internal("Connect registry not available".into())
+        })?;
+        return Ok(Box::new(ConnectProvider::new(
+            registry.clone(),
+            datasource_id.to_string(),
+        )));
+    }
+
+    let credentials = ensure_valid_oauth_credentials(
+        &credentials,
+        connection_config,
+        &datasource_type,
+    )
+    .await?;
+
+    match tokio::time::timeout(
+        DATASOURCE_TIMEOUT_CONNECT,
+        create_provider(
+            &datasource_type,
+            connection_config,
+            &credentials,
+            user_context.as_ref(),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(p)) => Ok(p),
+        Ok(Err(e)) => Err(kyomi_core::Error::Internal(format!(
+            "failed to connect to datasource: {e}"
+        ))),
+        Err(_) => Err(kyomi_core::Error::Internal(
+            "datasource connection timed out".into(),
+        )),
+    }
+}
+
