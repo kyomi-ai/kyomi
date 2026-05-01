@@ -18,6 +18,32 @@ Rules in this document are specific to patterns observed in this codebase. For g
 
 *Standards specific to Leptos components, reactivity, SSR/hydration, and frontend architecture.*
 
+### Use `.try_set()` / `.try_update()` in deferred execution contexts
+
+Signal writes inside `spawn_local`, `Closure::new`, `set_timeout`, or any callback that outlives the reactive scope must use `.try_set()` / `.try_update()` instead of `.set()` / `.update()`. The user may navigate away before the callback fires, disposing the signal — `.set()` panics, `.try_set()` silently returns `false`.
+
+**Rule:** Synchronous writes *before* a `spawn_local` or in `Effect::new` blocks are fine with `.set()` — the signal is guaranteed to be alive. Only deferred writes (inside the async block, inside a `.forget()`-ed Closure, inside a Timeout callback) need the `try_` variant.
+
+```rust
+// WRONG — panics if user navigates away before the fetch completes
+spawn_local(async move {
+    let result = fetch_data().await;
+    loading.set(false);        // 💥 signal may be disposed
+    data.update(|d| *d = result);
+});
+
+// RIGHT — deferred writes use try_ variants
+spawn_local(async move {
+    let result = fetch_data().await;
+    loading.try_set(false);    // returns false if disposed, no panic
+    data.try_update(|d| *d = result);
+});
+
+// ALSO RIGHT — synchronous write before spawn_local is safe
+loading.set(true);             // signal is alive here, .set() is fine
+spawn_local(async move { /* ... */ });
+```
+
 ### WASM-only `#[cfg]` blocks must compile on the WASM target
 
 Variables used inside `#[cfg(target_arch = "wasm32")]` blocks must be parameters of the enclosing function (or otherwise available in scope on WASM). `cargo check` on the native target silently skips the block body, so missing variables won't be caught until the WASM build.
