@@ -105,6 +105,11 @@ pub fn KyomiChart(
     /// "Ask about this chart" callback — receives chart YAML wrapped in a
     /// ```` ```chartml ```` fence.  `None` hides the ask button.
     on_ask_about_chart: Option<Callback<String>>,
+    /// Callback invoked with the new chart type string when the user changes
+    /// the type via the header bar dropdown. Used by the WYSIWYG editor to
+    /// persist type changes to the dashboard source. `None` in the viewer.
+    #[prop(optional)]
+    on_type_change_persist: Option<Callback<String>>,
 ) -> impl IntoView {
     // ------------------------------------------------------------------
     // 1. Parse YAML for initial chrome metadata
@@ -275,7 +280,10 @@ pub fn KyomiChart(
     // 10. Build header-bar callbacks
     // ------------------------------------------------------------------
     let on_type_change_cb = Callback::new(move |t: String| {
-        set_type_override.set(Some(t));
+        set_type_override.set(Some(t.clone()));
+        if let Some(cb) = on_type_change_persist {
+            cb.run(t);
+        }
     });
     let on_orientation_change_cb = Callback::new(move |o: Option<String>| {
         set_orientation_override.set(Some(o));

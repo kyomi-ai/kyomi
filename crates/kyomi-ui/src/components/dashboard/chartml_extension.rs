@@ -196,8 +196,11 @@ fn render_one_chart(
     });
 
     // Callbacks for the header bar
+    let yaml_for_type_persist = yaml.clone();
+    let block_content_for_type = block_content.clone();
     let on_type_change = Callback::new(move |t: String| {
-        set_type_override.set(Some(t));
+        set_type_override.set(Some(t.clone()));
+        dispatch_chart_type_change_event(&yaml_for_type_persist, &block_content_for_type, array_index, &t);
     });
     let on_orientation_change = Callback::new(move |o: Option<String>| {
         set_orientation_override.set(Some(o));
@@ -316,6 +319,49 @@ fn dispatch_chart_info_event(yaml: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = yaml;
+    }
+}
+
+/// Dispatch a `chart-type-change-request` CustomEvent so the dashboard editor
+/// can persist the new chart type directly to the source YAML without opening
+/// the chart builder modal.
+///
+/// Payload shape (JSON-stringified in `detail`):
+/// ```json
+/// { "yaml": "...", "block_content": "...", "array_index": 0, "new_type": "line" }
+/// ```
+/// - `yaml`: the per-item YAML (used to apply the type mutation)
+/// - `block_content`: the full block's YAML (fingerprint for the listener to
+///   find `block_index` by matching against ```chartml fences in the source)
+/// - `array_index`: which item within the block was changed (0 for mapping blocks)
+/// - `new_type`: the chart type string selected by the user
+fn dispatch_chart_type_change_event(
+    yaml: &str,
+    block_content: &str,
+    array_index: usize,
+    new_type: &str,
+) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let payload = serde_json::json!({
+            "yaml": yaml,
+            "block_content": block_content,
+            "array_index": array_index,
+            "new_type": new_type,
+        });
+        let json = payload.to_string();
+        let detail = wasm_bindgen::JsValue::from_str(&json);
+        let init = web_sys::CustomEventInit::new();
+        init.set_detail(&detail);
+        if let Ok(event) =
+            web_sys::CustomEvent::new_with_event_init_dict("chart-type-change-request", &init)
+        {
+            let _ = window.dispatch_event(&event);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (yaml, block_content, array_index, new_type);
     }
 }
 

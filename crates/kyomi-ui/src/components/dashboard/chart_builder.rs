@@ -93,7 +93,7 @@ struct SeriesEntry {
 // ─── AST helpers: mapping / key manipulation ────────────────────────────────
 
 /// Ensure `ast` is a mapping, replacing non-mapping values with an empty one.
-fn ensure_root_mapping(ast: &mut Value) {
+pub(crate) fn ensure_root_mapping(ast: &mut Value) {
     if !ast.is_mapping() {
         *ast = Value::Mapping(Mapping::new());
     }
@@ -107,7 +107,7 @@ fn ensure_root_mapping(ast: &mut Value) {
 /// and a single Visual-tab edit should never fail just because the previous
 /// YAML was malformed at this key. Callers relying on preserving a
 /// non-mapping value should check the shape themselves first.
-fn ensure_nested_mapping(parent: &mut Value, key: &str) {
+pub(crate) fn ensure_nested_mapping(parent: &mut Value, key: &str) {
     ensure_root_mapping(parent);
     let map = parent.as_mapping_mut().expect("ensured above");
     let k = Value::String(key.to_string());
@@ -300,7 +300,7 @@ fn ast_get_chart_type(ast: &Value) -> String {
     get_string_at(ast, &["visualize", "type"]).unwrap_or_else(|| "bar".to_string())
 }
 
-fn ast_set_chart_type(ast: &mut Value, val: &str) {
+pub(crate) fn ast_set_chart_type(ast: &mut Value, val: &str) {
     ensure_root_mapping(ast);
     ensure_nested_mapping(ast, "visualize");
     let vis = ast.get_mut("visualize").expect("ensured");

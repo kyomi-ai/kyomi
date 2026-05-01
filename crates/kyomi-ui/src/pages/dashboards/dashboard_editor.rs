@@ -31,6 +31,7 @@ use leptos_router::hooks::use_params_map;
 use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer,
+    chart_builder::ast_set_chart_type,
     markdown_renderer::{split_chartml_block, splice_chartml_item},
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
@@ -605,6 +606,102 @@ fn DashboardEditorInner(
                     && let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "chart-edit-request",
+                            cb.as_ref().unchecked_ref(),
+                        );
+                    }
+            });
+        });
+    }
+
+    // ── Chart type-change event listener (from WYSIWYG extension) ────────
+    // The WYSIWYG ChartMLExtension dispatches `chart-type-change-request` when
+    // the user picks a new chart type from the header bar dropdown. Unlike
+    // chart-edit-request (which opens ChartBuilderModal), this directly mutates
+    // the `visualize.type` field in the source YAML so the change is staged for
+    // the next Save without opening any modal.
+    //
+    // Payload: { yaml, block_content, array_index, new_type }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::closure::Closure;
+
+        let type_change_handler = Closure::<dyn Fn(web_sys::CustomEvent)>::new(
+            move |ev: web_sys::CustomEvent| {
+                let Some(detail) = ev.detail().as_string() else { return; };
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&detail) else { return; };
+                let Some(yaml) = payload.get("yaml").and_then(|v| v.as_str()) else { return; };
+                let Some(new_type) = payload.get("new_type").and_then(|v| v.as_str()) else { return; };
+                let Some(array_index) = payload
+                    .get("array_index")
+                    .and_then(|v| v.as_u64()) else { return; };
+                let block_content = payload
+                    .get("block_content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let array_index = array_index as usize;
+
+                // Parse the per-item YAML, mutate visualize.type, re-serialize.
+                let Ok(mut ast) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else { return; };
+                ast_set_chart_type(&mut ast, new_type);
+                let Ok(updated_yaml) = serde_yaml::to_string(&ast) else { return; };
+
+                // Locate the block in the current editor source.
+                let current = editor_content.get_untracked();
+                let Some(block_index) =
+                    find_chartml_block_index(&current, block_content) else { return; };
+
+                let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
+                let Some(m) = re.captures_iter(&current).nth(block_index) else { return; };
+                let Some(inner) = m.get(1) else { return; };
+                let old_block = inner.as_str();
+
+                // Splice the updated per-item yaml back into the block.
+                let Some(new_block) = splice_chartml_item(
+                    old_block.trim(),
+                    array_index,
+                    &updated_yaml,
+                ) else {
+                    tracing::warn!(
+                        block_index,
+                        array_index,
+                        "splice_chartml_item returned None on type-change; aborting"
+                    );
+                    return;
+                };
+
+                let new_block_with_newline = if new_block.ends_with('\n') {
+                    new_block
+                } else {
+                    format!("{new_block}\n")
+                };
+                let mut out =
+                    String::with_capacity(current.len() + new_block_with_newline.len());
+                out.push_str(&current[..inner.start()]);
+                out.push_str(&new_block_with_newline);
+                out.push_str(&current[inner.end()..]);
+
+                set_editor_content.try_set(out.clone());
+                set_preview_content.try_set(out);
+            },
+        );
+
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "chart-type-change-request",
+                type_change_handler.as_ref().unchecked_ref(),
+            );
+        }
+
+        let type_change_handler_stored =
+            StoredValue::new(Some(send_wrapper::SendWrapper::new(type_change_handler)));
+
+        on_cleanup(move || {
+            type_change_handler_stored.update_value(|h| {
+                if let Some(cb) = h.take()
+                    && let Some(window) = web_sys::window() {
+                        let _ = window.remove_event_listener_with_callback(
+                            "chart-type-change-request",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
