@@ -49,13 +49,7 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
 
         // If inside a multiline Typst block, pass through until balanced
         if typst_block_depth > 0 {
-            for ch in stripped.chars() {
-                match ch {
-                    '[' | '(' => typst_block_depth += 1,
-                    ']' | ')' => typst_block_depth -= 1,
-                    _ => {}
-                }
-            }
+            typst_block_depth += count_bracket_depth(stripped);
             output.push(stripped.to_string());
             continue;
         }
@@ -105,13 +99,7 @@ pub fn markdown_to_typst(markdown_text: &str) -> String {
         {
             close_list(&mut output, &mut in_ul, &mut in_ol);
             // Count brackets to track multiline blocks
-            for ch in stripped.chars() {
-                match ch {
-                    '[' | '(' => typst_block_depth += 1,
-                    ']' | ')' => typst_block_depth -= 1,
-                    _ => {}
-                }
-            }
+            typst_block_depth += count_bracket_depth(stripped);
             output.push(stripped.to_string());
             continue;
         }
@@ -445,6 +433,31 @@ pub fn render_data_table_typst(
     table
 }
 
+/// Count the net bracket depth change for a line of Typst source.
+///
+/// Used to track multi-line Typst blocks during passthrough. Counts `[`, `(`
+/// as +1 and `]`, `)` as -1, but skips any character preceded by a backslash
+/// (`\`) so that Typst escape sequences like `\[`, `\]`, `\(`, `\)` (produced
+/// by `typst_escape` for user content) don't distort the balance calculation.
+fn count_bracket_depth(s: &str) -> i32 {
+    let mut depth: i32 = 0;
+    let mut prev_was_backslash = false;
+    for ch in s.chars() {
+        if prev_was_backslash {
+            // This char is escaped — skip it for bracket counting
+            prev_was_backslash = false;
+            continue;
+        }
+        match ch {
+            '\\' => prev_was_backslash = true,
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
 /// Detect whether a cell value looks numeric (for Geist Mono font selection).
 ///
 /// Matches currency values ($620K, €1.2M), percentages (+15%, -3.1%),
@@ -585,5 +598,43 @@ mod tests {
         assert!(!is_numeric_cell("Revenue"));
         assert!(!is_numeric_cell(""));
         assert!(!is_numeric_cell("Q3 2026"));
+    }
+
+    #[test]
+    fn bracket_depth_basic() {
+        assert_eq!(count_bracket_depth("#block(fill: rgb(\"#F5F3EF\"))["), 1);
+        assert_eq!(count_bracket_depth("]"), -1);
+        assert_eq!(count_bracket_depth("  #align(center)[text]"), 0);
+    }
+
+    #[test]
+    fn bracket_depth_skips_escaped_brackets() {
+        // \[ and \] from typst_escape should not count toward depth
+        assert_eq!(count_bracket_depth(r"text with \[escaped\] brackets"), 0);
+        assert_eq!(count_bracket_depth(r"#text(...)[Chart: \[2026\]]"), 0);
+        // Unescaped brackets still count
+        assert_eq!(count_bracket_depth("[open"), 1);
+        assert_eq!(count_bracket_depth("close]"), -1);
+    }
+
+    #[test]
+    fn passthrough_with_special_chars_in_chart_title() {
+        // Chart unavailable placeholder with backticks and brackets in the title
+        // must not leave the Typst passthrough in an incorrect state so that
+        // any surrounding markdown is parsed correctly afterward.
+        let placeholder = concat!(
+            "#block(fill: rgb(\"#F5F3EF\"), stroke: rgb(\"#E8E5DE\"), radius: 6pt, inset: 24pt, width: 100%)[",
+            "\n  #align(center)[#text(fill: rgb(\"#6B6660\"), style: \"italic\", font: \"DM Sans\")",
+            "[Chart unavailable: Revenue from \\`orders\\` table with \\[brackets\\]]]",
+            "\n]"
+        );
+        let markdown = format!("## Heading\n\n{placeholder}\n\nAfter paragraph.");
+        let result = markdown_to_typst(&markdown);
+        // The heading before the block must be converted (not treated as passthrough)
+        assert!(result.contains("== Heading"), "heading missing from result: {result}");
+        // The paragraph after the block must also be converted correctly
+        assert!(result.contains("After paragraph"), "paragraph after block missing: {result}");
+        // The placeholder block must be emitted verbatim
+        assert!(result.contains("Chart unavailable"), "placeholder missing: {result}");
     }
 }

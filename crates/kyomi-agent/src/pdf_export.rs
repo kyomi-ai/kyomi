@@ -563,4 +563,135 @@ mod tests {
             "SELECT * FROM orders WHERE region = 'North'"
         );
     }
+
+    // -- replace_chartml_with_typst placeholder tests --
+
+    /// When a chart's data fails to resolve (it's not in resolved_specs),
+    /// `replace_chartml_with_typst` must emit the "Chart unavailable" placeholder
+    /// instead of leaving a raw ChartML fenced block in the document.
+    #[test]
+    fn failed_chart_produces_placeholder() {
+        let content = "## Dashboard\n\n```chartml\ntype: chart\ntitle: Revenue\nvisualize:\n  type: bar\n```\n\nAfter.";
+        let extraction = chartml_utils::extract_chartml_specs(content);
+        assert_eq!(extraction.specs.len(), 1, "should extract one chart");
+
+        // Simulate: data resolution failed — nothing in chart_image_refs or typst_rendered
+        let chart_image_refs: HashMap<usize, String> = HashMap::new();
+        let typst_rendered: HashMap<usize, String> = HashMap::new();
+
+        let result = replace_chartml_with_typst(
+            content,
+            &extraction,
+            &chart_image_refs,
+            &typst_rendered,
+        );
+
+        // The ChartML block must be replaced (not present in output)
+        assert!(
+            !result.contains("```chartml"),
+            "raw ChartML block must not appear in output: {result}"
+        );
+        // The placeholder must be present
+        assert!(
+            result.contains("Chart unavailable"),
+            "placeholder missing from output: {result}"
+        );
+        assert!(
+            result.contains("Revenue"),
+            "chart title missing from placeholder: {result}"
+        );
+        // Surrounding content must be preserved
+        assert!(result.contains("## Dashboard"), "heading missing: {result}");
+        assert!(result.contains("After."), "trailing content missing: {result}");
+    }
+
+    /// When a chart title contains backticks or square brackets, the placeholder
+    /// Typst markup must use properly escaped values so the Typst compiler can
+    /// process the document without "unclosed raw block" or "unclosed delimiter"
+    /// errors.
+    #[test]
+    fn failed_chart_with_special_title_escapes_correctly() {
+        let content =
+            "```chartml\ntype: chart\ntitle: \"Revenue from `orders` table [Q1]\"\nvisualize:\n  type: bar\n```";
+        let extraction = chartml_utils::extract_chartml_specs(content);
+        assert_eq!(extraction.specs.len(), 1);
+
+        let chart_image_refs: HashMap<usize, String> = HashMap::new();
+        let typst_rendered: HashMap<usize, String> = HashMap::new();
+
+        let result = replace_chartml_with_typst(
+            content,
+            &extraction,
+            &chart_image_refs,
+            &typst_rendered,
+        );
+
+        // The placeholder must contain escaped versions of the special chars
+        assert!(
+            result.contains("\\`orders\\`"),
+            "backticks must be escaped in placeholder: {result}"
+        );
+        assert!(
+            result.contains("\\[Q1\\]"),
+            "square brackets must be escaped in placeholder: {result}"
+        );
+        // The placeholder must be valid enough to compile — verify via pdf_typst
+        use crate::markdown_to_typst::markdown_to_typst;
+        use crate::pdf_typst::{generate_pdf, wrap_document};
+        let typst_body = markdown_to_typst(&result);
+        let typst_doc = wrap_document("Test", &typst_body);
+        let pdf = generate_pdf(&typst_doc, &std::collections::HashMap::new());
+        assert!(
+            pdf.is_ok(),
+            "Typst compilation must succeed with escaped special chars in chart title: {:?}",
+            pdf.err()
+        );
+    }
+
+    /// When ALL charts fail (data and render both), the PDF must still succeed
+    /// with placeholder blocks for each failed chart.
+    #[test]
+    fn all_charts_failed_pdf_still_succeeds() {
+        let content = concat!(
+            "## Dashboard\n\n",
+            "```chartml\ntype: chart\ntitle: \"Chart A\"\nvisualize:\n  type: bar\n```\n\n",
+            "Some text.\n\n",
+            "```chartml\ntype: chart\ntitle: \"Chart B `with backtick`\"\nvisualize:\n  type: line\n```\n\n",
+            "End."
+        );
+        let extraction = chartml_utils::extract_chartml_specs(content);
+        assert_eq!(extraction.specs.len(), 2);
+
+        // No charts resolved or rendered
+        let chart_image_refs: HashMap<usize, String> = HashMap::new();
+        let typst_rendered: HashMap<usize, String> = HashMap::new();
+
+        let replaced = replace_chartml_with_typst(
+            content,
+            &extraction,
+            &chart_image_refs,
+            &typst_rendered,
+        );
+
+        // Both charts must be placeholders
+        assert_eq!(
+            replaced.matches("Chart unavailable").count(),
+            2,
+            "both charts must show placeholder: {replaced}"
+        );
+
+        // Full Typst compilation must succeed
+        let processed = strip_leading_title(&replaced, "Dashboard");
+        use crate::markdown_to_typst::markdown_to_typst;
+        use crate::pdf_typst::{generate_pdf, wrap_document_with_cover};
+        let typst_body = markdown_to_typst(&processed);
+        let typst_doc = wrap_document_with_cover("Dashboard", &typst_body, Some("May 2026"));
+        let pdf = generate_pdf(&typst_doc, &std::collections::HashMap::new());
+        assert!(
+            pdf.is_ok(),
+            "PDF must succeed even when all charts fail: {:?}",
+            pdf.err()
+        );
+        assert!(pdf.unwrap().len() > 1000, "PDF must have non-trivial content");
+    }
 }

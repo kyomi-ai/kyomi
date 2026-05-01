@@ -342,11 +342,25 @@ fn wrap_document_inner(title: &str, body: &str, cover_date: Option<&str>) -> Str
 ///
 /// Typst uses `*`, `_`, `#`, etc. as markup. We need to escape them
 /// when inserting raw text that should be displayed literally.
+///
+/// Characters escaped:
+/// - `` ` `` — starts a raw span; unescaped backtick without a closing pair causes
+///   "unclosed raw block" compilation errors.
+/// - `[` / `]` — content block delimiters; an unmatched `[` causes "unclosed
+///   delimiter" and even matched pairs create unintended nested content blocks
+///   when interpolated into function arguments like `#text(...)[user text]`.
+/// - `#` — starts a Typst function call or markup directive.
+/// - `$` — starts math mode.
+/// - `*`, `_` — strong/emphasis markup.
+/// - `@`, `~` — reference and non-breaking-space markup.
+/// - `<`, `>` — label syntax.
+/// - `\` — escape character itself.
 pub fn typst_escape(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
+    let mut result = String::with_capacity(text.len() + 8);
     for c in text.chars() {
         match c {
-            '#' | '*' | '_' | '`' | '@' | '<' | '>' | '$' | '~' | '\\' => {
+            '#' | '*' | '_' | '`' | '@' | '<' | '>' | '$' | '~' | '\\'
+            | '[' | ']' => {
                 result.push('\\');
                 result.push(c);
             }
@@ -383,6 +397,51 @@ mod tests {
         assert_eq!(typst_escape("#heading"), "\\#heading");
         assert_eq!(typst_escape("$100"), "\\$100");
         assert_eq!(typst_escape("normal text"), "normal text");
+        // Backtick: must be escaped to prevent "unclosed raw block" Typst errors
+        assert_eq!(typst_escape("`code`"), "\\`code\\`");
+        assert_eq!(typst_escape("use `orders` table"), "use \\`orders\\` table");
+        // Square brackets: must be escaped to prevent unmatched delimiter errors
+        assert_eq!(typst_escape("[Q1]"), "\\[Q1\\]");
+        assert_eq!(typst_escape("Revenue [2026]"), "Revenue \\[2026\\]");
+        // Unmatched bracket that would break Typst compilation without escaping
+        assert_eq!(typst_escape("filter [active"), "filter \\[active");
+    }
+
+    /// Verify that a Typst document with backtick-containing text compiles
+    /// without "unclosed raw block" errors. Regression test for the production
+    /// failure where chart titles containing backticks crashed the entire PDF.
+    #[test]
+    fn document_with_backtick_in_content_compiles() {
+        let source = wrap_document(
+            "Dashboard with `backtick` title",
+            &format!(
+                "#block(fill: rgb(\"#F5F3EF\"), stroke: rgb(\"#E8E5DE\"), radius: 6pt, inset: 24pt, width: 100%)[
+  #align(center)[#text(fill: rgb(\"#6B6660\"), style: \"italic\", font: \"DM Sans\")[Chart unavailable: {}]]
+]",
+                typst_escape("Revenue from `orders` table")
+            ),
+        );
+        let pdf = generate_pdf(&source, &HashMap::new())
+            .expect("PDF with backtick in chart title must compile without error");
+        assert!(!pdf.is_empty());
+    }
+
+    /// Verify that a Typst document with square brackets in user content compiles
+    /// without "unclosed delimiter" errors.
+    #[test]
+    fn document_with_brackets_in_content_compiles() {
+        let source = wrap_document(
+            "Dashboard [Q1 2026]",
+            &format!(
+                "#block(fill: rgb(\"#F5F3EF\"), stroke: rgb(\"#E8E5DE\"), radius: 6pt, inset: 24pt, width: 100%)[
+  #align(center)[#text(fill: rgb(\"#6B6660\"), style: \"italic\", font: \"DM Sans\")[Chart unavailable: {}]]
+]",
+                typst_escape("Revenue [Q1] (2026)")
+            ),
+        );
+        let pdf = generate_pdf(&source, &HashMap::new())
+            .expect("PDF with brackets in chart title must compile without error");
+        assert!(!pdf.is_empty());
     }
 
     #[test]
