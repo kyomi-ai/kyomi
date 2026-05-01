@@ -42,7 +42,6 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use kyomi_auth::{
-    chat_service,
     encryption,
     middleware::AuthUser,
     redis_ops,
@@ -1922,24 +1921,11 @@ async fn run_slack_query(
         }
     });
 
-    // Store the user message BEFORE running the agent — ensures
-    // conversation history is persisted for follow-up messages in the
-    // same Slack thread (matches Python's store_and_broadcast_user_message).
-    let _user_msg_id = chat_service::add_message(
-        db,
-        encryption_key,
-        session_id,
-        "user",
-        message,
-        None, // metadata
-        None, // message_id (auto-generate)
-        current_time_user_tz.as_deref(),
-        Some(user_id),
-        None, // tool_call_id
-        None, // tool_name
-        None, // tool_calls
-    )
-    .await?;
+    // Generate a stable ID for the user message so the agent's
+    // persist_after_chat() stores it exactly once (matches the web frontend
+    // pattern in server_fns/chat.rs where prepare_chat_dispatch() returns a
+    // UUID and the server_fn passes it via user_message_id).
+    let user_message_id = uuid::Uuid::new_v4().to_string();
 
     // Build agent execution config.
     let agent_config = kyomi_agent::execution::AgentExecutionConfig {
@@ -1959,7 +1945,7 @@ async fn run_slack_query(
         tools_subset: None,  // all tools available
         max_iterations: 25,
         component: "slack_agent".into(),
-        user_message_id: None,
+        user_message_id: Some(user_message_id),
         assistant_message_id: None,
         conversation_history: None,
         user_display_name: "Kyomi Slack".to_string(),
