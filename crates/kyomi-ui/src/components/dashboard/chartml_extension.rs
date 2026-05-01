@@ -59,16 +59,6 @@ impl Extension for ChartMLExtension {
         &["chartml"]
     }
 
-    fn capture_context(&self) -> Option<Box<dyn Fn()>> {
-        use chartml_leptos::ProviderRef;
-
-        let provider = leptos::prelude::use_context::<ProviderRef>()?;
-
-        Some(Box::new(move || {
-            leptos::prelude::provide_context(provider.clone());
-        }))
-    }
-
     fn render_code_block(
         &self,
         language: &str,

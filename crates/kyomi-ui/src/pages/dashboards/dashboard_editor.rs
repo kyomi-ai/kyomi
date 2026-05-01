@@ -1268,6 +1268,13 @@ fn DashboardWysiwygEditor(
             Arc::new(extension),
         ];
 
+        let ext_ctx: Arc<dyn Fn() + Send + Sync> =
+            match use_context::<chartml_leptos::ProviderRef>() {
+                Some(provider) => Arc::new(move || {
+                    provide_context(provider.clone());
+                }),
+                None => Arc::new(|| {}),
+            };
 
         match (toolbar_items, inject) {
             (Some(items), Some(inj)) => view! {
@@ -1275,6 +1282,7 @@ fn DashboardWysiwygEditor(
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
                     toolbar_items=items inject=inj
+                    extension_context=ext_ctx
                 />
             }.into_any(),
             (Some(items), None) => view! {
@@ -1282,6 +1290,7 @@ fn DashboardWysiwygEditor(
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
                     toolbar_items=items
+                    extension_context=ext_ctx
                 />
             }.into_any(),
             (None, Some(inj)) => view! {
@@ -1289,12 +1298,14 @@ fn DashboardWysiwygEditor(
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
                     inject=inj
+                    extension_context=ext_ctx
                 />
             }.into_any(),
             (None, None) => view! {
                 <TreeWysiwygEditor
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
+                    extension_context=ext_ctx
                 />
             }.into_any(),
         }
