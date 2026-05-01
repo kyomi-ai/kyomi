@@ -152,10 +152,10 @@ jobs:
         run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
 
       - name: cargo clippy (workspace, excluding desktop)
-        run: cargo clippy --workspace --exclude kyomi-desktop -- -D warnings
+        run: cargo clippy --locked --workspace --exclude kyomi-desktop -- -D warnings
 
       - name: cargo clippy (kyomi-ui, wasm32)
-        run: cargo clippy -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
+        run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
 
       - name: sccache stats
         if: always()
