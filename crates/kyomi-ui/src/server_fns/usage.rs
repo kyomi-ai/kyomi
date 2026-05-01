@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 /// Workspace row — analytics-bundle-only.
 ///
@@ -64,11 +64,10 @@ pub struct UsageData {
 /// Self-hosted mode returns unlimited usage (no billing).
 #[server(prefix = "/leptos-api")]
 pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Self-hosted: no billing, unlimited AI usage
-    if ctx.config.self_hosted {
+    if ac.ctx.config.self_hosted {
         return Ok(UsageData {
             percentage_used: 0.0,
             warning_level: None,
@@ -93,11 +92,9 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
         });
     }
 
-    let ws_id = workspace_id(&auth)?;
-
     let billing_service = kyomi_auth::billing_service::BillingService::new();
     let status = billing_service
-        .get_ai_usage_status(&ctx.db, ws_id, &auth.user_id)
+        .get_ai_usage_status(ac.db(), &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?;
 
@@ -105,11 +102,11 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
     // remaining comes from `status.bundle_remaining_usd` below — it's the
     // authoritative live value (see BundleRow doc comment).
     let bundles = kyomi_core::db_fetch_optional!(
-        &ctx.db,
+        ac.db(),
         BundleRow,
         "SELECT COALESCE(analytics_bundle_events, 0) AS analytics_bundle_events \
          FROM workspaces WHERE workspace_id = $1",
-        ws_id
+        &ac.ws_id
     )
     .map_err(|e| ServerFnError::new(format!("failed to fetch bundle balances: {e}")))?;
 
@@ -117,10 +114,10 @@ pub async fn get_ai_usage_status() -> Result<UsageData, ServerFnError> {
     let ai_bundle_remaining_usd = status.bundle_remaining_usd;
 
     // Get analytics events used this month from Redis.
-    let analytics_events_used: u64 = if let Some(ref redis_url) = ctx.config.redis_url {
+    let analytics_events_used: u64 = if let Some(ref redis_url) = ac.ctx.config.redis_url {
         match kyomi_core::redis::create_pool(redis_url).await {
             Ok(mut conn) => {
-                kyomi_auth::analytics_quota::get_usage_count(&mut conn, ws_id)
+                kyomi_auth::analytics_quota::get_usage_count(&mut conn, &ac.ws_id)
                     .await
                     .unwrap_or(0)
             }

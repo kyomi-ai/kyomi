@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 use crate::pages::sql_editor::types::{CatalogNode, QueryHistoryEntry};
 #[cfg(feature = "ssr")]
@@ -47,12 +47,10 @@ pub async fn dry_run_sql(
     datasource_slug: String,
     sql: String,
 ) -> Result<DryRunResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let (_ds, provider) =
-        super::datasources::create_query_provider(&ctx, &auth, ws_id, &datasource_slug).await?;
+        super::datasources::create_query_provider(&ac.ctx, &ac.auth, &ac.ws_id, &datasource_slug).await?;
 
     let result = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_DRY_RUN,
@@ -110,14 +108,12 @@ pub async fn list_query_history(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<QueryHistoryEntry>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let records = kyomi_auth::sql_history_service::list_query_history(
-        &ctx.db,
-        ws_id,
-        &auth.user_id,
+        ac.db(),
+        &ac.ws_id,
+        &ac.auth.user_id,
         limit.clamp(1, 1000) as i64,
         offset as i64,
         saved_only.unwrap_or(false),
@@ -163,16 +159,14 @@ pub async fn save_query_history(
     error_message: Option<String>,
     datasource: Option<String>,
 ) -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Resolve datasource slug to ID if provided.
     let datasource_config_id = if let Some(ref slug) = datasource {
         let ds = kyomi_auth::datasource_service::get_datasource_by_slug(
-            &ctx.db,
+            ac.db(),
             slug,
-            ws_id,
+            &ac.ws_id,
         )
         .await
         .into_sfn()?;
@@ -182,9 +176,9 @@ pub async fn save_query_history(
     };
 
     let record = kyomi_auth::sql_history_service::create_query_history(
-        &ctx.db,
-        ws_id,
-        &auth.user_id,
+        ac.db(),
+        &ac.ws_id,
+        &ac.auth.user_id,
         datasource_config_id.as_deref(),
         &query_text,
         execution_time_ms,
@@ -209,15 +203,13 @@ pub async fn update_query_history(
     query_id: String,
     is_saved: Option<bool>,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let result = kyomi_auth::sql_history_service::update_query_history(
-        &ctx.db,
+        ac.db(),
         &query_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
         is_saved,
         None, // query_name
         None, // tags
@@ -243,15 +235,13 @@ pub async fn update_query_history(
 pub async fn delete_query_history(
     query_id: String,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let deleted = kyomi_auth::sql_history_service::delete_query_history(
-        &ctx.db,
+        ac.db(),
         &query_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
     )
     .await
     .into_sfn()?;
@@ -293,15 +283,13 @@ pub async fn get_catalog_tree(
 ) -> Result<CatalogTreeResult, ServerFnError> {
     use std::collections::BTreeMap;
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Resolve datasource.
     let datasource = kyomi_auth::datasource_service::resolve_datasource(
-        &ctx.db,
+        ac.db(),
         &datasource_slug,
-        ws_id,
+        &ac.ws_id,
         false,
     )
     .await
@@ -315,11 +303,11 @@ pub async fn get_catalog_tree(
     // the generic per-workspace indexer but this read site was missed, so
     // samples appeared empty in the UI. Query by `datasource_config_id`
     // uniformly — works for every datasource type including samples.
-    let is_pg = ctx.db.is_postgres();
+    let is_pg = ac.db().is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
     let mut cached_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> =
         kyomi_core::db_fetch_all!(
-            &ctx.db, kyomi_core::models::table_cache::DatasourceTableCache,
+            ac.db(), kyomi_core::models::table_cache::DatasourceTableCache,
             &format!(
                 "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
                  table_metadata, column_descriptions, created_at, updated_at, \
@@ -342,7 +330,7 @@ pub async fn get_catalog_tree(
         if include_public {
             let public_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> =
                 kyomi_core::db_fetch_all!(
-                    &ctx.db, kyomi_core::models::table_cache::DatasourceTableCache,
+                    ac.db(), kyomi_core::models::table_cache::DatasourceTableCache,
                     &format!(
                         "SELECT id, workspace_id, datasource_config_id, project_id, dataset_id, table_id, \
                          table_metadata, column_descriptions, created_at, updated_at, \
@@ -518,14 +506,12 @@ pub async fn search_catalog(
     datasource_slug: String,
     query: String,
 ) -> Result<Vec<CatalogNode>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let datasource = kyomi_auth::datasource_service::resolve_datasource(
-        &ctx.db,
+        ac.db(),
         &datasource_slug,
-        ws_id,
+        &ac.ws_id,
         false,
     )
     .await
@@ -536,7 +522,7 @@ pub async fn search_catalog(
     // Samples now index into the user's workspace via the generic indexer
     // (see `onboarding::add_sample_datasource`), so we query by
     // `datasource_config_id` uniformly.
-    let is_pg = ctx.db.is_postgres();
+    let is_pg = ac.db().is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
     let ilike = kyomi_core::sql_compat::ilike(is_pg, "table_id", "$2");
 
@@ -551,7 +537,7 @@ pub async fn search_catalog(
          ORDER BY table_id \
          LIMIT 50"
     );
-    let mut cached_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> = match &ctx.db {
+    let mut cached_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> = match ac.db() {
         kyomi_core::db::DbPool::Postgres(pg) =>
             sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
                 .bind(&datasource.id)
@@ -586,7 +572,7 @@ pub async fn search_catalog(
                  ORDER BY table_id \
                  LIMIT 50"
             );
-            let public_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> = match &ctx.db {
+            let public_tables: Vec<kyomi_core::models::table_cache::DatasourceTableCache> = match ac.db() {
                 kyomi_core::db::DbPool::Postgres(pg) =>
                     sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&public_sql)
                         .bind(kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID)
@@ -654,16 +640,15 @@ pub async fn search_catalog(
 pub async fn refresh_catalog(
     datasource_slug: String,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Check admin permission.
-    let is_admin = auth
+    let is_admin = ac
+        .auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || auth.workspace.is_owner;
+        || ac.auth.workspace.is_owner;
 
     if !is_admin {
         return Err(ServerFnError::new(
@@ -672,9 +657,9 @@ pub async fn refresh_catalog(
     }
 
     let datasource = kyomi_auth::datasource_service::resolve_datasource(
-        &ctx.db,
+        ac.db(),
         &datasource_slug,
-        ws_id,
+        &ac.ws_id,
         false,
     )
     .await
@@ -685,10 +670,7 @@ pub async fn refresh_catalog(
     // are now indexed into the user's workspace by the generic per-workspace
     // indexer, so the normal refresh path works for them too.)
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     let ds_type: kyomi_core::datasource_registry::DatasourceType =
         datasource.datasource_type.into();
@@ -696,10 +678,10 @@ pub async fn refresh_catalog(
     // Fetch and decrypt credentials in one service call.
     let (user_cred, credentials) =
         kyomi_auth::datasource_service::get_decrypted_user_credentials(
-            &ctx.db,
-            &auth.user_id,
+            ac.db(),
+            &ac.auth.user_id,
             &datasource.id,
-            encryption_key,
+            &*encryption_key,
         )
         .await
         .into_sfn()?;
@@ -716,9 +698,9 @@ pub async fn refresh_catalog(
     // Persist refreshed token if it changed.
     if let Some(ref cred) = user_cred {
         let _ = kyomi_auth::datasource_service::save_user_credential(
-            &ctx.db,
-            encryption_key,
-            &auth.user_id,
+            ac.db(),
+            &*encryption_key,
+            &ac.auth.user_id,
             &datasource.id,
             &cred.workspace_id,
             &credentials,
@@ -727,23 +709,24 @@ pub async fn refresh_catalog(
     }
 
     let user_context =
-        super::datasources::build_user_context(&ctx, &auth).await?;
+        super::datasources::build_user_context(&ac.ctx, &ac.auth).await?;
 
-    let embedding = ctx
+    let embedding = ac
+        .ctx
         .embedding
         .wait_ready()
         .await
         .into_sfn()?;
 
     let params = super::catalog_refresh::CatalogRefreshParams {
-        db: &ctx.db,
+        db: ac.db(),
         embedding,
-        encryption_key,
+        encryption_key: &encryption_key,
         datasource,
-        workspace_id: ws_id,
-        user_id: &auth.user_id,
+        workspace_id: &ac.ws_id,
+        user_id: &ac.auth.user_id,
         force: false,
-        connect_registry: ctx.connect_registry.as_ref(),
+        connect_registry: ac.ctx.connect_registry.as_ref(),
         user_context,
         credentials,
     };
@@ -788,15 +771,13 @@ pub async fn get_table_info(
     datasource_slug: String,
     table_id: String,
 ) -> Result<TableInfoResponse, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Resolve datasource to verify workspace access.
     let datasource = kyomi_auth::datasource_service::resolve_datasource(
-        &ctx.db,
+        ac.db(),
         &datasource_slug,
-        ws_id,
+        &ac.ws_id,
         false,
     )
     .await
@@ -814,7 +795,7 @@ pub async fn get_table_info(
         }
     };
 
-    let is_pg = ctx.db.is_postgres();
+    let is_pg = ac.db().is_postgres();
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
 
     // Query matching rows from table cache, filtered by datasource_config_id
@@ -842,7 +823,7 @@ pub async fn get_table_info(
     let table: Option<kyomi_core::models::table_cache::DatasourceTableCache> = if project_id
         .is_empty()
     {
-        match &ctx.db {
+        match ac.db() {
             kyomi_core::db::DbPool::Postgres(pg) => {
                 sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
                     .bind(&datasource.id)
@@ -863,7 +844,7 @@ pub async fn get_table_info(
             }
         }
     } else {
-        match &ctx.db {
+        match ac.db() {
             kyomi_core::db::DbPool::Postgres(pg) => {
                 sqlx::query_as::<_, kyomi_core::models::table_cache::DatasourceTableCache>(&sql)
                     .bind(&datasource.id)
@@ -932,7 +913,7 @@ pub async fn generate_chart_from_results(
     datasource_slug: String,
 ) -> Result<GeneratedChart, ServerFnError> {
     // Auth check — must be logged in.
-    let _auth = extract_auth().await?;
+    let _ac = AuthenticatedContext::extract().await?;
 
     if columns.is_empty() {
         return Err(ServerFnError::new("No columns provided"));
@@ -1216,11 +1197,10 @@ pub struct WsConnectionInfo {
 /// Called once when the SQL Editor page mounts to set up the streaming handler.
 #[server(prefix = "/leptos-api")]
 pub async fn get_ws_connection_info() -> Result<WsConnectionInfo, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     Ok(WsConnectionInfo {
-        user_id: auth.user_id.clone(),
-        workspace_id: ws_id.to_string(),
+        user_id: ac.auth.user_id.clone(),
+        workspace_id: ac.ws_id.clone(),
     })
 }

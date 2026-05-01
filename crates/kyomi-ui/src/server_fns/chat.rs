@@ -228,20 +228,18 @@ pub async fn store_chart_context_for_ask(
 /// The client uses this token to authenticate the WebSocket upgrade request.
 #[server(prefix = "/leptos-api")]
 pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
-    let auth = super::extract_auth().await?;
-    let ctx = super::extract_context()?;
-    let workspace_id = super::workspace_id(&auth)?.to_string();
+    let ac = AuthenticatedContext::extract().await?;
 
     let mut extra = std::collections::HashMap::new();
-    extra.insert("user_id".into(), serde_json::json!(auth.user_id));
-    extra.insert("email".into(), serde_json::json!(auth.email));
-    extra.insert("name".into(), serde_json::json!(auth.name));
-    extra.insert("roles".into(), serde_json::json!(auth.roles));
+    extra.insert("user_id".into(), serde_json::json!(ac.auth.user_id));
+    extra.insert("email".into(), serde_json::json!(ac.auth.email));
+    extra.insert("name".into(), serde_json::json!(ac.auth.name));
+    extra.insert("roles".into(), serde_json::json!(ac.auth.roles));
 
     // Short-lived token (15 minutes) — matches apps/server/src/routes/auth.rs
     let token = kyomi_auth::jwt::create_access_token_str(
-        &auth.user_id,
-        &ctx.config.jwt_secret,
+        &ac.auth.user_id,
+        &ac.ctx.config.jwt_secret,
         15,
         extra,
     )
@@ -249,8 +247,8 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 
     Ok(WebSocketConfig {
         token,
-        user_id: auth.user_id,
-        workspace_id,
+        user_id: ac.auth.user_id.clone(),
+        workspace_id: ac.ws_id.clone(),
     })
 }
 
@@ -266,14 +264,12 @@ pub async fn get_websocket_config() -> Result<WebSocketConfig, ServerFnError> {
 /// Mirrors `GET /chat/sessions` in `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_chat_sessions(pinned_only: bool) -> Result<Vec<ChatSessionItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let sessions = kyomi_auth::chat_service::get_user_sessions(
-        &ctx.db,
-        &auth.user_id,
-        ws_id,
+        ac.db(),
+        &ac.auth.user_id,
+        &ac.ws_id,
         200,   // limit (matches default_session_limit clamped to max)
         0,     // offset
         pinned_only,
@@ -299,29 +295,24 @@ pub async fn list_chat_sessions(pinned_only: bool) -> Result<Vec<ChatSessionItem
 pub async fn get_session_messages(
     session_id: String,
 ) -> Result<SessionMessagesResponse, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Permission check: user must own or have shared access.
     let session = kyomi_auth::chat_service::get_session_info(
-        &ctx.db,
-        &auth.user_id,
+        ac.db(),
+        &ac.auth.user_id,
         &session_id,
-        Some(ws_id),
+        Some(&ac.ws_id),
     )
     .await
     .into_sfn()?
     .ok_or_else(|| ServerFnError::new("Session not found or access denied"))?;
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     let messages = kyomi_auth::chat_service::get_session_messages(
-        &ctx.db,
-        encryption_key,
+        ac.db(),
+        &encryption_key,
         &session_id,
         200, // limit
     )
@@ -349,22 +340,20 @@ pub async fn update_session_title(
     session_id: String,
     title: String,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Verify ownership (only owner can update title).
     let session = kyomi_auth::chat_service::get_session_info(
-        &ctx.db,
-        &auth.user_id,
+        ac.db(),
+        &ac.auth.user_id,
         &session_id,
-        Some(ws_id),
+        Some(&ac.ws_id),
     )
     .await
     .into_sfn()?;
 
     match session {
-        Some(s) if s.user_id == auth.user_id => {}
+        Some(s) if s.user_id == ac.auth.user_id => {}
         Some(_) => {
             return Err(ServerFnError::new(
                 "Only the session owner can update the title",
@@ -376,7 +365,7 @@ pub async fn update_session_title(
     }
 
     let updated =
-        kyomi_auth::chat_service::update_session_title(&ctx.db, &session_id, &title)
+        kyomi_auth::chat_service::update_session_title(ac.db(), &session_id, &title)
             .await
             .into_sfn()?;
 
@@ -386,7 +375,7 @@ pub async fn update_session_title(
 
     tracing::info!(
         session_id = %session_id,
-        user_id = %auth.user_id,
+        user_id = %ac.auth.user_id,
         "Updated session title"
     );
 
@@ -402,15 +391,13 @@ pub async fn update_session_title(
 /// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let deleted = kyomi_auth::chat_service::delete_session(
-        &ctx.db,
-        &auth.user_id,
+        ac.db(),
+        &ac.auth.user_id,
         &session_id,
-        Some(ws_id),
+        Some(&ac.ws_id),
     )
     .await
     .into_sfn()?;
@@ -423,26 +410,26 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
 
     tracing::info!(
         session_id = %session_id,
-        user_id = %auth.user_id,
+        user_id = %ac.auth.user_id,
         "Deleted chat session"
     );
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::CHAT_SESSION.to_string(),
             entity_id: session_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Delete,
             data: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -459,9 +446,7 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
 /// `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     if session_ids.is_empty() {
         return Err(ServerFnError::new("session_ids cannot be empty"));
@@ -474,38 +459,38 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
     }
 
     let deleted_count = kyomi_auth::chat_service::bulk_delete_sessions(
-        &ctx.db,
-        &auth.user_id,
+        ac.db(),
+        &ac.auth.user_id,
         &session_ids,
-        ws_id,
+        &ac.ws_id,
     )
     .await
     .into_sfn()?;
 
     tracing::info!(
         deleted_count = deleted_count,
-        user_id = %auth.user_id,
+        user_id = %ac.auth.user_id,
         "Bulk deleted chat sessions"
     );
 
     // Broadcast live sync action for each deleted session.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let timestamp = chrono::Utc::now().to_rfc3339();
         for id in &session_ids {
             let sync_action = kyomi_types::sync::SyncAction {
                 sync_id: 0,
                 entity_type: kyomi_types::sync::entity_types::CHAT_SESSION.to_string(),
                 entity_id: id.clone(),
-                workspace_id: ws_id.to_string(),
+                workspace_id: ac.ws_id.clone(),
                 action: kyomi_types::sync::SyncActionType::Delete,
                 data: None,
                 timestamp: timestamp.clone(),
             };
             kyomi_auth::websocket::helpers::send_sync_action(
                 ws_manager,
-                ws_id,
+                &ac.ws_id,
                 &sync_action,
-                Some(&auth.user_id),
+                Some(&ac.auth.user_id),
             )
             .await;
         }
@@ -522,18 +507,16 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
 /// Mirrors `GET /chat/search` in `apps/server/src/routes/chat.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn search_chat_messages(query: String) -> Result<Vec<ChatSessionItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     if query.is_empty() {
         return Ok(Vec::new());
     }
 
     let sessions = kyomi_auth::chat_service::search_sessions(
-        &ctx.db,
-        &auth.user_id,
-        ws_id,
+        ac.db(),
+        &ac.auth.user_id,
+        &ac.ws_id,
         &query,
         50, // limit (matches default_search_limit)
     )
@@ -569,9 +552,7 @@ pub async fn send_chat_message(
     // deduplication when shared_chat_message WebSocket broadcast arrives.
     client_msg_id: Option<String>,
 ) -> Result<SendMessageResponse, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // 1. Validate message.
     if message.trim().is_empty() {
@@ -584,33 +565,29 @@ pub async fn send_chat_message(
     }
 
     // 2. Gate: LLM must be configured for AI features.
-    if !ctx.config.llm_configured() {
+    if !ac.ctx.config.llm_configured() {
         return Err(ServerFnError::new(
             "No LLM provider configured. Add ANTHROPIC_API_KEY or LLM_API_KEY to your environment.",
         ));
     }
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?
-        .clone();
+    let encryption_key = ac.encryption_key()?;
 
-    let user_display_name = auth
+    let user_display_name = ac.auth
         .name
         .as_deref()
-        .unwrap_or(&auth.email)
+        .unwrap_or(&ac.auth.email)
         .to_string();
 
     // 3–5. Find/create session, handle skip_ai, broadcast user message.
     // Callout 1 of 3.
     let outcome = kyomi_auth::chat_service::prepare_chat_dispatch(
         kyomi_auth::chat_service::ChatDispatchParams {
-            db: &ctx.db,
+            db: ac.db(),
             encryption_key: &encryption_key,
-            ws_manager: ctx.ws_manager.as_ref(),
-            user_id: &auth.user_id,
-            workspace_id: ws_id,
+            ws_manager: ac.ctx.ws_manager.as_ref(),
+            user_id: &ac.auth.user_id,
+            workspace_id: &ac.ws_id,
             user_display_name: &user_display_name,
             session_id: session_id.as_deref(),
             message: &message,
@@ -650,19 +627,19 @@ pub async fn send_chat_message(
 
     // 6. Build execution config and spawn agent task.
     // Requires ws_manager and cancel_registry to be provided in ServerContext.
-    let ws_manager = ctx
+    let ws_manager = ac.ctx
         .ws_manager
         .as_ref()
         .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?
         .clone();
 
-    let cancel_registry = ctx
+    let cancel_registry = ac.ctx
         .cancel_registry
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Cancel registry not configured"))?
         .clone();
 
-    let platforms = ctx
+    let platforms = ac.ctx
         .platforms
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Platform registry not configured"))?
@@ -672,8 +649,8 @@ pub async fn send_chat_message(
 
     let exec_config = kyomi_agent::AgentExecutionConfig {
         session_id: session_id.clone(),
-        user_id: auth.user_id.clone(),
-        workspace_id: ws_id.to_string(),
+        user_id: ac.auth.user_id.clone(),
+        workspace_id: ac.ws_id.clone(),
         message: message.clone(),
         model_name: model,
         temperature: 0.7,
@@ -690,27 +667,23 @@ pub async fn send_chat_message(
         user_message_id: Some(user_message_id.clone()),
         assistant_message_id: Some(assistant_message_id.clone()),
         conversation_history: None,
-        user_display_name: auth.name.clone().unwrap_or_else(|| auth.email.clone()),
+        user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
     };
 
     // Register cancel token so WebSocket cancel_request can stop this task.
-    cancel_registry.register(&auth.user_id, &session_id, cancel_token.clone());
+    cancel_registry.register(&ac.auth.user_id, &session_id, cancel_token.clone());
 
     // Spawn async task for AI execution + response delivery.
-    let db = ctx.db.clone();
-    let kv = ctx
-        .kv
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("KV store not configured"))?
-        .clone();
+    let db = ac.ctx.db.clone();
+    let kv = ac.kv()?;
 
-    let embedding = ctx.embedding.clone();
-    let app_config = ctx.config.clone();
-    let connect_registry = ctx.connect_registry.clone();
-    let spawn_user_id = auth.user_id.clone();
+    let embedding = ac.ctx.embedding.clone();
+    let app_config = ac.ctx.config.clone();
+    let connect_registry = ac.ctx.connect_registry.clone();
+    let spawn_user_id = ac.auth.user_id.clone();
     let spawn_session_id = session_id.clone();
     let spawn_assistant_message_id = assistant_message_id.clone();
-    let spawn_workspace_id = ws_id.to_string();
+    let spawn_workspace_id = ac.ws_id.clone();
     let spawn_is_shared = is_shared;
     let context_type = "chat".to_string();
 
@@ -802,16 +775,16 @@ pub async fn send_chat_message(
     // `resolve_provider_config` would silently skip titles for BYOK-only
     // deployments that never set server Kyomi keys.
     if is_new_session
-        && let Some(ref ws_mgr) = ctx.ws_manager
+        && let Some(ref ws_mgr) = ac.ctx.ws_manager
     {
         kyomi_agent::generate_session_title(
-            ctx.db.clone(),
+            ac.ctx.db.clone(),
             ws_mgr.clone(),
             session_id.clone(),
-            auth.user_id.clone(),
-            ws_id.to_string(),
+            ac.auth.user_id.clone(),
+            ac.ws_id.clone(),
             message.clone(),
-            ctx.config.clone(),
+            ac.ctx.config.clone(),
         );
     }
 
@@ -967,16 +940,14 @@ pub async fn mark_session_read(
     session_id: String,
     last_message_id: Option<String>,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Permission check: user must own or have shared access.
     let session = kyomi_auth::chat_service::get_session_info(
-        &ctx.db,
-        &auth.user_id,
+        ac.db(),
+        &ac.auth.user_id,
         &session_id,
-        Some(ws_id),
+        Some(&ac.ws_id),
     )
     .await
     .into_sfn()?;
@@ -996,7 +967,7 @@ pub async fn mark_session_read(
             message_id: String,
         }
         let latest = kyomi_core::db_fetch_optional!(
-            &ctx.db,
+            ac.db(),
             MsgIdRow,
             "SELECT message_id FROM chat_messages \
              WHERE session_id = $1 \
@@ -1012,14 +983,14 @@ pub async fn mark_session_read(
     let now_str = now.to_rfc3339();
 
     kyomi_core::db_execute!(
-        &ctx.db,
+        ac.db(),
         "INSERT INTO conversation_read_status \
          (session_id, user_id, last_read_at, last_read_message_id) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (session_id, user_id) \
          DO UPDATE SET last_read_at = $3, last_read_message_id = $4",
         &session_id,
-        &auth.user_id,
+        &ac.auth.user_id,
         &now_str,
         message_id.as_deref()
     )
@@ -1027,7 +998,7 @@ pub async fn mark_session_read(
 
     tracing::info!(
         session_id = %session_id,
-        user_id = %auth.user_id,
+        user_id = %ac.auth.user_id,
         message_id = ?message_id,
         "Marked session as read"
     );
@@ -1048,16 +1019,14 @@ pub async fn toggle_message_pin(
     session_id: String,
     message_id: String,
 ) -> Result<bool, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let success = kyomi_auth::chat_service::toggle_message_pin(
-        &ctx.db,
+        ac.db(),
         &session_id,
         &message_id,
-        &auth.user_id,
-        Some(ws_id),
+        &ac.auth.user_id,
+        Some(&ac.ws_id),
     )
     .await
     .into_sfn()?;
@@ -1086,9 +1055,7 @@ pub async fn update_message_content(
     message_id: String,
     content: String,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     if content.len() > 100_000 {
         return Err(ServerFnError::new(
@@ -1096,17 +1063,14 @@ pub async fn update_message_content(
         ));
     }
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     // Verify ownership, verify message membership, re-encrypt, and persist.
     kyomi_auth::chat_service::update_message_content_owned(
-        &ctx.db,
-        encryption_key,
-        &auth.user_id,
-        ws_id,
+        ac.db(),
+        &encryption_key,
+        &ac.auth.user_id,
+        &ac.ws_id,
         &session_id,
         &message_id,
         &content,
@@ -1117,7 +1081,7 @@ pub async fn update_message_content(
     tracing::info!(
         session_id = %session_id,
         message_id = %message_id,
-        user_id = %auth.user_id,
+        user_id = %ac.auth.user_id,
         "Updated message content"
     );
 
@@ -1129,7 +1093,7 @@ pub async fn update_message_content(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
 
 /// Convert a `chat_service::SessionListItem` to our `ChatSessionItem`.
 #[cfg(feature = "ssr")]

@@ -158,17 +158,15 @@ fn execution_to_alert(execution: &kyomi_core::models::WatchExecution) -> AlertIt
 /// Mirrors `GET /watches/` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let watches = kyomi_auth::watch_service::list_watches(&ctx.db, ws_id)
+    let watches = kyomi_auth::watch_service::list_watches(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?;
 
     let mut items = Vec::with_capacity(watches.len());
     for w in &watches {
-        items.push(watch_to_item(&ctx.db, w).await);
+        items.push(watch_to_item(ac.db(), w).await);
     }
 
     Ok(items)
@@ -179,9 +177,7 @@ pub async fn list_watches() -> Result<Vec<WatchListItem>, ServerFnError> {
 /// Mirrors `POST /watches/` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let WatchConfig {
         name,
@@ -206,9 +202,9 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         .map_err(|e| ServerFnError::new(format!("Invalid queries JSON: {e}")))?;
 
     let watch = kyomi_auth::watch_service::create_watch(
-        &ctx.db,
-        ws_id,
-        &auth.user_id,
+        ac.db(),
+        &ac.ws_id,
+        &ac.auth.user_id,
         name.trim(),
         prompt.trim(),
         &schedule,
@@ -226,7 +222,7 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         && !channel_id.is_empty()
     {
         kyomi_core::platform::set_watch_alert_channel(
-            &ctx.db,
+            ac.db(),
             &watch.watch_id,
             "slack",
             channel_id,
@@ -243,12 +239,12 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
     }
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
             entity_id: watch.watch_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Insert,
             data: Some(serde_json::json!({
                 "watch_id": watch.watch_id,
@@ -258,14 +254,14 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
 
-    Ok(watch_to_item(&ctx.db, &watch).await)
+    Ok(watch_to_item(ac.db(), &watch).await)
 }
 
 /// Get a single watch by ID.
@@ -273,16 +269,14 @@ pub async fn create_watch(config: WatchConfig) -> Result<WatchListItem, ServerFn
 /// Mirrors `GET /watches/{watch_id}` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_watch(watch_id: String) -> Result<WatchListItem, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let watch = kyomi_auth::watch_service::get_watch(&ctx.db, &watch_id, ws_id)
+    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
-    Ok(watch_to_item(&ctx.db, &watch).await)
+    Ok(watch_to_item(ac.db(), &watch).await)
 }
 
 /// Update a watch with partial fields.
@@ -293,9 +287,7 @@ pub async fn update_watch(
     watch_id: String,
     config: WatchConfig,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let WatchConfig {
         name: name_val,
@@ -360,7 +352,7 @@ pub async fn update_watch(
     }
 
     if has_updates {
-        kyomi_auth::watch_service::update_watch(&ctx.db, &watch_id, ws_id, &updates)
+        kyomi_auth::watch_service::update_watch(ac.db(), &watch_id, &ac.ws_id, &updates)
             .await
             .into_sfn()?;
     }
@@ -368,7 +360,7 @@ pub async fn update_watch(
     // Update the Slack alert channel if provided
     if let Some(ref channel_id) = slack_channel_id {
         if channel_id.is_empty() {
-            kyomi_core::platform::remove_watch_alert_channel(&ctx.db, &watch_id, "slack")
+            kyomi_core::platform::remove_watch_alert_channel(ac.db(), &watch_id, "slack")
                 .await
                 .map_err(|e| {
                     tracing::error!(watch_id = %watch_id, "Failed to remove alert channel: {e}");
@@ -376,7 +368,7 @@ pub async fn update_watch(
                 })?;
         } else {
             kyomi_core::platform::set_watch_alert_channel(
-                &ctx.db,
+                ac.db(),
                 &watch_id,
                 "slack",
                 channel_id,
@@ -391,21 +383,21 @@ pub async fn update_watch(
     }
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
             entity_id: watch_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Update,
             data: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -418,30 +410,28 @@ pub async fn update_watch(
 /// Mirrors `DELETE /watches/{watch_id}` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::delete_watch(&ctx.db, &watch_id, ws_id)
+    kyomi_auth::watch_service::delete_watch(ac.db(), &watch_id, &ac.ws_id)
         .await
         .into_sfn()?;
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
             entity_id: watch_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Delete,
             data: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -454,35 +444,33 @@ pub async fn delete_watch(watch_id: String) -> Result<(), ServerFnError> {
 /// Mirrors `POST /watches/{watch_id}/toggle` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let watch = kyomi_auth::watch_service::get_watch(&ctx.db, &watch_id, ws_id)
+    let watch = kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
-    kyomi_auth::watch_service::toggle_watch(&ctx.db, &watch_id, ws_id, !watch.enabled)
+    kyomi_auth::watch_service::toggle_watch(ac.db(), &watch_id, &ac.ws_id, !watch.enabled)
         .await
         .into_sfn()?;
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::WATCH.to_string(),
             entity_id: watch_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Update,
             data: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -497,13 +485,11 @@ pub async fn toggle_watch(watch_id: String) -> Result<(), ServerFnError> {
 /// Mirrors `POST /watches/{watch_id}/run` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Rate limit and concurrency check
     let (can_run, reason) =
-        kyomi_auth::watch_service::can_run_watch_now(&ctx.db, &watch_id, ws_id)
+        kyomi_auth::watch_service::can_run_watch_now(ac.db(), &watch_id, &ac.ws_id)
             .await
             .into_sfn()?;
 
@@ -512,28 +498,25 @@ pub async fn run_watch_now(watch_id: String) -> Result<(), ServerFnError> {
     }
 
     // Spawn background execution — require all necessary services
-    let bg_db = ctx.db.clone();
-    let bg_kv = ctx
-        .kv
-        .clone()
-        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
-    let bg_encryption_key = ctx
-        .encryption_key
-        .clone()
-        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
-    let bg_embedding = ctx
+    let bg_db = ac.ctx.db.clone();
+    let bg_kv = ac.kv()?;
+    let bg_encryption_key = ac.encryption_key()?;
+    let bg_embedding = ac
+        .ctx
         .embedding
         .wait_ready()
         .await
         .map_err(|e| ServerFnError::new(format!("Embedding model not ready: {e}")))?
         .clone();
-    let bg_ws_manager = ctx
+    let bg_ws_manager = ac
+        .ctx
         .ws_manager
         .clone()
         .ok_or_else(|| ServerFnError::new("WebSocket manager not available"))?;
-    let bg_config = ctx.config.clone();
-    let bg_connect = ctx.connect_registry.clone();
-    let bg_platforms = ctx
+    let bg_config = ac.ctx.config.clone();
+    let bg_connect = ac.ctx.connect_registry.clone();
+    let bg_platforms = ac
+        .ctx
         .platforms
         .clone()
         .ok_or_else(|| ServerFnError::new("Platform registry not available"))?;
@@ -576,14 +559,12 @@ pub async fn get_watch_executions(
     watch_id: String,
     limit: Option<i64>,
 ) -> Result<Vec<WatchExecutionItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let limit = limit.unwrap_or(20).clamp(1, 100) as u32;
 
     let executions =
-        kyomi_auth::watch_service::get_executions(&ctx.db, &watch_id, ws_id, limit)
+        kyomi_auth::watch_service::get_executions(ac.db(), &watch_id, &ac.ws_id, limit)
             .await
             .into_sfn()?;
 
@@ -599,12 +580,10 @@ pub async fn get_watch_execution(
     watch_id: String,
     execution_id: i32,
 ) -> Result<WatchExecutionItem, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let execution =
-        kyomi_auth::watch_service::get_execution_by_id(&ctx.db, &watch_id, execution_id, ws_id)
+        kyomi_auth::watch_service::get_execution_by_id(ac.db(), &watch_id, execution_id, &ac.ws_id)
             .await
             .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Execution not found"))?;
@@ -626,17 +605,15 @@ pub async fn get_alerts(
     offset: Option<i64>,
     include_deleted: Option<bool>,
 ) -> Result<AlertsPage, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let offset = offset.unwrap_or(0).max(0);
     let include_deleted = include_deleted.unwrap_or(false);
 
     let (executions, total) = kyomi_auth::watch_service::get_alerts_history(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         watch_id.as_deref(),
         limit,
         offset,
@@ -656,11 +633,9 @@ pub async fn get_alerts(
 /// Mirrors `GET /watches/alerts/count` in `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::get_unread_alerts_count(&ctx.db, ws_id)
+    kyomi_auth::watch_service::get_unread_alerts_count(ac.db(), &ac.ws_id)
         .await
         .into_sfn()
 }
@@ -671,11 +646,9 @@ pub async fn get_unread_alerts_count() -> Result<i64, ServerFnError> {
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::mark_alert_read(&ctx.db, execution_id, ws_id)
+    kyomi_auth::watch_service::mark_alert_read(ac.db(), execution_id, &ac.ws_id)
         .await
         .into_sfn()
 }
@@ -686,11 +659,9 @@ pub async fn mark_alert_read(execution_id: i32) -> Result<(), ServerFnError> {
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::mark_alert_unread(&ctx.db, execution_id, ws_id)
+    kyomi_auth::watch_service::mark_alert_unread(ac.db(), execution_id, &ac.ws_id)
         .await
         .into_sfn()
 }
@@ -701,11 +672,9 @@ pub async fn mark_alert_unread(execution_id: i32) -> Result<(), ServerFnError> {
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::delete_alert(&ctx.db, execution_id, ws_id, &auth.user_id)
+    kyomi_auth::watch_service::delete_alert(ac.db(), execution_id, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()
 }
@@ -716,11 +685,9 @@ pub async fn delete_alert(execution_id: i32) -> Result<(), ServerFnError> {
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::watch_service::restore_alert(&ctx.db, execution_id, ws_id)
+    kyomi_auth::watch_service::restore_alert(ac.db(), execution_id, &ac.ws_id)
         .await
         .into_sfn()
 }
@@ -731,9 +698,7 @@ pub async fn restore_alert(execution_id: i32) -> Result<(), ServerFnError> {
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     if execution_ids.is_empty() {
         return Err(ServerFnError::new("execution_ids must not be empty"));
@@ -751,7 +716,7 @@ pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnE
         ));
     }
 
-    kyomi_auth::watch_service::bulk_delete_alerts(&ctx.db, &unique_ids, ws_id, &auth.user_id)
+    kyomi_auth::watch_service::bulk_delete_alerts(ac.db(), &unique_ids, &ac.ws_id, &ac.auth.user_id)
         .await
         .into_sfn()?;
 
@@ -764,9 +729,7 @@ pub async fn bulk_delete_alerts(execution_ids: Vec<i32>) -> Result<(), ServerFnE
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     if execution_ids.is_empty() {
         return Err(ServerFnError::new("execution_ids must not be empty"));
@@ -784,7 +747,7 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
         ));
     }
 
-    kyomi_auth::watch_service::bulk_mark_alerts_read(&ctx.db, &unique_ids, ws_id)
+    kyomi_auth::watch_service::bulk_mark_alerts_read(ac.db(), &unique_ids, &ac.ws_id)
         .await
         .into_sfn()?;
 
@@ -797,9 +760,7 @@ pub async fn bulk_mark_alerts_read(execution_ids: Vec<i32>) -> Result<(), Server
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     if execution_ids.is_empty() {
         return Err(ServerFnError::new("execution_ids must not be empty"));
@@ -817,7 +778,7 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
         ));
     }
 
-    kyomi_auth::watch_service::bulk_mark_alerts_unread(&ctx.db, &unique_ids, ws_id)
+    kyomi_auth::watch_service::bulk_mark_alerts_unread(ac.db(), &unique_ids, &ac.ws_id)
         .await
         .into_sfn()?;
 
@@ -832,20 +793,15 @@ pub async fn bulk_mark_alerts_unread(execution_ids: Vec<i32>) -> Result<(), Serv
 /// `apps/server/src/routes/watches.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let encryption_key = ctx
-        .encryption_key
-        .clone()
-        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+    let encryption_key = ac.encryption_key()?;
 
     kyomi_auth::watch_service::create_chat_session_from_alert(
-        &ctx.db,
+        ac.db(),
         &encryption_key,
-        &auth.user_id,
-        ws_id,
+        &ac.auth.user_id,
+        &ac.ws_id,
         execution_id,
     )
     .await
@@ -860,18 +816,16 @@ pub async fn continue_alert_in_chat(execution_id: i32) -> Result<String, ServerF
 pub async fn get_last_execution(
     watch_id: String,
 ) -> Result<Option<WatchExecutionItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Verify watch exists and belongs to workspace
-    kyomi_auth::watch_service::get_watch(&ctx.db, &watch_id, ws_id)
+    kyomi_auth::watch_service::get_watch(ac.db(), &watch_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Watch not found"))?;
 
     let executions =
-        kyomi_auth::watch_service::get_executions(&ctx.db, &watch_id, ws_id, 1)
+        kyomi_auth::watch_service::get_executions(ac.db(), &watch_id, &ac.ws_id, 1)
             .await
             .into_sfn()?;
 
@@ -892,12 +846,10 @@ pub async fn get_thinking_events(
     watch_id: String,
     execution_id: i32,
 ) -> Result<serde_json::Value, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let execution =
-        kyomi_auth::watch_service::get_execution_by_id(&ctx.db, &watch_id, execution_id, ws_id)
+        kyomi_auth::watch_service::get_execution_by_id(ac.db(), &watch_id, execution_id, &ac.ws_id)
             .await
             .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Execution not found"))?;
@@ -906,13 +858,10 @@ pub async fn get_thinking_events(
 
     // Load thinking events from session messages
     if let Some(ref session_id) = execution.session_id {
-        let encryption_key = ctx
-            .encryption_key
-            .clone()
-            .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+        let encryption_key = ac.encryption_key()?;
 
         match kyomi_auth::chat_service::get_session_messages(
-            &ctx.db,
+            ac.db(),
             &encryption_key,
             session_id,
             1000,
@@ -953,4 +902,4 @@ pub async fn get_thinking_events(
 
 // SSR-only import — placed at bottom to match `dashboards.rs` convention.
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};

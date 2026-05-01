@@ -13,7 +13,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -52,11 +52,9 @@ pub struct ConnectStatusResponse {
 /// Mirrors `GET /api/v1/datasources` with client-side filtering in the React page.
 #[server(prefix = "/leptos-api")]
 pub async fn list_connect_datasources() -> Result<Vec<ConnectDatasource>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let datasources = kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, false)
+    let datasources = kyomi_auth::datasource_service::list_datasources(ac.db(), &ac.ws_id, false)
         .await
         .into_sfn()?;
 
@@ -84,11 +82,9 @@ pub async fn create_connect_datasource(
     slug: Option<String>,
     datasource_type: String,
 ) -> Result<CreateConnectResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
     // Validate datasource type is supported
     if !kyomi_core::datasource_registry::is_supported_type(&datasource_type) {
@@ -111,7 +107,7 @@ pub async fn create_connect_datasource(
     // before mutating the database. `None` means Kyomi Connect is not configured
     // on this server — surface that up front so we don't create an orphan
     // datasource row that we can't mint a token for.
-    if ctx.connect_token.is_none() {
+    if ac.ctx.connect_token.is_none() {
         return Err(ServerFnError::new(
             "Kyomi Connect is not configured on this server",
         ));
@@ -120,8 +116,8 @@ pub async fn create_connect_datasource(
     let slug_ref = slug.as_deref().filter(|s| !s.is_empty());
 
     let ds = kyomi_auth::datasource_service::create_datasource(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         &name,
         slug_ref,
         &datasource_type,
@@ -141,13 +137,13 @@ pub async fn create_connect_datasource(
 
     // Generate Connect JWT token and store the JTI for revocation
     let (token, jti) = generate_connect_token(
-        ctx.connect_token.as_ref(),
+        ac.ctx.connect_token.as_ref(),
         &ds.id,
-        ws_id,
+        &ac.ws_id,
         ds.datasource_type.as_ref(),
     )?;
 
-    kyomi_auth::datasource_service::update_connect_jti(&ctx.db, &ds.id, &jti)
+    kyomi_auth::datasource_service::update_connect_jti(ac.db(), &ds.id, &jti)
         .await
         .into_sfn()?;
 
@@ -156,8 +152,8 @@ pub async fn create_connect_datasource(
         ds.name,
         ds.slug,
         ds.id,
-        ws_id,
-        auth.user_id
+        ac.ws_id,
+        ac.auth.user_id
     );
 
     Ok(CreateConnectResult {
@@ -172,13 +168,11 @@ pub async fn create_connect_datasource(
 /// The old token is immediately invalidated (JTI replaced).
 #[server(prefix = "/leptos-api")]
 pub async fn rotate_connect_token(datasource_id: String) -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
+    let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
@@ -190,13 +184,13 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
     }
 
     let (token, jti) = generate_connect_token(
-        ctx.connect_token.as_ref(),
+        ac.ctx.connect_token.as_ref(),
         &ds.id,
-        ws_id,
+        &ac.ws_id,
         ds.datasource_type.as_ref(),
     )?;
 
-    kyomi_auth::datasource_service::update_connect_jti(&ctx.db, &ds.id, &jti)
+    kyomi_auth::datasource_service::update_connect_jti(ac.db(), &ds.id, &jti)
         .await
         .into_sfn()?;
 
@@ -204,7 +198,7 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
         "Rotated Connect token for datasource '{}' (id: {}) by user {}",
         ds.slug,
         ds.id,
-        auth.user_id
+        ac.auth.user_id
     );
 
     Ok(token)
@@ -218,13 +212,11 @@ pub async fn rotate_connect_token(datasource_id: String) -> Result<String, Serve
 /// reported as disconnected — matching the REST handler's behavior.
 #[server(prefix = "/leptos-api")]
 pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusResponse, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
+    let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
@@ -236,7 +228,7 @@ pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusRespon
     }
 
     // Single-instance mode (no Redis) — always report disconnected.
-    let Some(mut redis) = ctx.redis.clone() else {
+    let Some(mut redis) = ac.ctx.redis.clone() else {
         return Ok(ConnectStatusResponse {
             connected: false,
             last_seen: None,
@@ -259,13 +251,11 @@ pub async fn connect_status(datasource_id: String) -> Result<ConnectStatusRespon
 /// Clears the stored JTI so any active token immediately fails verification.
 #[server(prefix = "/leptos-api")]
 pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
+    let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
@@ -276,7 +266,7 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
         ));
     }
 
-    kyomi_auth::datasource_service::clear_connect_jti(&ctx.db, &ds.id)
+    kyomi_auth::datasource_service::clear_connect_jti(ac.db(), &ds.id)
         .await
         .into_sfn()?;
 
@@ -284,7 +274,7 @@ pub async fn disconnect_connect_datasource(datasource_id: String) -> Result<(), 
         "Disconnected Connect datasource '{}' (id: {}) by user {}",
         ds.slug,
         ds.id,
-        auth.user_id
+        ac.auth.user_id
     );
 
     Ok(())

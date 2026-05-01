@@ -134,9 +134,7 @@ pub async fn list_dashboards(
     sort_by: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<DashboardListItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let sort = match sort_by.as_deref() {
         Some("popularity") => kyomi_auth::dashboard_service::SearchSort::Popularity,
@@ -147,8 +145,8 @@ pub async fn list_dashboards(
     let limit = limit.unwrap_or(50).clamp(1, 100);
 
     let results = kyomi_auth::dashboard_service::search_dashboards(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         query.as_deref(),
         Some(kyomi_core::models::DocType::Dashboard), // dashboard page only shows dashboards
         sort,
@@ -197,21 +195,19 @@ pub(crate) fn map_search_result_to_list_item(
 /// Mirrors `GET /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_dashboard(dashboard_id: String) -> Result<DashboardDetail, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let dashboard =
-        kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+        kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
             .await
             .into_sfn()?
             .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
     // Record view for popularity tracking (fire-and-forget)
-    let db = ctx.db.clone();
+    let db = ac.ctx.db.clone();
     let did = dashboard_id.clone();
-    let uid = auth.user_id.clone();
-    let wid = ws_id.to_string();
+    let uid = ac.auth.user_id.clone();
+    let wid = ac.ws_id.clone();
     tokio::spawn(async move {
         if let Err(e) = kyomi_auth::dashboard_service::record_view(&db, &did, &uid, &wid).await {
             tracing::warn!(dashboard_id = %did, error = %e, "Failed to record dashboard view");
@@ -248,20 +244,18 @@ pub async fn create_dashboard(
     title: String,
     content: Option<String>,
 ) -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let content = content.unwrap_or_default();
 
     // Get embedding service for both embedding generation and rechunking
-    let embedding_svc = ctx.embedding.wait_ready().await
+    let embedding_svc = ac.ctx.embedding.wait_ready().await
         .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
 
     let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-        &ctx.db,
-        &auth.user_id,
-        ws_id,
+        ac.db(),
+        &ac.auth.user_id,
+        &ac.ws_id,
         &title,
         &content,
         kyomi_core::models::DocType::Dashboard,
@@ -270,21 +264,21 @@ pub async fn create_dashboard(
     .await
     .into_sfn()?;
     kyomi_auth::dashboard_service::spawn_embedding_generation(
-        ctx.db.clone(),
+        ac.ctx.db.clone(),
         embedding_svc.clone(),
         dashboard_id.clone(),
-        ws_id.to_string(),
+        ac.ws_id.clone(),
         title.trim().to_string(),
         content.clone(),
     );
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::DASHBOARD.to_string(),
             entity_id: dashboard_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Insert,
             data: Some(serde_json::json!({
                 "dashboard_id": dashboard_id,
@@ -294,9 +288,9 @@ pub async fn create_dashboard(
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -318,9 +312,7 @@ pub async fn update_dashboard(
     change_summary: Option<String>,
 ) -> Result<(), ServerFnError> {
     // lint-allow: server-fn-callouts=sync broadcast is a separate cross-cutting concern alongside mutation + embedding + re-fetch
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Reject no-op updates (matches REST handler validation)
     if title.is_none() && content.is_none() && change_summary.is_none() {
@@ -329,11 +321,11 @@ pub async fn update_dashboard(
 
     kyomi_auth::dashboard_service::update_dashboard(
         kyomi_auth::dashboard_service::UpdateDashboardParams {
-            db: &ctx.db,
+            db: ac.db(),
             embed: None, // no rechunking from dashboard UI (yet)
             dashboard_id: &dashboard_id,
-            workspace_id: ws_id,
-            user_id: &auth.user_id,
+            workspace_id: &ac.ws_id,
+            user_id: &ac.auth.user_id,
             title: title.as_deref(),
             content: content.as_deref(),
             change_summary: change_summary.as_deref(),
@@ -345,16 +337,16 @@ pub async fn update_dashboard(
 
     // Re-embed if content or title changed (matches REST handler — propagates error)
     if title.is_some() || content.is_some() {
-        let embedding_svc = ctx.embedding.wait_ready().await
+        let embedding_svc = ac.ctx.embedding.wait_ready().await
             .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
         if let Ok(Some(d)) =
-            kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id).await
+            kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id).await
         {
             kyomi_auth::dashboard_service::spawn_embedding_generation(
-                ctx.db.clone(),
+                ac.ctx.db.clone(),
                 embedding_svc.clone(),
                 dashboard_id.clone(),
-                ws_id.to_string(),
+                ac.ws_id.clone(),
                 d.title,
                 d.content,
             );
@@ -362,21 +354,21 @@ pub async fn update_dashboard(
     }
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::DASHBOARD.to_string(),
             entity_id: dashboard_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Update,
             data: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -389,35 +381,33 @@ pub async fn update_dashboard(
 /// Mirrors `DELETE /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     kyomi_auth::dashboard_service::delete_dashboard(
-        &ctx.db,
+        ac.db(),
         &dashboard_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
     )
     .await
     .into_sfn()?;
 
     // Broadcast live sync action to workspace peers.
-    if let Some(ws_manager) = &ctx.ws_manager {
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
         let sync_action = kyomi_types::sync::SyncAction {
             sync_id: 0,
             entity_type: kyomi_types::sync::entity_types::DASHBOARD.to_string(),
             entity_id: dashboard_id.clone(),
-            workspace_id: ws_id.to_string(),
+            workspace_id: ac.ws_id.clone(),
             action: kyomi_types::sync::SyncActionType::Delete,
             data: None,
             timestamp: chrono::Utc::now().to_rfc3339(),
         };
         kyomi_auth::websocket::helpers::send_sync_action(
             ws_manager,
-            ws_id,
+            &ac.ws_id,
             &sync_action,
-            Some(&auth.user_id),
+            Some(&ac.auth.user_id),
         )
         .await;
     }
@@ -436,18 +426,16 @@ pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError>
 /// Matches the Python/REST API contract.
 #[server(prefix = "/leptos-api")]
 pub async fn list_versions(dashboard_id: String) -> Result<VersionListResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Fetch the live dashboard (also verifies workspace ownership)
-    let dashboard = kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+    let dashboard = kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
     let versions =
-        kyomi_auth::dashboard_service::list_versions(&ctx.db, &dashboard_id, 50, 0)
+        kyomi_auth::dashboard_service::list_versions(ac.db(), &dashboard_id, 50, 0)
             .await
             .into_sfn()?;
 
@@ -489,18 +477,16 @@ pub async fn get_version(
     dashboard_id: String,
     version_number: i32,
 ) -> Result<VersionDetail, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Verify dashboard belongs to workspace
-    kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id)
+    kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new(format!("Dashboard {dashboard_id} not found")))?;
 
     let version =
-        kyomi_auth::dashboard_service::get_version(&ctx.db, &dashboard_id, version_number)
+        kyomi_auth::dashboard_service::get_version(ac.db(), &dashboard_id, version_number)
             .await
             .into_sfn()?
             .ok_or_else(|| {
@@ -532,14 +518,12 @@ pub async fn diff_versions(
     from_version: i32,
     to_version: i32,
 ) -> Result<VersionDiff, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let result = kyomi_auth::dashboard_service::diff_versions(
-        &ctx.db,
+        ac.db(),
         &dashboard_id,
-        ws_id,
+        &ac.ws_id,
         from_version,
         to_version,
     )
@@ -571,31 +555,29 @@ pub async fn restore_version(
     dashboard_id: String,
     version_number: i32,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     kyomi_auth::dashboard_service::restore_version(
-        &ctx.db,
+        ac.db(),
         &dashboard_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
         version_number,
     )
     .await
     .into_sfn()?;
 
     // Re-embed after restore (matches REST handler — propagates error)
-    let embedding_svc = ctx.embedding.wait_ready().await
+    let embedding_svc = ac.ctx.embedding.wait_ready().await
         .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
     if let Ok(Some(d)) =
-        kyomi_auth::dashboard_service::get_dashboard(&ctx.db, &dashboard_id, ws_id).await
+        kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id).await
     {
         kyomi_auth::dashboard_service::spawn_embedding_generation(
-            ctx.db.clone(),
+            ac.ctx.db.clone(),
             embedding_svc.clone(),
             dashboard_id,
-            ws_id.to_string(),
+            ac.ws_id.clone(),
             d.title,
             d.content,
         );
@@ -665,11 +647,9 @@ pub async fn set_user_default_dashboard(dashboard_id: Option<String>) -> Result<
 /// Mirrors `GET /workspaces/default-dashboard` in `apps/server/src/routes/workspaces.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
@@ -694,11 +674,11 @@ pub async fn get_workspace_default_dashboard() -> Result<Option<String>, ServerF
 pub async fn set_workspace_default_dashboard(
     dashboard_id: Option<String>,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Require workspace admin role
-    if !auth
+    if !ac
+        .auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
@@ -706,9 +686,7 @@ pub async fn set_workspace_default_dashboard(
         return Err(ServerFnError::new("Workspace admin access required"));
     }
 
-    let ws_id = workspace_id(&auth)?;
-
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
@@ -724,7 +702,7 @@ pub async fn set_workspace_default_dashboard(
         obj.insert("default_dashboard_id".to_string(), dashboard_value);
     }
 
-    kyomi_auth::workspace_service::update_workspace_settings(&ctx.db, ws_id, &current_settings)
+    kyomi_auth::workspace_service::update_workspace_settings(ac.db(), &ac.ws_id, &current_settings)
         .await
         .into_sfn()?;
 
@@ -736,4 +714,4 @@ pub async fn set_workspace_default_dashboard(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};

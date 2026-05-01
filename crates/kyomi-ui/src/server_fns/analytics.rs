@@ -15,7 +15,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -54,13 +54,11 @@ pub struct AnalyticsUsageData {
 /// List all analytics sites for the current workspace.
 #[server(prefix = "/leptos-api")]
 pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
-    let sites = kyomi_auth::analytics_site_service::list_sites(&ctx.db, ws_id)
+    let sites = kyomi_auth::analytics_site_service::list_sites(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?;
 
@@ -81,12 +79,10 @@ pub async fn list_analytics_sites() -> Result<Vec<AnalyticsSiteData>, ServerFnEr
 /// Fetch analytics event usage for the current workspace.
 #[server(prefix = "/leptos-api")]
 pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Self-hosted: no quota tracking
-    if ctx.config.self_hosted {
+    if ac.ctx.config.self_hosted {
         return Ok(AnalyticsUsageData {
             events_used: 0,
             events_limit: 0,
@@ -96,7 +92,7 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
         });
     }
 
-    let tier_str = auth.workspace.subscription_tier.as_ref();
+    let tier_str = ac.auth.workspace.subscription_tier.as_ref();
     let configs = kyomi_auth::analytics_quota::default_tier_configs();
     let config = configs
         .get(tier_str)
@@ -105,10 +101,10 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
     // Get usage from Redis — requires RedisPool from the kv layer.
     // The KVPool abstraction doesn't expose raw Redis, so we create a
     // temporary connection from config when the Redis URL is available.
-    let events_used = if let Some(ref redis_url) = ctx.config.redis_url {
+    let events_used = if let Some(ref redis_url) = ac.ctx.config.redis_url {
         match kyomi_core::redis::create_pool(redis_url).await {
             Ok(mut conn) => {
-                kyomi_auth::analytics_quota::get_usage_count(&mut conn, ws_id)
+                kyomi_auth::analytics_quota::get_usage_count(&mut conn, &ac.ws_id)
                     .await
                     .unwrap_or(0)
             }
@@ -128,10 +124,10 @@ pub async fn get_analytics_usage() -> Result<AnalyticsUsageData, ServerFnError> 
 
     // Load non-expiring bundle balance from the workspace row.
     let bundle_balance: u64 = kyomi_core::db_fetch_scalar!(
-        &ctx.db,
+        ac.db(),
         i64,
         "SELECT COALESCE(analytics_bundle_events, 0) FROM workspaces WHERE workspace_id = $1",
-        ws_id
+        &ac.ws_id
     )
     .map_err(|e| ServerFnError::new(format!("Failed to load bundle balance: {e}")))?
     .max(0) as u64;
@@ -171,11 +167,9 @@ pub async fn create_analytics_site(
     allowed_domains: String,
     datasource_slug: Option<String>,
 ) -> Result<AnalyticsSiteData, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
     let name = name.trim();
     if name.is_empty() || name.len() > 255 {
@@ -192,7 +186,7 @@ pub async fn create_analytics_site(
         return Err(ServerFnError::new("At least one domain is required"));
     }
 
-    if ctx.config.analytics_signing_secret.is_empty() {
+    if ac.ctx.config.analytics_signing_secret.is_empty() {
         return Err(ServerFnError::new(
             "Analytics signing secret is not configured",
         ));
@@ -200,17 +194,17 @@ pub async fn create_analytics_site(
 
     let site = kyomi_auth::analytics_site_service::create_site(
         kyomi_auth::analytics_site_service::CreateSiteParams {
-            db: &ctx.db,
-            workspace_id: ws_id,
+            db: ac.db(),
+            workspace_id: &ac.ws_id,
             name,
             domains: &domains,
-            secret: &ctx.config.analytics_signing_secret,
+            secret: &ac.ctx.config.analytics_signing_secret,
             datasource_slug: datasource_slug.as_deref(),
             clickhouse: kyomi_auth::analytics_site_service::ClickHouseProvisioning {
-                host: &ctx.config.analytics_clickhouse_host,
-                port: ctx.config.analytics_clickhouse_port,
-                admin_password: &ctx.config.analytics_clickhouse_password,
-                secure: ctx.config.analytics_clickhouse_secure,
+                host: &ac.ctx.config.analytics_clickhouse_host,
+                port: ac.ctx.config.analytics_clickhouse_port,
+                admin_password: &ac.ctx.config.analytics_clickhouse_password,
+                secure: ac.ctx.config.analytics_clickhouse_secure,
             },
         },
     )
@@ -236,11 +230,9 @@ pub async fn update_analytics_site(
     allowed_domains: String,
     datasource_slug: Option<String>,
 ) -> Result<AnalyticsSiteData, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
     let name = name.trim();
     if name.is_empty() || name.len() > 255 {
@@ -258,12 +250,12 @@ pub async fn update_analytics_site(
     }
 
     let site = kyomi_auth::analytics_site_service::update_site(
-        &ctx.db,
+        ac.db(),
         &site_id,
-        ws_id,
+        &ac.ws_id,
         Some(name),
         Some(&domains),
-        &ctx.config.analytics_signing_secret,
+        &ac.ctx.config.analytics_signing_secret,
         datasource_slug.as_deref(),
     )
     .await
@@ -283,20 +275,18 @@ pub async fn update_analytics_site(
 /// Delete an analytics site.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_analytics_site(site_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
     kyomi_auth::analytics_site_service::delete_site(
-        &ctx.db,
+        ac.db(),
         &site_id,
-        ws_id,
-        &ctx.config.analytics_clickhouse_host,
-        ctx.config.analytics_clickhouse_port,
-        &ctx.config.analytics_clickhouse_password,
-        ctx.config.analytics_clickhouse_secure,
+        &ac.ws_id,
+        &ac.ctx.config.analytics_clickhouse_host,
+        ac.ctx.config.analytics_clickhouse_port,
+        &ac.ctx.config.analytics_clickhouse_password,
+        ac.ctx.config.analytics_clickhouse_secure,
     )
     .await
     .into_sfn()?;

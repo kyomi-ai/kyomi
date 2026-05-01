@@ -161,6 +161,48 @@ pub(crate) fn workspace_id(auth: &kyomi_auth::middleware::AuthUser) -> Result<&s
         })
 }
 
+/// Bundles the three values every authenticated server function needs:
+/// the authenticated user, the server context, and the resolved workspace ID.
+///
+/// Call `AuthenticatedContext::extract().await?` at the top of any server
+/// function that requires authentication to replace the three-line boilerplate.
+#[cfg(feature = "ssr")]
+pub(crate) struct AuthenticatedContext {
+    pub auth: kyomi_auth::middleware::AuthUser,
+    pub ctx: ServerContext,
+    pub ws_id: String,
+}
+
+#[cfg(feature = "ssr")]
+impl AuthenticatedContext {
+    pub(crate) async fn extract() -> Result<Self, leptos::prelude::ServerFnError> {
+        let auth = extract_auth().await?;
+        let ctx = extract_context()?;
+        let ws_id = workspace_id(&auth)?.to_string();
+        Ok(Self { auth, ctx, ws_id })
+    }
+
+    pub(crate) fn db(&self) -> &kyomi_core::DbPool {
+        &self.ctx.db
+    }
+
+    pub(crate) fn kv(&self) -> Result<kyomi_core::KVPool, leptos::prelude::ServerFnError> {
+        self.ctx.kv.clone().ok_or_else(|| {
+            tracing::error!("KV store requested but not configured in ServerContext");
+            leptos::prelude::ServerFnError::new("KV store not available")
+        })
+    }
+
+    pub(crate) fn encryption_key(
+        &self,
+    ) -> Result<std::sync::Arc<[u8; 32]>, leptos::prelude::ServerFnError> {
+        self.ctx.encryption_key.clone().ok_or_else(|| {
+            tracing::error!("Encryption key requested but not configured in ServerContext");
+            leptos::prelude::ServerFnError::new("Encryption key not configured")
+        })
+    }
+}
+
 /// Extension trait that converts any `Result<T, E: Display>` into a server
 /// function result, replacing the boilerplate
 /// `.map_err(|e| ServerFnError::new(e.to_string()))`.

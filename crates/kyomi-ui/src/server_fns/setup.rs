@@ -9,7 +9,7 @@
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 /// Check whether the current workspace has any datasources.
 ///
@@ -18,11 +18,9 @@ use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
 /// step when datasources are already configured.
 #[server(prefix = "/leptos-api")]
 pub async fn check_has_datasources() -> Result<bool, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let datasources = kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, false)
+    let datasources = kyomi_auth::datasource_service::list_datasources(ac.db(), &ac.ws_id, false)
         .await
         .into_sfn()?;
 

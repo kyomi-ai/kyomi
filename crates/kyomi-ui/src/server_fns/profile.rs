@@ -71,14 +71,11 @@ pub async fn get_profile() -> Result<ProfileData, ServerFnError> {
 /// Load dashboards for the default dashboard selector.
 #[server(prefix = "/leptos-api")]
 pub async fn get_dashboards() -> Result<Vec<DashboardSummary>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-
-    let workspace_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let results = kyomi_auth::dashboard_service::search_dashboards(
-        &ctx.db,
-        workspace_id,
+        ac.db(),
+        &ac.ws_id,
         None,
         Some(kyomi_core::models::DocType::Dashboard), // profile page only shows dashboards
         kyomi_auth::dashboard_service::SearchSort::Recent,
@@ -274,7 +271,7 @@ pub async fn decline_invitation(invitation_id: String) -> Result<(), ServerFnErr
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {

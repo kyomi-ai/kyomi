@@ -21,7 +21,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, AuthenticatedContext, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -42,20 +42,15 @@ pub struct DatasourceTypeInfo {
 /// Mirrors `GET /api/v1/datasources` + `GET /api/v1/datasources/credential-status`.
 #[server(prefix = "/leptos-api")]
 pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     let items = kyomi_auth::datasource_service::list_datasources_with_status(
-        &ctx.db,
-        ws_id,
-        &auth.user_id,
-        encryption_key,
+        ac.db(),
+        &ac.ws_id,
+        &ac.auth.user_id,
+        &*encryption_key,
     )
     .await
     .into_sfn()?;
@@ -89,22 +84,17 @@ pub async fn toggle_datasource(
     datasource_id: String,
     enabled: bool,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     kyomi_auth::datasource_service::toggle_datasource_enabled(
-        &ctx.db,
+        ac.db(),
         &datasource_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
         enabled,
-        encryption_key,
+        &*encryption_key,
     )
     .await
     .into_sfn()
@@ -115,13 +105,11 @@ pub async fn toggle_datasource(
 /// Mirrors `DELETE /api/v1/datasources/{id}`.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_datasource(datasource_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
-    kyomi_auth::datasource_service::delete_datasource(&ctx.db, &datasource_id, ws_id)
+    kyomi_auth::datasource_service::delete_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
         .into_sfn()?;
 
@@ -207,17 +195,15 @@ pub async fn create_datasource_modal(
     connection_config: serde_json::Value,
     credentials: serde_json::Value,
 ) -> Result<DatasourceResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
     let slug_opt = if slug.is_empty() { None } else { Some(slug.as_str()) };
 
     let ds = kyomi_auth::datasource_service::create_datasource(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         &name,
         slug_opt,
         &datasource_type,
@@ -230,17 +216,14 @@ pub async fn create_datasource_modal(
     // Save credentials if provided
     let has_creds = credentials.as_object().map(|o| !o.is_empty()).unwrap_or(false);
     if has_creds {
-        let encryption_key = ctx
-            .encryption_key
-            .as_deref()
-            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+        let encryption_key = ac.encryption_key()?;
 
         kyomi_auth::datasource_service::save_user_credential(
-            &ctx.db,
-            encryption_key,
-            &auth.user_id,
+            ac.db(),
+            &*encryption_key,
+            &ac.auth.user_id,
             &ds.id,
-            ws_id,
+            &ac.ws_id,
             &credentials,
         )
         .await
@@ -252,17 +235,17 @@ pub async fn create_datasource_modal(
     // failures are logged and picked up on the next scheduled refresh.
     // Credential resolution (dedicated → shared → workspace owner) is
     // handled inside spawn_post_create.
-    if let Some(encryption_key) = ctx.encryption_key.clone() {
+    if let Some(encryption_key) = ac.ctx.encryption_key.clone() {
         kyomi_agent::catalog::indexing_service::CatalogIndexingService::spawn_post_create(
-            ctx.db.clone(),
+            ac.ctx.db.clone(),
             encryption_key,
-            ctx.embedding.clone(),
-            ws_id.to_string(),
+            ac.ctx.embedding.clone(),
+            ac.ws_id.clone(),
             ds.id.clone(),
         );
     } else {
         tracing::warn!(
-            workspace_id = %ws_id,
+            workspace_id = %ac.ws_id,
             datasource_id = %ds.id,
             "Encryption key not configured — skipping initial catalog index"
         );
@@ -286,19 +269,17 @@ pub async fn update_datasource_settings(
     slug: String,
     connection_config: serde_json::Value,
 ) -> Result<DatasourceResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_admin(&auth)?;
+    require_workspace_admin(&ac.auth)?;
 
     let slug_opt = if slug.is_empty() { None } else { Some(slug.as_str()) };
     let name_opt = if name.is_empty() { None } else { Some(name.as_str()) };
 
     let updated = kyomi_auth::datasource_service::update_datasource(
-        &ctx.db,
+        ac.db(),
         &datasource_id,
-        ws_id,
+        &ac.ws_id,
         name_opt,
         slug_opt,
         Some(connection_config),
@@ -324,21 +305,16 @@ pub async fn save_datasource_credentials(
     datasource_id: String,
     credentials: serde_json::Value,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     kyomi_auth::datasource_service::save_user_credential(
-        &ctx.db,
-        encryption_key,
-        &auth.user_id,
+        ac.db(),
+        &*encryption_key,
+        &ac.auth.user_id,
         &datasource_id,
-        ws_id,
+        &ac.ws_id,
         &credentials,
     )
     .await
@@ -354,28 +330,24 @@ pub async fn save_datasource_credentials(
 pub async fn get_datasource_settings(
     datasource_id: String,
 ) -> Result<DatasourceSettingsResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let is_admin = auth
+    let is_admin = ac
+        .auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || auth.workspace.is_owner;
+        || ac.auth.workspace.is_owner;
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     let d = kyomi_auth::datasource_service::get_datasource_settings_detail(
-        &ctx.db,
+        ac.db(),
         &datasource_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
         is_admin,
-        encryption_key,
+        &*encryption_key,
     )
     .await
     .into_sfn()?;
@@ -477,11 +449,9 @@ pub async fn test_datasource_standalone(
 pub async fn test_existing_datasource(
     datasource_id: String,
 ) -> Result<TestConnectionResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let ds = kyomi_auth::datasource_service::get_datasource(&ctx.db, &datasource_id, ws_id)
+    let ds = kyomi_auth::datasource_service::get_datasource(ac.db(), &datasource_id, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Datasource not found"))?;
@@ -490,20 +460,17 @@ pub async fn test_existing_datasource(
         return Err(ServerFnError::new("Datasource is not active"));
     }
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     let ds_type: kyomi_core::datasource_registry::DatasourceType = ds.datasource_type.into();
 
     let user_cred =
-        kyomi_auth::datasource_service::get_user_credential(&ctx.db, &auth.user_id, &ds.id)
+        kyomi_auth::datasource_service::get_user_credential(ac.db(), &ac.auth.user_id, &ds.id)
             .await
             .into_sfn()?;
 
     let credentials = if let Some(ref cred) = user_cred {
-        kyomi_auth::encryption::decrypt_json(&cred.credentials, encryption_key)
+        kyomi_auth::encryption::decrypt_json(&cred.credentials, &*encryption_key)
             .unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -576,27 +543,22 @@ pub async fn discover_datasource_resources(
     datasource_slug: Option<String>,
 ) -> Result<DiscoverResourcesResult, ServerFnError> {
     use std::str::FromStr as _;
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let ds_type = kyomi_core::datasource_registry::DatasourceType::from_str(&datasource_type)
         .into_sfn()?;
 
     // If slug provided, look up stored credentials (for OAuth datasources)
     let resolved_creds = if let Some(ref slug) = datasource_slug {
-        let encryption_key = ctx
-            .encryption_key
-            .as_deref()
-            .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+        let encryption_key = ac.encryption_key()?;
 
-        match kyomi_auth::datasource_service::get_datasource_by_slug(&ctx.db, slug, ws_id)
+        match kyomi_auth::datasource_service::get_datasource_by_slug(ac.db(), slug, &ac.ws_id)
             .await
         {
             Ok(Some(ds)) => {
                 match kyomi_auth::datasource_service::get_user_credential(
-                    &ctx.db,
-                    &auth.user_id,
+                    ac.db(),
+                    &ac.auth.user_id,
                     &ds.id,
                 )
                 .await
@@ -604,7 +566,7 @@ pub async fn discover_datasource_resources(
                     Ok(Some(cred)) => {
                         kyomi_auth::encryption::decrypt_json(
                             &cred.credentials,
-                            encryption_key,
+                            &*encryption_key,
                         )
                         .unwrap_or(credentials.clone())
                     }

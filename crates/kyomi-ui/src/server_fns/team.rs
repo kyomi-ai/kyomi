@@ -74,13 +74,11 @@ async fn get_current_workspace(
 /// Mirrors `GET /api/v1/workspaces/members` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    let workspace = get_current_workspace(&ctx.db, ws_id).await?;
+    let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
     let members =
-        kyomi_auth::workspace_service::get_workspace_members_with_users(&ctx.db, ws_id)
+        kyomi_auth::workspace_service::get_workspace_members_with_users(ac.db(), &ac.ws_id)
             .await
             .into_sfn()?;
 
@@ -104,12 +102,10 @@ pub async fn list_workspace_members() -> Result<Vec<TeamMember>, ServerFnError> 
 /// Mirrors `PATCH /api/v1/workspaces/members/{id}/role` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn update_member_role(user_id: String, role: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
-    let workspace = get_current_workspace(&ctx.db, ws_id).await?;
+    let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
 
     // Cannot change the owner's role
     if user_id == workspace.owner_user_id {
@@ -119,9 +115,9 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
     let db_role = map_role_to_db(&role);
 
     // Self-demotion guard
-    if user_id == auth.user_id && db_role == "workspace_user" {
+    if user_id == ac.auth.user_id && db_role == "workspace_user" {
         let admin_count =
-            kyomi_auth::workspace_service::count_admins(&ctx.db, ws_id)
+            kyomi_auth::workspace_service::count_admins(ac.db(), &ac.ws_id)
                 .await
                 .into_sfn()?;
         if admin_count < 2 {
@@ -132,14 +128,14 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
     }
 
     // Verify member exists
-    let target = kyomi_auth::workspace_service::get_workspace_user(&ctx.db, ws_id, &user_id)
+    let target = kyomi_auth::workspace_service::get_workspace_user(ac.db(), &ac.ws_id, &user_id)
         .await
         .into_sfn()?;
     if target.is_none() {
         return Err(ServerFnError::new("Member not found in workspace"));
     }
 
-    kyomi_auth::workspace_service::update_member_role(&ctx.db, ws_id, &user_id, db_role)
+    kyomi_auth::workspace_service::update_member_role(ac.db(), &ac.ws_id, &user_id, db_role)
         .await
         .into_sfn()?;
 
@@ -151,18 +147,16 @@ pub async fn update_member_role(user_id: String, role: String) -> Result<(), Ser
 /// Mirrors `DELETE /api/v1/workspaces/members/{id}` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
-    let workspace = get_current_workspace(&ctx.db, ws_id).await?;
+    let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
 
     kyomi_auth::workspace_service::remove_workspace_member(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         &workspace.owner_user_id,
-        &auth.user_id,
+        &ac.auth.user_id,
         &user_id,
     )
     .await
@@ -180,13 +174,11 @@ pub async fn remove_member(user_id: String) -> Result<(), ServerFnError> {
 /// Mirrors `GET /api/v1/workspaces/invitations` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
     let invitations =
-        kyomi_auth::workspace_service::get_pending_invitations_for_workspace(&ctx.db, ws_id)
+        kyomi_auth::workspace_service::get_pending_invitations_for_workspace(ac.db(), &ac.ws_id)
             .await
             .into_sfn()?;
 
@@ -210,11 +202,9 @@ pub async fn list_workspace_invitations() -> Result<Vec<TeamInvitation>, ServerF
 /// Mirrors `POST /api/v1/workspaces/invitations` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
     let email = email.trim().to_lowercase();
 
     if email.is_empty() || !email.contains('@') {
@@ -222,10 +212,10 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
     }
 
     // Resolve the per-plan user limit (None = self-hosted, no limit enforced).
-    let user_limit = if ctx.config.self_hosted {
+    let user_limit = if ac.ctx.config.self_hosted {
         None
     } else {
-        let workspace = get_current_workspace(&ctx.db, ws_id).await?;
+        let workspace = get_current_workspace(ac.db(), &ac.ws_id).await?;
         Some(workspace.user_limit.unwrap_or(1) as i64)
     };
 
@@ -235,11 +225,11 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
 
     kyomi_auth::workspace_service::invite_workspace_member(
         kyomi_auth::workspace_service::InviteWorkspaceMemberParams {
-            pool: &ctx.db,
-            workspace_id: ws_id,
+            pool: ac.db(),
+            workspace_id: &ac.ws_id,
             email: &email,
             db_role,
-            invited_by: &auth.user_id,
+            invited_by: &ac.auth.user_id,
             invitation_id: &invitation_id,
             expires_at,
             user_limit,
@@ -256,13 +246,11 @@ pub async fn invite_member(email: String, role: String) -> Result<(), ServerFnEr
 /// Mirrors `DELETE /api/v1/workspaces/invitations/{id}` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
     let invitation =
-        kyomi_auth::workspace_service::get_invitation_in_workspace(&ctx.db, &invitation_id, ws_id)
+        kyomi_auth::workspace_service::get_invitation_in_workspace(ac.db(), &invitation_id, &ac.ws_id)
             .await
             .into_sfn()?
             .ok_or_else(|| ServerFnError::new("Invitation not found"))?;
@@ -271,7 +259,7 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
         return Err(ServerFnError::new("Can only cancel pending invitations"));
     }
 
-    kyomi_auth::workspace_service::update_invitation_status(&ctx.db, &invitation_id, "cancelled")
+    kyomi_auth::workspace_service::update_invitation_status(ac.db(), &invitation_id, "cancelled")
         .await
         .into_sfn()?;
 
@@ -287,12 +275,10 @@ pub async fn cancel_invitation(invitation_id: String) -> Result<(), ServerFnErro
 /// Mirrors `GET /api/v1/workspaces/ownership/transfers` in workspaces.rs.
 #[server(prefix = "/leptos-api")]
 pub async fn list_ownership_transfers() -> Result<Vec<OwnershipTransferData>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let transfers =
-        kyomi_auth::workspace_service::list_ownership_transfers_for_user(&ctx.db, ws_id, &auth.user_id)
+        kyomi_auth::workspace_service::list_ownership_transfers_for_user(ac.db(), &ac.ws_id, &ac.auth.user_id)
             .await
             .into_sfn()?;
 
@@ -352,24 +338,22 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
 /// Only the workspace owner can call this.
 #[server(prefix = "/leptos-api")]
 pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Must be owner
-    if !auth.workspace.is_owner {
+    if !ac.auth.workspace.is_owner {
         return Err(ServerFnError::new(
             "Only the workspace owner can transfer ownership",
         ));
     }
 
-    if to_user_id == auth.user_id {
+    if to_user_id == ac.auth.user_id {
         return Err(ServerFnError::new("You are already the owner"));
     }
 
     // Check no existing pending transfer
     let existing =
-        kyomi_auth::workspace_service::get_pending_transfer_for_workspace(&ctx.db, ws_id)
+        kyomi_auth::workspace_service::get_pending_transfer_for_workspace(ac.db(), &ac.ws_id)
             .await
             .into_sfn()?;
     if existing.is_some() {
@@ -385,10 +369,10 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
     let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
 
     kyomi_auth::workspace_service::create_ownership_transfer(
-        &ctx.db,
+        ac.db(),
         &transfer_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
         &to_user_id,
         expires_at,
     )
@@ -400,4 +384,4 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};

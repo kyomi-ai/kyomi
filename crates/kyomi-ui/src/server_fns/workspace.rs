@@ -86,12 +86,10 @@ fn merge_custom_settings(
 /// Requires workspace admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
@@ -120,17 +118,15 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
 /// Update the workspace name. Requires admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(ServerFnError::new("Workspace name cannot be empty"));
     }
 
-    let ws_id = workspace_id(&auth)?;
-    kyomi_auth::workspace_service::update_workspace_name(&ctx.db, ws_id, trimmed)
+    kyomi_auth::workspace_service::update_workspace_name(ac.db(), &ac.ws_id, trimmed)
         .await
         .into_sfn()?;
 
@@ -140,12 +136,10 @@ pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
 /// Update the workspace default AI model. Requires admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
@@ -157,8 +151,8 @@ pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> 
     );
 
     kyomi_auth::workspace_service::update_workspace_settings(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         &updated_settings,
     )
     .await
@@ -170,12 +164,10 @@ pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> 
 /// Update the workspace ChartML config (chart palette). Requires admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn update_workspace_chartml_config(palette: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
-    let workspace = kyomi_auth::workspace_service::get_workspace_full(&ctx.db, ws_id)
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
@@ -193,8 +185,8 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
     );
 
     kyomi_auth::workspace_service::update_workspace_settings(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         &updated_settings,
     )
     .await
@@ -213,12 +205,10 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
 /// along with the Slack team name and ID if installed.
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlackStatus, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let ws_config =
-        kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
+        kyomi_core::platform::get_workspace_integration(ac.db(), &ac.ws_id, "slack")
             .await
             .into_sfn()?;
 
@@ -248,21 +238,16 @@ pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlack
 /// Requires workspace admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
-    let ws_id = workspace_id(&auth)?;
-
-    let client_id = ctx
-        .config
+    let client_id = ac.ctx.config
         .slack_client_id
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ServerFnError::new("Slack integration not configured"))?;
 
-    let kv = ctx
-        .kv
+    let kv = ac.ctx.kv
         .as_ref()
         .ok_or_else(|| ServerFnError::new("OAuth state store not available"))?;
 
@@ -274,15 +259,15 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
         "slack_install",
         &oauth_state,
         &serde_json::json!({
-            "user_id": auth.user_id,
-            "workspace_id": ws_id,
+            "user_id": ac.auth.user_id,
+            "workspace_id": &ac.ws_id,
             "created_at": chrono::Utc::now().to_rfc3339(),
         }),
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to store OAuth state: {e}")))?;
 
-    let base = ctx.config.frontend_url.trim_end_matches('/');
+    let base = ac.ctx.config.frontend_url.trim_end_matches('/');
     let redirect_uri = format!("{base}/api/v1/slack/oauth/callback");
 
     let auth_url = format!(
@@ -303,15 +288,12 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
 /// Requires workspace admin role.
 #[server(prefix = "/leptos-api")]
 pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_admin(&auth)?;
-
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
 
     // Verify the integration exists
     let integration =
-        kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
+        kyomi_core::platform::get_workspace_integration(ac.db(), &ac.ws_id, "slack")
             .await
             .into_sfn()?;
 
@@ -322,7 +304,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
     }
 
     // Remove the workspace integration
-    kyomi_core::platform::delete_workspace_integration(&ctx.db, ws_id, "slack")
+    kyomi_core::platform::delete_workspace_integration(ac.db(), &ac.ws_id, "slack")
         .await
         .into_sfn()?;
 
@@ -333,7 +315,7 @@ pub async fn uninstall_workspace_slack(team_id: String) -> Result<(), ServerFnEr
 
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {

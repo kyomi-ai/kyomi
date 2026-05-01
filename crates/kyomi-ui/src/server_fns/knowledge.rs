@@ -24,9 +24,7 @@ pub async fn list_knowledge_docs(
     sort_by: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<DashboardListItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let sort = match sort_by.as_deref() {
         Some("popularity") => kyomi_auth::dashboard_service::SearchSort::Popularity,
@@ -37,8 +35,8 @@ pub async fn list_knowledge_docs(
     let limit = limit.unwrap_or(50).clamp(1, 100);
 
     let results = kyomi_auth::dashboard_service::search_dashboards(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         query.as_deref(),
         Some(kyomi_core::models::DocType::Knowledge),
         sort,
@@ -62,23 +60,22 @@ pub async fn create_knowledge_doc(
     title: String,
     content: Option<String>,
 ) -> Result<String, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let content = content.unwrap_or_default();
 
     // Get embedding service for both embedding generation and rechunking
-    let embedding_svc = ctx
+    let embedding_svc = ac
+        .ctx
         .embedding
         .wait_ready()
         .await
         .map_err(|e| ServerFnError::new(format!("Embedding service unavailable: {e}")))?;
 
     let dashboard_id = kyomi_auth::dashboard_service::create_dashboard(
-        &ctx.db,
-        &auth.user_id,
-        ws_id,
+        ac.db(),
+        &ac.auth.user_id,
+        &ac.ws_id,
         &title,
         &content,
         kyomi_core::models::DocType::Knowledge,
@@ -87,10 +84,10 @@ pub async fn create_knowledge_doc(
     .await
     .into_sfn()?;
     kyomi_auth::dashboard_service::spawn_embedding_generation(
-        ctx.db.clone(),
+        ac.ctx.db.clone(),
         embedding_svc.clone(),
         dashboard_id.clone(),
-        ws_id.to_string(),
+        ac.ws_id.clone(),
         title.trim().to_string(),
         content.clone(),
     );
@@ -104,15 +101,13 @@ pub async fn create_knowledge_doc(
 /// does not distinguish doc_type for deletion.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     kyomi_auth::dashboard_service::delete_dashboard(
-        &ctx.db,
+        ac.db(),
         &dashboard_id,
-        ws_id,
-        &auth.user_id,
+        &ac.ws_id,
+        &ac.auth.user_id,
     )
     .await
     .into_sfn()?;
@@ -122,4 +117,4 @@ pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnEr
 
 // SSR-only import — placed at bottom to match convention.
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};

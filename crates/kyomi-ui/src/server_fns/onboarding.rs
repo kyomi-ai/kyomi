@@ -14,7 +14,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::extract_context;
+use super::{extract_context, AuthenticatedContext, IntoServerFnError};
 
 // `CredentialStatusItem` and `OnboardingState` are defined in `kyomi_types` and
 // shared with `kyomi_auth::onboarding_service`. Re-exported here so that UI
@@ -109,24 +109,18 @@ pub async fn accept_terms(
 /// Mirrors the logic in `DatasourceOnboarding.jsx`'s `checkWorkspaceState()`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    let ac = AuthenticatedContext::extract().await?;
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
-
-    let is_admin = auth
+    let is_admin = ac
+        .auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || auth.workspace.is_owner;
+        || ac.auth.workspace.is_owner;
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_deref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
-    kyomi_auth::onboarding_service::get_onboarding_state(&ctx.db, ws_id, &auth.user_id, is_admin, encryption_key)
+    kyomi_auth::onboarding_service::get_onboarding_state(ac.db(), &ac.ws_id, &ac.auth.user_id, is_admin, &*encryption_key)
         .await
         .into_sfn()
 }
@@ -137,18 +131,15 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 /// `apps/server/src/routes/datasources.rs`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
-
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Require admin
-    if !auth
+    if !ac
+        .auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        && !auth.workspace.is_owner
+        && !ac.auth.workspace.is_owner
     {
         return Err(ServerFnError::new("Workspace admin access required"));
     }
@@ -162,7 +153,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
 
     // Check if workspace already has a sample datasource
     let datasources =
-        kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, true)
+        kyomi_auth::datasource_service::list_datasources(ac.db(), &ac.ws_id, true)
             .await
             .into_sfn()?;
 
@@ -182,8 +173,8 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     let connection_config = ch_config.sample_datasource_config_json();
 
     let ds = kyomi_auth::datasource_service::create_datasource(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         "Acme Analytics (Sample)",
         Some("acme-analytics-sample"),
         "clickhouse",
@@ -197,8 +188,8 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
         "Created sample datasource '{}' (id: {}) for workspace {} by user {}",
         ds.name,
         ds.id,
-        ws_id,
-        auth.user_id
+        ac.ws_id,
+        ac.auth.user_id
     );
 
     // Trigger the generic catalog indexer in the background so the sample
@@ -207,17 +198,17 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
     // workspace — the generic per-workspace path is simpler, consistent with
     // other datasource types, and unblocks the `list_datasources` tool which
     // reads from the workspace cache.
-    if let Some(encryption_key) = ctx.encryption_key.clone() {
+    if let Some(encryption_key) = ac.ctx.encryption_key.clone() {
         kyomi_agent::catalog::indexing_service::CatalogIndexingService::spawn_post_create(
-            ctx.db.clone(),
+            ac.db().clone(),
             encryption_key,
-            ctx.embedding.clone(),
-            ws_id.to_string(),
+            ac.ctx.embedding.clone(),
+            ac.ws_id.clone(),
             ds.id.clone(),
         );
     } else {
         tracing::warn!(
-            workspace_id = %ws_id,
+            workspace_id = %ac.ws_id,
             datasource_id = %ds.id,
             "Encryption key not configured — skipping initial catalog index for sample datasource"
         );
@@ -248,24 +239,21 @@ pub struct SampleDatasourceAvailability {
 #[server(prefix = "/leptos-api")]
 pub async fn check_sample_datasource_available()
 -> Result<SampleDatasourceAvailability, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    let ac = AuthenticatedContext::extract().await?;
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
-
-    let is_admin = auth
+    let is_admin = ac
+        .auth
         .workspace
         .workspace_roles
         .contains(&kyomi_core::enums::WorkspaceRole::WorkspaceAdmin)
-        || auth.workspace.is_owner;
+        || ac.auth.workspace.is_owner;
 
     let configured =
         kyomi_auth::catalog::indexers::sample_data::SampleClickHouseConfig::from_env()
             .is_some();
 
     let datasources =
-        kyomi_auth::datasource_service::list_datasources(&ctx.db, ws_id, true)
+        kyomi_auth::datasource_service::list_datasources(ac.db(), &ac.ws_id, true)
             .await
             .into_sfn()?;
 

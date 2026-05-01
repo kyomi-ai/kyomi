@@ -59,15 +59,13 @@ pub struct WatchChannel {
 /// Returns 403-equivalent error if the workspace tier lacks the capability.
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    use super::{AuthenticatedContext, IntoServerFnError};
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Check tier capability — mirrors require_slack_capability() in routes.rs
     if !kyomi_core::capability::has_capability(
-        auth.workspace.subscription_tier,
+        ac.auth.workspace.subscription_tier,
         "slack_integration",
     ) {
         return Err(ServerFnError::new(
@@ -77,7 +75,7 @@ pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
 
     // Check workspace Slack installation via platform tables
     let ws_config =
-        kyomi_core::platform::get_workspace_integration(&ctx.db, ws_id, "slack")
+        kyomi_core::platform::get_workspace_integration(ac.db(), &ac.ws_id, "slack")
             .await
             .into_sfn()?;
 
@@ -94,7 +92,7 @@ pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
 
     if installed {
         let link = kyomi_core::platform::get_platform_user_link(
-            &ctx.db, ws_id, &auth.user_id, "slack",
+            ac.db(), &ac.ws_id, &ac.auth.user_id, "slack",
         )
         .await
         .into_sfn()?;
@@ -175,15 +173,13 @@ pub async fn slack_connect() -> Result<String, ServerFnError> {
 /// Removes the user integration and platform user link from the database.
 #[server(prefix = "/leptos-api")]
 pub async fn slack_disconnect() -> Result<(), ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    use super::{AuthenticatedContext, IntoServerFnError};
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Verify user has a Slack connection
     let user_integration =
-        kyomi_core::platform::get_user_integration(&ctx.db, ws_id, &auth.user_id, "slack")
+        kyomi_core::platform::get_user_integration(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack")
             .await
             .into_sfn()?;
 
@@ -192,12 +188,12 @@ pub async fn slack_disconnect() -> Result<(), ServerFnError> {
     }
 
     // Remove user integration
-    kyomi_core::platform::delete_user_integration(&ctx.db, ws_id, &auth.user_id, "slack")
+    kyomi_core::platform::delete_user_integration(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack")
         .await
         .into_sfn()?;
 
     // Remove platform user link
-    kyomi_core::platform::delete_platform_user_link(&ctx.db, ws_id, &auth.user_id, "slack")
+    kyomi_core::platform::delete_platform_user_link(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack")
         .await
         .into_sfn()?;
 
@@ -212,15 +208,13 @@ pub async fn slack_disconnect() -> Result<(), ServerFnError> {
 /// - SlackClient is available in server context
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    use super::{AuthenticatedContext, IntoServerFnError};
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Check tier capability
     if !kyomi_core::capability::has_capability(
-        auth.workspace.subscription_tier,
+        ac.auth.workspace.subscription_tier,
         "slack_integration",
     ) {
         return Err(ServerFnError::new(
@@ -228,18 +222,16 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
         ));
     }
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+    let encryption_key = ac.encryption_key()?;
 
-    let slack_client = ctx
+    let slack_client = ac
+        .ctx
         .slack_client
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Slack client not available"))?;
 
     // Get the decrypted bot token from workspace integration config
-    let bot_token = kyomi_slack::routes::get_slack_bot_token(&ctx.db, encryption_key, ws_id)
+    let bot_token = kyomi_slack::routes::get_slack_bot_token(ac.db(), &*encryption_key, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| {
@@ -248,7 +240,7 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
 
     // Verify user is connected to Slack
     let has_link =
-        kyomi_core::platform::get_platform_user_link(&ctx.db, ws_id, &auth.user_id, "slack")
+        kyomi_core::platform::get_platform_user_link(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack")
             .await
             .into_sfn()?;
 
@@ -279,14 +271,12 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
 /// Reads from the user's Slack integration config in workspace_user_integrations.
 #[server(prefix = "/leptos-api")]
 pub async fn get_default_watch_channel() -> Result<WatchChannel, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    use super::{AuthenticatedContext, IntoServerFnError};
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let user_config =
-        kyomi_core::platform::get_user_integration(&ctx.db, ws_id, &auth.user_id, "slack")
+        kyomi_core::platform::get_user_integration(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack")
             .await
             .into_sfn()?;
 
@@ -320,7 +310,7 @@ pub async fn set_default_watch_channel(
     channel_id: Option<String>,
     channel_name: Option<String>,
 ) -> Result<WatchChannel, ServerFnError> {
-    use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+    use super::{AuthenticatedContext, IntoServerFnError};
 
     // Validate: both must be Some or both must be None (no partial clear)
     match (&channel_id, &channel_name) {
@@ -332,13 +322,11 @@ pub async fn set_default_watch_channel(
         _ => {}
     }
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Get existing user integration config
     let user_config =
-        kyomi_core::platform::get_user_integration(&ctx.db, ws_id, &auth.user_id, "slack")
+        kyomi_core::platform::get_user_integration(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack")
             .await
             .into_sfn()?;
 
@@ -372,7 +360,7 @@ pub async fn set_default_watch_channel(
         }
     }
 
-    kyomi_core::platform::upsert_user_integration(&ctx.db, ws_id, &auth.user_id, "slack", &config)
+    kyomi_core::platform::upsert_user_integration(ac.db(), &ac.ws_id, &ac.auth.user_id, "slack", &config)
         .await
         .into_sfn()?;
 

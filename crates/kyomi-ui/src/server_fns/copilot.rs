@@ -18,7 +18,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::IntoServerFnError;
+use super::{AuthenticatedContext, IntoServerFnError};
 
 /// Response from the copilot after submitting a user message.
 ///
@@ -41,9 +41,7 @@ pub struct CopilotResponse {
 pub async fn create_copilot_session(
     context_type: String,
 ) -> Result<String, ServerFnError> {
-    let auth = super::extract_auth().await?;
-    let ctx = super::extract_context()?;
-    let workspace_id = super::workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let context_type = kyomi_agent::copilot::normalize_context_type(&context_type);
     let title = kyomi_agent::copilot::session_title_for_context(context_type);
@@ -51,9 +49,9 @@ pub async fn create_copilot_session(
     let session_id = sqlx::types::Uuid::new_v4().to_string();
 
     kyomi_auth::chat_service::create_session_with_id(
-        &ctx.db,
-        &auth.user_id,
-        workspace_id,
+        ac.db(),
+        &ac.auth.user_id,
+        &ac.ws_id,
         &session_id,
         Some(title),
         context_type,
@@ -90,9 +88,7 @@ pub async fn send_copilot_message(
     timezone: Option<String>,
     current_time_user_tz: Option<String>,
 ) -> Result<CopilotResponse, ServerFnError> {
-    let auth = super::extract_auth().await?;
-    let ctx = super::extract_context()?;
-    let workspace_id = super::workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Validate message.
     if message.trim().is_empty() {
@@ -107,20 +103,17 @@ pub async fn send_copilot_message(
     // Normalize context type.
     let context_type = kyomi_agent::copilot::normalize_context_type(&context_type);
 
-    let encryption_key = ctx
-        .encryption_key
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("Encryption key not configured"))?;
+    let encryption_key = ac.encryption_key()?;
 
     // Validate capabilities, verify session access, store user message and
     // assistant placeholder — all via the shared service layer.
     let prep = kyomi_auth::copilot_service::prepare_copilot_message(
         kyomi_auth::copilot_service::CopilotMessageInputs {
-            db: &ctx.db,
-            encryption_key,
-            config: &ctx.config,
-            workspace_id,
-            user_id: &auth.user_id,
+            db: ac.db(),
+            encryption_key: &*encryption_key,
+            config: &ac.ctx.config,
+            workspace_id: &ac.ws_id,
+            user_id: &ac.auth.user_id,
             session_id: &session_id,
             message: &message,
             content: content.as_deref(),
@@ -133,19 +126,22 @@ pub async fn send_copilot_message(
     // ── Spawn AI agent execution ────────────────────────────────────────
     // Follows the same pattern as send_chat_message in chat.rs.
 
-    let ws_manager = ctx
+    let ws_manager = ac
+        .ctx
         .ws_manager
         .as_ref()
         .ok_or_else(|| ServerFnError::new("WebSocket manager not configured"))?
         .clone();
 
-    let cancel_registry = ctx
+    let cancel_registry = ac
+        .ctx
         .cancel_registry
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Cancel registry not configured"))?
         .clone();
 
-    let platforms = ctx
+    let platforms = ac
+        .ctx
         .platforms
         .as_ref()
         .ok_or_else(|| ServerFnError::new("Platform registry not configured"))?
@@ -155,15 +151,15 @@ pub async fn send_copilot_message(
     let system_prompt = kyomi_agent::copilot::build_copilot_system_prompt(
         context_type,
         user_timezone,
-        auth.name.as_deref(),
+        ac.auth.name.as_deref(),
     );
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let exec_config = kyomi_agent::AgentExecutionConfig {
         session_id: session_id.clone(),
-        user_id: auth.user_id.clone(),
-        workspace_id: workspace_id.to_string(),
+        user_id: ac.auth.user_id.clone(),
+        workspace_id: ac.ws_id.clone(),
         message: prep.user_message,
         model_name: Some("claude-haiku-4-5-20251001".to_string()),
         temperature: 0.1,
@@ -180,22 +176,17 @@ pub async fn send_copilot_message(
         user_message_id: None,
         assistant_message_id: Some(prep.assistant_message_id.clone()),
         conversation_history: None,
-        user_display_name: auth.name.clone().unwrap_or_else(|| auth.email.clone()),
+        user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
     };
 
-    cancel_registry.register(&auth.user_id, &session_id, cancel_token.clone());
+    cancel_registry.register(&ac.auth.user_id, &session_id, cancel_token.clone());
 
-    let db = ctx.db.clone();
-    let kv = ctx
-        .kv
-        .as_ref()
-        .ok_or_else(|| ServerFnError::new("KV store not configured"))?
-        .clone();
-    let encryption_key = encryption_key.clone();
-    let embedding = ctx.embedding.clone();
-    let app_config = ctx.config.clone();
-    let connect_registry = ctx.connect_registry.clone();
-    let spawn_user_id = auth.user_id.clone();
+    let db = ac.db().clone();
+    let kv = ac.kv()?;
+    let embedding = ac.ctx.embedding.clone();
+    let app_config = ac.ctx.config.clone();
+    let connect_registry = ac.ctx.connect_registry.clone();
+    let spawn_user_id = ac.auth.user_id.clone();
     let spawn_session_id = session_id.clone();
     let spawn_assistant_message_id = prep.assistant_message_id.clone();
     let spawn_context_type = context_type.to_string();
@@ -246,7 +237,7 @@ pub async fn send_copilot_message(
                 kyomi_auth::copilot_service::handle_copilot_agent_error(
                     kyomi_auth::copilot_service::CopilotAgentErrorParams {
                         db: &db,
-                        encryption_key: &encryption_key,
+                        encryption_key: &*encryption_key,
                         ws_manager: &ws_manager,
                         user_id: &spawn_user_id,
                         session_id: &spawn_session_id,
@@ -281,15 +272,13 @@ pub async fn send_copilot_message(
 /// Called when the copilot sidebar/modal closes to clean up the ephemeral session.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_copilot_session(session_id: String) -> Result<(), ServerFnError> {
-    let auth = super::extract_auth().await?;
-    let ctx = super::extract_context()?;
-    let workspace_id = super::workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let deleted = kyomi_auth::chat_service::delete_session(
-        &ctx.db,
-        &auth.user_id,
+        ac.db(),
+        &ac.auth.user_id,
         &session_id,
-        Some(workspace_id),
+        Some(&ac.ws_id),
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to delete copilot session: {e}")))?;

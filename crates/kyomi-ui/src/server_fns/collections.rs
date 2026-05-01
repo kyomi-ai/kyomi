@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{AuthenticatedContext, IntoServerFnError};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -103,13 +103,11 @@ fn bare_to_collection_item(coll: &kyomi_core::models::Collection) -> CollectionI
 pub async fn list_collections(
     doc_type: Option<String>,
 ) -> Result<Vec<CollectionItem>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let collections = kyomi_auth::collection_service::list_collections(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         doc_type.as_deref(),
     )
     .await
@@ -127,15 +125,13 @@ pub async fn create_collection(
     is_public: Option<bool>,
     doc_type: Option<String>,
 ) -> Result<CollectionItem, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let dt = doc_type.as_deref().unwrap_or("dashboard");
 
     let collection = kyomi_auth::collection_service::create_collection(
-        &ctx.db,
-        ws_id,
+        ac.db(),
+        &ac.ws_id,
         &name,
         description.as_deref(),
         color.as_deref(),
@@ -157,9 +153,7 @@ pub async fn update_collection(
     color: Option<String>,
     is_public: Option<bool>,
 ) -> Result<CollectionItem, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     let updates = kyomi_auth::collection_service::CollectionUpdates {
         name,
@@ -169,9 +163,9 @@ pub async fn update_collection(
     };
 
     kyomi_auth::collection_service::update_collection(
-        &ctx.db,
+        ac.db(),
         &collection_id,
-        ws_id,
+        &ac.ws_id,
         &updates,
     )
     .await
@@ -179,7 +173,7 @@ pub async fn update_collection(
 
     // Re-fetch to get updated state with dashboards
     let collection =
-        kyomi_auth::collection_service::get_collection(&ctx.db, &collection_id, ws_id)
+        kyomi_auth::collection_service::get_collection(ac.db(), &collection_id, &ac.ws_id)
             .await
             .into_sfn()?;
 
@@ -193,11 +187,9 @@ pub async fn update_collection(
 /// Delete a collection.
 #[server(prefix = "/leptos-api")]
 pub async fn delete_collection(collection_id: String) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    kyomi_auth::collection_service::delete_collection(&ctx.db, &collection_id, ws_id)
+    kyomi_auth::collection_service::delete_collection(ac.db(), &collection_id, &ac.ws_id)
         .await
         .into_sfn()?;
 
@@ -212,15 +204,13 @@ pub async fn add_dashboard_to_collection(
     collection_id: String,
     dashboard_id: String,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     kyomi_auth::collection_service::add_dashboard(
-        &ctx.db,
+        ac.db(),
         &collection_id,
         &dashboard_id,
-        ws_id,
+        &ac.ws_id,
         None, // position — append to end
     )
     .await
@@ -235,15 +225,13 @@ pub async fn remove_dashboard_from_collection(
     collection_id: String,
     dashboard_id: String,
 ) -> Result<(), ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
 
     kyomi_auth::collection_service::remove_dashboard(
-        &ctx.db,
+        ac.db(),
         &collection_id,
         &dashboard_id,
-        ws_id,
+        &ac.ws_id,
     )
     .await
     .into_sfn()?;

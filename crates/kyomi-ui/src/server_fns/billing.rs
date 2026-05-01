@@ -16,7 +16,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -239,13 +239,11 @@ fn require_stripe(
 /// portal operations require Stripe.
 #[server(prefix = "/leptos-api")]
 pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
+    let ac = AuthenticatedContext::extract().await?;
 
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    require_workspace_owner(&ac.auth)?;
 
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     // Calculate AI reset date
     let ai_reset_date = {
@@ -275,17 +273,17 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
     // remaining" display that never decreased as users actually consumed
     // credits — see the Billing Service comment for the full story.
     let ai_remaining_usd = kyomi_auth::billing_service::BillingService::new()
-        .get_bundle_remaining_usd(&ctx.db, ws_id)
+        .get_bundle_remaining_usd(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?;
     let ai_token_balance_cents = (ai_remaining_usd * 100.0) as i64;
 
     // Analytics events this month from Redis (same pattern as usage.rs).
     // Falls back to 0 if Redis is unavailable.
-    let analytics_events_used: i64 = if let Some(ref redis_url) = ctx.config.redis_url {
+    let analytics_events_used: i64 = if let Some(ref redis_url) = ac.ctx.config.redis_url {
         match kyomi_core::redis::create_pool(redis_url).await {
             Ok(mut conn) => {
-                kyomi_auth::analytics_quota::get_usage_count(&mut conn, ws_id)
+                kyomi_auth::analytics_quota::get_usage_count(&mut conn, &ac.ws_id)
                     .await
                     .unwrap_or(0) as i64
             }
@@ -299,12 +297,12 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
     let analytics_bundle_balance = workspace.analytics_bundle_events.unwrap_or(0);
 
     // Count active workspace members for seat billing display
-    let bt = kyomi_core::sql_compat::bool_true(ctx.db.is_postgres());
+    let bt = kyomi_core::sql_compat::bool_true(ac.db().is_postgres());
     let count_sql = format!(
         "SELECT COUNT(*) FROM workspace_users WHERE workspace_id = $1 AND active = {bt}"
     );
     let active_members: i32 = kyomi_core::db_fetch_scalar!(
-        &ctx.db, i64, &count_sql, ws_id
+        ac.db(), i64, &count_sql, &ac.ws_id
     ).map_err(|e| ServerFnError::new(format!("Failed to count workspace members: {e}")))? as i32;
 
     // Normalize all timestamps to RFC3339 so the frontend's date formatter
@@ -335,18 +333,16 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
 /// Mirrors `GET /api/v1/billing/invoices`.
 #[server(prefix = "/leptos-api")]
 pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
+    let ac = AuthenticatedContext::extract().await?;
 
     // Stripe not configured — no invoices to show.
-    if ctx.config.stripe_secret_key.is_none() {
+    if ac.ctx.config.stripe_secret_key.is_none() {
         return Ok(vec![]);
     }
 
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    require_workspace_owner(&ac.auth)?;
 
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     // If no Stripe customer, return empty list
     let customer_id = match workspace.stripe_customer_id {
@@ -354,7 +350,7 @@ pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
         _ => return Ok(vec![]),
     };
 
-    let stripe_service = require_stripe(&ctx.config)?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
     let invoices = stripe_service
         .list_invoices(&customer_id, 10)
         .await
@@ -385,13 +381,11 @@ pub async fn get_invoices() -> Result<Vec<InvoiceRecord>, ServerFnError> {
 pub async fn create_checkout(
     quantity: u64,
 ) -> Result<CheckoutOutcome, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     // If user already has an active subscription, modify it directly.
     //
@@ -404,12 +398,12 @@ pub async fn create_checkout(
             || workspace.subscription_status == "cancelled")
     {
         kyomi_auth::subscription_service::modify_existing_subscription(
-            &ctx.db,
+            ac.db(),
             &stripe_service,
-            ctx.mcp_sessions
+            ac.ctx.mcp_sessions
                 .as_ref()
                 .ok_or_else(|| ServerFnError::new("MCP session manager unavailable"))?,
-            ws_id,
+            &ac.ws_id,
             sub_id,
         )
         .await
@@ -430,18 +424,18 @@ pub async fn create_checkout(
     let customer_id = match workspace.stripe_customer_id {
         Some(ref id) if !id.is_empty() => id.clone(),
         _ => {
-            let email = &auth.email;
+            let email = &ac.auth.email;
             let ws_name = workspace.name.as_deref().unwrap_or("Unnamed");
             let new_customer_id = stripe_service
-                .create_customer(email, ws_id, ws_name)
+                .create_customer(email, &ac.ws_id, ws_name)
                 .await
                 .map_err(|e| ServerFnError::new(format!("Failed to create Stripe customer: {e}")))?;
 
             kyomi_core::db_execute!(
-                &ctx.db,
+                ac.db(),
                 "UPDATE workspaces SET stripe_customer_id = $1 WHERE workspace_id = $2",
                 &new_customer_id,
-                ws_id
+                &ac.ws_id
             )
             .into_sfn()?;
 
@@ -452,7 +446,7 @@ pub async fn create_checkout(
     let params = kyomi_auth::stripe_service::EmbeddedCheckoutParams {
         customer_id,
         price_id: price_id.to_string(),
-        workspace_id: ws_id.to_string(),
+        workspace_id: ac.ws_id.clone(),
         quantity,
         trial_days: 30,
     };
@@ -473,13 +467,11 @@ pub async fn create_checkout(
 /// Mirrors `POST /api/v1/billing/cancel-subscription`.
 #[server(prefix = "/leptos-api")]
 pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     let sub_id = workspace
         .stripe_subscription_id
@@ -492,9 +484,9 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("Failed to cancel subscription: {e}")))?;
 
     kyomi_core::db_execute!(
-        &ctx.db,
+        ac.db(),
         "UPDATE workspaces SET subscription_status = 'cancelled' WHERE workspace_id = $1",
-        ws_id
+        &ac.ws_id
     )
     .into_sfn()?;
 
@@ -508,13 +500,11 @@ pub async fn cancel_subscription() -> Result<BillingResult, ServerFnError> {
 /// Mirrors `POST /api/v1/billing/reactivate-subscription`.
 #[server(prefix = "/leptos-api")]
 pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     let sub_id = workspace
         .stripe_subscription_id
@@ -531,9 +521,9 @@ pub async fn reactivate_subscription() -> Result<BillingResult, ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("Failed to reactivate subscription: {e}")))?;
 
     kyomi_core::db_execute!(
-        &ctx.db,
+        ac.db(),
         "UPDATE workspaces SET subscription_status = 'active' WHERE workspace_id = $1",
-        ws_id
+        &ac.ws_id
     )
     .into_sfn()?;
 
@@ -554,21 +544,19 @@ pub const UNLIMITED_SEAT_CAP: i32 = 999_999;
 /// lowering below that would require removing users first.
 #[server(prefix = "/leptos-api")]
 pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
     if limit < 1 {
         return Err(ServerFnError::new("Seat cap must be at least 1"));
     }
 
     // Count active workspace members
-    let bt = kyomi_core::sql_compat::bool_true(ctx.db.is_postgres());
+    let bt = kyomi_core::sql_compat::bool_true(ac.db().is_postgres());
     let count_sql = format!(
         "SELECT COUNT(*) FROM workspace_users WHERE workspace_id = $1 AND active = {bt}"
     );
-    let active: i64 = kyomi_core::db_fetch_scalar!(&ctx.db, i64, &count_sql, ws_id)
+    let active: i64 = kyomi_core::db_fetch_scalar!(ac.db(), i64, &count_sql, &ac.ws_id)
         .map_err(|e| ServerFnError::new(format!("Failed to count members: {e}")))?;
 
     if (limit as i64) < active {
@@ -578,14 +566,14 @@ pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
     }
 
     kyomi_core::db_execute!(
-        &ctx.db,
+        ac.db(),
         "UPDATE workspaces SET user_limit = $1 WHERE workspace_id = $2",
         limit,
-        ws_id
+        &ac.ws_id
     )
     .into_sfn()?;
 
-    tracing::info!(workspace_id = %ws_id, limit, "Updated workspace seat cap");
+    tracing::info!(workspace_id = %ac.ws_id, limit, "Updated workspace seat cap");
 
     Ok(limit)
 }
@@ -595,13 +583,11 @@ pub async fn update_user_limit(limit: i32) -> Result<i32, ServerFnError> {
 /// Mirrors `POST /api/v1/billing/create-portal-session`.
 #[server(prefix = "/leptos-api")]
 pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
         ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
@@ -609,7 +595,7 @@ pub async fn create_portal_session() -> Result<RedirectUrl, ServerFnError> {
 
     // Portal returns via cross-site redirect from Stripe — use the
     // intermediate bounce page so SameSite=Strict cookies work.
-    let return_url = format!("{}/billing/return", ctx.config.frontend_url);
+    let return_url = format!("{}/billing/return", ac.ctx.config.frontend_url);
 
     let (portal_url, _session_id) = stripe_service
         .create_portal_session(customer_id, &return_url)
@@ -630,13 +616,11 @@ pub async fn purchase_ai_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession
         return Err(ServerFnError::new("Quantity must be at least 1"));
     }
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
         ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
@@ -650,7 +634,7 @@ pub async fn purchase_ai_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession
     let params = kyomi_auth::stripe_service::EmbeddedPaymentCheckoutParams {
         customer_id: customer_id.to_string(),
         price_id: price_id.to_string(),
-        workspace_id: ws_id.to_string(),
+        workspace_id: ac.ws_id.clone(),
         purchase_type: "ai_bundle".to_string(),
         quantity: u64::from(quantity),
     };
@@ -677,13 +661,11 @@ pub async fn purchase_analytics_bundle(quantity: u32) -> Result<EmbeddedCheckout
         return Err(ServerFnError::new("Quantity must be at least 1"));
     }
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_workspace_owner(&auth)?;
-    let ws_id = workspace_id(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_owner(&ac.auth)?;
 
-    let stripe_service = require_stripe(&ctx.config)?;
-    let workspace = load_workspace(&ctx.db, ws_id).await?;
+    let stripe_service = require_stripe(&ac.ctx.config)?;
+    let workspace = load_workspace(ac.db(), &ac.ws_id).await?;
 
     let customer_id = workspace.stripe_customer_id.as_deref().ok_or_else(|| {
         ServerFnError::new("No Stripe customer found. Please subscribe to a plan first.")
@@ -697,7 +679,7 @@ pub async fn purchase_analytics_bundle(quantity: u32) -> Result<EmbeddedCheckout
     let params = kyomi_auth::stripe_service::EmbeddedPaymentCheckoutParams {
         customer_id: customer_id.to_string(),
         price_id: price_id.to_string(),
-        workspace_id: ws_id.to_string(),
+        workspace_id: ac.ws_id.clone(),
         purchase_type: "analytics_bundle".to_string(),
         quantity: u64::from(quantity),
     };

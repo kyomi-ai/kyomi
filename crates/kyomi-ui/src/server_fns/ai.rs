@@ -148,15 +148,13 @@ async fn load_ai_bundle_remaining_usd(
 /// member may call this.
 #[server(prefix = "/leptos-api")]
 pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_saas(&ctx)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_saas(&ac.ctx)?;
 
-    let ws_id = workspace_id(&auth)?;
-    let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
+    let cfg = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?;
-    let balance = load_ai_bundle_remaining_usd(&ctx.db, ws_id).await?;
+    let balance = load_ai_bundle_remaining_usd(ac.db(), &ac.ws_id).await?;
 
     Ok(view_from_config(&cfg, balance))
 }
@@ -182,10 +180,9 @@ pub async fn update_workspace_ai_config(
 ) -> Result<WorkspaceAiConfigView, ServerFnError> {
     use std::str::FromStr;
 
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_saas(&ctx)?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_saas(&ac.ctx)?;
+    require_workspace_admin(&ac.auth)?;
 
     let parsed_provider =
         kyomi_auth::workspace_ai_config::WorkspaceAiProvider::from_str(&provider)
@@ -198,16 +195,15 @@ pub async fn update_workspace_ai_config(
         model,
     };
 
-    let ws_id = workspace_id(&auth)?;
-    kyomi_auth::workspace_ai_config::update(&ctx.db, ws_id, input)
+    kyomi_auth::workspace_ai_config::update(ac.db(), &ac.ws_id, input)
         .await
         .into_sfn()?;
 
     // Re-load so the returned view reflects the committed state.
-    let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
+    let cfg = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
         .await
         .into_sfn()?;
-    let balance = load_ai_bundle_remaining_usd(&ctx.db, ws_id).await?;
+    let balance = load_ai_bundle_remaining_usd(ac.db(), &ac.ws_id).await?;
 
     Ok(view_from_config(&cfg, balance))
 }
@@ -436,10 +432,9 @@ pub async fn list_workspace_ai_models(
     api_key: Option<String>,
     base_url: Option<String>,
 ) -> Result<Vec<AiModelInfo>, ServerFnError> {
-    let auth = extract_auth().await?;
-    let ctx = extract_context()?;
-    require_saas(&ctx)?;
-    require_workspace_admin(&auth)?;
+    let ac = AuthenticatedContext::extract().await?;
+    require_saas(&ac.ctx)?;
+    require_workspace_admin(&ac.auth)?;
 
     if provider == "kyomi" {
         return Err(ServerFnError::new(
@@ -465,8 +460,7 @@ pub async fn list_workspace_ai_models(
     let (resolved_key, stored_base_url): (String, Option<String>) = match candidate_key {
         Some(k) => (k, None),
         None => {
-            let ws_id = workspace_id(&auth)?;
-            let cfg = kyomi_auth::workspace_ai_config::load(&ctx.db, ws_id)
+            let cfg = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
                 .await
                 .into_sfn()?;
             // Cross-provider guard: never use a stored key intended for
@@ -754,7 +748,7 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ssr")]
-use super::{extract_auth, extract_context, workspace_id, IntoServerFnError};
+use super::{extract_auth, extract_context, AuthenticatedContext, IntoServerFnError};
 
 // ---------------------------------------------------------------------------
 // Tests
