@@ -125,7 +125,7 @@ pub fn KnowledgePage() -> impl IntoView {
                 }
                 Err(e) => {
                     leptos::logging::error!("Failed to create knowledge doc: {e}");
-                    set_creating.set(false);
+                    set_creating.try_set(false);
                 }
             }
         });
