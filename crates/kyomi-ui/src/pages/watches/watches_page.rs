@@ -363,10 +363,10 @@ pub fn WatchesPage() -> impl IntoView {
             executions_data.set(None);
             leptos::task::spawn_local(async move {
                 let result = get_watch_executions(watch_id, None).await;
-                if let Ok(ref execs) = result && !execs.is_empty() && selected_execution_id.get_untracked().is_none() {
-                    set_selected_execution_id.set(Some(execs[0].id));
+                if let Ok(ref execs) = result && !execs.is_empty() && selected_execution_id.try_get_untracked().flatten().is_none() {
+                    set_selected_execution_id.try_set(Some(execs[0].id));
                 }
-                executions_data.set(Some(result));
+                executions_data.try_set(Some(result));
             });
         } else {
             executions_data.set(None);
@@ -384,7 +384,7 @@ pub fn WatchesPage() -> impl IntoView {
                 execution_detail_data.set(None);
                 leptos::task::spawn_local(async move {
                     let result = get_watch_execution(watch_id, eid).await.ok();
-                    execution_detail_data.set(Some(result));
+                    execution_detail_data.try_set(Some(result));
                 });
             } else {
                 execution_detail_data.set(Some(None));
@@ -405,7 +405,7 @@ pub fn WatchesPage() -> impl IntoView {
                 }
                 Err(e) => toast_error(format!("Failed to toggle watch: {e}")),
             }
-            set_toggling.set(false);
+            set_toggling.try_set(false);
         });
     });
 
@@ -419,7 +419,7 @@ pub fn WatchesPage() -> impl IntoView {
                 }
                 Err(e) => toast_error(format!("Failed to run watch: {e}")),
             }
-            set_running.set(false);
+            set_running.try_set(false);
         });
     });
 
