@@ -1143,6 +1143,9 @@ pub(crate) fn format_number(n: u64) -> String {
 /// Events per analytics bundle (matches ANALYTICS_BUNDLE_CREDIT_EVENTS default).
 const ANALYTICS_BUNDLE_EVENTS: u64 = 1_000_000;
 
+/// Price per analytics event bundle in USD (matches STRIPE_ANALYTICS_BUNDLE Stripe price).
+const ANALYTICS_BUNDLE_PRICE: f64 = 10.0;
+
 #[component]
 fn AnalyticsCard(
     events_used: u64,
@@ -1217,8 +1220,9 @@ fn AnalyticsCard(
                         <span class="text-sm text-foreground">
                             {move || {
                                 let q = analytics_quantity.get();
-                                let total = ANALYTICS_BUNDLE_EVENTS * q as u64;
-                                format!("{q} \u{00d7} {} = {} events", format_number(ANALYTICS_BUNDLE_EVENTS), format_number(total))
+                                let total_events = ANALYTICS_BUNDLE_EVENTS * q as u64;
+                                let total_price = ANALYTICS_BUNDLE_PRICE * q as f64;
+                                format!("{q} \u{00d7} ${:.0} = ${:.0} for {} events", ANALYTICS_BUNDLE_PRICE, total_price, format_number(total_events))
                             }}
                         </span>
                     </div>
@@ -1232,8 +1236,8 @@ fn AnalyticsCard(
                     >
                         {move || if handle_purchase_analytics.pending().get() { "Loading...".to_string() } else {
                             let q = analytics_quantity.get();
-                            let total = ANALYTICS_BUNDLE_EVENTS * q as u64;
-                            format!("Buy Event Bundle \u{2014} {} events", format_number(total))
+                            let total_price = ANALYTICS_BUNDLE_PRICE * q as f64;
+                            format!("Buy Event Bundle \u{2014} ${:.0}", total_price)
                         }}
                     </Button>
                 </div>
