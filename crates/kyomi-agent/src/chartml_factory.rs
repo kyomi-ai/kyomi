@@ -86,6 +86,10 @@ pub fn create_chartml_with_theme(theme: Theme) -> ChartML {
 /// The caller is responsible for resolving datasource queries to inline data
 /// before calling this function.
 ///
+/// The SVG rasterization step (resvg + tiny-skia) is CPU-intensive and
+/// synchronous — it runs on the blocking thread pool via `spawn_blocking` so
+/// it does not starve the Tokio async runtime.
+///
 /// # Arguments
 /// * `yaml` — ChartML YAML spec string (with inline data already resolved)
 /// * `width` — chart width in CSS pixels
@@ -100,18 +104,24 @@ pub async fn render_chart_to_png(
     palette: Option<&[String]>,
 ) -> Result<Vec<u8>, String> {
     ensure_fonts_registered();
-    let chartml = create_chartml();
 
-    // If a palette is provided, inject it into the spec's style.colors
+    // If a palette is provided, inject it into the spec's style.colors.
+    // Do this before entering spawn_blocking so we work with owned data.
     let final_yaml = if let Some(colors) = palette {
         inject_palette(yaml, colors)
     } else {
         yaml.to_string()
     };
 
-    chartml_render::render_to_png_async(&chartml, &final_yaml, width, height, density)
-        .await
-        .map_err(|e| format!("Chart rendering failed: {e}"))
+    // Rasterization (SVG parse → tiny-skia → PNG encode) is CPU-bound and
+    // synchronous — offload it to the blocking thread pool.
+    tokio::task::spawn_blocking(move || {
+        let chartml = create_chartml();
+        chartml_render::render_to_png(&chartml, &final_yaml, width, height, density)
+            .map_err(|e| format!("Chart rendering failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Chart rendering panicked: {e}"))?
 }
 
 /// Render a ChartML spec synchronously (for specs without async transforms).

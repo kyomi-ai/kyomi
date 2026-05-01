@@ -140,7 +140,14 @@ async fn export_pdf_inner(
         parameter_values.as_ref(),
     )
     .await
-    .map_err(|e| kyomi_core::Error::Internal(format!("PDF generation failed: {e}")))?;
+    .map_err(|e| {
+        tracing::error!(
+            error = %e,
+            dashboard_id = %dashboard_id,
+            "PDF generation failed"
+        );
+        kyomi_core::Error::Internal(format!("PDF generation failed: {e}"))
+    })?;
 
     // 8. Build filename from title
     let safe_title: String = dashboard

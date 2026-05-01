@@ -171,8 +171,14 @@ pub async fn generate_dashboard_pdf(
     let today = chrono::Utc::now().format("%B %Y").to_string();
     let typst_doc = pdf_typst::wrap_document_with_cover(title, &typst_body, Some(&today));
 
-    // 8. Compile Typst → PDF (pure Rust, no external deps)
-    let pdf_bytes = pdf_typst::generate_pdf(&typst_doc, &chart_png_bytes)?;
+    // 8. Compile Typst → PDF (pure Rust, no external deps).
+    //    Typst compilation is CPU-intensive and fully synchronous — run it on
+    //    the blocking thread pool so it doesn't starve the Tokio async runtime.
+    let pdf_bytes = tokio::task::spawn_blocking(move || {
+        pdf_typst::generate_pdf(&typst_doc, &chart_png_bytes)
+    })
+    .await
+    .map_err(|e| format!("PDF generation panicked: {e}"))??;
 
     info!(
         bytes = pdf_bytes.len(),
