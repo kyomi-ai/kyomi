@@ -9,6 +9,7 @@ use leptos_router::{
     path,
 };
 
+use crate::components::toast::ToastProvider;
 use crate::components::{Layout, NavigationProgress, ThemeProvider};
 use crate::pages::accept_ownership::AcceptOwnershipPage;
 use crate::pages::billing_return::BillingReturnPage;
@@ -79,6 +80,7 @@ pub fn App() -> impl IntoView {
 
     view! {
         <ThemeProvider initial_preference="system">
+            <ToastProvider>
             <NavigationProgress is_routing />
             <Router set_is_routing>
                 <Routes fallback=|| view! { <Layout><NotFoundPage/></Layout> }>
@@ -174,6 +176,7 @@ pub fn App() -> impl IntoView {
                     </ParentRoute>
                 </Routes>
             </Router>
+            </ToastProvider>
         </ThemeProvider>
     }
 }

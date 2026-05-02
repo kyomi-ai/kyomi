@@ -29,6 +29,7 @@ use crate::pages::dashboards::CollectionsSidebar;
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::collections::{list_collections, CollectionItem};
 use crate::server_fns::dashboards::DashboardListItem;
+use crate::components::toast::{toast_error, toast_success};
 use crate::server_fns::knowledge::{create_knowledge_doc, delete_knowledge_doc};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,8 +97,9 @@ pub fn KnowledgePage() -> impl IntoView {
         set_confirm_open.set(false);
         if let Some((doc_id, _title)) = deleting_doc.try_get_untracked().flatten() {
             leptos::task::spawn_local(async move {
-                if let Err(e) = delete_knowledge_doc(doc_id).await {
-                    leptos::logging::error!("Failed to delete knowledge doc: {e}");
+                match delete_knowledge_doc(doc_id).await {
+                    Ok(()) => toast_success("Document deleted"),
+                    Err(e) => toast_error(format!("Failed to delete document: {e}")),
                 }
                 // Sync engine handles cache updates via WebSocket — no manual
                 // invalidation needed for knowledge docs (KYO-169).

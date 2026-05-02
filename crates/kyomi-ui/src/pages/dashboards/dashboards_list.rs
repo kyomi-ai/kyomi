@@ -41,6 +41,7 @@ use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::collections::{
     list_collections, remove_dashboard_from_collection, CollectionItem,
 };
+use crate::components::toast::{toast_error, toast_success};
 use crate::server_fns::dashboards::{
     create_dashboard, delete_dashboard, DashboardListItem,
 };
@@ -110,8 +111,9 @@ pub fn DashboardsListPage() -> impl IntoView {
         set_confirm_open.set(false);
         if let Some((dashboard_id, _title)) = deleting_dashboard.try_get_untracked().flatten() {
             leptos::task::spawn_local(async move {
-                if let Err(e) = delete_dashboard(dashboard_id).await {
-                    leptos::logging::error!("Failed to delete dashboard: {e}");
+                match delete_dashboard(dashboard_id).await {
+                    Ok(()) => toast_success("Dashboard deleted"),
+                    Err(e) => toast_error(format!("Failed to delete dashboard: {e}")),
                 }
                 // Sync engine handles cache updates via WebSocket — no manual
                 // invalidation needed for dashboards (KYO-169).
@@ -167,7 +169,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                 }
                 Err(e) => {
                     leptos::logging::error!("Failed to create dashboard: {e}");
-                    set_creating.set(false);
+                    set_creating.try_set(false);
                 }
             }
         });
