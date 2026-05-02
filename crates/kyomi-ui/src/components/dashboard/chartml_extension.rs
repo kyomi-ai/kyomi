@@ -562,6 +562,17 @@ fn start_resize(
         let start_w = rect.width();
         let start_h = rect.height();
 
+        // The container includes the header bar, padding, and border above and
+        // below the actual chart. Measure the .chartml-container (the chart
+        // rendering root) so we can subtract overhead when persisting height —
+        // `visualize.style.height` controls only the chart, not the full card.
+        let height_overhead = container_el
+            .query_selector(".chartml-container")
+            .ok()
+            .flatten()
+            .map(|chart_el| start_h - chart_el.get_bounding_client_rect().height())
+            .unwrap_or(0.0);
+
         // Container width for column calculation.
         let grid_width = grid_el
             .as_ref()
@@ -678,9 +689,15 @@ fn start_resize(
                     };
 
                     let label = match (new_col_span, new_height) {
-                        (Some(cs), Some(h)) => format!("{cs}/12 · {h:.0}px"),
+                        (Some(cs), Some(h)) => {
+                            let chart_h = snap_height((h - height_overhead).max(MIN_CHART_HEIGHT_PX));
+                            format!("{cs}/12 · {chart_h:.0}px")
+                        }
                         (Some(cs), None) => format!("{cs}/12"),
-                        (None, Some(h)) => format!("{h:.0}px"),
+                        (None, Some(h)) => {
+                            let chart_h = snap_height((h - height_overhead).max(MIN_CHART_HEIGHT_PX));
+                            format!("{chart_h:.0}px")
+                        }
                         (None, None) => String::new(),
                     };
                     ghost_clone.set_inner_text(&label);
@@ -740,8 +757,12 @@ fn start_resize(
                 };
                 let new_h = match axis {
                     ResizeAxis::Height | ResizeAxis::Both => {
-                        if (final_h - start_h).abs() > 1.0 {
-                            Some(final_h)
+                        let chart_h = snap_height(
+                            (final_h - height_overhead).max(MIN_CHART_HEIGHT_PX),
+                        );
+                        let start_chart_h = (start_h - height_overhead).max(MIN_CHART_HEIGHT_PX);
+                        if (chart_h - start_chart_h).abs() > 1.0 {
+                            Some(chart_h)
                         } else {
                             None
                         }
