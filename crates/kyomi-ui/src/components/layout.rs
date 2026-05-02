@@ -811,18 +811,10 @@ fn Sidebar(
                     </a>
 
                     <NavItem href=Signal::stored("/chats".to_string()) icon=phosphor_leptos::CHATS label="Chats" collapsed=effective_collapsed also_matches="/chat/"/>
-                    // `also_matches="/dashboard"` (no trailing slash) covers
-                    // the list `/dashboards`, detail `/dashboard/:id`, and
-                    // editor `/dashboard/:id/edit` in one prefix. Needed
-                    // because `href` is now dynamic — when it resolves to
-                    // `/dashboard/<user-default-id>` the list path no longer
-                    // satisfies `starts_with(href)`, so `also_matches` is the
-                    // one that keeps the nav item active on the list page.
-                    <NavItem href=dashboards_href icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed also_matches="/dashboard"/>
                     <NavItem
-                        href=Signal::stored("/watches".to_string())
-                        icon=phosphor_leptos::EYE
-                        label="Watches"
+                        href=Signal::stored("/inbox".to_string())
+                        icon=phosphor_leptos::TRAY
+                        label="Inbox"
                         collapsed=effective_collapsed
                         badge_count=Signal::derive(move || {
                             match unread_alerts.get() {
@@ -832,6 +824,15 @@ fn Sidebar(
                             }
                         })
                     />
+                    // `also_matches="/dashboard"` (no trailing slash) covers
+                    // the list `/dashboards`, detail `/dashboard/:id`, and
+                    // editor `/dashboard/:id/edit` in one prefix. Needed
+                    // because `href` is now dynamic — when it resolves to
+                    // `/dashboard/<user-default-id>` the list path no longer
+                    // satisfies `starts_with(href)`, so `also_matches` is the
+                    // one that keeps the nav item active on the list page.
+                    <NavItem href=dashboards_href icon=phosphor_leptos::CHART_BAR label="Dashboards" collapsed=effective_collapsed also_matches="/dashboard"/>
+                    <NavItem href=Signal::stored("/watches".to_string()) icon=phosphor_leptos::EYE label="Watches" collapsed=effective_collapsed/>
                     <NavItem href=Signal::stored("/knowledge".to_string()) icon=phosphor_leptos::BOOK_OPEN label="Knowledge" collapsed=effective_collapsed/>
                     <NavItem href=Signal::stored("/sql-editor".to_string()) icon=phosphor_leptos::DATABASE label="SQL Editor" collapsed=effective_collapsed/>
                 </div>

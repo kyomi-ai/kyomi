@@ -1,23 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! WatchesPage — main page with two tabs: Alerts and Watches.
-//!
-//! Ported from `apps/frontend/src/pages/WatchesPage.jsx` (667 lines).
+//! WatchesPage — watch configuration list page.
 //!
 //! Features:
 //! - Header with "Watches" title and "Create Watch" button
-//! - Two tabs: Alerts (inbox) and Watches (config)
-//! - Alerts tab shows `AlertsHistory` component
-//! - Watches tab shows watch cards with toggle, run, edit, delete actions
+//! - List of watch cards with toggle, run, edit, delete actions
 //! - WatchModal opens for creating/editing watches (Configure + AI sub-tabs)
 //! - Execution log modal for viewing watch run history
 
 use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
-use leptos_router::hooks::{use_navigate, use_params_map, use_query_map};
 
 use crate::components::toast::{toast_error, toast_success};
-use crate::components::watches::{AlertsHistory, ExecutionLogViewer, WatchModal};
+use crate::components::watches::{ExecutionLogViewer, WatchModal};
 use crate::components::{
     Alert, AlertDescription, AlertVariant, Button, ButtonLink, ButtonSize, ButtonVariant, Card,
     CardContent, CardHeader, CardTitle, ConfirmDialog, EmptyState, ListPageSkeleton, Modal,
@@ -273,20 +268,9 @@ fn WatchCard(
 
 // ─── Main Component ─────────────────────────────────────────────────────────
 
-/// WatchesPage — main page with Alerts and Watches tabs.
-///
-/// Matches `apps/frontend/src/pages/WatchesPage.jsx` exactly.
+/// WatchesPage — watch configuration list page.
 #[component]
 pub fn WatchesPage() -> impl IntoView {
-    let navigate = use_navigate();
-    let params = use_params_map();
-    let query = use_query_map();
-
-    // Deep-link alert ID from ?alert=N query parameter.
-    let expanded_alert_id = Memo::new(move |_| {
-        query.get().get("alert").and_then(|v| v.parse::<i32>().ok())
-    });
-
     // ── User context & capabilities ─────────────────────────────────────
     // Provided by the parent Layout — one fetch per session.
     let user_ctx_resource =
@@ -317,16 +301,6 @@ pub fn WatchesPage() -> impl IntoView {
     });
 
     let ctx_loading = Memo::new(move |_| user_ctx_resource.get().is_none());
-
-    // View from URL: "config" maps to "watches", anything else maps to "alerts"
-    let active_view = Memo::new(move |_| {
-        let view_param = params.get().get("view").unwrap_or_default();
-        if view_param == "config" {
-            "watches"
-        } else {
-            "alerts"
-        }
-    });
 
     // ── Unified Watch Modal state ──────────────────────────────────────
     let (show_watch_modal, set_show_watch_modal) = signal(false);
@@ -479,14 +453,6 @@ pub fn WatchesPage() -> impl IntoView {
         set_selected_execution_id.set(Some(exec_id));
     });
 
-    // AlertsHistory "continue in chat" handler.
-    let on_continue_chat = {
-        let navigate = navigate.clone();
-        Callback::new(move |session_id: String| {
-            navigate(&format!("/chat/{session_id}"), Default::default());
-        })
-    };
-
     // Confirm dialog derived values.
     let confirm_message = move || {
         deleting_watch
@@ -503,20 +469,6 @@ pub fn WatchesPage() -> impl IntoView {
     // Timezone offset for cron descriptions.
     let tz_offset = get_tz_offset_minutes();
 
-    // Navigation helpers — stored as Callbacks so they are Copy and can be used
-    // inside `move` closures without consuming them.
-    let nav_alerts = StoredValue::new({
-        let navigate = navigate.clone();
-        move || {
-            navigate("/watches/alerts", Default::default());
-        }
-    });
-    let nav_watches = StoredValue::new({
-        let navigate = navigate.clone();
-        move || {
-            navigate("/watches/config", Default::default());
-        }
-    });
     let handle_create_watch = move |_: leptos::ev::MouseEvent| {
         set_modal_watch.set(None);
         set_modal_initial_tab.set("ai".to_string());
@@ -606,36 +558,6 @@ pub fn WatchesPage() -> impl IntoView {
                             </Button>
                         </div>
 
-                        // Row 2: Underline tabs
-                        <div class="px-4 md:px-6 border-b border-border flex items-center gap-4">
-                            <button
-                                on:click=move |_| nav_alerts.with_value(|f| f())
-                                class=move || {
-                                    if active_view.get() == "alerts" {
-                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-primary text-foreground transition-colors"
-                                    } else {
-                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors"
-                                    }
-                                }
-                            >
-                                <Icon icon=phosphor_leptos::BELL attr:class="h-4 w-4" />
-                                "Alerts"
-                            </button>
-                            <button
-                                on:click=move |_| nav_watches.with_value(|f| f())
-                                class=move || {
-                                    if active_view.get() == "watches" {
-                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-primary text-foreground transition-colors"
-                                    } else {
-                                        "flex items-center gap-1.5 px-1 py-3 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors"
-                                    }
-                                }
-                            >
-                                <Icon icon=phosphor_leptos::EYE attr:class="h-4 w-4" />
-                                "Watches"
-                            </button>
-                        </div>
-
                         // Budget exhausted warning
                         {is_credits_exhausted.then(|| {
                             view! {
@@ -653,79 +575,64 @@ pub fn WatchesPage() -> impl IntoView {
 
                 // Content
                 <div class="flex-1 overflow-auto p-4 md:p-6 @container">
-                    {move || {
-                        if active_view.get() == "watches" {
-                            // Watches list view
-                            view! {
-                                <Transition fallback=move || view! { <ListPageSkeleton /> }>
-                                    {move || {
-                                        // Show skeleton until the SyncStore has been hydrated
-                                        // from IndexedDB (KYO-169).
-                                        if !store_initialized.get() {
-                                            return view! { <ListPageSkeleton /> }.into_any();
-                                        }
-                                        let watches = watches_signal.get();
-                                        if watches.is_empty() {
-                                            let desc = if is_credits_exhausted {
-                                                "Your AI budget is exhausted. Wait for it to reset or upgrade your plan to create watches."
-                                            } else {
-                                                "Create your first watch to start monitoring your data proactively."
-                                            };
-                                            view! {
-                                                <EmptyState
-                                                    icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::EYE weight=IconWeight::Duotone size="64px" /> }.into_any())
-                                                    title="No watches yet"
-                                                    description=desc.to_string()
-                                                    action=std::sync::Arc::new(move || view! {
-                                                        <Button
-                                                            on:click=move |_| {
-                                                                set_modal_watch.set(None);
-                                                                set_modal_initial_tab.set("ai".to_string());
-                                                                set_show_watch_modal.set(true);
-                                                            }
-                                                            disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
-                                                        >
-                                                            <Icon icon=phosphor_leptos::PLUS attr:class="h-4 w-4" />
-                                                            "Create Watch"
-                                                        </Button>
-                                                    }.into_any())
-                                                />
-                                            }.into_any()
-                                        } else {
-                                            let cards = watches.into_iter().map(|watch| {
-                                                view! {
-                                                    <WatchCard
-                                                        watch=watch
-                                                        tz_offset=tz_offset
-                                                        on_toggle=handle_toggle_watch
-                                                        on_run=handle_run_now
-                                                        on_edit=handle_edit_watch
-                                                        on_delete=handle_request_delete
-                                                        on_view_log=handle_view_execution_log
-                                                        toggle_pending=Signal::derive(move || toggling.get())
-                                                        run_pending=Signal::derive(move || running.get())
-                                                    />
+                    <Transition fallback=move || view! { <ListPageSkeleton /> }>
+                        {move || {
+                            // Show skeleton until the SyncStore has been hydrated
+                            // from IndexedDB (KYO-169).
+                            if !store_initialized.get() {
+                                return view! { <ListPageSkeleton /> }.into_any();
+                            }
+                            let watches = watches_signal.get();
+                            if watches.is_empty() {
+                                let desc = if is_credits_exhausted {
+                                    "Your AI budget is exhausted. Wait for it to reset or upgrade your plan to create watches."
+                                } else {
+                                    "Create your first watch to start monitoring your data proactively."
+                                };
+                                view! {
+                                    <EmptyState
+                                        icon=std::sync::Arc::new(|| view! { <Icon icon=phosphor_leptos::EYE weight=IconWeight::Duotone size="64px" /> }.into_any())
+                                        title="No watches yet"
+                                        description=desc.to_string()
+                                        action=std::sync::Arc::new(move || view! {
+                                            <Button
+                                                on:click=move |_| {
+                                                    set_modal_watch.set(None);
+                                                    set_modal_initial_tab.set("ai".to_string());
+                                                    set_show_watch_modal.set(true);
                                                 }
-                                            }).collect_view();
-                                            view! {
-                                                <div class="grid gap-4 @2xl:grid-cols-2 @4xl:grid-cols-3">
-                                                    {cards}
-                                                </div>
-                                            }.into_any()
-                                        }
-                                    }}
-                                </Transition>
-                            }.into_any()
-                        } else {
-                            // Alerts history view
-                            view! {
-                                <AlertsHistory
-                                    on_continue_chat=on_continue_chat
-                                    expanded_alert_id=expanded_alert_id.get()
-                                />
-                            }.into_any()
-                        }
-                    }}
+                                                disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
+                                            >
+                                                <Icon icon=phosphor_leptos::PLUS attr:class="h-4 w-4" />
+                                                "Create Watch"
+                                            </Button>
+                                        }.into_any())
+                                    />
+                                }.into_any()
+                            } else {
+                                let cards = watches.into_iter().map(|watch| {
+                                    view! {
+                                        <WatchCard
+                                            watch=watch
+                                            tz_offset=tz_offset
+                                            on_toggle=handle_toggle_watch
+                                            on_run=handle_run_now
+                                            on_edit=handle_edit_watch
+                                            on_delete=handle_request_delete
+                                            on_view_log=handle_view_execution_log
+                                            toggle_pending=Signal::derive(move || toggling.get())
+                                            run_pending=Signal::derive(move || running.get())
+                                        />
+                                    }
+                                }).collect_view();
+                                view! {
+                                    <div class="grid gap-4 @2xl:grid-cols-2 @4xl:grid-cols-3">
+                                        {cards}
+                                    </div>
+                                }.into_any()
+                            }
+                        }}
+                    </Transition>
                 </div>
 
                 // Watch Modal — create or edit

@@ -9,6 +9,7 @@ pub mod chat;
 pub mod connect_setup;
 pub mod dashboards;
 pub mod home;
+pub mod inbox;
 pub mod knowledge;
 pub mod not_found;
 pub mod not_implemented;

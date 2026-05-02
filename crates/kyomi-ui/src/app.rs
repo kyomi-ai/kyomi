@@ -26,6 +26,7 @@ use crate::pages::chat::{ChatPage, ChatsListPage};
 use crate::pages::connect_setup::ConnectSetupPage;
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
 use crate::pages::home::HomePage;
+use crate::pages::inbox::InboxPage;
 use crate::pages::knowledge::KnowledgePage;
 use crate::pages::not_found::NotFoundPage;
 use crate::pages::not_implemented::NotImplementedPage;
@@ -139,8 +140,8 @@ pub fn App() -> impl IntoView {
                         // Knowledge docs reuse the dashboard viewer/editor.
                         <Route path=path!("/knowledge/:id") view=DashboardViewerPage/>
                         <Route path=path!("/knowledge/:id/edit") view=DashboardEditorPage/>
+                        <Route path=path!("/inbox") view=InboxPage/>
                         <Route path=path!("/watches") view=WatchesPage/>
-                        <Route path=path!("/watches/:view") view=WatchesPage/>
                         // Settings — nested ParentRoute provides the SettingsShell
                         // chrome around the settings tab routes.
                         <ParentRoute path=path!("/settings") view=|| view! {
