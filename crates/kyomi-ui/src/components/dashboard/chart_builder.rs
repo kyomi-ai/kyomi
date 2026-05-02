@@ -42,6 +42,7 @@ use crate::pages::sql_editor::types::QueryResult;
 use crate::server_fns::datasources::list_datasources;
 
 use crate::chartml_provider::configured_chartml;
+#[cfg(target_arch = "wasm32")]
 use super::markdown_renderer::{kyomi_palette, kyomi_theme};
 use super::shared::{BTN_BASE, BTN_DEFAULT, BTN_SIZE};
 
@@ -1690,6 +1691,7 @@ pub fn ChartBuilderModal(
 /// with hooks installed. This helper returns a raw [`chartml_core::ChartML`]
 /// so the caller can register an inline data source before wrapping it —
 /// that post-construction step doesn't fit the shared-factory model.
+#[cfg(target_arch = "wasm32")]
 fn build_remote_chartml(
     data_table: chartml_core::data::DataTable,
     is_dark: bool,

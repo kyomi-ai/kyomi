@@ -30,6 +30,7 @@ use chartml_core::ChartRenderer;
 // crate has zero server-only dependencies, so it compiles cleanly under
 // the `hydrate` feature. Re-exported here so existing callers in this
 // file don't have to touch their import paths.
+#[cfg(target_arch = "wasm32")]
 pub(crate) use kyomi_chart_theme::{kyomi_palette, kyomi_theme};
 use crate::chartml_provider::configured_chartml;
 use super::kyomi_chart::KyomiChart;
@@ -456,6 +457,7 @@ pub(crate) fn chart_col_span_class(col_span: u8) -> &'static str {
 ///
 /// Used by the `chart-resize-request` handler in the dashboard editor to
 /// persist width changes made via the WYSIWYG drag-to-resize handles.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
     let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
     let layout = spec
@@ -477,6 +479,7 @@ pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
 ///
 /// Used by the `chart-resize-request` handler in the dashboard editor to
 /// persist height changes made via the WYSIWYG drag-to-resize handles.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn set_chart_height(yaml: &str, new_height: f64) -> Option<String> {
     let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
     let spec_obj = spec.as_object_mut()?;

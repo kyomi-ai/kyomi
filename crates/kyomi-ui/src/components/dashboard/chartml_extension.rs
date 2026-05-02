@@ -22,12 +22,15 @@ use crate::components::dashboard::markdown_renderer::{
 // Valid colSpan values for the 12-column grid — these snap points look correct
 // across common container widths. Odd values like 1, 5, 7, 11 are excluded
 // because they produce awkward proportions in typical 2+ chart layouts.
+#[cfg(any(target_arch = "wasm32", test))]
 const VALID_COL_SPANS: &[u8] = &[2, 3, 4, 6, 8, 9, 10, 12];
 
 /// Minimum resize height in pixels — prevents charts collapsing too small.
+#[cfg(any(target_arch = "wasm32", test))]
 const MIN_CHART_HEIGHT_PX: f64 = 100.0;
 
 /// Height snap interval — rounds to nearest 5px increment during drag.
+#[cfg(any(target_arch = "wasm32", test))]
 const HEIGHT_SNAP_PX: f64 = 5.0;
 
 /// Teardown closure stored during an active resize drag.
@@ -478,6 +481,7 @@ enum ResizeAxis {
 ///
 /// `container_width` is the full width of the `.kode-block-grid` container
 /// (12 columns). Each column is `container_width / 12` pixels wide.
+#[cfg(any(target_arch = "wasm32", test))]
 fn snap_to_col_span(container_width: f64, px_x: f64) -> u8 {
     if container_width <= 0.0 {
         return 12;
@@ -495,6 +499,7 @@ fn snap_to_col_span(container_width: f64, px_x: f64) -> u8 {
 
 /// Snap a height value to the nearest `HEIGHT_SNAP_PX` increment, clamped to
 /// `MIN_CHART_HEIGHT_PX`.
+#[cfg(any(target_arch = "wasm32", test))]
 fn snap_height(px: f64) -> f64 {
     let snapped = (px / HEIGHT_SNAP_PX).round() * HEIGHT_SNAP_PX;
     snapped.max(MIN_CHART_HEIGHT_PX)

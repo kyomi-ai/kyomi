@@ -107,7 +107,7 @@ pub struct ServerExtras {
 /// `extras` carries optional platform-specific components (e.g. Slack client)
 /// that need to reach the Leptos server-function context without polluting
 /// `AppState`.
-pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
+pub fn build_router(state: state::AppState, _extras: ServerExtras) -> Router {
     let demo_mode = state.config.demo_mode;
 
     Router::new()
@@ -172,7 +172,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 connect_token: state.connect_token.clone(),
                 mcp_sessions: Some(state.mcp_sessions.clone()),
                 #[cfg(feature = "slack")]
-                slack_client: extras.slack_client.clone(),
+                slack_client: _extras.slack_client.clone(),
             };
             leptos_frontend::login_ssr_handler(server_ctx)
         }))
@@ -220,7 +220,7 @@ pub fn build_router(state: state::AppState, extras: ServerExtras) -> Router {
                 connect_token: state.connect_token.clone(),
                 mcp_sessions: Some(state.mcp_sessions.clone()),
                 #[cfg(feature = "slack")]
-                slack_client: extras.slack_client,
+                slack_client: _extras.slack_client,
             };
             move |req: axum::http::Request<axum::body::Body>| {
                 let ctx = server_ctx.clone();

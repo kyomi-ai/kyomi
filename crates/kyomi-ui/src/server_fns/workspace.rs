@@ -236,6 +236,7 @@ pub async fn get_workspace_slack_status() -> Result<crate::types::WorkspaceSlack
 /// Returns the OAuth authorization URL. The frontend redirects the user
 /// to this URL to complete the Slack app installation.
 /// Requires workspace admin role.
+#[cfg(feature = "slack")]
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
@@ -280,6 +281,12 @@ pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
     );
 
     Ok(auth_url)
+}
+
+#[cfg(not(feature = "slack"))]
+#[server(prefix = "/leptos-api")]
+pub async fn get_slack_install_url() -> Result<String, ServerFnError> {
+    Err(ServerFnError::new("Slack integration not available"))
 }
 
 /// Remove the Slack integration from the workspace.

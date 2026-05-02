@@ -116,6 +116,7 @@ pub async fn get_slack_status() -> Result<SlackStatus, ServerFnError> {
 /// Generates a CSRF state token, stores it in KV, and returns the
 /// Slack OAuth authorization URL. The frontend redirects the user to
 /// this URL to complete the OAuth flow.
+#[cfg(feature = "slack")]
 #[server(prefix = "/leptos-api")]
 pub async fn slack_connect() -> Result<String, ServerFnError> {
     use super::{extract_auth, extract_context};
@@ -168,6 +169,12 @@ pub async fn slack_connect() -> Result<String, ServerFnError> {
     Ok(auth_url)
 }
 
+#[cfg(not(feature = "slack"))]
+#[server(prefix = "/leptos-api")]
+pub async fn slack_connect() -> Result<String, ServerFnError> {
+    Err(ServerFnError::new("Slack integration not available"))
+}
+
 /// Disconnect the current user's Slack account.
 ///
 /// Removes the user integration and platform user link from the database.
@@ -206,6 +213,7 @@ pub async fn slack_disconnect() -> Result<(), ServerFnError> {
 /// - Workspace has Slack installed (bot token in workspace_integrations)
 /// - User has linked their Slack account (platform_user_links)
 /// - SlackClient is available in server context
+#[cfg(feature = "slack")]
 #[server(prefix = "/leptos-api")]
 pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
     use super::{AuthenticatedContext, IntoServerFnError};
@@ -264,6 +272,12 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
             is_private: ch.is_private,
         })
         .collect())
+}
+
+#[cfg(not(feature = "slack"))]
+#[server(prefix = "/leptos-api")]
+pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
+    Err(ServerFnError::new("Slack integration not available"))
 }
 
 /// Get the user's default watch channel setting.

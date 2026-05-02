@@ -80,7 +80,7 @@ pub fn save_mode(mode: &AppMode) {
         AppMode::FirstLaunch => return,
     };
 
-    let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap());
+    let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).expect("failed to serialize mode config"));
 }
 
 /// Reset mode — writes a "choose" sentinel so next launch shows the selector,

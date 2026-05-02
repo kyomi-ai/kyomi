@@ -50,7 +50,7 @@ fn start_mode_selector() {
 
     let tx_clone = tx.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async {
             use axum::{routing::{get, post}, Router, Json, response::Html};
 
@@ -76,8 +76,8 @@ fn start_mode_selector() {
                 }));
 
             let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-                .await.unwrap();
-            axum::serve(listener, app).await.unwrap();
+                .await.expect("failed to bind selector HTTP server");
+            axum::serve(listener, app).await.expect("selector HTTP server error");
         });
     });
 
