@@ -449,6 +449,59 @@ pub(crate) fn chart_col_span_class(col_span: u8) -> &'static str {
     }
 }
 
+/// Set `layout.colSpan` in a per-item ChartML YAML string.
+///
+/// Parses the YAML, sets or creates the `layout.colSpan` field, and
+/// re-serializes. Returns `None` if the YAML cannot be parsed or serialized.
+///
+/// Used by the `chart-resize-request` handler in the dashboard editor to
+/// persist width changes made via the WYSIWYG drag-to-resize handles.
+pub(crate) fn set_col_span(yaml: &str, new_col_span: u8) -> Option<String> {
+    let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
+    let layout = spec
+        .as_object_mut()?
+        .entry("layout")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let layout_obj = layout.as_object_mut()?;
+    layout_obj.insert(
+        "colSpan".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(new_col_span)),
+    );
+    serde_yaml::to_string(&spec).ok()
+}
+
+/// Set `visualize.style.height` in a per-item ChartML YAML string.
+///
+/// Parses the YAML, sets or creates the `visualize.style.height` field, and
+/// re-serializes. Returns `None` if the YAML cannot be parsed or serialized.
+///
+/// Used by the `chart-resize-request` handler in the dashboard editor to
+/// persist height changes made via the WYSIWYG drag-to-resize handles.
+pub(crate) fn set_chart_height(yaml: &str, new_height: f64) -> Option<String> {
+    let mut spec: serde_json::Value = serde_yaml::from_str(yaml).ok()?;
+    let spec_obj = spec.as_object_mut()?;
+    let visualize = spec_obj
+        .entry("visualize")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let viz_obj = visualize.as_object_mut()?;
+    let style = viz_obj
+        .entry("style")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let style_obj = style.as_object_mut()?;
+    // Store as integer when the value is whole-number to keep YAML clean
+    let height_val = if new_height.fract() == 0.0 {
+        serde_json::Value::Number(serde_json::Number::from(new_height as i64))
+    } else {
+        serde_json::Number::from_f64(new_height)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Number(serde_json::Number::from(
+                new_height as i64,
+            )))
+    };
+    style_obj.insert("height".to_string(), height_val);
+    serde_yaml::to_string(&spec).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -1272,5 +1325,79 @@ mod splice_tests {
                 "round-trip at index {i} should parse identically",
             );
         }
+    }
+
+    // ── set_col_span tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn set_col_span_creates_layout_section_when_absent() {
+        let yaml = "type: bar\ntitle: My Chart\n";
+        let result = set_col_span(yaml, 6).expect("should succeed");
+        let v: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(v["layout"]["colSpan"], 6);
+    }
+
+    #[test]
+    fn set_col_span_updates_existing_col_span() {
+        let yaml = "type: bar\nlayout:\n  colSpan: 12\n";
+        let result = set_col_span(yaml, 4).expect("should succeed");
+        let v: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(v["layout"]["colSpan"], 4);
+    }
+
+    #[test]
+    fn set_col_span_preserves_other_layout_fields() {
+        let yaml = "type: bar\nlayout:\n  colSpan: 12\n  align: center\n";
+        let result = set_col_span(yaml, 6).expect("should succeed");
+        let v: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(v["layout"]["colSpan"], 6);
+        assert_eq!(v["layout"]["align"], "center");
+    }
+
+    #[test]
+    fn set_col_span_returns_none_on_invalid_yaml() {
+        assert!(set_col_span("type: [unclosed", 6).is_none());
+    }
+
+    // ── set_chart_height tests ───────────────────────────────────────────────
+
+    #[test]
+    fn set_chart_height_creates_visualize_style_when_absent() {
+        let yaml = "type: bar\ntitle: My Chart\n";
+        let result = set_chart_height(yaml, 300.0).expect("should succeed");
+        let v: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(v["visualize"]["style"]["height"], 300);
+    }
+
+    #[test]
+    fn set_chart_height_updates_existing_height() {
+        let yaml = "type: bar\nvisualize:\n  style:\n    height: 200\n";
+        let result = set_chart_height(yaml, 350.0).expect("should succeed");
+        let v: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(v["visualize"]["style"]["height"], 350);
+    }
+
+    #[test]
+    fn set_chart_height_stores_whole_number_as_integer() {
+        // Whole-number heights should serialize as integers, not floats.
+        let yaml = "type: bar\n";
+        let result = set_chart_height(yaml, 400.0).expect("should succeed");
+        // The YAML should contain "400" not "400.0"
+        assert!(result.contains("400"), "expected integer in output: {result}");
+        assert!(!result.contains("400.0"), "unexpected float in output: {result}");
+    }
+
+    #[test]
+    fn set_chart_height_preserves_other_style_fields() {
+        let yaml = "type: bar\nvisualize:\n  style:\n    height: 200\n    color: red\n";
+        let result = set_chart_height(yaml, 300.0).expect("should succeed");
+        let v: serde_json::Value = serde_yaml::from_str(&result).unwrap();
+        assert_eq!(v["visualize"]["style"]["height"], 300);
+        assert_eq!(v["visualize"]["style"]["color"], "red");
+    }
+
+    #[test]
+    fn set_chart_height_returns_none_on_invalid_yaml() {
+        assert!(set_chart_height("type: [unclosed", 300.0).is_none());
     }
 }

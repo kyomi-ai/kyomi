@@ -1102,6 +1102,102 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   --kode-extension-block-background: transparent;
 }
 
+/* ── ChartML drag-to-resize handles ─────────────────────────────────
+ * Resize handles appear on hover over a chartml block in the WYSIWYG
+ * editor. The .chartml-resize-container wraps the chart-card and
+ * provides the `position: relative` anchor for handle positioning.
+ *
+ * Handles follow the kode .kode-drag-handle hover-reveal pattern:
+ * transparent by default, visible on container hover.
+ *
+ * Ghost overlay: semi-transparent amber fill with dashed border shows
+ * the snapped target size during drag. */
+
+.chartml-resize-container {
+  position: relative;
+}
+
+/* Base handle style — small tab at the block edge */
+.chartml-resize-handle {
+  position: absolute;
+  background-color: transparent;
+  z-index: 10;
+  /* Handles are always interactive even inside contenteditable */
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+/* Show handles on container hover */
+.chartml-resize-container:hover .chartml-resize-handle {
+  opacity: 1;
+}
+
+/* Active (mid-drag) — keep visible */
+.chartml-resizing .chartml-resize-handle {
+  opacity: 1;
+}
+
+/* Right edge — width resize */
+.chartml-resize-handle-e {
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.chartml-resize-handle-e:hover,
+.chartml-resizing .chartml-resize-handle-e {
+  background-color: var(--color-primary, #d97706);
+  border-radius: 0 3px 3px 0;
+}
+
+/* Bottom edge — height resize */
+.chartml-resize-handle-s {
+  bottom: -3px;
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.chartml-resize-handle-s:hover,
+.chartml-resizing .chartml-resize-handle-s {
+  background-color: var(--color-primary, #d97706);
+  border-radius: 0 0 3px 3px;
+}
+
+/* Bottom-right corner — both axes */
+.chartml-resize-handle-se {
+  bottom: -3px;
+  right: -3px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+  border-radius: 0 0 3px 0;
+}
+
+.chartml-resize-handle-se:hover,
+.chartml-resizing .chartml-resize-handle-se {
+  background-color: var(--color-primary, #d97706);
+}
+
+/* Ghost overlay — shows snapped target size during drag */
+.chartml-resize-ghost {
+  background-color: color-mix(in srgb, var(--color-primary, #d97706) 15%, transparent);
+  border: 2px dashed var(--color-primary, #d97706);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-primary, #d97706);
+  user-select: none;
+}
+
 .dashboard-wysiwyg .kode-extension-block > .kode-drag-handle {
   opacity: 1;
   left: 8px;

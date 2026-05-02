@@ -23,6 +23,8 @@
 //! - `beforeunload` warning when unsaved changes exist
 
 use std::sync::Arc;
+#[cfg(any(target_arch = "wasm32", test))]
+use std::sync::OnceLock;
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
@@ -32,7 +34,7 @@ use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer,
     chart_builder::ast_set_chart_type,
-    markdown_renderer::{split_chartml_block, splice_chartml_item},
+    markdown_renderer::{set_chart_height, set_col_span, split_chartml_block, splice_chartml_item},
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;
@@ -59,9 +61,23 @@ enum EditorMode {
 /// Gated to `target_arch = "wasm32"` (where the event listener lives) plus
 /// `test` (for the focused unit tests below) — the server-side build has no
 /// event listeners and would otherwise flag this as dead code.
+/// Returns the compiled chartml fence regex, initialising on first call.
+///
+/// Shared static to avoid recompiling `(?s)```chartml\s*\n(.*?)``` ` on every
+/// call to `find_chartml_block_index` and every event-handler invocation.
+/// Per `docs/CODING_STANDARDS.md §OnceLock<Regex>`.
+#[cfg(any(target_arch = "wasm32", test))]
+fn chartml_fence_regex() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```")
+            .expect("chartml fence regex is valid")
+    })
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 fn find_chartml_block_index(source: &str, block_content: &str) -> Option<usize> {
-    let re = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```").ok()?;
+    let re = chartml_fence_regex();
     let target = block_content.trim();
     for (idx, cap) in re.captures_iter(source).enumerate() {
         let inner = cap.get(1).map_or("", |m| m.as_str()).trim();
@@ -651,7 +667,7 @@ fn DashboardEditorInner(
                 let Some(block_index) =
                     find_chartml_block_index(&current, block_content) else { return; };
 
-                let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
+                let re = chartml_fence_regex();
                 let Some(m) = re.captures_iter(&current).nth(block_index) else { return; };
                 let Some(inner) = m.get(1) else { return; };
                 let old_block = inner.as_str();
@@ -702,6 +718,141 @@ fn DashboardEditorInner(
                     && let Some(window) = web_sys::window() {
                         let _ = window.remove_event_listener_with_callback(
                             "chart-type-change-request",
+                            cb.as_ref().unchecked_ref(),
+                        );
+                    }
+            });
+        });
+    }
+
+    // ── Chart resize event listener (from WYSIWYG extension) ─────────────
+    // The WYSIWYG ChartMLExtension dispatches `chart-resize-request` when the
+    // user finishes a drag-to-resize gesture on a chart block. Unlike
+    // chart-edit-request (which opens ChartBuilderModal), this directly mutates
+    // `layout.colSpan` and/or `visualize.style.height` in the source YAML.
+    //
+    // Payload: { yaml, block_content, array_index, new_col_span?, new_height? }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::closure::Closure;
+
+        let resize_handler = Closure::<dyn Fn(web_sys::CustomEvent)>::new(
+            move |ev: web_sys::CustomEvent| {
+                let Some(detail) = ev.detail().as_string() else { return; };
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&detail) else { return; };
+                let Some(yaml) = payload.get("yaml").and_then(|v| v.as_str()) else { return; };
+                let Some(array_index) = payload
+                    .get("array_index")
+                    .and_then(|v| v.as_u64()) else { return; };
+                let block_content = payload
+                    .get("block_content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let array_index = array_index as usize;
+                let new_col_span = payload
+                    .get("new_col_span")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u8);
+                let new_height = payload
+                    .get("new_height")
+                    .and_then(|v| v.as_f64());
+
+                // Nothing changed — bail early.
+                if new_col_span.is_none() && new_height.is_none() {
+                    return;
+                }
+
+                // Apply colSpan mutation to the per-item yaml.
+                let yaml_after_col = if let Some(cs) = new_col_span {
+                    match set_col_span(yaml, cs) {
+                        Some(y) => y,
+                        None => {
+                            tracing::warn!(
+                                array_index,
+                                cs,
+                                "set_col_span returned None on resize; aborting"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    yaml.to_string()
+                };
+
+                // Apply height mutation to the (possibly already mutated) yaml.
+                let updated_yaml = if let Some(h) = new_height {
+                    match set_chart_height(&yaml_after_col, h) {
+                        Some(y) => y,
+                        None => {
+                            tracing::warn!(
+                                array_index,
+                                h,
+                                "set_chart_height returned None on resize; aborting"
+                            );
+                            return;
+                        }
+                    }
+                } else {
+                    yaml_after_col
+                };
+
+                // Locate the block in the current editor source.
+                let current = editor_content.get_untracked();
+                let Some(block_index) =
+                    find_chartml_block_index(&current, block_content) else { return; };
+
+                let re = chartml_fence_regex();
+                let Some(m) = re.captures_iter(&current).nth(block_index) else { return; };
+                let Some(inner) = m.get(1) else { return; };
+                let old_block = inner.as_str();
+
+                // Splice the updated per-item yaml back into the block.
+                let Some(new_block) = splice_chartml_item(
+                    old_block.trim(),
+                    array_index,
+                    &updated_yaml,
+                ) else {
+                    tracing::warn!(
+                        block_index,
+                        array_index,
+                        "splice_chartml_item returned None on resize; aborting"
+                    );
+                    return;
+                };
+
+                let new_block_with_newline = if new_block.ends_with('\n') {
+                    new_block
+                } else {
+                    format!("{new_block}\n")
+                };
+                let mut out =
+                    String::with_capacity(current.len() + new_block_with_newline.len());
+                out.push_str(&current[..inner.start()]);
+                out.push_str(&new_block_with_newline);
+                out.push_str(&current[inner.end()..]);
+
+                set_editor_content.try_set(out.clone());
+                set_preview_content.try_set(out);
+            },
+        );
+
+        if let Some(window) = web_sys::window() {
+            let _ = window.add_event_listener_with_callback(
+                "chart-resize-request",
+                resize_handler.as_ref().unchecked_ref(),
+            );
+        }
+
+        let resize_handler_stored =
+            StoredValue::new(Some(send_wrapper::SendWrapper::new(resize_handler)));
+
+        on_cleanup(move || {
+            resize_handler_stored.update_value(|h| {
+                if let Some(cb) = h.take()
+                    && let Some(window) = web_sys::window() {
+                        let _ = window.remove_event_listener_with_callback(
+                            "chart-resize-request",
                             cb.as_ref().unchecked_ref(),
                         );
                     }
