@@ -1198,6 +1198,13 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   user-select: none;
 }
 
+/* Extra left padding on the chart header bar so the "Last refreshed"
+ * text clears the kode drag handle (20px icon at left: 8px). Only
+ * applies in the WYSIWYG editor where drag handles are visible. */
+.dashboard-wysiwyg .chartml-resize-container .chart-card > div:first-child {
+  padding-left: 32px;
+}
+
 .dashboard-wysiwyg .kode-extension-block > .kode-drag-handle {
   opacity: 1;
   left: 8px;
