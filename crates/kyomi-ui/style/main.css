@@ -809,6 +809,7 @@ html {
 .dark .prose-kyomi pre,
 .dark .prose-kyomi code {
   background: var(--color-muted);
+  color: var(--color-foreground);
 }
 
 /* === Dark Mode Color Overrides === */
