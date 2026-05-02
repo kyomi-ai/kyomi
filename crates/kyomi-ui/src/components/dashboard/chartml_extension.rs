@@ -15,8 +15,8 @@ use leptos::tachys::view::any_view::AnyView;
 use crate::chartml_provider::configured_chartml;
 use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
 use crate::components::dashboard::markdown_renderer::{
-    apply_spec_overrides, chart_col_span_class, extract_chart_mode, extract_chart_orientation,
-    extract_chart_type, extract_col_span, split_chartml_block,
+    apply_spec_overrides, extract_chart_mode, extract_chart_orientation, extract_chart_type,
+    split_chartml_block,
 };
 
 /// Kode extension that renders `chartml` code blocks as live charts.
@@ -59,6 +59,27 @@ impl Extension for ChartMLExtension {
         &["chartml"]
     }
 
+    fn block_col_span(&self, content: &str) -> Option<u8> {
+        // Parse the YAML to extract layout.colSpan.
+        // For YAML sequences (Array), use the first item's colSpan.
+        // Returns None for blocks without an explicit colSpan — kode treats
+        // None as "break the grid group and render full-width".
+        let parsed: serde_json::Value = serde_yaml::from_str(content.trim()).ok()?;
+        let spec = match &parsed {
+            serde_json::Value::Array(items) => items.first()?,
+            other => other,
+        };
+        let col_span = spec
+            .get("layout")
+            .and_then(|l| l.get("colSpan").or_else(|| l.get("col_span")))
+            .and_then(|v| v.as_u64())?;
+        if (1..=12).contains(&col_span) {
+            Some(col_span as u8)
+        } else {
+            None
+        }
+    }
+
     fn render_code_block(
         &self,
         language: &str,
@@ -92,12 +113,6 @@ impl Extension for ChartMLExtension {
             .into_iter()
             .enumerate()
             .map(|(array_index, item_yaml)| {
-                let col_span = serde_yaml::from_str::<serde_json::Value>(&item_yaml)
-                    .ok()
-                    .as_ref()
-                    .map(extract_col_span)
-                    .unwrap_or(12);
-                let col_class = chart_col_span_class(col_span);
                 let palette_clone = palette.clone();
                 let block_content = full_block_content.clone();
                 let chart_view = move || {
@@ -109,16 +124,16 @@ impl Extension for ChartMLExtension {
                         chartml,
                     )
                 };
-                view! { <div class=col_class>{chart_view}</div> }.into_any()
+                chart_view().into_any()
             })
             .collect();
 
         Some(
             view! {
-                // dashboard-content wrapper triggers chart container CSS (border,
-                // bg, radius) on each .chart-card child. Grid wrapping lets items
-                // with `layout.colSpan` share rows instead of stacking full-width.
-                <div class="dashboard-content not-prose grid grid-cols-12 gap-4">
+                // not-prose prevents Tailwind typography styles from interfering
+                // with chart content. The grid layout is handled natively by kode
+                // via block_col_span — no inner grid wrapper needed here.
+                <div class="not-prose">
                     {views}
                 </div>
             }

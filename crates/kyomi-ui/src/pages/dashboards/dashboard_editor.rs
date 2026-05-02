@@ -1094,9 +1094,6 @@ fn DashboardEditorInner(
                         // renders inside the WYSIWYG editor inherit them via
                         // `use_context` — no per-mode re-registration required.
                         view! {
-                            // dashboard-wysiwyg scopes the shared-grid CSS that
-                            // lets col-span-6 charts from separate fenced blocks
-                            // sit side-by-side (KYO-211).
                             <div class="flex flex-1 min-h-0 overflow-hidden dashboard-wysiwyg">
                                 <div class="flex-1 min-h-0 overflow-hidden">
                                     <DashboardWysiwygEditor
@@ -1378,6 +1375,7 @@ fn DashboardWysiwygEditor(
                 <TreeWysiwygEditor
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
+                    enable_block_drag=true
                     toolbar_items=items inject=inj
                     extension_context=ext_ctx
                 />
@@ -1386,6 +1384,7 @@ fn DashboardWysiwygEditor(
                 <TreeWysiwygEditor
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
+                    enable_block_drag=true
                     toolbar_items=items
                     extension_context=ext_ctx
                 />
@@ -1394,6 +1393,7 @@ fn DashboardWysiwygEditor(
                 <TreeWysiwygEditor
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
+                    enable_block_drag=true
                     inject=inj
                     extension_context=ext_ctx
                 />
@@ -1402,6 +1402,7 @@ fn DashboardWysiwygEditor(
                 <TreeWysiwygEditor
                     content=content on_change=on_change theme=editor_theme
                     extensions=extensions container_max_width="100%"
+                    enable_block_drag=true
                     extension_context=ext_ctx
                 />
             }.into_any(),

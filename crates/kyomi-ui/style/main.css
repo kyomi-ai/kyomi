@@ -252,7 +252,8 @@ html {
  * carry no vertical margin. `overflow: hidden` ensures the ChartHeaderBar's
  * border-b is clipped to the card's rounded corners.
  * See DESIGN.md "Chart Container Pattern". */
-.dashboard-content .chart-card {
+.dashboard-content .chart-card,
+.dashboard-wysiwyg .chart-card {
   background-color: var(--color-card);
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -260,7 +261,8 @@ html {
   overflow: hidden;
 }
 
-.dashboard-content .chart-card > div:not(:first-child) {
+.dashboard-content .chart-card > div:not(:first-child),
+.dashboard-wysiwyg .chart-card > div:not(:first-child) {
   padding: 16px;
 }
 
@@ -268,7 +270,8 @@ html {
  * need the 16px breathing room that bar/line/scatter/pie need for tick
  * labels, so tables get `padding: 0` overriding the default above when
  * the chart content is a chartml-table. KYO-14. */
-.dashboard-content .chart-card:has(.chartml-table) > div:not(:first-child) {
+.dashboard-content .chart-card:has(.chartml-table) > div:not(:first-child),
+.dashboard-wysiwyg .chart-card:has(.chartml-table) > div:not(:first-child) {
   padding: 0;
 }
 
@@ -1092,76 +1095,10 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
  * automatically by chartml-leptos's ChartMLChart component on mount.
  * No manual CSS needed — styles are embedded in the chartml-leptos crate. */
 
-/* ── Dashboard WYSIWYG shared grid (KYO-211) ─────────────────────────
- *
- * Problem: the kode tree editor renders each `chartml` fenced block in its
- * own `[data-kode-extension="chartml"]` wrapper, and each wrapper contains a
- * `.dashboard-content grid grid-cols-12` div. Two col-span-6 charts in
- * *separate* blocks each get their own grid, so they always stack vertically
- * instead of sitting side by side.
- *
- * Fix: inside `.dashboard-wysiwyg`, promote the scroll container to be the
- * shared 12-column grid. Both the kode extension wrapper and the inner
- * `.dashboard-content` div are made `display: contents` so their chart items
- * (the `col-span-*` divs) "escape" to the scroll container's grid and can
- * share rows across block boundaries.
- *
- * CSS `display: contents` keeps each element in the DOM tree — CSS descendant
- * selectors (e.g. `.dashboard-content .chart-card`) continue to work because
- * those are DOM-tree selectors, not layout-box selectors. Cursor-positioning
- * code in kode-leptos also continues to work because `find_element_for_pos`
- * recurses into elements without pos attrs and the kode wrapper's
- * `data-pos-start`/`data-pos-end` attributes remain present in the DOM.
- *
- * The `.dashboard-wysiwyg` scope ensures the viewer (markdown_renderer.rs)
- * is unaffected — it has its own top-level grid and does not carry this class.
- */
-
-/* 1. Scroll container becomes the shared 12-column grid. */
-.dashboard-wysiwyg .tree-wysiwyg-scroll-container {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 1rem;         /* matches Tailwind gap-4 = 1rem */
-  align-content: start;
-}
-
-/* 2. All direct DOM children of the scroll container span the full 12 columns
- *    by default. This covers paragraphs, headings, kode-block-gaps, code
- *    blocks, and any other non-chart content. The position:absolute overlay
- *    is removed from grid flow automatically (no rule needed). */
-.dashboard-wysiwyg .tree-wysiwyg-scroll-container > * {
-  grid-column: 1 / -1;
-}
-
-/* 3. The kode extension wrapper becomes a transparent grid pass-through.
- *    It remains in the DOM so `data-pos-start`/`data-pos-end` and the
- *    `.dashboard-content .chart-card` descendant selector both still work. */
-.dashboard-wysiwyg [data-kode-extension="chartml"] {
-  display: contents;
-}
-
-/* 4. The inner dashboard-content grid also becomes transparent so chart items
- *    (the col-span-* divs) participate directly in the scroll container's
- *    grid. The `.dashboard-content .chart-card` descendant selector is
- *    preserved — display:contents keeps the element in the DOM ancestry. */
-.dashboard-wysiwyg .dashboard-content {
-  display: contents;
-}
-
-/* 5. Chart items are DOM-grandchildren of the scroll container (not direct
- *    children), so rule #2 does not apply to them. Their Tailwind col-span-*
- *    classes take effect directly in the shared grid. No override needed here.
- *
- *    Rule #2 DOES apply to the kode extension wrapper and dashboard-content
- *    elements, but since they have display:contents they create no layout box,
- *    so grid-column:1/-1 on them is harmless. */
-
-/* 6. Hide the kode-block-gap that sits between two consecutive chartml blocks.
- *    Without this, the gap div becomes a full-width grid row that prevents
- *    charts from adjacent blocks from sharing the same row. Gaps adjacent to
- *    non-chartml content remain visible so the cursor can target them. */
-.dashboard-wysiwyg [data-kode-extension="chartml"] + .kode-block-gap:has(+ [data-kode-extension="chartml"]) {
-  display: none;
+.dashboard-wysiwyg {
+  --kode-extension-block-padding: 0;
+  --kode-extension-block-border-width: 0;
+  --kode-extension-block-background: transparent;
 }
 
 /* PWA standalone safe-area insets — prevents OS chrome (status bar,
