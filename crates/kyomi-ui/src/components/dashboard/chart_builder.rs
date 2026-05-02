@@ -827,7 +827,7 @@ pub fn ChartBuilderModal(
     // require Send + Sync on the inner value, so we wrap in SendWrapper —
     // safe because wasm32-unknown-unknown is single-threaded and the wrapper
     // panics if accessed from a different thread (which can never happen).
-    let (preview_chartml, set_preview_chartml) =
+    let (preview_chartml, _set_preview_chartml) =
         signal(None::<send_wrapper::SendWrapper<chartml_leptos::ChartMLRef>>);
     let (preview_loading, set_preview_loading) = signal(false);
     let (preview_error, set_preview_error) = signal(None::<String>);
@@ -867,7 +867,7 @@ pub fn ChartBuilderModal(
                 match crate::arrow_fetch::fetch_arrow_stream(&initial_ds, &initial_sql).await {
                     Ok(data_table) => {
                         let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
-                        set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
+                        _set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
                             chartml_leptos::ChartMLRef::new(chartml_inst),
                         )));
                         set_preview_loading.try_set(false);
@@ -1581,7 +1581,7 @@ pub fn ChartBuilderModal(
                                                 match crate::arrow_fetch::fetch_arrow_stream(&ds_slug, &query_text).await {
                                                     Ok(data_table) => {
                                                         let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
-                                                        set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
+                                                        _set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
                                                             chartml_leptos::ChartMLRef::new(chartml_inst),
                                                         )));
                                                         set_preview_loading.try_set(false);

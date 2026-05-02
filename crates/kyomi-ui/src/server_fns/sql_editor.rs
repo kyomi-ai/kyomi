@@ -681,7 +681,7 @@ pub async fn refresh_catalog(
             ac.db(),
             &ac.auth.user_id,
             &datasource.id,
-            &*encryption_key,
+            &encryption_key,
         )
         .await
         .into_sfn()?;
@@ -699,7 +699,7 @@ pub async fn refresh_catalog(
     if let Some(ref cred) = user_cred {
         let _ = kyomi_auth::datasource_service::save_user_credential(
             ac.db(),
-            &*encryption_key,
+            &encryption_key,
             &ac.auth.user_id,
             &datasource.id,
             &cred.workspace_id,

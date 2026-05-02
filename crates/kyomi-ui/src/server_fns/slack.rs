@@ -231,7 +231,7 @@ pub async fn get_slack_channels() -> Result<Vec<SlackChannel>, ServerFnError> {
         .ok_or_else(|| ServerFnError::new("Slack client not available"))?;
 
     // Get the decrypted bot token from workspace integration config
-    let bot_token = kyomi_slack::routes::get_slack_bot_token(ac.db(), &*encryption_key, &ac.ws_id)
+    let bot_token = kyomi_slack::routes::get_slack_bot_token(ac.db(), &encryption_key, &ac.ws_id)
         .await
         .into_sfn()?
         .ok_or_else(|| {

@@ -299,11 +299,10 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
 
         let _ = btn.set_attribute("disabled", "true");
         btn.set_text_content(Some("Sending\u{2026}"));
-        btn.dyn_ref::<web_sys::HtmlElement>()
-            .map(|el| {
-                let _ = el.style().set_property("opacity", "0.7");
-                let _ = el.style().set_property("cursor", "default");
-            });
+        if let Some(el) = btn.dyn_ref::<web_sys::HtmlElement>() {
+            let _ = el.style().set_property("opacity", "0.7");
+            let _ = el.style().set_property("cursor", "default");
+        }
 
         wasm_bindgen_futures::spawn_local(async move {
             match submit_panic_report(&win, &panic_msg).await {
@@ -315,11 +314,10 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
                 Err(_) => {
                     let _ = btn.remove_attribute("disabled");
                     btn.set_text_content(Some("Failed \u{2014} click to retry"));
-                    btn.dyn_ref::<web_sys::HtmlElement>()
-                        .map(|el| {
-                            let _ = el.style().set_property("opacity", "1");
-                            let _ = el.style().set_property("cursor", "pointer");
-                        });
+                    if let Some(el) = btn.dyn_ref::<web_sys::HtmlElement>() {
+                        let _ = el.style().set_property("opacity", "1");
+                        let _ = el.style().set_property("cursor", "pointer");
+                    }
                 }
             }
         });

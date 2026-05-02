@@ -50,7 +50,7 @@ pub async fn list_datasources() -> Result<Vec<DatasourceInfo>, ServerFnError> {
         ac.db(),
         &ac.ws_id,
         &ac.auth.user_id,
-        &*encryption_key,
+        &encryption_key,
     )
     .await
     .into_sfn()?;
@@ -94,7 +94,7 @@ pub async fn toggle_datasource(
         &ac.ws_id,
         &ac.auth.user_id,
         enabled,
-        &*encryption_key,
+        &encryption_key,
     )
     .await
     .into_sfn()
@@ -220,7 +220,7 @@ pub async fn create_datasource_modal(
 
         kyomi_auth::datasource_service::save_user_credential(
             ac.db(),
-            &*encryption_key,
+            &encryption_key,
             &ac.auth.user_id,
             &ds.id,
             &ac.ws_id,
@@ -311,7 +311,7 @@ pub async fn save_datasource_credentials(
 
     kyomi_auth::datasource_service::save_user_credential(
         ac.db(),
-        &*encryption_key,
+        &encryption_key,
         &ac.auth.user_id,
         &datasource_id,
         &ac.ws_id,
@@ -347,7 +347,7 @@ pub async fn get_datasource_settings(
         &ac.ws_id,
         &ac.auth.user_id,
         is_admin,
-        &*encryption_key,
+        &encryption_key,
     )
     .await
     .into_sfn()?;
@@ -470,7 +470,7 @@ pub async fn test_existing_datasource(
             .into_sfn()?;
 
     let credentials = if let Some(ref cred) = user_cred {
-        kyomi_auth::encryption::decrypt_json(&cred.credentials, &*encryption_key)
+        kyomi_auth::encryption::decrypt_json(&cred.credentials, &encryption_key)
             .unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -566,7 +566,7 @@ pub async fn discover_datasource_resources(
                     Ok(Some(cred)) => {
                         kyomi_auth::encryption::decrypt_json(
                             &cred.credentials,
-                            &*encryption_key,
+                            &encryption_key,
                         )
                         .unwrap_or(credentials.clone())
                     }

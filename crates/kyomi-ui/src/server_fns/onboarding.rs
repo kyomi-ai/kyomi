@@ -120,7 +120,7 @@ pub async fn get_onboarding_state() -> Result<OnboardingState, ServerFnError> {
 
     let encryption_key = ac.encryption_key()?;
 
-    kyomi_auth::onboarding_service::get_onboarding_state(ac.db(), &ac.ws_id, &ac.auth.user_id, is_admin, &*encryption_key)
+    kyomi_auth::onboarding_service::get_onboarding_state(ac.db(), &ac.ws_id, &ac.auth.user_id, is_admin, &encryption_key)
         .await
         .into_sfn()
 }

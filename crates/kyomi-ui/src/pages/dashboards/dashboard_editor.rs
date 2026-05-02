@@ -33,8 +33,12 @@ use leptos_router::hooks::use_params_map;
 use crate::components::dashboard::{
     ChartBuilderModal, ChartInfoModal, CopilotSidebar, HistoryPanel,
     InsertDashboardLinkModal, MarkdownRenderer,
+    markdown_renderer::{split_chartml_block, splice_chartml_item},
+};
+#[cfg(target_arch = "wasm32")]
+use crate::components::dashboard::{
     chart_builder::ast_set_chart_type,
-    markdown_renderer::{set_chart_height, set_col_span, split_chartml_block, splice_chartml_item},
+    markdown_renderer::{set_chart_height, set_col_span},
 };
 use crate::components::{Button, ButtonLink, ButtonSize, ButtonVariant, DetailPageSkeleton, ToggleButton, Spinner};
 use crate::server_fns::context::UserContext;

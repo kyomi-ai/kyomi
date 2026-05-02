@@ -30,6 +30,12 @@ const MIN_CHART_HEIGHT_PX: f64 = 100.0;
 /// Height snap interval — rounds to nearest 5px increment during drag.
 const HEIGHT_SNAP_PX: f64 = 5.0;
 
+/// Teardown closure stored during an active resize drag.
+///
+/// Wrapped in `SendWrapper` because `FnOnce` closures that capture DOM handles
+/// are `!Send`; `SendWrapper` is safe on the single-threaded WASM target.
+type DragCleanup = StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>>;
+
 /// Kode extension that renders `chartml` code blocks as live charts.
 ///
 /// Stores the palette name and a reactive `is_dark` memo rather than a
@@ -272,9 +278,7 @@ fn render_one_chart(
     // mousemove/mouseup listeners if the component unmounts mid-drag.
     // Pattern mirrors `right_panel.rs CleanupSlot`. Only populated during an
     // active drag; cleared by mouseup (normal end) or on_cleanup (navigate away).
-    let drag_cleanup: StoredValue<
-        Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>,
-    > = StoredValue::new(None);
+    let drag_cleanup: DragCleanup = StoredValue::new(None);
 
     on_cleanup(move || {
         if let Some(teardown) = drag_cleanup.try_update_value(|v| v.take()).flatten() {
@@ -513,7 +517,7 @@ fn start_resize(
     ev: leptos::ev::MouseEvent,
     axis: ResizeAxis,
     on_resize: Callback<(Option<u8>, Option<f64>)>,
-    drag_cleanup: StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()>>>>,
+    drag_cleanup: DragCleanup,
 ) {
     #[cfg(target_arch = "wasm32")]
     {
@@ -615,16 +619,16 @@ fn start_resize(
         let last_height = Rc::new(std::cell::Cell::new(start_h));
 
         // Lock body cursor for the duration of the drag.
-        if let Some(doc) = window.document() {
-            if let Some(body) = doc.body() {
-                let cursor = match axis {
-                    ResizeAxis::Width => "ew-resize",
-                    ResizeAxis::Height => "ns-resize",
-                    ResizeAxis::Both => "nwse-resize",
-                };
-                let _ = body.style().set_property("cursor", cursor);
-                let _ = body.style().set_property("user-select", "none");
-            }
+        if let Some(doc) = window.document()
+            && let Some(body) = doc.body()
+        {
+            let cursor = match axis {
+                ResizeAxis::Width => "ew-resize",
+                ResizeAxis::Height => "ns-resize",
+                ResizeAxis::Both => "nwse-resize",
+            };
+            let _ = body.style().set_property("cursor", cursor);
+            let _ = body.style().set_property("user-select", "none");
         }
 
         // ── Build both closures, store them together in an Rc so teardown ──
@@ -730,14 +734,14 @@ fn start_resize(
                     );
                 }
                 // Remove ghost and resizing class.
-                let _ = ghost_up.remove();
+                ghost_up.remove();
                 let _ = container_up.class_list().remove_1("chartml-resizing");
                 // Restore body cursor.
-                if let Some(doc) = window_up.document() {
-                    if let Some(body) = doc.body() {
-                        let _ = body.style().remove_property("cursor");
-                        let _ = body.style().remove_property("user-select");
-                    }
+                if let Some(doc) = window_up.document()
+                    && let Some(body) = doc.body()
+                {
+                    let _ = body.style().remove_property("cursor");
+                    let _ = body.style().remove_property("user-select");
                 }
                 // Drop closure storage (mirrors right_panel.rs teardown).
                 closures_for_up.borrow_mut().take();

@@ -110,7 +110,7 @@ pub async fn send_copilot_message(
     let prep = kyomi_auth::copilot_service::prepare_copilot_message(
         kyomi_auth::copilot_service::CopilotMessageInputs {
             db: ac.db(),
-            encryption_key: &*encryption_key,
+            encryption_key: &encryption_key,
             config: &ac.ctx.config,
             workspace_id: &ac.ws_id,
             user_id: &ac.auth.user_id,
@@ -237,7 +237,7 @@ pub async fn send_copilot_message(
                 kyomi_auth::copilot_service::handle_copilot_agent_error(
                     kyomi_auth::copilot_service::CopilotAgentErrorParams {
                         db: &db,
-                        encryption_key: &*encryption_key,
+                        encryption_key: &encryption_key,
                         ws_manager: &ws_manager,
                         user_id: &spawn_user_id,
                         session_id: &spawn_session_id,
