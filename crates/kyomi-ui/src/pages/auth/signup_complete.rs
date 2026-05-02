@@ -311,7 +311,7 @@ pub fn SignupCompletePage() -> impl IntoView {
                                         </Alert>
                                     })}
 
-                                <Button size=ButtonSize::Lg class="w-full">
+                                <Button button_type="submit" size=ButtonSize::Lg class="w-full">
                                     "Create Account"
                                 </Button>
                             </form>
