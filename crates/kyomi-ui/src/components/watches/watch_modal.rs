@@ -1063,18 +1063,15 @@ fn SlackNotificationsSection(
                                     }
                                     opts
                                 };
-                                let current_val = slack_channel_id.get();
-                                let select_val = if current_val.is_empty() {
-                                    "none".to_string()
-                                } else {
-                                    current_val
-                                };
                                 let (channel_opts_sig, _) = signal(channel_options);
-                                let (select_val_sig, _) = signal(select_val);
+                                let select_val = Signal::derive(move || {
+                                    let val = slack_channel_id.get();
+                                    if val.is_empty() { "none".to_string() } else { val }
+                                });
                                 let mode_label = if mode.get() == "report" { "Reports" } else { "Alerts" };
                                 view! {
                                     <DynSelect
-                                        value=Signal::derive(move || select_val_sig.get())
+                                        value=select_val
                                         options=Signal::derive(move || channel_opts_sig.get())
                                         on_change=move |val: String| {
                                             if val == "none" {
