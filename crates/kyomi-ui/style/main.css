@@ -1102,6 +1102,22 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   --kode-extension-block-background: transparent;
 }
 
+.dashboard-wysiwyg .kode-extension-block > .kode-drag-handle {
+  opacity: 1;
+  left: 8px;
+  top: 8px;
+  transform: none;
+  z-index: 10;
+  color: var(--color-muted-foreground);
+  border-radius: var(--radius-sm);
+  transition: color 200ms, background-color 200ms;
+}
+
+.dashboard-wysiwyg .kode-extension-block > .kode-drag-handle:hover {
+  color: var(--color-foreground);
+  background: var(--color-muted);
+}
+
 /* PWA standalone safe-area insets — prevents OS chrome (status bar,
    home indicator, navigation bar) from overlapping app content.
    Only applies in installed/standalone mode, not normal browser tabs. */
