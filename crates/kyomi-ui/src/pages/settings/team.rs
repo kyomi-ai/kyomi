@@ -945,9 +945,11 @@ fn TransferOwnershipModal(
                     </Button>
                 }.into_any()
             } else {
-                let conf = transfer_confirmation.get();
-                let is_submitting = initiate_transfer_action.pending().get();
-                let disabled = is_submitting || conf != ws_name;
+                let transfer_disabled = Signal::derive(move || {
+                    initiate_transfer_action.pending().get()
+                        || transfer_confirmation.get() != workspace_name.get()
+                });
+                let is_submitting = Signal::derive(move || initiate_transfer_action.pending().get());
                 view! {
                     <Button
                         variant=ButtonVariant::Outline
@@ -960,7 +962,7 @@ fn TransferOwnershipModal(
                     </Button>
                     <Button
                         variant=ButtonVariant::Destructive
-                        disabled=disabled
+                        disabled=transfer_disabled
                         on:click=move |_| {
                             let uid = transfer_selected_user_id.get_untracked();
                             if !uid.is_empty() {
@@ -968,7 +970,7 @@ fn TransferOwnershipModal(
                             }
                         }
                     >
-                        {if is_submitting { "Transferring..." } else { "Transfer Ownership" }}
+                        {move || if is_submitting.get() { "Transferring..." } else { "Transfer Ownership" }}
                     </Button>
                 }.into_any()
             }
@@ -1043,75 +1045,67 @@ fn TransferOwnershipModal(
 
             // Step 2: Final confirmation
             <Show when=move || transfer_step.get() == 2>
-                {move || {
-                    let member = selected_member.get();
-                    let selected_name = member
-                        .as_ref()
-                        .and_then(|m| m.name.clone())
-                        .filter(|n: &String| !n.is_empty())
-                        .or_else(|| member.as_ref().map(|m| m.email.clone()))
-                        .unwrap_or_default();
-                    let selected_email = member
-                        .as_ref()
-                        .map(|m| m.email.clone())
-                        .unwrap_or_default();
-                    let ws_name = workspace_name.get();
-                    let ws_name_for_check = ws_name.clone();
+                <div class="space-y-4">
+                    <Alert variant=AlertVariant::Error>
+                        <AlertDescription>
+                            <strong>"Final Confirmation Required"</strong>
+                            <p class="mt-1">"This action cannot be undone once the recipient accepts."</p>
+                        </AlertDescription>
+                    </Alert>
 
-                    view! {
-                        <div class="space-y-4">
-                            <Alert variant=AlertVariant::Error>
-                                <AlertDescription>
-                                    <strong>"Final Confirmation Required"</strong>
-                                    <p class="mt-1">"This action cannot be undone once the recipient accepts."</p>
-                                </AlertDescription>
-                            </Alert>
-
-                            <div class="bg-muted p-4 rounded-md space-y-2">
-                                <div class="text-sm">
-                                    <span class="text-muted-foreground">"Transfer ownership to:"</span>
-                                    <div class="mt-1 font-medium text-foreground">{selected_name}</div>
-                                    <div class="text-xs text-muted-foreground">{selected_email}</div>
-                                </div>
+                    <div class="bg-muted p-4 rounded-md space-y-2">
+                        <div class="text-sm">
+                            <span class="text-muted-foreground">"Transfer ownership to:"</span>
+                            <div class="mt-1 font-medium text-foreground">
+                                {move || selected_member.get()
+                                    .as_ref()
+                                    .and_then(|m| m.name.clone())
+                                    .filter(|n: &String| !n.is_empty())
+                                    .or_else(|| selected_member.get().as_ref().map(|m| m.email.clone()))
+                                    .unwrap_or_default()}
                             </div>
-
-                            <div>
-                                <label class="block text-sm font-medium text-foreground mb-2">
-                                    "Type the workspace name to confirm: "
-                                    <span class="font-mono text-primary">{ws_name.clone()}</span>
-                                </label>
-                                <input
-                                    type="text"
-                                    class=INPUT_CLASS
-                                    placeholder="Enter workspace name"
-                                    prop:value=transfer_confirmation
-                                    on:input=move |ev| transfer_confirmation.set(event_target_value(&ev))
-                                />
+                            <div class="text-xs text-muted-foreground">
+                                {move || selected_member.get().as_ref().map(|m| m.email.clone()).unwrap_or_default()}
                             </div>
-
-                            {move || {
-                                let conf = transfer_confirmation.get();
-                                if !conf.is_empty() && conf != ws_name_for_check {
-                                    view! {
-                                        <p class="text-sm text-error-foreground">
-                                            "Workspace name does not match"
-                                        </p>
-                                    }.into_any()
-                                } else {
-                                    view! { <span></span> }.into_any()
-                                }
-                            }}
-
-                            {move || {
-                                transfer_error.get().map(|e| view! {
-                                    <Alert variant=AlertVariant::Error>
-                                        <AlertDescription>{e}</AlertDescription>
-                                    </Alert>
-                                })
-                            }}
                         </div>
-                    }
-                }}
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-foreground mb-2">
+                            "Type the workspace name to confirm: "
+                            <span class="font-mono text-primary">{move || workspace_name.get()}</span>
+                        </label>
+                        <input
+                            type="text"
+                            class=INPUT_CLASS
+                            placeholder="Enter workspace name"
+                            prop:value=transfer_confirmation
+                            on:input=move |ev| transfer_confirmation.set(event_target_value(&ev))
+                        />
+                    </div>
+
+                    {move || {
+                        let conf = transfer_confirmation.get();
+                        let ws_name = workspace_name.get();
+                        if !conf.is_empty() && conf != ws_name {
+                            view! {
+                                <p class="text-sm text-error-foreground">
+                                    "Workspace name does not match"
+                                </p>
+                            }.into_any()
+                        } else {
+                            view! { <span></span> }.into_any()
+                        }
+                    }}
+
+                    {move || {
+                        transfer_error.get().map(|e| view! {
+                            <Alert variant=AlertVariant::Error>
+                                <AlertDescription>{e}</AlertDescription>
+                            </Alert>
+                        })
+                    }}
+                </div>
             </Show>
         </Modal>
     }
