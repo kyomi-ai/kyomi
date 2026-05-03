@@ -114,9 +114,9 @@ pub async fn archive_missing_tables(
     datasource_config_id: &str,
     seen_table_ids: &std::collections::HashSet<String>,
 ) -> Result<Vec<String>> {
-    // Note: if seen_table_ids is empty (no tables found during refresh),
-    // ALL existing tables get archived. This matches Python behavior —
-    // a datasource with no tables should archive everything.
+    // Callers are responsible for only calling this when discovery succeeded.
+    // An empty seen_table_ids with a successful discovery means the datasource
+    // genuinely has no tables — archiving everything is correct in that case.
 
     #[derive(sqlx::FromRow)]
     struct CacheRow {

@@ -449,6 +449,7 @@ pub async fn index_catalog_sql(
     let mut tables_indexed = 0usize;
     let mut errors = Vec::new();
     let mut seen_table_ids = std::collections::HashSet::new();
+    let mut any_container_succeeded = false;
     let project_id = indexer.get_project_id(ctx);
 
     // Analytics datasources use _-prefixed hidden tables for transforms;
@@ -465,7 +466,10 @@ pub async fn index_catalog_sql(
             .get_tables_in_container(provider.as_ref(), container, max_tables_per_dataset)
             .await
         {
-            Ok(t) => t,
+            Ok(t) => {
+                any_container_succeeded = true;
+                t
+            }
             Err(e) => {
                 let msg = format!(
                     "Failed to list tables in {} '{}': {e}",
@@ -546,16 +550,35 @@ pub async fn index_catalog_sql(
         }
     }
 
-    // Archive missing tables
-    let archived_names = archive_missing_tables(
-        db,
-        &ctx.workspace_id,
-        &ctx.datasource_config_id,
-        &seen_table_ids,
-    )
-    .await
-    .unwrap_or_default();
-    let tables_archived = archived_names.len();
+    // Archive missing tables — only when we have positive evidence of tables.
+    // Guard condition: if no tables were found (regardless of whether any container
+    // query succeeded), preserve the existing catalog. A successful query returning
+    // 0 rows is just as unsafe to archive on as a failed query.
+    // Exception: containers.is_empty() means the user explicitly configured no
+    // containers — archiving is correct there (removes stale tables from a datasource
+    // the user intentionally emptied).
+    let nothing_found =
+        seen_table_ids.is_empty() && tables_indexed == 0 && !containers.is_empty();
+
+    let tables_archived = if nothing_found {
+        warn!(
+            workspace_id = ctx.workspace_id,
+            datasource_config_id = ctx.datasource_config_id,
+            any_container_succeeded,
+            "No tables found — preserving existing catalog (archiving skipped)"
+        );
+        0
+    } else {
+        let archived_names = archive_missing_tables(
+            db,
+            &ctx.workspace_id,
+            &ctx.datasource_config_id,
+            &seen_table_ids,
+        )
+        .await
+        .unwrap_or_default();
+        archived_names.len()
+    };
 
     // Update datasource last refresh time
     let _ = update_datasource_last_refresh(db, &ctx.datasource_config_id).await;
@@ -584,6 +607,19 @@ pub async fn index_catalog_sql(
         elapsed_secs = (end_time - start_time).num_seconds(),
         "catalog indexing complete"
     );
+
+    // If nothing was found, return an error result so callers can surface
+    // the failure rather than silently reporting zero tables indexed.
+    if nothing_found {
+        let mut result =
+            CatalogIndexResult::error("No tables discovered — existing catalog preserved")
+                .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
+                .with_ids(&ctx.datasource_config_id, &ctx.workspace_id);
+        if !errors.is_empty() {
+            result.errors = Some(errors);
+        }
+        return result;
+    }
 
     let mut result = CatalogIndexResult::completed(tables_indexed, tables_archived)
         .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())

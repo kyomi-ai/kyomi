@@ -288,6 +288,24 @@ impl CatalogRefreshScheduler {
             }
         };
 
+        // Count total active datasources across all workspaces for the start log.
+        #[derive(sqlx::FromRow)]
+        struct CountRow { count: i64 }
+        let is_pg = self.db.is_postgres();
+        let bool_true = kyomi_core::sql_compat::bool_true(is_pg);
+        let count_sql = format!(
+            "SELECT COUNT(*) AS count FROM datasource_configs WHERE active = {bool_true}"
+        );
+        let total_datasources = kyomi_core::db_fetch_one!(self.db, CountRow, &count_sql)
+            .map(|r| r.count)
+            .unwrap_or(0);
+
+        info!(
+            workspace_count = workspaces.len(),
+            total_datasources,
+            "Starting catalog refresh across all workspaces"
+        );
+
         let mut refreshed_count = 0usize;
         let mut skipped_count = 0usize;
         let mut failed_count = 0usize;
@@ -384,10 +402,10 @@ impl CatalogRefreshScheduler {
         if !catalog_helpers::can_refresh_now(&self.db, datasource_config_id, REFRESH_HOURS_THRESHOLD)
             .await
         {
-            debug!(
+            info!(
                 workspace_id,
                 datasource = datasource_name,
-                "Rate limited or recently refreshed, skipping"
+                "Skipping datasource: rate limited or refreshed within threshold"
             );
             return RefreshResult::Skipped;
         }
@@ -399,13 +417,29 @@ impl CatalogRefreshScheduler {
         let effective_email = owner_email.unwrap_or("");
 
         if effective_email.is_empty() && indexing_creds.is_none() {
-            debug!(
+            info!(
                 workspace_id,
                 datasource = datasource_name,
-                "No credentials available, skipping"
+                "Skipping datasource: no credentials available"
             );
             return RefreshResult::Skipped;
         }
+
+        // Log which credential path will be used for this datasource refresh.
+        let credential_path = if indexing_creds.is_some() {
+            "indexing_credentials"
+        } else if !effective_email.is_empty() {
+            "owner_email"
+        } else {
+            "shared"
+        };
+        info!(
+            workspace_id,
+            datasource = datasource_name,
+            datasource_type,
+            credential_path,
+            "Starting scheduled catalog refresh"
+        );
 
         // Wait for the embedding service to be ready
         let embedding = match self.embedding.wait_ready().await {

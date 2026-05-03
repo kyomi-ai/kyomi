@@ -124,9 +124,13 @@ pub fn SqlEditorSidebar(
         set_refreshing_catalog.set(true);
 
         leptos::task::spawn_local(async move {
-            let result = crate::server_fns::sql_editor::refresh_catalog(slug).await;
-            if result.is_ok() {
-                set_catalog_refresh_trigger.try_update(|n| *n += 1);
+            match crate::server_fns::sql_editor::refresh_catalog(slug).await {
+                Ok(()) => {
+                    set_catalog_refresh_trigger.try_update(|n| *n += 1);
+                }
+                Err(e) => {
+                    crate::components::toast::toast_error(format!("Catalog refresh failed: {e}"));
+                }
             }
             set_refreshing_catalog.try_set(false);
         });

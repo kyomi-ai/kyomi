@@ -84,6 +84,7 @@ impl UserDatasetIndexer {
         let mut tables_indexed = 0usize;
         let mut errors = Vec::new();
         let mut seen_table_ids = HashSet::new();
+        let mut any_project_succeeded = false;
 
         for (i, project_id) in project_ids.iter().enumerate() {
             info!(
@@ -106,6 +107,7 @@ impl UserDatasetIndexer {
             .await
             {
                 Ok(count) => {
+                    any_project_succeeded = true;
                     tables_indexed += count;
                 }
                 Err(e) => {
@@ -157,16 +159,31 @@ impl UserDatasetIndexer {
             .await;
         }
 
-        // Archive tables that no longer exist
-        let archived_names = archive_missing_tables(
-            db,
-            workspace_id,
-            datasource_config_id,
-            &seen_table_ids,
-        )
-        .await
-        .unwrap_or_default();
-        let tables_archived = archived_names.len();
+        // Archive tables that no longer exist — only when we have positive evidence
+        // of tables. If no tables were found (regardless of whether any project query
+        // succeeded), preserve the existing catalog. A successful query returning 0
+        // rows is just as unsafe to archive on as a failed query.
+        let nothing_found = seen_table_ids.is_empty() && tables_indexed == 0;
+
+        let tables_archived = if nothing_found {
+            warn!(
+                workspace_id,
+                datasource_config_id,
+                any_project_succeeded,
+                "No tables found — preserving existing catalog (archiving skipped)"
+            );
+            0
+        } else {
+            let archived_names = archive_missing_tables(
+                db,
+                workspace_id,
+                datasource_config_id,
+                &seen_table_ids,
+            )
+            .await
+            .unwrap_or_default();
+            archived_names.len()
+        };
 
         // Update last refresh timestamp
         let _ = update_datasource_last_refresh(db, datasource_config_id).await;
@@ -192,6 +209,19 @@ impl UserDatasetIndexer {
             elapsed_secs = elapsed,
             "user dataset indexing complete"
         );
+
+        // If nothing was found, return an error result so callers surface
+        // the failure rather than silently reporting zero tables indexed.
+        if nothing_found {
+            let mut result =
+                CatalogIndexResult::error("No tables discovered — existing catalog preserved")
+                    .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())
+                    .with_ids(datasource_config_id, workspace_id);
+            if !errors.is_empty() {
+                result.errors = Some(errors);
+            }
+            return result;
+        }
 
         let mut result = CatalogIndexResult::completed(tables_indexed, tables_archived)
             .with_times(&start_time.to_rfc3339(), &end_time.to_rfc3339())

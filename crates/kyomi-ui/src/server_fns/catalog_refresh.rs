@@ -199,6 +199,14 @@ async fn refresh_connect(
         }
     };
 
+    let total_tables: usize = catalog_result.containers.iter().map(|c| c.tables.len()).sum();
+    tracing::info!(
+        datasource_id = %datasource.id,
+        containers = catalog_result.containers.len(),
+        total_tables,
+        "Connect catalog discovered"
+    );
+
     // Process CatalogResult into cache_table calls.
     let mut tables_indexed = 0usize;
     let mut seen_table_ids = HashSet::new();
@@ -251,7 +259,17 @@ async fn refresh_connect(
         }
     }
 
-    finalize_refresh(params.db, params.workspace_id, &datasource.id, &seen_table_ids, tables_indexed, &[], params.embedding).await
+    finalize_refresh(
+        params.db,
+        params.workspace_id,
+        &datasource.id,
+        &seen_table_ids,
+        tables_indexed,
+        &[],
+        params.embedding,
+        true,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +331,7 @@ async fn refresh_bigquery_rest(
     let mut tables_indexed = 0usize;
     let mut seen_table_ids = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut any_project_succeeded = false;
 
     let ctx = IndexerContext {
         workspace_id: params.workspace_id.to_string(),
@@ -338,6 +357,13 @@ async fn refresh_bigquery_rest(
                 continue;
             }
         };
+
+        any_project_succeeded = true;
+        tracing::info!(
+            project = %project,
+            datasets_found = datasets.len(),
+            "BigQuery project catalog scan: datasets found"
+        );
 
         for dataset_id in &datasets {
             // List tables via REST API (like Python's bq_client.list_tables).
@@ -414,6 +440,7 @@ async fn refresh_bigquery_rest(
         tables_indexed,
         &errors,
         params.embedding,
+        any_project_succeeded,
     )
     .await
 }
@@ -554,6 +581,7 @@ async fn refresh_sql_based(
     let mut tables_indexed = 0usize;
     let mut seen_table_ids = HashSet::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut any_container_succeeded = false;
 
     // Analytics datasources use _-prefixed hidden tables for transforms;
     // only the public views (without _) should be indexed.
@@ -585,7 +613,10 @@ async fn refresh_sql_based(
         };
 
         let table_rows = match provider.execute_query(&sql, None, None, false, None).await {
-            Ok(r) => r,
+            Ok(r) => {
+                any_container_succeeded = true;
+                r
+            }
             Err(e) => {
                 tracing::warn!(
                     container,
@@ -702,6 +733,7 @@ async fn refresh_sql_based(
         tables_indexed,
         &errors,
         params.embedding,
+        any_container_succeeded || containers.is_empty(),
     )
     .await
 }
@@ -718,12 +750,41 @@ async fn finalize_refresh(
     tables_indexed: usize,
     errors: &[String],
     embedding: &kyomi_embed::EmbeddingService,
+    discovery_succeeded: bool,
 ) -> Result<CatalogRefreshResult, kyomi_core::Error> {
-    // Archive missing tables.
-    let archived_names = archive_missing_tables(db, workspace_id, datasource_id, seen_table_ids)
-        .await
-        .unwrap_or_default();
-    let tables_archived = archived_names.len();
+    tracing::info!(
+        datasource_id,
+        seen_table_ids = seen_table_ids.len(),
+        tables_indexed,
+        errors = errors.len(),
+        discovery_succeeded,
+        "Finalizing catalog refresh"
+    );
+
+    // Guard: if no tables were found (regardless of whether discovery technically
+    // "succeeded" at the query level), preserve the existing catalog instead of
+    // archiving everything. A successful query returning 0 rows is just as unsafe
+    // to archive on as a failed query — we have no positive evidence of what tables
+    // exist in either case.
+    let tables_archived: usize = if seen_table_ids.is_empty() && tables_indexed == 0 {
+        tracing::warn!(
+            datasource_id,
+            discovery_succeeded,
+            "No tables found — preserving existing catalog (archiving skipped)"
+        );
+        0
+    } else {
+        archive_missing_tables(db, workspace_id, datasource_id, seen_table_ids)
+            .await
+            .unwrap_or_default()
+            .len()
+    };
+
+    tracing::info!(
+        datasource_id,
+        tables_archived,
+        "Archived stale catalog entries"
+    );
 
     // Update last refresh timestamp.
     let _ = update_datasource_last_refresh(db, datasource_id).await;
@@ -736,10 +797,18 @@ async fn finalize_refresh(
         populate_embeddings_after_indexing(db, embedding, workspace_id, datasource_id).await;
     }
 
-    // Partial success (errors + some tables indexed) returns "completed" — this
-    // aligns SQL-based and BigQuery paths to the same semantics. Only return
-    // "error" when zero tables were indexed and errors occurred.
-    if !errors.is_empty() && tables_indexed == 0 {
+    // When nothing was found at all, return an error so the caller knows the
+    // refresh didn't produce results (catalog was preserved).
+    if tables_indexed == 0 && seen_table_ids.is_empty() {
+        Ok(CatalogRefreshResult {
+            status: "error".into(),
+            message: "No tables discovered — existing catalog preserved".into(),
+            datasource_id: datasource_id.to_string(),
+        })
+    } else if !errors.is_empty() && tables_indexed == 0 {
+        // Partial success (errors + some tables indexed) returns "completed" — this
+        // aligns SQL-based and BigQuery paths to the same semantics. Only return
+        // "error" when zero tables were indexed and errors occurred.
         Ok(CatalogRefreshResult {
             status: "error".into(),
             message: format!("Catalog refresh failed: {}", errors.join("; ")),
