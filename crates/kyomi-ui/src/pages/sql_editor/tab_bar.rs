@@ -101,8 +101,10 @@ pub fn TabBar(
             // Scrollable tab area
             <div class="flex-1 flex overflow-x-auto overflow-y-hidden scrollbar-thin min-w-0">
                 {move || {
-                    let current_tabs = tabs.get();
-                    let current_active = active_tab_id.get();
+                    let Some(current_tabs) = tabs.try_get() else {
+                        return view! { <div /> }.into_any();
+                    };
+                    let current_active = active_tab_id.try_get().flatten();
 
                     if current_tabs.is_empty() {
                         view! {

@@ -56,17 +56,17 @@ pub fn QueryHistory(
 
     // ── Load query history ──────────────────────────────────────────────
     let load_history = move |reset: bool| {
-        let search = search_query.get_untracked();
-        let saved_only = show_saved_only.get_untracked();
-        let current_offset = if reset { 0 } else { offset.get_untracked() };
+        let Some(search) = search_query.try_get_untracked() else { return };
+        let Some(saved_only) = show_saved_only.try_get_untracked() else { return };
+        let current_offset = if reset { 0 } else { offset.try_get_untracked().unwrap_or(0) };
 
         if reset {
-            set_loading.set(true);
-            set_has_more.set(true);
+            set_loading.try_set(true);
+            set_has_more.try_set(true);
         } else {
-            set_loading_more.set(true);
+            set_loading_more.try_set(true);
         }
-        set_error.set(None);
+        set_error.try_set(None);
 
         let search_opt = if search.is_empty() {
             None
@@ -138,9 +138,9 @@ pub fn QueryHistory(
             let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
                 if let Some(entry) = entries.get(0).dyn_ref::<web_sys::IntersectionObserverEntry>()
                     && entry.is_intersecting()
-                        && has_more.get_untracked()
-                        && !loading_more.get_untracked()
-                        && !loading.get_untracked()
+                        && has_more.try_get_untracked().unwrap_or(false)
+                        && !loading_more.try_get_untracked().unwrap_or(true)
+                        && !loading.try_get_untracked().unwrap_or(true)
                     {
                         load_history(false);
                     }

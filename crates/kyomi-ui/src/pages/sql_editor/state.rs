@@ -339,8 +339,8 @@ impl SqlEditorState {
         let tabs = self.tabs;
         let active_id = self.active_tab_id;
         Memo::new(move |_| {
-            let id = active_id.get()?;
-            tabs.get().into_iter().find(|t| t.id == id)
+            let id = active_id.try_get()??;
+            tabs.try_get()?.into_iter().find(|t| t.id == id)
         })
     }
 
@@ -349,9 +349,9 @@ impl SqlEditorState {
         let active_id = self.active_tab_id;
         let table_ui = self.table_ui_state;
         Memo::new(move |_| {
-            let id = active_id.get();
+            let id = active_id.try_get().flatten();
             match id {
-                Some(id) => table_ui.get().get(&id).cloned().unwrap_or_default(),
+                Some(id) => table_ui.try_get().and_then(|ui| ui.get(&id).cloned()).unwrap_or_default(),
                 None => TableUIState::default(),
             }
         })

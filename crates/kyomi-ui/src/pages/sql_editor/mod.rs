@@ -298,16 +298,16 @@ pub fn SqlEditorPage() -> impl IntoView {
             // Cmd/Ctrl+K — toggle catalog sidebar.
             if meta_or_ctrl && key.eq_ignore_ascii_case("k") {
                 ev.prevent_default();
-                if state.active_right_tab.get_untracked().is_some() {
-                    state.set_active_right_tab(None);
+                if state.active_right_tab.try_get_untracked().flatten().is_some() {
+                    state.active_right_tab.try_set(None);
                 } else {
-                    state.set_active_right_tab(Some(SidebarTab::Catalog));
+                    state.active_right_tab.try_set(Some(SidebarTab::Catalog));
                 }
             }
 
             // Escape — close sidebar if open.
-            if key == "Escape" && state.active_right_tab.get_untracked().is_some() {
-                state.set_active_right_tab(None);
+            if key == "Escape" && state.active_right_tab.try_get_untracked().flatten().is_some() {
+                state.active_right_tab.try_set(None);
             }
         });
 

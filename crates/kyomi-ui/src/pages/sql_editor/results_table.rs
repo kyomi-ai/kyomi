@@ -332,10 +332,12 @@ pub fn ResultsTable(
 
             let move_handler = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(
                 move |ev: web_sys::MouseEvent| {
-                    let diff = ev.client_x() as f64 - resize_start_x.get_untracked();
-                    let new_width = (resize_start_width.get_untracked() + diff).max(MIN_COL_WIDTH);
-                    if let Some(idx) = resizing_col.get_untracked() {
-                        column_widths.update(|widths| {
+                    let Some(start_x) = resize_start_x.try_get_untracked() else { return };
+                    let Some(start_width) = resize_start_width.try_get_untracked() else { return };
+                    let diff = ev.client_x() as f64 - start_x;
+                    let new_width = (start_width + diff).max(MIN_COL_WIDTH);
+                    if let Some(idx) = resizing_col.try_get_untracked().flatten() {
+                        column_widths.try_update(|widths| {
                             widths.insert(idx, new_width);
                         });
                     }
@@ -351,7 +353,7 @@ pub fn ResultsTable(
             let closures_for_up = Rc::clone(&closures);
 
             let up_handler = Closure::<dyn FnMut()>::once(move || {
-                resizing_col.set(None);
+                resizing_col.try_set(None);
                 let _ = document_clone
                     .remove_event_listener_with_callback("mousemove", &move_fn_clone);
                 if let Some((_, ref up_closure)) = *closures_for_up.borrow() {
