@@ -218,7 +218,31 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
     card.append_child(&details)?;
 
     // ------------------------------------------------------------------
-    // 8. Button row
+    // 8. Optional user description textarea
+    // ------------------------------------------------------------------
+    let user_textarea = document.create_element("textarea")?;
+    user_textarea.set_attribute("id", "kyomi-panic-user-description")?;
+    user_textarea.set_attribute("rows", "3")?;
+    user_textarea.set_attribute("placeholder", "What were you doing when this happened? (optional)")?;
+    user_textarea.set_attribute(
+        "style",
+        "width:100%;\
+         box-sizing:border-box;\
+         padding:10px 12px;\
+         font-size:13px;\
+         font-family:'DM Sans',system-ui,sans-serif;\
+         line-height:1.5;\
+         color:var(--color-foreground,#1c1917);\
+         background-color:var(--color-muted,#f5f3ef);\
+         border:1px solid var(--color-border,#e8e5de);\
+         border-radius:8px;\
+         resize:vertical;\
+         outline:none;",
+    )?;
+    card.append_child(&user_textarea)?;
+
+    // ------------------------------------------------------------------
+    // 9. Button row
     // ------------------------------------------------------------------
     let button_row = document.create_element("div")?;
     button_row.set_attribute(
@@ -291,11 +315,13 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
     let panic_msg_owned = panic_message.to_string();
     let report_btn_clone = report_btn.clone();
     let window_for_report = window.clone();
+    let user_textarea_clone = user_textarea.clone();
 
     let report_closure = Closure::<dyn Fn()>::new(move || {
         let panic_msg = panic_msg_owned.clone();
         let btn = report_btn_clone.clone();
         let win = window_for_report.clone();
+        let textarea = user_textarea_clone.clone();
 
         let _ = btn.set_attribute("disabled", "true");
         btn.set_text_content(Some("Sending\u{2026}"));
@@ -305,7 +331,11 @@ fn try_show_panic_recovery_overlay(panic_message: &str) -> Result<(), JsValue> {
         }
 
         wasm_bindgen_futures::spawn_local(async move {
-            match submit_panic_report(&win, &panic_msg).await {
+            let user_desc = textarea
+                .dyn_ref::<web_sys::HtmlTextAreaElement>()
+                .map(|t| t.value())
+                .unwrap_or_default();
+            match submit_panic_report(&win, &panic_msg, &user_desc).await {
                 Ok(()) => {
                     btn.set_text_content(Some("Report Sent \u{2014} Thank you!"));
                     btn.dyn_ref::<web_sys::HtmlElement>()
@@ -382,13 +412,17 @@ fn build_panic_context(window: &web_sys::Window, panic_message: &str) -> String 
 /// Posts URL-encoded form data to `/leptos-api/submit_feedback`, matching
 /// exactly what the Leptos-generated client would send. The existing session
 /// cookie is still present in the browser so authentication still works.
-async fn submit_panic_report(window: &web_sys::Window, panic_message: &str) -> Result<(), JsValue> {
+async fn submit_panic_report(window: &web_sys::Window, panic_message: &str, user_description: &str) -> Result<(), JsValue> {
     let context_json = build_panic_context(window, panic_message);
 
     // URL-encode all fields. We encode manually to avoid pulling in a URL
     // encoding library — only the characters that `encodeURIComponent` encodes
     // are special here.
-    let description = format!("WASM Panic: {}", panic_message);
+    let description = if user_description.is_empty() {
+        format!("WASM Panic: {}", panic_message)
+    } else {
+        format!("{}\n\nWASM Panic: {}", user_description, panic_message)
+    };
     let body = format!(
         "feedback_type={}&description={}&include_context={}&context={}&screenshot=",
         url_encode("bug"),
