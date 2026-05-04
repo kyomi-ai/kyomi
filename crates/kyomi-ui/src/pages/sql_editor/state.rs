@@ -425,15 +425,16 @@ impl SqlEditorState {
         let pending = Rc::new(Cell::new(None::<SendWrapper<Timeout>>));
 
         Effect::new(move |_| {
-            // Read all signals to subscribe to them.
-            let tabs_val = tabs.get();
-            let active_tab_id_val = active_tab_id.get();
-            let query_text_val = query_text.get();
-            let table_ui_state_val = table_ui_state.get();
-            let next_color_index_val = next_color_index.get();
-            let default_page_size_val = default_page_size.get();
-            let active_right_tab_val = active_right_tab.get();
-            let right_sidebar_percentage_val = right_sidebar_percentage.get();
+            // Read all signals to subscribe to them. Use try_get() so the
+            // effect is a no-op when signals are disposed during navigation.
+            let Some(tabs_val) = tabs.try_get() else { return };
+            let active_tab_id_val = active_tab_id.try_get().flatten();
+            let query_text_val = query_text.try_get().unwrap_or_default();
+            let table_ui_state_val = table_ui_state.try_get().unwrap_or_default();
+            let next_color_index_val = next_color_index.try_get().unwrap_or(0);
+            let default_page_size_val = default_page_size.try_get().unwrap_or(DEFAULT_PAGE_SIZE);
+            let active_right_tab_val = active_right_tab.try_get().flatten();
+            let right_sidebar_percentage_val = right_sidebar_percentage.try_get().unwrap_or(DEFAULT_SIDEBAR_PERCENTAGE);
 
             // Prepare tabs for persistence. `data` (DataTable) is excluded by
             // #[serde(skip)] automatically. `rows` and `columns` are kept so

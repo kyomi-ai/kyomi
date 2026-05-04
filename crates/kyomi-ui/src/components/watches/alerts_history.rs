@@ -60,7 +60,8 @@ fn AlertDropdownMenu(
 
     let (action_pending, set_action_pending) = signal(false);
 
-    // Continue in Chat handler
+    // Continue in Chat handler — use try_set for signals that may be
+    // disposed if the user navigates away while the async op is in flight.
     let handle_continue_chat = move |_: web_sys::MouseEvent| {
         set_action_pending.set(true);
         set_is_open.set(false);
@@ -73,7 +74,7 @@ fn AlertDropdownMenu(
                     leptos::logging::error!("Failed to continue in chat: {e}");
                 }
             }
-            set_action_pending.set(false);
+            set_action_pending.try_set(false);
         });
     };
 
@@ -377,19 +378,19 @@ pub fn AlertsHistory(
 
     // ── Clear selection when page or filters change ──────────────────────
     Effect::new(move || {
-        let _ = page.get();
-        let _ = selected_watch_id.get();
-        let _ = show_deleted.get();
-        selected_alerts.set(HashSet::new());
+        let _ = page.try_get();
+        let _ = selected_watch_id.try_get();
+        let _ = show_deleted.try_get();
+        selected_alerts.try_set(HashSet::new());
     });
 
     // ── Auto-expand alert if expanded_alert_id is provided ──────────────
     if let Some(target_id) = expanded_alert_id {
         Effect::new(move || {
-            if let Some(Ok(page)) = alerts_resource.get() { let alerts = &page.alerts;
+            if let Some(Ok(page)) = alerts_resource.try_get().flatten() { let alerts = &page.alerts;
                 let mut new_set = HashSet::new();
                 new_set.insert(target_id);
-                expanded_alerts.set(new_set);
+                expanded_alerts.try_set(new_set);
 
                 // Auto-mark as read
                 if let Some(alert) = alerts.iter().find(|a| a.id == target_id)
@@ -466,8 +467,8 @@ pub fn AlertsHistory(
             if let Err(e) = bulk_mark_alerts_read(ids).await {
                 leptos::logging::error!("Bulk mark read failed: {e}");
             }
-            selected_alerts.set(HashSet::new());
-            set_bulk_action_pending.set(false);
+            selected_alerts.try_set(HashSet::new());
+            set_bulk_action_pending.try_set(false);
             query_cache.invalidate("alerts");
             query_cache.invalidate("unread_alerts");
         });
@@ -483,8 +484,8 @@ pub fn AlertsHistory(
             if let Err(e) = bulk_mark_alerts_unread(ids).await {
                 leptos::logging::error!("Bulk mark unread failed: {e}");
             }
-            selected_alerts.set(HashSet::new());
-            set_bulk_action_pending.set(false);
+            selected_alerts.try_set(HashSet::new());
+            set_bulk_action_pending.try_set(false);
             query_cache.invalidate("alerts");
             query_cache.invalidate("unread_alerts");
         });
@@ -520,8 +521,8 @@ pub fn AlertsHistory(
             if let Err(e) = bulk_delete_alerts(ids).await {
                 leptos::logging::error!("Bulk delete failed: {e}");
             }
-            selected_alerts.set(HashSet::new());
-            set_bulk_action_pending.set(false);
+            selected_alerts.try_set(HashSet::new());
+            set_bulk_action_pending.try_set(false);
             query_cache.invalidate("alerts");
             query_cache.invalidate("unread_alerts");
         });
@@ -882,7 +883,7 @@ pub fn AlertsHistory(
                                                                             leptos::logging::error!("Failed to continue in chat: {e}");
                                                                         }
                                                                     }
-                                                                    set_continue_chat_alert_id.set(None);
+                                                                    set_continue_chat_alert_id.try_set(None);
                                                                 });
                                                             }
                                                         >

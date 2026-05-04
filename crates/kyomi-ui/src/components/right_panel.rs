@@ -111,7 +111,8 @@ pub fn RightPanel(
 
         Effect::new(move |_| {
             // Re-bind the listener whenever `open` flips so we don't leak.
-            let is_open = open.get();
+            // Use try_get() — the parent signal may be disposed during navigation.
+            let is_open = open.try_get().unwrap_or(false);
             // Clear any previous handler before (re-)registering.
             if let Some(teardown) = escape_cleanup.try_update_value(|v| v.take()).flatten() {
                 teardown.take()();

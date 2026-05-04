@@ -48,16 +48,18 @@ pub fn SqlEditorSidebar(
     let state = SqlEditorState::use_state();
     let sidebar_width = RwSignal::new(DEFAULT_WIDTH);
 
-    // Derived: which tab is active within the sidebar.
+    // Derived: which tab is active within the sidebar. Use try_get() so the
+    // memo is safe during scope disposal (parent signals may be freed first).
     let active_tab = Memo::new(move |_| {
         state
             .active_right_tab
-            .get()
+            .try_get()
+            .flatten()
             .unwrap_or(SidebarTab::Catalog)
     });
 
     // Derived: is the sidebar open at all?
-    let is_open = Memo::new(move |_| state.active_right_tab.get().is_some());
+    let is_open = Memo::new(move |_| state.active_right_tab.try_get().flatten().is_some());
 
     // ── Tab + close handlers ────────────────────────────────────────────
     let set_catalog_tab = move |_| {
@@ -81,7 +83,7 @@ pub fn SqlEditorSidebar(
     // `execution::save_to_history` can bump it after a query runs and the
     // QueryHistory panel will refetch automatically.
     let history_refresh_trigger =
-        Signal::derive(move || state.history_refresh_tick.get());
+        Signal::derive(move || state.history_refresh_tick.try_get().unwrap_or(0));
 
     // Debounce history search input → actual search query.
     #[cfg(feature = "hydrate")]
@@ -95,11 +97,11 @@ pub fn SqlEditorSidebar(
         let pending = Rc::new(Cell::new(None::<SendWrapper<Timeout>>));
 
         Effect::new(move |_| {
-            let input = history_search_input.get();
+            let Some(input) = history_search_input.try_get() else { return };
             let pending = pending.clone();
             pending.set(None); // cancel previous timeout
             let timeout = Timeout::new(300, move || {
-                set_history_search.set(input);
+                set_history_search.try_set(input);
             });
             pending.set(Some(SendWrapper::new(timeout)));
         });

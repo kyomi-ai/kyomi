@@ -53,11 +53,12 @@ pub fn CatalogTree(
     let (expanded_nodes, set_expanded_nodes) = signal(HashSet::<String>::new());
 
     // Fetch catalog tree reactively when datasource or refresh trigger changes.
+    // Use try_get() so the resource source is safe during scope disposal.
     let catalog_resource = Resource::new(
         move || {
             (
-                datasource_slug.get(),
-                refresh_trigger.get(),
+                datasource_slug.try_get().flatten(),
+                refresh_trigger.try_get().unwrap_or(0),
             )
         },
         move |(slug, _trigger)| async move {
@@ -72,8 +73,8 @@ pub fn CatalogTree(
 
     // Reset expanded nodes when datasource changes.
     Effect::new(move |_| {
-        let _ = datasource_slug.get();
-        set_expanded_nodes.set(HashSet::new());
+        let _ = datasource_slug.try_get();
+        let _ = set_expanded_nodes.try_set(HashSet::new());
     });
 
     let toggle_node = move |node_id: String| {

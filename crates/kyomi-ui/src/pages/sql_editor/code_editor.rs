@@ -157,8 +157,9 @@ fn use_debounced_dry_run(
 
     Effect::new(move |_| {
         // Subscribe to reactive signals so this effect re-runs on changes.
-        let sql = query_text.get();
-        let slug = datasource_slug.get();
+        // Use try_get() — parent signals may be disposed during navigation.
+        let Some(sql) = query_text.try_get() else { return };
+        let slug = datasource_slug.try_get().flatten();
 
         // Cancel any pending dry run by dropping the old timeout.
         pending.set(None);
@@ -343,7 +344,8 @@ fn use_cursor_position(
         let Some(window) = web_sys::window() else { return };
 
         let closure = Closure::wrap(Box::new(move || {
-            let Some(handle) = editor_handle.get_untracked() else {
+            let handle = editor_handle.try_get_untracked().flatten();
+            let Some(handle) = handle else {
                 return;
             };
 
@@ -352,11 +354,11 @@ fn use_cursor_position(
             let new_line = pos.line + 1;
             let new_col = pos.col + 1;
 
-            if line.get_untracked() != new_line {
-                line.set(new_line);
+            if line.try_get_untracked() != Some(new_line) {
+                line.try_set(new_line);
             }
-            if col.get_untracked() != new_col {
-                col.set(new_col);
+            if col.try_get_untracked() != Some(new_col) {
+                col.try_set(new_col);
             }
         }) as Box<dyn FnMut()>);
 

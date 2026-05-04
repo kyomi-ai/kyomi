@@ -105,10 +105,13 @@ pub fn QueryHistory(
 
     // ── Reload when search, saved-only filter, or refresh trigger changes ──
     Effect::new(move |_| {
-        // Subscribe to all three signals.
-        let _ = search_query.get();
-        let _ = show_saved_only.get();
-        let _ = refresh_trigger.get();
+        // Subscribe to all three signals. Use try_get() for cross-scope
+        // signals that may be disposed during navigation.
+        let _ = search_query.try_get();
+        let _ = show_saved_only.try_get();
+        if refresh_trigger.try_get().is_none() {
+            return;
+        }
         load_history(true);
     });
 
@@ -124,9 +127,9 @@ pub fn QueryHistory(
             };
             let el: web_sys::Element = el.into();
 
-            let has_more_val = has_more.get();
-            let loading_more_val = loading_more.get();
-            let loading_val = loading.get();
+            let has_more_val = has_more.try_get().unwrap_or(false);
+            let loading_more_val = loading_more.try_get().unwrap_or(true);
+            let loading_val = loading.try_get().unwrap_or(true);
 
             if !has_more_val || loading_more_val || loading_val {
                 return;

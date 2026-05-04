@@ -93,11 +93,16 @@ pub fn SqlEditorPage() -> impl IntoView {
     let set_is_resizing = _set_is_resizing;
 
     // Track whether there are tabs (controls results panel visibility).
-    let has_tabs = Memo::new(move |_| !state.tabs.get().is_empty());
+    // Use try_get() so the memo is safe during scope disposal.
+    let has_tabs = Memo::new(move |_| {
+        state.tabs.try_get().is_some_and(|t| !t.is_empty())
+    });
 
     // ── Sidebar toggle ───────────────────────────────────────────────────
     // The sidebar open/close state is stored in SqlEditorState.active_right_tab.
-    let sidebar_open = Memo::new(move |_| state.active_right_tab.get().is_some());
+    let sidebar_open = Memo::new(move |_| {
+        state.active_right_tab.try_get().flatten().is_some()
+    });
 
     let toggle_sidebar = move |_| {
         if state.active_right_tab.get_untracked().is_some() {
@@ -222,7 +227,7 @@ pub fn SqlEditorPage() -> impl IntoView {
                 }
             }
 
-            if !is_resizing.get() {
+            if !is_resizing.try_get().unwrap_or(false) {
                 return None;
             }
 
@@ -242,12 +247,12 @@ pub fn SqlEditorPage() -> impl IntoView {
                 if h > 0.0 {
                     let diff_pct = ((y - start_y) / h) * 100.0;
                     let new_pct = (start_pct + diff_pct).clamp(20.0, 80.0);
-                    set_editor_pct.set(new_pct);
+                    set_editor_pct.try_set(new_pct);
                 }
             });
 
             let on_up = Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |_: web_sys::MouseEvent| {
-                set_is_resizing.set(false);
+                set_is_resizing.try_set(false);
             });
 
             let _ = doc.add_event_listener_with_callback(
