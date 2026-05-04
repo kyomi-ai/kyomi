@@ -36,7 +36,7 @@ use crate::server_fns::watches::get_unread_alerts_count;
 /// - Mobile (<768px): sidebar hidden by default, hamburger header bar at top
 /// - Desktop (768px+): sidebar always visible (collapsed/expanded)
 #[component]
-pub fn Layout(children: Children) -> impl IntoView {
+pub fn Layout(children: ChildrenFn) -> impl IntoView {
     // Restore collapsed state from localStorage so it persists across navigation.
     // Each route creates its own Layout instance, so without persistence the
     // sidebar always resets to expanded on page change.
@@ -379,21 +379,13 @@ pub fn Layout(children: Children) -> impl IntoView {
         });
     }
 
+    let children_render = StoredValue::new(children);
+
     view! {
-        // Auth guard loading screen — shown while auth check is in progress.
-        // Hidden once auth_confirmed becomes true (user is authenticated).
-        // Matches React `<ProtectedRoute>` loading state.
-        <div
-            class="min-h-screen flex items-center justify-center"
-            style=move || if auth_confirmed.get() { "display:none" } else { "" }
+        <Show
+            when=move || auth_confirmed.get()
+            fallback=|| view! { <div class="min-h-screen flex items-center justify-center">"Loading..."</div> }
         >
-            "Loading..."
-        </div>
-        // Main layout — hidden until auth is confirmed to prevent
-        // unauthenticated users from seeing the sidebar/app shell.
-        // If auth fails, refresh_and_reload() redirects to /login
-        // before this ever becomes visible.
-        <div style=move || if auth_confirmed.get() { "" } else { "display:none" }>
             <WebSocketProvider user_id=ws_user_id.into() workspace_id=ws_workspace_id.into()>
                 // Bridges Layout-level QueryCache to the WS `dashboard_update`
                 // channel so list pages stay fresh without each page owning
@@ -452,12 +444,12 @@ pub fn Layout(children: Children) -> impl IntoView {
                                 }
                             }
                         >
-                            {children()}
+                            {children_render.with_value(|c| c())}
                         </main>
                     </div>
                 </div>
             </WebSocketProvider>
-        </div>
+        </Show>
     }
 }
 
