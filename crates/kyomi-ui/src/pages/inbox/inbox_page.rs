@@ -46,7 +46,7 @@ pub fn InboxPage() -> impl IntoView {
             <div class="flex-1 overflow-auto p-4 md:p-6">
                 <AlertsHistory
                     on_continue_chat=on_continue_chat
-                    expanded_alert_id=expanded_alert_id.get()
+                    expanded_alert_id=expanded_alert_id.into()
                 />
             </div>
         </div>

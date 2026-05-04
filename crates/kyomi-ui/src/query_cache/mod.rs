@@ -131,6 +131,26 @@ impl QueryCache {
         }
     }
 
+    /// Like [`invalidate`] but silently no-ops if the cache's `StoredValue` has
+    /// been disposed (e.g. the reactive owner unmounted). Use this variant
+    /// inside `spawn_local` blocks where the async task may outlive the
+    /// component that spawned it.
+    pub fn try_invalidate(&self, name: &'static str) {
+        let refetches: Vec<Rc<dyn Fn()>> = self
+            .inner
+            .try_with_value(|rc| {
+                rc.borrow()
+                    .iter()
+                    .filter(|((n, _), _)| *n == name)
+                    .map(|(_, raw)| raw.refetch.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for r in refetches {
+            r();
+        }
+    }
+
     /// Borrow the underlying map mutably via the stored `StoredValue`.
     /// Internal helper used by [`lookup_or_create`].
     fn with_map_mut<R>(

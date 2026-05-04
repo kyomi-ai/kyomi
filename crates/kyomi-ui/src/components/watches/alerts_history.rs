@@ -85,8 +85,8 @@ fn AlertDropdownMenu(
             if let Err(e) = mark_alert_unread(alert_id).await {
                 leptos::logging::error!("Failed to mark unread: {e}");
             }
-            query_cache.invalidate("alerts");
-            query_cache.invalidate("unread_alerts");
+            query_cache.try_invalidate("alerts");
+            query_cache.try_invalidate("unread_alerts");
         });
     };
 
@@ -97,8 +97,8 @@ fn AlertDropdownMenu(
             if let Err(e) = delete_alert(alert_id).await {
                 leptos::logging::error!("Failed to delete alert: {e}");
             }
-            query_cache.invalidate("alerts");
-            query_cache.invalidate("unread_alerts");
+            query_cache.try_invalidate("alerts");
+            query_cache.try_invalidate("unread_alerts");
         });
     };
 
@@ -109,8 +109,8 @@ fn AlertDropdownMenu(
             if let Err(e) = restore_alert(alert_id).await {
                 leptos::logging::error!("Failed to restore alert: {e}");
             }
-            query_cache.invalidate("alerts");
-            query_cache.invalidate("unread_alerts");
+            query_cache.try_invalidate("alerts");
+            query_cache.try_invalidate("unread_alerts");
         });
     };
 
@@ -265,8 +265,11 @@ fn get_watch_name(alert: &AlertItem, watches: &[WatchListItem]) -> String {
 /// Filterable by watch and paginated.
 #[component]
 pub fn AlertsHistory(
-    /// Optional pre-expanded alert ID (from URL params).
-    expanded_alert_id: Option<i32>,
+    /// Optional pre-expanded alert ID (from URL params), as a reactive signal.
+    /// Using `Signal<Option<i32>>` rather than a plain `Option<i32>` snapshot
+    /// prevents disposed-scope panics when the user navigates away while an
+    /// async operation is still in flight (KYO-274).
+    expanded_alert_id: Signal<Option<i32>>,
     /// Called when user clicks "Continue in Chat" on an alert.
     on_continue_chat: Callback<String>,
 ) -> impl IntoView {
@@ -385,26 +388,29 @@ pub fn AlertsHistory(
     });
 
     // ── Auto-expand alert if expanded_alert_id is provided ──────────────
-    if let Some(target_id) = expanded_alert_id {
-        Effect::new(move || {
-            if let Some(Ok(page)) = alerts_resource.try_get().flatten() { let alerts = &page.alerts;
-                let mut new_set = HashSet::new();
-                new_set.insert(target_id);
-                expanded_alerts.try_set(new_set);
+    // Uses try_get() on both signals so the Effect silently no-ops if either
+    // signal is accessed after the component's scope has been disposed (e.g.
+    // the user navigated away while the alerts resource was still loading).
+    Effect::new(move || {
+        let Some(target_id) = expanded_alert_id.try_get().flatten() else { return };
+        if let Some(Ok(page)) = alerts_resource.try_get().flatten() {
+            let alerts = &page.alerts;
+            let mut new_set = HashSet::new();
+            new_set.insert(target_id);
+            expanded_alerts.try_set(new_set);
 
-                // Auto-mark as read
-                if let Some(alert) = alerts.iter().find(|a| a.id == target_id)
-                    && alert.read_at.is_none() && alert.deleted_at.is_none()
-                {
-                    leptos::task::spawn_local(async move {
-                        let _ = mark_alert_read(target_id).await;
-                        query_cache.invalidate("alerts");
-                        query_cache.invalidate("unread_alerts");
-                    });
-                }
+            // Auto-mark as read
+            if let Some(alert) = alerts.iter().find(|a| a.id == target_id)
+                && alert.read_at.is_none() && alert.deleted_at.is_none()
+            {
+                leptos::task::spawn_local(async move {
+                    let _ = mark_alert_read(target_id).await;
+                    query_cache.try_invalidate("alerts");
+                    query_cache.try_invalidate("unread_alerts");
+                });
             }
-        });
-    }
+        }
+    });
 
     // ── Toggle expand ────────────────────────────────────────────────────
     let toggle_expanded = move |alert_id: i32| {
@@ -420,8 +426,8 @@ pub fn AlertsHistory(
                     {
                         leptos::task::spawn_local(async move {
                             let _ = mark_alert_read(alert_id).await;
-                            query_cache.invalidate("alerts");
-                            query_cache.invalidate("unread_alerts");
+                            query_cache.try_invalidate("alerts");
+                            query_cache.try_invalidate("unread_alerts");
                         });
                     }
                 }
@@ -469,8 +475,8 @@ pub fn AlertsHistory(
             }
             selected_alerts.try_set(HashSet::new());
             set_bulk_action_pending.try_set(false);
-            query_cache.invalidate("alerts");
-            query_cache.invalidate("unread_alerts");
+            query_cache.try_invalidate("alerts");
+            query_cache.try_invalidate("unread_alerts");
         });
     };
 
@@ -486,8 +492,8 @@ pub fn AlertsHistory(
             }
             selected_alerts.try_set(HashSet::new());
             set_bulk_action_pending.try_set(false);
-            query_cache.invalidate("alerts");
-            query_cache.invalidate("unread_alerts");
+            query_cache.try_invalidate("alerts");
+            query_cache.try_invalidate("unread_alerts");
         });
     };
 
@@ -523,8 +529,8 @@ pub fn AlertsHistory(
             }
             selected_alerts.try_set(HashSet::new());
             set_bulk_action_pending.try_set(false);
-            query_cache.invalidate("alerts");
-            query_cache.invalidate("unread_alerts");
+            query_cache.try_invalidate("alerts");
+            query_cache.try_invalidate("unread_alerts");
         });
     };
 
