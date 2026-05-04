@@ -396,6 +396,24 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
     .await
     .into_sfn()?;
 
+    // Send notification emails to both parties
+    let to_user = kyomi_auth::user_service::get_user_by_id(ac.db(), &to_user_id)
+        .await
+        .into_sfn()?;
+    if let Some(to_user) = to_user {
+        let workspace_name = ac.auth.workspace.workspace_name.clone().unwrap_or_default();
+        let from_name = ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone());
+        let to_name = to_user.name.clone().unwrap_or_else(|| to_user.email.clone());
+        let to_email = to_user.email.clone();
+        let from_email = ac.auth.email.clone();
+
+        tokio::spawn(async move {
+            let svc = kyomi_auth::email_service::EmailService::from_env();
+            svc.send_ownership_transfer(&to_email, &workspace_name, &from_name, &to_name, "initiated").await;
+            svc.send_ownership_transfer(&from_email, &workspace_name, &from_name, &to_name, "confirmation").await;
+        });
+    }
+
     Ok(())
 }
 

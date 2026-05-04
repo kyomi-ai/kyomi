@@ -468,6 +468,70 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             .await
     }
 
+    /// Send an ownership transfer notification email.
+    ///
+    /// `variant` is either "initiated" (sent to recipient) or "confirmation" (sent to current owner).
+    pub async fn send_ownership_transfer(
+        &self,
+        email: &str,
+        workspace_name: &str,
+        from_name: &str,
+        to_name: &str,
+        variant: &str,
+    ) -> bool {
+        let (subject, heading, body_text) = if variant == "initiated" {
+            (
+                format!("You've been offered ownership of {workspace_name}"),
+                "Ownership Transfer Request".to_string(),
+                format!(
+                    "<strong>{from_name}</strong> wants to transfer ownership of \
+                     <strong>{workspace_name}</strong> on Kyomi to you. Log in to review \
+                     and accept or decline this transfer. The request expires in 7 days."
+                ),
+            )
+        } else {
+            (
+                format!("Ownership transfer initiated for {workspace_name}"),
+                "Transfer Initiated".to_string(),
+                format!(
+                    "You initiated an ownership transfer of <strong>{workspace_name}</strong> \
+                     to <strong>{to_name}</strong>. They have 7 days to accept. You can cancel \
+                     this transfer from your workspace settings."
+                ),
+            )
+        };
+
+        let html_body = format!(
+            r#"
+        <h1>{heading}</h1>
+        <p>{body_text}</p>
+        <div class="cta">
+            <a href="{frontend_url}/settings/team" class="button">View in Settings</a>
+        </div>
+        <p class="text-sm" style="color: #6b7280; margin-top: 16px;">
+            If you didn't expect this, you can safely ignore it.
+        </p>
+"#,
+            heading = heading,
+            body_text = body_text,
+            frontend_url = self.frontend_url,
+        );
+
+        let text_body = format!(
+            "{heading}\n\n{body}\n\nView: {url}/settings/team\n",
+            heading = heading,
+            body = if variant == "initiated" {
+                format!("{from_name} wants to transfer ownership of {workspace_name} on Kyomi to you. Log in to review and accept or decline. Expires in 7 days.")
+            } else {
+                format!("You initiated an ownership transfer of {workspace_name} to {to_name}. They have 7 days to accept.")
+            },
+            url = self.frontend_url,
+        );
+
+        self.send_email(email, &subject, &html_body, Some(&text_body), None, &[])
+            .await
+    }
+
     /// Send a passkey recovery email.
     ///
     /// Returns `true` if sent successfully.

@@ -43,7 +43,7 @@ Quick reference — what to rebuild per change type:
 CSS only (main.css):      trunk build → refresh browser
 Frontend Rust (.rs):      trunk build → refresh browser
 Path dep (chartml etc):   trunk build → refresh browser
-Server-side Rust:         cargo build --profile dev-server → restart server
+Server-side Rust:         cargo build --locked --profile dev-server → restart server
 ```
 
 Start dev.kyomi.ai (SaaS mode):
@@ -56,6 +56,8 @@ PORT=3000 FRONTEND_URL=https://dev.kyomi.ai target/dev-server/kyomi &
 **dev.kyomi.ai = SaaS mode (Postgres + Redis) on port 3000. NEVER use SELF_HOSTED=true.**
 
 **NEVER run `tailwindcss` manually.** Trunk runs it as a pre-build hook. Running it separately breaks content hashes in `index.html`.
+
+**Always pass `--locked` to cargo commands** (`cargo check --locked`, `cargo clippy --locked`, `cargo build --locked`). This prevents silent Cargo.lock drift from transitive dependency re-resolution. If `--locked` fails, run `cargo update` explicitly and commit the lock file as a separate change.
 
 ## Sync Engine (Local-First Cache)
 
