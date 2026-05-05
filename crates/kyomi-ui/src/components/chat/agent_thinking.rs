@@ -266,7 +266,7 @@ pub fn AgentThinking(
         view! {
             // Header — always visible, clickable to expand/collapse
             <div
-                class="flex items-center justify-between cursor-pointer py-1.5"
+                class="flex items-center justify-between cursor-pointer h-8"
                 on:click=move |_| set_is_expanded.update(|v| *v = !*v)
             >
                 <div class="flex items-center gap-2 min-w-0 flex-1">
