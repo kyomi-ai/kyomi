@@ -25,7 +25,7 @@ jobs:
   # ---------------------------------------------------------------------------
   lint-policy:
     name: Lint Suppression Policy
-    runs-on: kyomi-ci
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,7 +65,7 @@ jobs:
   # ---------------------------------------------------------------------------
   trivy-scan:
     name: Trivy Security Scan
-    runs-on: kyomi-ci
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -86,10 +86,7 @@ jobs:
   # ---------------------------------------------------------------------------
   clippy:
     name: Clippy
-    runs-on: kyomi-ci
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_DIR: /opt/cargo-cache/sccache
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -103,19 +100,10 @@ jobs:
           components: clippy
           targets: wasm32-unknown-unknown
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
-
-      - name: Install sccache
-        run: |
-          if ! command -v sccache &>/dev/null; then
-            curl -fsSL https://github.com/mozilla/sccache/releases/download/v0.14.0/sccache-v0.14.0-x86_64-unknown-linux-musl.tar.gz -o sccache.tar.gz
-            echo "8424b38cda4ecce616a1557d81328f3d7c96503a171eab79942fad618b42af44  sccache.tar.gz" | sha256sum -c
-            tar xzf sccache.tar.gz
-            mv sccache-v0.14.0-x86_64-unknown-linux-musl/sccache "$CARGO_HOME/bin/"
-            rm -rf sccache.tar.gz sccache-v0.14.0-x86_64-unknown-linux-musl
-          fi
-          sccache --start-server || true
 
       - name: Install trunk
         uses: taiki-e/install-action@trunk
@@ -157,6 +145,3 @@ jobs:
       - name: cargo clippy (kyomi-ui, wasm32)
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
 
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats
