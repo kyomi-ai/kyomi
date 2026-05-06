@@ -72,7 +72,6 @@ pub fn LoginPage(
     // ── Credentials view signals ────────────────────────────────────────
     let (email, set_email) = signal(String::new());
     let (password, set_password) = signal(String::new());
-    let (loading, set_loading) = signal(false);
     let (error, set_error) = signal(Option::<String>::None);
     let (success_msg, set_success_msg) = signal(Option::<String>::None);
 
@@ -87,12 +86,9 @@ pub fn LoginPage(
     let (signup_email, set_signup_email) = signal(String::new());
     let (signup_name, set_signup_name) = signal(String::new());
     let (signup_password, set_signup_password) = signal(String::new());
-    let (signup_loading, set_signup_loading) = signal(false);
-
     // ── Verification needed (email not verified) ────────────────────────
     let (verification_needed, set_verification_needed) = signal(false);
     let (verification_email, set_verification_email) = signal(String::new());
-    let (resend_loading, set_resend_loading) = signal(false);
     let (resend_success, set_resend_success) = signal(false);
 
     // ── SPA navigation handle (must be obtained at component level) ─────
@@ -124,12 +120,143 @@ pub fn LoginPage(
         }
     };
 
+    // ── Login action (password + 2FA submit) ────────────────────────────
+    // Replaces the spawn_local pattern for login_with_password. Input tuple:
+    // (email, password, totp_opt). The action value is the raw server result;
+    // navigation and state transitions happen in the Effect below.
+    let login_action = Action::new(
+        move |(login_email, login_password, totp_opt): &(String, String, Option<String>)| {
+            let login_email = login_email.clone();
+            let login_password = login_password.clone();
+            let totp_opt = totp_opt.clone();
+            async move { login_with_password(login_email, login_password, totp_opt).await }
+        },
+    );
+
+    // ── Signup action ───────────────────────────────────────────────────
+    // Input tuple: (email, name_opt, password_opt). Returns (email, result) so
+    // the Effect can use the dispatch-time email for CheckEmail navigation
+    // without reading the (potentially mutated) live signal.
+    let signup_action = Action::new(
+        move |(dispatched_email, name_opt, password_opt): &(
+            String,
+            Option<String>,
+            Option<String>,
+        )| {
+            let dispatched_email = dispatched_email.clone();
+            let name_opt = name_opt.clone();
+            let password_opt = password_opt.clone();
+            async move {
+                let result = signup_start(dispatched_email.clone(), name_opt, password_opt).await;
+                (dispatched_email, result)
+            }
+        },
+    );
+
+    // ── Resend verification action ──────────────────────────────────────
+    let resend_action = Action::new(move |ver_email: &String| {
+        let ver_email = ver_email.clone();
+        async move { resend_verification(ver_email).await }
+    });
+
+    // ── Effect: react to login action result ────────────────────────────
+    // Handles navigation and state transitions after login_with_password
+    // completes. Runs in component scope — automatically cleans up on
+    // navigation, preventing the disposed-signal panics that spawn_local causes.
+    Effect::new(move |_| {
+        if let Some(result) = login_action.value().get() {
+            match result {
+                Ok(LoginResult::Success { .. }) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let dest = redirect_url();
+                        if dest.starts_with("/api/") {
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().set_href(&dest);
+                            }
+                        } else {
+                            navigate.get_value()(&dest, Default::default());
+                        }
+                    }
+                }
+                Ok(LoginResult::TwoFactorRequired { email: user_email }) => {
+                    set_view_state.set(LoginView::TwoFactor { email: user_email });
+                    set_error.set(None);
+                }
+                Ok(LoginResult::VerificationRequired { email: user_email }) => {
+                    set_verification_needed.set(true);
+                    set_verification_email.set(user_email);
+                }
+                Ok(LoginResult::RateLimited { retry_after_secs }) => {
+                    set_error.set(Some(format!(
+                        "Too many login attempts. Please try again in {} seconds.",
+                        retry_after_secs
+                    )));
+                }
+                Ok(LoginResult::Error { message }) => {
+                    set_error.set(Some(message));
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Server error: {}", e)));
+                }
+            }
+        }
+    });
+
+    // ── Effect: react to signup action result ───────────────────────────
+    // signup_action returns (dispatched_email, result) — the email is threaded
+    // through so the Effect uses the value that was actually sent to the server,
+    // not a potentially-mutated live signal.
+    Effect::new(move |_| {
+        if let Some((dispatched_email, result)) = signup_action.value().get() {
+            match result {
+                Ok(SignupResult::AccountCreated { redirect }) => {
+                    #[cfg(target_arch = "wasm32")]
+                    navigate.get_value()(&redirect, Default::default());
+                    let _ = &redirect; // suppress unused warning on SSR
+                }
+                Ok(SignupResult::VerificationRequired { message }) => {
+                    set_success_msg.set(Some(message));
+                    set_view_state.set(LoginView::CheckEmail {
+                        email: dispatched_email,
+                    });
+                }
+                Ok(SignupResult::Error { message }) => {
+                    set_error.set(Some(message));
+                }
+                Ok(SignupResult::RateLimited { .. }) => {
+                    set_error.set(Some(
+                        "Too many signup attempts. Please try again later.".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    set_error.set(Some(format!("Server error: {}", e)));
+                }
+            }
+        }
+    });
+
+    // ── Effect: react to resend verification action result ──────────────
+    Effect::new(move |_| {
+        if let Some(result) = resend_action.value().get() {
+            match result {
+                Ok(()) => set_resend_success.set(true),
+                Err(_) => set_error.set(Some(
+                    "Failed to resend verification email.".to_string(),
+                )),
+            }
+        }
+    });
+
     // ── Already authenticated? Redirect away from login page ──────────
     // Matches React: Login.jsx line 124 — `if (isAuthenticated) { navigate(redirect) }`
     //
     // Uses spawn_local (not Resource::new) so it doesn't consume a serialized
     // resource ID. Resource IDs must be identical between SSR and client or
     // hydration markers will be misaligned, causing a tachys panic.
+    //
+    // Cannot use Action here: window.location().set_href() is a !Send browser
+    // API (web_sys). Signal writes use try_set for deferred safety.
     #[cfg(target_arch = "wasm32")]
     {
         use crate::server_fns::sidebar::get_sidebar_user;
@@ -205,6 +332,9 @@ pub fn LoginPage(
     });
 
     // ── Google OAuth handler ────────────────────────────────────────────
+    // Cannot use Action: uses JsFuture::from(window.fetch_with_str(...)) and
+    // window.location().set_href() which are !Send browser APIs. Signal writes
+    // inside the async block use try_set for deferred-write safety.
     let on_google_click = Callback::new(move |()| {
         set_google_loading.set(true);
         set_error.set(None);
@@ -258,14 +388,17 @@ pub fn LoginPage(
                 .await;
 
                 if let Err(e) = result {
-                    set_error.set(Some(format!("Google login failed: {e}")));
-                    set_google_loading.set(false);
+                    set_error.try_set(Some(format!("Google login failed: {e}")));
+                    set_google_loading.try_set(false);
                 }
             }
         });
     });
 
     // ── Passkey handler ─────────────────────────────────────────────────
+    // Cannot use Action: calls start_authentication() which uses JsFuture and
+    // navigator.credentials.get() — !Send browser APIs. Signal writes inside
+    // the async block use try_set for deferred-write safety.
     let on_passkey_click = Callback::new(move |()| {
         set_passkey_loading.set(true);
         set_error.set(None);
@@ -276,8 +409,8 @@ pub fn LoginPage(
             let (challenge_id, request_json) = match start_result {
                 Ok(r) => (r.challenge_id, r.request_challenge),
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to start passkey login: {}", e)));
-                    set_passkey_loading.set(false);
+                    set_error.try_set(Some(format!("Failed to start passkey login: {}", e)));
+                    set_passkey_loading.try_set(false);
                     return;
                 }
             };
@@ -287,8 +420,8 @@ pub fn LoginPage(
                 match crate::utils::webauthn::start_authentication(&request_json).await {
                     Ok(json) => json,
                     Err(e) => {
-                        set_error.set(Some(format!("Passkey authentication failed: {}", e)));
-                        set_passkey_loading.set(false);
+                        set_error.try_set(Some(format!("Passkey authentication failed: {}", e)));
+                        set_passkey_loading.try_set(false);
                         return;
                     }
                 };
@@ -310,29 +443,36 @@ pub fn LoginPage(
                     }
                 }
                 Ok(LoginResult::VerificationRequired { email }) => {
-                    set_verification_needed.set(true);
-                    set_verification_email.set(email);
-                    set_passkey_loading.set(false);
+                    set_verification_needed.try_set(true);
+                    set_verification_email.try_set(email);
+                    set_passkey_loading.try_set(false);
                 }
                 Ok(LoginResult::Error { message }) => {
-                    set_error.set(Some(message));
-                    set_passkey_loading.set(false);
+                    set_error.try_set(Some(message));
+                    set_passkey_loading.try_set(false);
                 }
                 Ok(_) => {
-                    set_passkey_loading.set(false);
+                    set_passkey_loading.try_set(false);
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Server error: {}", e)));
-                    set_passkey_loading.set(false);
+                    set_error.try_set(Some(format!("Server error: {}", e)));
+                    set_passkey_loading.try_set(false);
                 }
             }
         });
     });
 
     // ── Login form submit ───────────────────────────────────────────────
+    // Dispatches login_action with dispatch-time values; the Effect above
+    // handles navigation and state transitions on the result.
     let on_login_submit = {
         move |ev: leptos::ev::SubmitEvent| {
             ev.prevent_default();
+
+            // Double-dispatch guard: Action's pending() prevents concurrent calls.
+            if login_action.pending().get_untracked() {
+                return;
+            }
 
             let current_email = email.get_untracked();
             let current_password = password.get_untracked();
@@ -343,69 +483,24 @@ pub fn LoginPage(
                 Some(current_totp)
             };
 
-            set_loading.set(true);
             set_error.set(None);
             set_verification_needed.set(false);
             set_resend_success.set(false);
 
-            leptos::task::spawn_local(async move {
-                let result = login_with_password(
-                    current_email.clone(),
-                    current_password,
-                    totp_opt,
-                )
-                .await;
-
-                match result {
-                    Ok(LoginResult::Success { .. }) => {
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            let dest = redirect_url();
-                            if dest.starts_with("/api/") {
-                                if let Some(window) = web_sys::window() {
-                                    let _ = window.location().set_href(&dest);
-                                }
-                            } else {
-                                navigate.get_value()(&dest, Default::default());
-                            }
-                        }
-                    }
-                    Ok(LoginResult::TwoFactorRequired { email: user_email }) => {
-                        set_view_state.set(LoginView::TwoFactor {
-                            email: user_email,
-                        });
-                        set_error.set(None);
-                        set_loading.set(false);
-                    }
-                    Ok(LoginResult::VerificationRequired { email: user_email }) => {
-                        set_verification_needed.set(true);
-                        set_verification_email.set(user_email);
-                        set_loading.set(false);
-                    }
-                    Ok(LoginResult::RateLimited { retry_after_secs }) => {
-                        set_error.set(Some(format!(
-                            "Too many login attempts. Please try again in {} seconds.",
-                            retry_after_secs
-                        )));
-                        set_loading.set(false);
-                    }
-                    Ok(LoginResult::Error { message }) => {
-                        set_error.set(Some(message));
-                        set_loading.set(false);
-                    }
-                    Err(e) => {
-                        set_error.set(Some(format!("Server error: {}", e)));
-                        set_loading.set(false);
-                    }
-                }
-            });
+            login_action.dispatch((current_email, current_password, totp_opt));
         }
     };
 
     // ── Signup form submit ──────────────────────────────────────────────
+    // Dispatches signup_action; the Effect above handles navigation and state.
     let on_signup_submit = {
         move |ev: leptos::ev::SubmitEvent| {
             ev.prevent_default();
+
+            // Double-dispatch guard.
+            if signup_action.pending().get_untracked() {
+                return;
+            }
 
             let current_email = signup_email.get_untracked();
             if current_email.trim().is_empty() {
@@ -430,7 +525,6 @@ pub fn LoginPage(
                 }
             }
 
-            set_signup_loading.set(true);
             set_error.set(None);
 
             let name_opt = if self_hosted_no_smtp && !current_name.trim().is_empty() {
@@ -444,59 +538,23 @@ pub fn LoginPage(
                 None
             };
 
-            leptos::task::spawn_local(async move {
-                let result = signup_start(current_email.clone(), name_opt, password_opt).await;
-
-                match result {
-                    Ok(SignupResult::AccountCreated { redirect }) => {
-                        // SPA navigation — keeps WASM in memory
-                        #[cfg(target_arch = "wasm32")]
-                        navigate.get_value()(&redirect, Default::default());
-                        let _ = &redirect; // Suppress unused warning on SSR
-                    }
-                    Ok(SignupResult::VerificationRequired { message }) => {
-                        set_success_msg.set(Some(message));
-                        set_view_state.set(LoginView::CheckEmail {
-                            email: current_email,
-                        });
-                    }
-                    Ok(SignupResult::Error { message }) => {
-                        set_error.set(Some(message));
-                    }
-                    Ok(SignupResult::RateLimited { .. }) => {
-                        set_error.set(Some(
-                            "Too many signup attempts. Please try again later.".to_string(),
-                        ));
-                    }
-                    Err(e) => {
-                        set_error.set(Some(format!("Server error: {}", e)));
-                    }
-                }
-
-                set_signup_loading.set(false);
-            });
+            signup_action.dispatch((current_email, name_opt, password_opt));
         }
     };
 
     // ── Resend verification handler ─────────────────────────────────────
+    // Dispatches resend_action; the Effect above handles result state.
     let on_resend_verification = move |_| {
-        set_resend_loading.set(true);
+        // Double-dispatch guard.
+        if resend_action.pending().get_untracked() {
+            return;
+        }
+
         set_resend_success.set(false);
         set_error.set(None);
 
         let ver_email = verification_email.get_untracked();
-        leptos::task::spawn_local(async move {
-            let result = resend_verification(ver_email).await;
-
-            match result {
-                Ok(()) => set_resend_success.set(true),
-                Err(_) => set_error.set(Some(
-                    "Failed to resend verification email.".to_string(),
-                )),
-            }
-
-            set_resend_loading.set(false);
-        });
+        resend_action.dispatch(ver_email);
     };
 
     // ── Render ───────────────────────────────────────────────────────────
@@ -507,13 +565,15 @@ pub fn LoginPage(
                     let current_view = view_state.get();
                     match current_view {
                         LoginView::Credentials => {
+                            let login_loading = Signal::derive(move || login_action.pending().get());
+                            let resend_loading = Signal::derive(move || resend_action.pending().get());
                             view! {
                                 <CredentialsView
                                     email=email
                                     set_email=set_email
                                     password=password
                                     set_password=set_password
-                                    loading=loading
+                                    loading=login_loading
                                     error=error
                                     set_error=set_error
                                     success_msg=success_msg
@@ -534,21 +594,22 @@ pub fn LoginPage(
                         }
                         LoginView::TwoFactor { ref email } => {
                             let tfa_email = email.clone();
+                            let login_loading = Signal::derive(move || login_action.pending().get());
                             view! {
                                 <TwoFactorView
                                     email=tfa_email
                                     totp_code=totp_code
                                     set_totp_code=set_totp_code
-                                    loading=loading
+                                    loading=login_loading
                                     error=error
                                     set_error=set_error
                                     on_login_submit=on_login_submit
                                     set_view_state=set_view_state
-                                    set_loading=set_loading
                                 />
                             }.into_any()
                         }
                         LoginView::Signup => {
+                            let signup_loading = Signal::derive(move || signup_action.pending().get());
                             view! {
                                 <SignupView
                                     signup_email=signup_email
@@ -595,7 +656,7 @@ fn CredentialsView(
     set_email: WriteSignal<String>,
     password: ReadSignal<String>,
     set_password: WriteSignal<String>,
-    loading: ReadSignal<bool>,
+    loading: Signal<bool>,
     error: ReadSignal<Option<String>>,
     set_error: WriteSignal<Option<String>>,
     success_msg: ReadSignal<Option<String>>,
@@ -608,7 +669,7 @@ fn CredentialsView(
     on_login_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
     set_view_state: WriteSignal<LoginView>,
     verification_needed: ReadSignal<bool>,
-    resend_loading: ReadSignal<bool>,
+    resend_loading: Signal<bool>,
     resend_success: ReadSignal<bool>,
     on_resend_verification: impl Fn(leptos::ev::MouseEvent) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
@@ -794,12 +855,11 @@ fn TwoFactorView(
     email: String,
     totp_code: ReadSignal<String>,
     set_totp_code: WriteSignal<String>,
-    loading: ReadSignal<bool>,
+    loading: Signal<bool>,
     error: ReadSignal<Option<String>>,
     set_error: WriteSignal<Option<String>>,
     on_login_submit: impl Fn(leptos::ev::SubmitEvent) + Copy + Send + Sync + 'static,
     set_view_state: WriteSignal<LoginView>,
-    set_loading: WriteSignal<bool>,
 ) -> impl IntoView {
     let verify_disabled = move || loading.get() || totp_code.get().len() != 6;
 
@@ -877,7 +937,8 @@ fn TwoFactorView(
                     set_view_state.set(LoginView::Credentials);
                     set_error.set(None);
                     set_totp_code.set(String::new());
-                    set_loading.set(false);
+                    // Action::pending() auto-resets when the action completes or
+                    // when no action is in-flight — no manual loading reset needed.
                 }
             >
                 "Back to login"
@@ -898,7 +959,7 @@ fn SignupView(
     set_signup_name: WriteSignal<String>,
     signup_password: ReadSignal<String>,
     set_signup_password: WriteSignal<String>,
-    signup_loading: ReadSignal<bool>,
+    signup_loading: Signal<bool>,
     error: ReadSignal<Option<String>>,
     set_error: WriteSignal<Option<String>>,
     is_self_hosted_no_smtp: impl Fn() -> bool + Copy + Send + Sync + 'static,

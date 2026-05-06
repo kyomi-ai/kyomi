@@ -157,13 +157,15 @@ pub fn GoogleCallbackPage() -> impl IntoView {
     let (code, state_param, error): (Option<String>, Option<String>, Option<String>) =
         (None, None, None);
 
-    // spawn_local works on both targets; on SSR the future runs but the
-    // page is never actually displayed, so the result is harmless.
+    // Cannot use Action: uses gloo_timers::future::TimeoutFuture (timer-based
+    // delay before navigation) and window.location().set_href() — both !Send
+    // browser APIs on wasm32. Signal writes inside the async block use try_set
+    // for deferred-write safety.
     leptos::task::spawn_local(async move {
         let outcome = process_google_callback(code, state_param, error).await;
-        set_status.set(outcome.status);
+        set_status.try_set(outcome.status);
         if !outcome.message.is_empty() {
-            set_message.set(outcome.message);
+            set_message.try_set(outcome.message);
         }
 
         // Redirect handling — gloo_timers and web_sys are browser-only,

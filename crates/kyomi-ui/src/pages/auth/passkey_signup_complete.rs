@@ -127,6 +127,9 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
             status_message: "Verifying your email...".to_string(),
         });
 
+        // Cannot use Action: calls start_registration() which uses JsFuture and
+        // navigator.credentials.create() — !Send browser APIs. Signal writes
+        // inside the async block use try_set for deferred-write safety.
         leptos::task::spawn_local(async move {
             // Step 1: Verify token, update name/terms, get WebAuthn challenge
             let start_result = passkey_signup_complete(
@@ -143,14 +146,14 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
             } = match start_result {
                 Ok(r) => r,
                 Err(e) => {
-                    set_error.set(Some(format!("{}", e)));
-                    set_page_state.set(PageState::Form);
+                    set_error.try_set(Some(format!("{}", e)));
+                    set_page_state.try_set(PageState::Form);
                     return;
                 }
             };
 
             // Step 2: Create passkey via WebAuthn
-            set_page_state.set(PageState::Creating {
+            set_page_state.try_set(PageState::Creating {
                 status_message: "Creating your passkey...".to_string(),
             });
 
@@ -159,22 +162,24 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
                     Ok(json) => json,
                     Err(e) => {
                         let msg = map_webauthn_error(&e);
-                        set_error.set(Some(msg));
-                        set_page_state.set(PageState::Form);
+                        set_error.try_set(Some(msg));
+                        set_page_state.try_set(PageState::Form);
                         return;
                     }
                 };
 
             // Step 3: Complete registration on server
-            set_page_state.set(PageState::Creating {
+            set_page_state.try_set(PageState::Creating {
                 status_message: "Finalizing your account...".to_string(),
             });
 
             match passkey_register_complete(challenge_id, credential_json).await {
                 Ok(LoginResult::Success { .. }) => {
-                    set_page_state.set(PageState::Success);
+                    set_page_state.try_set(PageState::Success);
 
-                    // Navigate to onboarding after 1.5 seconds (keeps WASM in memory)
+                    // Navigate to onboarding after 1.5 seconds (keeps WASM in memory).
+                    // gloo_timers::future::TimeoutFuture is !Send — must stay
+                    // in spawn_local.
                     #[cfg(target_arch = "wasm32")]
                     {
                         let nav = navigate.get_value();
@@ -187,12 +192,12 @@ pub fn PasskeySignupCompletePage() -> impl IntoView {
                         LoginResult::Error { message } => message,
                         _ => "Unexpected response from server. Please try again.".to_string(),
                     };
-                    set_error.set(Some(msg));
-                    set_page_state.set(PageState::Form);
+                    set_error.try_set(Some(msg));
+                    set_page_state.try_set(PageState::Form);
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to create account: {}", e)));
-                    set_page_state.set(PageState::Form);
+                    set_error.try_set(Some(format!("Failed to create account: {}", e)));
+                    set_page_state.try_set(PageState::Form);
                 }
             }
         });

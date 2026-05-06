@@ -103,13 +103,33 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
     #[cfg(not(target_arch = "wasm32"))]
     let initial_token: Option<String> = None;
 
-    // spawn_local compiles on both targets; the extracted function ensures
-    // the compiler sees all PageState variants constructed.
-    leptos::task::spawn_local(async move {
-        set_page_state.set(verify_passkey_recovery_token(initial_token).await);
+    // ── Token verification action ────────────────────────────────────────
+    // Converts the spawn_local on mount to an Action dispatched once via
+    // Effect. verify_passkey_recovery_token only calls a server fn — no !Send
+    // browser APIs — so Action is safe here.
+    let verify_action = Action::new(move |token: &Option<String>| {
+        let token = token.clone();
+        async move { verify_passkey_recovery_token(token).await }
+    });
+
+    // Dispatch the verify action exactly once on mount.
+    Effect::new(move |already_ran: Option<()>| {
+        if already_ran.is_none() {
+            verify_action.dispatch(initial_token.clone());
+        }
+    });
+
+    // React to the verify action result: transition page state.
+    Effect::new(move |_| {
+        if let Some(new_state) = verify_action.value().get() {
+            set_page_state.set(new_state);
+        }
     });
 
     // ── Create passkey handler ────────────────────────────────────────────
+    // Cannot use Action: calls start_registration() which uses JsFuture and
+    // navigator.credentials.create() — !Send browser APIs. Signal writes
+    // inside the async block use try_set for deferred-write safety.
     let on_create_passkey = move |_: leptos::ev::MouseEvent| {
         let current_state = page_state.get_untracked();
         let (challenge_id, creation_challenge) = match current_state {
@@ -131,12 +151,10 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
                     Ok(json) => json,
                     Err(e) => {
                         let msg = map_webauthn_error(&e);
-                        set_error.set(Some(msg));
-                        // Allow retry — restore ready state
-                        // We can't restore the full Ready state since we consumed
-                        // the values, so we need to re-verify the token.
+                        set_error.try_set(Some(msg));
+                        // Allow retry — restore ready state.
                         // In practice, the challenge is still valid in KV.
-                        set_page_state.set(PageState::Ready {
+                        set_page_state.try_set(PageState::Ready {
                             challenge_id,
                             creation_challenge,
                             email: String::new(), // email display is secondary
@@ -148,9 +166,11 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
             // Step 2: Complete registration on server (auto-login)
             match passkey_register_complete(challenge_id.clone(), credential_json).await {
                 Ok(LoginResult::Success { .. }) => {
-                    set_page_state.set(PageState::Success);
+                    set_page_state.try_set(PageState::Success);
 
-                    // Navigate to home after 2 seconds (keeps WASM in memory)
+                    // Navigate to home after 2 seconds (keeps WASM in memory).
+                    // gloo_timers::future::TimeoutFuture is !Send — must stay
+                    // in spawn_local.
                     #[cfg(target_arch = "wasm32")]
                     {
                         let nav = navigate.get_value();
@@ -163,16 +183,16 @@ pub fn PasskeyRecoveryCompletePage() -> impl IntoView {
                         LoginResult::Error { message } => message,
                         _ => "Unexpected response from server. Please try again.".to_string(),
                     };
-                    set_error.set(Some(msg));
-                    set_page_state.set(PageState::Ready {
+                    set_error.try_set(Some(msg));
+                    set_page_state.try_set(PageState::Ready {
                         challenge_id,
                         creation_challenge,
                         email: String::new(),
                     });
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to create passkey: {}", e)));
-                    set_page_state.set(PageState::Ready {
+                    set_error.try_set(Some(format!("Failed to create passkey: {}", e)));
+                    set_page_state.try_set(PageState::Ready {
                         challenge_id,
                         creation_challenge,
                         email: String::new(),
