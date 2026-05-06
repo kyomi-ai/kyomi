@@ -1,21 +1,18 @@
 # =============================================================================
-# Kyomi — Desktop Build (KYO-113)
+# Kyomi — Desktop Build
 # =============================================================================
-# Builds Tauri desktop installers for Linux (.deb, .AppImage).
+# Builds Tauri desktop installers for all platforms.
 # Triggered on version tags alongside the release workflow.
 #
-# Uses the kyomi-desktop runner scale set (Ubuntu 22.04 + Tauri deps
-# pre-installed). macOS and Windows builds require native runners and
-# are tracked separately.
+# Artifacts are attached to the same GitHub Release created by release.yml.
 # =============================================================================
 
 name: Desktop
 
 on:
-  # Disabled — kyomi-desktop runner not provisioned yet
-  # push:
-  #   tags:
-  #     - 'v*'
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -29,39 +26,98 @@ env:
   BINARYEN_VERSION: version_123
 
 jobs:
-  linux:
-    name: Linux Desktop (.deb + .AppImage)
-    runs-on: kyomi-desktop
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            trunk_arch: x86_64
+            trunk_os_suffix: unknown-linux-gnu
+            wasm_bindgen_arch: x86_64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-x64
+            binaryen_arch: x86_64-linux
+            bundles: deb appimage
+            sed_inplace: "sed -i"
+          - os: macos
+            runner: macos-latest
+            trunk_arch: aarch64
+            trunk_os_suffix: apple-darwin
+            wasm_bindgen_arch: aarch64-apple-darwin
+            tailwind_binary: tailwindcss-macos-arm64
+            binaryen_arch: arm64-macos
+            bundles: dmg
+            sed_inplace: "sed -i ''"
+          - os: windows
+            runner: windows-latest
+            bundles: msi nsis
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable + wasm target
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Add cargo bin to PATH
-        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-${{ matrix.os }}
+          save-if: ${{ github.ref_type == 'tag' }}
 
-      - name: Strip local-dev patch.crates-io block
+      # --- Linux/macOS build tools ---
+      - name: Install build dependencies (Linux)
+        if: matrix.os == 'linux'
         run: |
-          sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
-          sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev clang \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Strip local-dev mold linker config
-        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+      - name: Install build dependencies (macOS)
+        if: matrix.os == 'macos'
+        run: brew install brotli
 
-      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+      - name: Strip local-dev blocks (Linux/macOS)
+        if: matrix.os != 'windows'
+        run: |
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          ${{ matrix.sed_inplace }} '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
+
+      - name: Strip local-dev blocks (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          (Get-Content Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES', '' | Set-Content Cargo.toml
+          (Get-Content apps/mcp-chart-app-wasm/Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES', '' | Set-Content apps/mcp-chart-app-wasm/Cargo.toml
+          (Get-Content .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER', '' | Set-Content .cargo/config.toml
+          (Get-Content crates/kyomi-ui/Trunk.toml) | Where-Object { $_ -notmatch 'cargo_profile' } | Set-Content crates/kyomi-ui/Trunk.toml
+
+      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Linux/macOS)
+        if: matrix.os != 'windows'
         run: |
           set -euo pipefail
-          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin trunk
-          sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | sudo tar -xz --strip-components=1 -C /usr/local/bin \
-                "wasm-bindgen-${WASM_BINDGEN_VERSION}-x86_64-unknown-linux-musl/wasm-bindgen"
-          sudo curl -fsSL -o /usr/local/bin/tailwindcss \
-            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64"
-          sudo chmod +x /usr/local/bin/tailwindcss
-          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            SUDO=sudo
+          else
+            SUDO=""
+          fi
+          $SUDO curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
+            | $SUDO tar -xz -C /usr/local/bin trunk
+          $SUDO curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+            | $SUDO tar -xz --strip-components=1 -C /usr/local/bin \
+                "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
+          $SUDO curl -fsSL -o /usr/local/bin/tailwindcss \
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
+          $SUDO chmod +x /usr/local/bin/tailwindcss
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            sudo apt-get install -y --no-install-recommends brotli
+          fi
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
           mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
@@ -71,23 +127,50 @@ jobs:
             > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
           chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
 
+      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          cargo install trunk --version "^$env:TRUNK_VERSION" --locked
+          cargo install wasm-bindgen-cli --version "=$env:WASM_BINDGEN_VERSION" --locked
+          Invoke-WebRequest -Uri "https://github.com/tailwindlabs/tailwindcss/releases/download/$env:TAILWIND_VERSION/tailwindcss-windows-x64.exe" -OutFile "$env:CARGO_HOME\bin\tailwindcss.exe"
+          $binaryenUrl = "https://github.com/WebAssembly/binaryen/releases/download/$env:BINARYEN_VERSION/binaryen-$env:BINARYEN_VERSION-x86_64-windows.tar.gz"
+          Invoke-WebRequest -Uri $binaryenUrl -OutFile binaryen.tar.gz
+          tar -xzf binaryen.tar.gz -C $env:TEMP
+          $wasmOptDir = "$env:USERPROFILE\.cache\trunk\wasm-opt-$env:BINARYEN_VERSION\bin"
+          New-Item -ItemType Directory -Force -Path $wasmOptDir | Out-Null
+          Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$wasmOptDir\wasm-opt.exe"
+
       - name: Build Leptos WASM frontend
         working-directory: crates/kyomi-ui
         run: trunk build --release
 
-      - name: Build MCP chart app WASM
+      - name: Build MCP chart app WASM (Linux/macOS)
+        if: matrix.os != 'windows'
         working-directory: apps/mcp-chart-app-wasm
         run: bash build.sh
+
+      - name: Build MCP chart app WASM (Windows)
+        if: matrix.os == 'windows'
+        working-directory: apps/mcp-chart-app-wasm
+        shell: pwsh
+        run: |
+          trunk build --release
+          Copy-Item dist/index.html chart_app.html
 
       - name: Bundle with cargo-tauri
         run: |
           cargo install tauri-cli --version "^2" --locked
-          cargo tauri build --bundles deb appimage
+          cargo tauri build --bundles ${{ matrix.bundles }}
         working-directory: apps/desktop
 
       - name: Upload artifacts to GitHub Release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/**/*.deb
+            target/release/bundle/**/*.AppImage
+            target/release/bundle/**/*.dmg
+            target/release/bundle/**/*.msi
+            target/release/bundle/**/*.exe
