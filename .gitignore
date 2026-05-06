@@ -1,5 +1,5 @@
 # Rust
-/target/
+**/target/
 .fastembed_cache/
 
 # Python
@@ -83,8 +83,7 @@ apps/mcp-chart-app-wasm/dist/
 # FastEmbed model cache (downloaded at runtime)
 .fastembed_cache/
 
-# Rust build artifacts
-apps/backend-rust/target/
+# Worktrees and tool state
 .worktrees/
 .gstack/
 .review-approval
