@@ -1,9 +1,6 @@
 #!/bin/bash
-# Pre-commit hook: blocks lint suppressions, server_fn/REST divergence, clippy
-# warnings, and unreviewed commits.
-# Order: cheap checks first (grep-based lints), then clippy, then expensive
-# review signature check. This avoids wasting an LLM review cycle on code that
-# fails basic linting.
+# Pre-commit hook: blocks lint suppressions, server_fn/REST divergence, and
+# unreviewed commits. Clippy runs in CI on PRs (not locally).
 
 set -e
 
@@ -53,74 +50,7 @@ else
     echo "✅ server_fn lint skipped (no server_fns files staged)."
 fi
 
-# --- Check 3: Cargo clippy (staged crates only) ---
-# Only check crates that have staged .rs files, not the full workspace.
-# This prevents warnings in other crates (e.g. from parallel agents working
-# on the same branch) from blocking unrelated commits.
-echo "🔍 Running cargo clippy..."
-
-staged_rs_files=$(git diff --cached --name-only -- '*.rs' || true)
-
-if [ -z "$staged_rs_files" ]; then
-    echo "✅ Clippy skipped (no Rust files staged)."
-else
-    # Derive -p flags from staged file paths.
-    # Handles crates/, apps/, and enterprise/ directories.
-    staged_crates=$(echo "$staged_rs_files" \
-        | sed -n 's|^\(crates/[^/]*\)/.*|\1|p; s|^\(apps/[^/]*\)/.*|\1|p; s|^\(enterprise/[^/]*\)/.*|\1|p' \
-        | sort -u \
-        | while read -r crate_dir; do
-            if [ -f "$crate_dir/Cargo.toml" ]; then
-                pkg=$(grep '^name' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/')
-                [ -n "$pkg" ] && echo "-p $pkg"
-            fi
-        done)
-
-    if [ -z "$staged_crates" ]; then
-        echo "✅ Clippy skipped (no crate detected)."
-    else
-        warnings=$(cargo clippy $staged_crates -- -D warnings 2>&1 \
-            | grep "^error\[" \
-            || true)
-
-        if [ -n "$warnings" ]; then
-            echo ""
-            echo "❌ Clippy warnings found — commit blocked."
-            echo ""
-            echo "$warnings"
-            echo ""
-            echo "Fix warnings and try again."
-            exit 1
-        fi
-
-        echo "✅ Clippy clean (host)."
-    fi
-
-    # --- Check 3b: wasm32 clippy for kyomi-ui (matches CI) ---
-    has_kyomi_ui=$(echo "$staged_rs_files" | grep '^crates/kyomi-ui/' || true)
-
-    if [ -n "$has_kyomi_ui" ]; then
-        echo "🔍 Running clippy (wasm32)..."
-
-        wasm_errors=$(cargo clippy -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings 2>&1 \
-            | grep "^error\[" \
-            || true)
-
-        if [ -n "$wasm_errors" ]; then
-            echo ""
-            echo "❌ Clippy warnings found (wasm32) — commit blocked."
-            echo ""
-            echo "$wasm_errors"
-            echo ""
-            echo "Fix warnings and try again."
-            exit 1
-        fi
-
-        echo "✅ Clippy clean (wasm32)."
-    fi
-fi
-
-# --- Check 4: Verify code review signature ---
+# --- Check 3: Verify code review signature ---
 echo "🔍 Verifying code review approval..."
 
 REVIEW_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----
