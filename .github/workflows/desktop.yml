@@ -78,7 +78,9 @@ jobs:
 
       - name: Install build dependencies (macOS)
         if: matrix.os == 'macos'
-        run: brew install brotli
+        run: |
+          brew install brotli llvm
+          echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
 
       - name: Strip local-dev blocks (Linux/macOS)
         if: matrix.os != 'windows'
@@ -92,9 +94,9 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          (Get-Content Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES', '' | Set-Content Cargo.toml
-          (Get-Content apps/mcp-chart-app-wasm/Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES', '' | Set-Content apps/mcp-chart-app-wasm/Cargo.toml
-          (Get-Content .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER', '' | Set-Content .cargo/config.toml
+          (Get-Content -Raw Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES\r?\n?', '' | Set-Content -NoNewline Cargo.toml
+          (Get-Content -Raw apps/mcp-chart-app-wasm/Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES\r?\n?', '' | Set-Content -NoNewline apps/mcp-chart-app-wasm/Cargo.toml
+          (Get-Content -Raw .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER\r?\n?', '' | Set-Content -NoNewline .cargo/config.toml
           (Get-Content crates/kyomi-ui/Trunk.toml) | Where-Object { $_ -notmatch 'cargo_profile' } | Set-Content crates/kyomi-ui/Trunk.toml
 
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Linux/macOS)
