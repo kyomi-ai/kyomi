@@ -1,0 +1,109 @@
+# Docker Compose for Kyomi INTEGRATION TESTING
+# Uses unique ports to avoid conflicts with dev/prod
+# Run: docker-compose -f docker-compose.test.yml up -d
+version: '3.8'
+
+name: kyomi-test
+
+services:
+  #######################################
+  # PostgreSQL with pgvector
+  #######################################
+  postgres-test:
+    image: docker.io/pgvector/pgvector:pg15
+    container_name: kyomi-postgres-test
+    environment:
+      POSTGRES_DB: test_db
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./apps/backend/scripts/test-init/postgres:/docker-entrypoint-initdb.d:z
+      - kyomi_postgres_test:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d test_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  #######################################
+  # MySQL 8.0
+  #######################################
+  mysql-test:
+    image: docker.io/library/mysql:8.0
+    container_name: kyomi-mysql-test
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: test_db
+      MYSQL_USER: test_user
+      MYSQL_PASSWORD: test_password
+    ports:
+      - "3308:3306"
+    volumes:
+      - ./apps/backend/scripts/test-init/mysql:/docker-entrypoint-initdb.d:z
+      - kyomi_mysql_test:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  #######################################
+  # ClickHouse
+  #######################################
+  clickhouse-test:
+    image: docker.io/clickhouse/clickhouse-server:latest
+    container_name: kyomi-clickhouse-test
+    environment:
+      CLICKHOUSE_DB: test_db
+      CLICKHOUSE_USER: test_user
+      CLICKHOUSE_PASSWORD: test_password
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8124:8123"  # HTTP interface
+      - "9001:9000"  # Native interface
+    volumes:
+      - ./apps/backend/scripts/test-init/clickhouse:/docker-entrypoint-initdb.d:z
+      - kyomi_clickhouse_test:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  #######################################
+  # SQL Server 2022
+  #######################################
+  sqlserver-test:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: kyomi-sqlserver-test
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "TestPassword123!"
+      MSSQL_PID: "Express"
+    ports:
+      - "1434:1433"
+    volumes:
+      - kyomi_sqlserver_test:/var/opt/mssql
+      - ./apps/backend/scripts/test-init/sqlserver:/docker-entrypoint-initdb.d:z
+    healthcheck:
+      test: [
+        "CMD", "/opt/mssql-tools18/bin/sqlcmd",
+        "-S", "localhost", "-U", "sa", "-P", "TestPassword123!",
+        "-C", "-Q", "SELECT 1"
+      ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  kyomi_postgres_test:
+  kyomi_mysql_test:
+  kyomi_clickhouse_test:
+  kyomi_sqlserver_test:

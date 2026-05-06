@@ -1,0 +1,58 @@
+[package]
+name = "kyomi-auth"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+kyomi-core = { workspace = true }
+kyomi-embed = { workspace = true }
+kyomi-types = { workspace = true }
+kyomi-knowledge = { workspace = true }
+kyomi-datasource-server = { workspace = true }
+axum = { workspace = true }
+sqlx = { workspace = true }
+pgvector = { workspace = true }
+async-trait = { workspace = true }
+jsonwebtoken = { workspace = true }
+p256 = { workspace = true }
+bcrypt = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+redis = { workspace = true }
+reqwest = { workspace = true }
+webauthn-rs = { workspace = true }
+webauthn-rs-proto = { workspace = true }
+url = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+lettre = { workspace = true }
+regex = { workspace = true }
+serde_yaml = { workspace = true }
+similar = { workspace = true }
+cron = { workspace = true }
+async-stripe = { workspace = true }
+async-stripe-webhook = { workspace = true }
+async-stripe-billing = { workspace = true }
+async-stripe-checkout = { workspace = true }
+async-stripe-core = { workspace = true }
+async-stripe-product = { workspace = true }
+async-stripe-shared = { workspace = true }
+async-stripe-types = { workspace = true }
+hmac = { workspace = true }
+totp-rs = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

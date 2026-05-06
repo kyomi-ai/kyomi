@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+[package]
+name = "kyomi-chart-theme"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Kyomi chart palettes and editorial chart theme — shared across browser (kyomi-ui) and server (kyomi-agent) render paths."
+
+[dependencies]
+chartml-core = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,113 @@
+# =============================================================================
+# Kyomi Community Edition — Docker Compose
+# =============================================================================
+#
+# Quick start:
+#   1. Copy .env.example to .env and fill in required values
+#   2. docker compose -f docker-compose.community.yml up -d
+#
+# The kyomi service includes the embedded frontend — no separate web server
+# is needed. Access the application at http://localhost:8080 (or whatever
+# you set KYOMI_PORT to in your .env).
+#
+# Persistent data is stored in named Docker volumes. To back up your
+# database, use standard pg_dump against the postgres service.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL with pgvector extension (required)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kyomi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: kyomi
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyomi -d kyomi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # Uncomment to expose Postgres to the host for debugging:
+    # ports:
+    #   - "5432:5432"
+
+    ## Resource limits (uncomment and adjust for your environment):
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1G
+
+  # ---------------------------------------------------------------------------
+  # Kyomi application (backend + embedded frontend)
+  # ---------------------------------------------------------------------------
+  kyomi:
+    image: ghcr.io/kyomi-ai/kyomi:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${KYOMI_PORT:-8080}:8003"
+    env_file:
+      - .env
+    environment:
+      # --- Core (do not change these) ---
+      SELF_HOSTED: "true"
+      KYOMI_EDITION: community
+      PORT: "8003"
+      DATABASE_URL: postgresql://kyomi:${POSTGRES_PASSWORD}@postgres:5432/kyomi
+
+      # --- Application URLs ---
+      # These must match the external URL users will access.
+      # Change if you put Kyomi behind a reverse proxy or use a domain name.
+      FRONTEND_URL: ${KYOMI_URL:-http://localhost:8080}
+      BASE_URL: ${KYOMI_URL:-http://localhost:8080}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+
+      # --- Authentication ---
+      PASSWORD_AUTH_ENABLED: ${PASSWORD_AUTH_ENABLED:-true}
+      PASSKEYS_ENABLED: ${PASSKEYS_ENABLED:-true}
+
+      # LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL are read from
+      # .env via env_file above. Do not duplicate them here.
+
+      ## --- SMTP (uncomment to enable email notifications) ---
+      # SMTP_HOST: ${SMTP_HOST}
+      # SMTP_PORT: ${SMTP_PORT:-587}
+      # SMTP_USER: ${SMTP_USER}
+      # SMTP_PASSWORD: ${SMTP_PASSWORD}
+      # SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL}
+      # SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Kyomi}
+
+      ## --- Push Notifications (uncomment to enable web push) ---
+      ## Generate VAPID keys with: npx web-push generate-vapid-keys
+      # VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
+      # VAPID_CONTACT: ${VAPID_CONTACT}
+
+      ## --- Google OAuth (uncomment to enable Google sign-in / BigQuery) ---
+      # GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID}
+      # GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET}
+    volumes:
+      - kyomi_data:/data
+    # Note: The kyomi image is scratch-based (no shell or curl), so
+    # container-level HEALTHCHECK is not available. The application exposes
+    # GET /health and GET /api/health for external monitoring tools.
+    # The restart policy handles recovery from crashes.
+
+    ## Resource limits (uncomment and adjust for your environment):
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 2G
+
+volumes:
+  postgres_data:
+    driver: local
+  kyomi_data:
+    driver: local

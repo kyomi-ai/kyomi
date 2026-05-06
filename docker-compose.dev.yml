@@ -1,0 +1,153 @@
+# Docker Compose for Kyomi LOCAL DEVELOPMENT services
+# Uses port 5433 for PostgreSQL to avoid conflicts with production
+version: '3.8'
+
+name: kyomi-dev
+
+services:
+  #######################################
+  # PostgreSQL Database with pgvector
+  #######################################
+  postgres:
+    image: docker.io/pgvector/pgvector:pg15
+    container_name: kyomi-postgres-dev
+    environment:
+      POSTGRES_DB: kyomi
+      POSTGRES_USER: kyomi
+      POSTGRES_PASSWORD: password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5433:5432"  # Dev uses 5433 to avoid conflicts
+    volumes:
+      - kyomi_postgres_data_dev:/var/lib/postgresql/data
+      - ./scripts/dev/db-init:/docker-entrypoint-initdb.d:z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyomi -d kyomi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  #######################################
+  # Redis for multi-worker support
+  #######################################
+  redis:
+    image: docker.io/library/redis:7-alpine
+    container_name: kyomi-redis-dev
+    ports:
+      - "6380:6379"  # Dev uses 6380 to avoid conflicts with prod
+    volumes:
+      - kyomi_redis_data_dev:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  #######################################
+  # MySQL for testing datasource
+  #######################################
+  mysql:
+    image: docker.io/library/mysql:8.0
+    container_name: kyomi-mysql-dev
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: test_db
+      MYSQL_USER: testuser
+      MYSQL_PASSWORD: testpassword
+    ports:
+      - "3307:3306"  # Dev uses 3307 to avoid conflicts
+    volumes:
+      - kyomi_mysql_data_dev:/var/lib/mysql
+      - ./scripts/dev/mysql-init:/docker-entrypoint-initdb.d:z
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-prootpassword"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  #######################################
+  # SQL Server for testing datasource
+  #######################################
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: kyomi-sqlserver-dev
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "TestPass123!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - kyomi_sqlserver_data_dev:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'TestPass123!' -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  #######################################
+  # ClickHouse for Trial Sample Data
+  #######################################
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:latest
+    container_name: kyomi-clickhouse-dev
+    environment:
+      CLICKHOUSE_DB: acme_analytics
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "8126:8123"  # HTTP interface (clickhouse_connect uses this - SAMPLE_CLICKHOUSE_PORT default)
+      - "9000:9000"  # Native interface (for clickhouse-client CLI)
+    volumes:
+      - kyomi_clickhouse_data_dev:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # After starting, run: ./scripts/sample-data/seed_sample_data.sh
+
+  #######################################
+  # Kyomi API server
+  #######################################
+  kyomi-api:
+    build:
+      context: .
+      dockerfile: apps/backend-rust/Dockerfile
+    container_name: kyomi-api-dev
+    env_file:
+      - .env
+    environment:
+      PORT: "8002"
+      DATABASE_URL: "postgresql://kyomi:password@postgres:5432/kyomi"
+      REDIS_URL: "redis://redis:6379/0"
+      ENABLE_SCHEDULERS: "false"
+      WEBAUTHN_RP_ID: "dev.kyomi.ai"
+      BASE_URL: "https://dev.kyomi.ai"
+      CONNECT_URL: "wss://dev.kyomi.ai/connect/v1"
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  kyomi_postgres_data_dev:
+    external: true
+  kyomi_redis_data_dev:
+    external: true
+  kyomi_mysql_data_dev:
+    external: true
+  kyomi_sqlserver_data_dev:
+    external: true
+  kyomi_clickhouse_data_dev:
+    external: true

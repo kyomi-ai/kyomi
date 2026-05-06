@@ -1,0 +1,124 @@
+# Kyomi Shared Constants
+#
+# Single source of truth for all values shared between the Python and Rust backends.
+# Both backends load this file at startup. NEVER hardcode these values elsewhere.
+#
+# Secrets (JWT secret, encryption key, DB URLs) are NOT here — they stay in env vars.
+
+[api]
+version = "1.0.0"
+
+[analytics]
+collector_url = "https://analytics.kyomi.ai"
+
+[jwt]
+algorithm = "HS256"
+access_token_expire_minutes = 15
+refresh_token_expire_days = 7
+password_reset_expire_minutes = 15
+email_verification_expire_hours = 24
+refresh_token_prefix = "rt_"
+refresh_token_min_length = 40
+refresh_token_grace_period_seconds = 30
+
+[cookies]
+access_token_name = "access_token"
+refresh_token_name = "refresh_token"
+httponly = true
+secure = true
+samesite = "strict"
+path = "/"
+
+[cors]
+allowed_origins = [
+    "https://kyomi.ai",
+    "https://app.kyomi.ai",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+allowed_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+allow_credentials = true
+
+[security_headers]
+x_frame_options = "DENY"
+x_content_type_options = "nosniff"
+x_xss_protection = "1; mode=block"
+hsts = "max-age=31536000; includeSubDomains"
+content_security_policy = "default-src 'none'; frame-ancestors 'none'"
+
+[redis.key_prefixes]
+websocket_user = "ws:user:{user_id}"
+oauth_state = "oauth:{provider}:state:{state}"
+pending_signup = "auth:pending_signup:{token}"
+pending_terms = "auth:pending_terms:{token}"
+totp_setup = "auth:totp_setup:{user_id}"
+webauthn_challenge = "auth:webauthn_challenge:{challenge_id}"
+recovery_session = "auth:recovery_session:{session_id}"
+rate_limit_ip = "ratelimit:ip:{ip}:{endpoint}"
+rate_limit_user = "ratelimit:user:{user_id}:{endpoint}"
+
+[redis.ttls]
+oauth_state = 300
+pending_signup = 3600
+totp_setup = 600
+webauthn_challenge = 300
+recovery_session = 900
+
+[rate_limits.login]
+ip_capacity = 10
+ip_refill_interval = 60           # 1 token every 60s (1/min)
+user_capacity = 5
+user_refill_interval = 300        # 1 token every 300s (1/5min)
+window_seconds = 900
+
+[rate_limits.register]
+ip_capacity = 5
+ip_refill_interval = 3600         # 1 token every 3600s (1/hour)
+user_capacity = 1
+user_refill_interval = 86400      # 1 token every 86400s (1/day)
+window_seconds = 3600
+
+[rate_limits.refresh]
+ip_capacity = 30
+ip_refill_interval = 60           # 1 token every 60s (1/min)
+user_capacity = 20
+user_refill_interval = 30         # 1 token every 30s
+window_seconds = 300
+
+[rate_limits.api_call]
+ip_capacity = 1000
+ip_refill_interval = 1            # 1 token every 1s
+user_capacity = 500
+user_refill_interval = 1          # 1 token every 1s
+window_seconds = 60
+
+
+[workspace.roles]
+admin = "workspace_admin"
+user = "workspace_user"
+viewer = "workspace_viewer"
+
+[websocket.message_types]
+chat_stream = "chat_stream"
+chat_complete = "chat_complete"
+title_update = "title_update"
+session_created = "session_created"
+agent_thinking = "agent_thinking"
+token_usage_update = "token_usage_update"
+oauth_reconnect_required = "oauth_reconnect_required"
+oauth_cancel = "oauth_cancel"
+ownership_transfer_offered = "ownership_transfer_offered"
+workspace_invitation = "workspace_invitation"
+workspace_removed = "workspace_removed"
+dashboard_update = "dashboard_update"
+chart_update = "chart_update"
+watch_alert = "watch_alert"
+watch_state_update = "watch_state_update"
+credential_status_changed = "credential_status_changed"
+catalog_status_update = "catalog_status_update"
+ai_usage_update = "ai_usage_update"
+shared_conversation_activity = "shared_conversation_activity"
+shared_chat_message = "shared_chat_message"
+request_cancelled = "request_cancelled"
+error = "error"
+heartbeat = "heartbeat"

@@ -1,0 +1,99 @@
+# Rust
+/target/
+.fastembed_cache/
+
+# Python
+__pycache__/
+.venv/
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+*.pyc
+
+# Environment files
+.env
+
+# Private keys
+*.pem
+.env.local
+.env.deploy
+.env.*-test
+
+# IDEs
+.idea/
+.vscode/settings.json
+.cursor/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Local development data (NOT in version control)
+.data/
+data/config.toml
+apps/backend-rust/data/
+postgres_data/
+*.db
+*.db-*
+
+# Logs
+*.log
+logs/
+src/logs/
+
+# Temp files
+temp/
+
+# Test artifacts
+test-results/
+playwright-report/
+htmlcov/
+coverage/
+.coverage
+coverage.xml
+tests/auth-state.json
+
+# Logs
+*.log
+logs/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# Dependencies
+node_modules/
+
+# Database backups
+*.dump
+backups/
+
+# Debug screenshots
+*-debug.png
+.env.production
+
+# Secrets
+kyomi-secrets-backup-*.yaml
+
+# MCP chart app WASM build output (built at deploy time)
+apps/mcp-chart-app-wasm/chart_app.html
+apps/mcp-chart-app-wasm/dist/
+
+# FastEmbed model cache (downloaded at runtime)
+.fastembed_cache/
+
+# Rust build artifacts
+apps/backend-rust/target/
+.worktrees/
+.gstack/
+.review-approval
+
+# Internal docs — public-facing docs will be deliberately added later
+docs/
+
+# Internal infrastructure and production scripts
+infra/arc/
+scripts/prod/
+.agents/
+

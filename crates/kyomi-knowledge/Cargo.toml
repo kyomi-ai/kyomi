@@ -1,0 +1,25 @@
+[package]
+name = "kyomi-knowledge"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+kyomi-core = { workspace = true }
+kyomi-embed = { workspace = true }
+sqlx = { workspace = true }
+pgvector = { workspace = true }
+sqlparser = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+regex = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true

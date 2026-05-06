@@ -1,0 +1,162 @@
+# =============================================================================
+# Kyomi — CI (Pull Request Checks)
+# =============================================================================
+# Runs on every PR to main, including new pushes to existing PRs.
+# Three jobs:
+#   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
+#      runs the server_fn/REST divergence linter across the full tree
+#   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
+#   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check
+# =============================================================================
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast check: reject new lint suppressions (no Rust toolchain needed)
+  # ---------------------------------------------------------------------------
+  lint-policy:
+    name: Lint Suppression Policy
+    runs-on: kyomi-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reject new lint suppressions
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          # Check .rs files for #[allow(...)]
+          RS=$(git diff "$BASE"...HEAD -- '*.rs' | grep '^+' | grep -v '^+++' | grep '#\[allow(' || true)
+          # Check Cargo.toml for = "allow" lint downgrades
+          TOML=$(git diff "$BASE"...HEAD -- '*/Cargo.toml' 'Cargo.toml' | grep '^+' | grep -v '^+++' | grep '= "allow"' || true)
+          if [ -n "$RS" ] || [ -n "$TOML" ]; then
+            echo "::error::Lint suppressions detected. Fix the lint instead of suppressing it."
+            [ -n "$RS" ] && echo "" && echo "In .rs files:" && echo "$RS"
+            [ -n "$TOML" ] && echo "" && echo "In Cargo.toml:" && echo "$TOML"
+            exit 1
+          fi
+          echo "✅ No new lint suppressions."
+
+      # --------------------------------------------------------------------
+      # Server function / REST divergence lint (KYO-122).
+      #
+      # Blocks two patterns that caused the KYO-70, KYO-72, KYO-115
+      # outages:
+      #   A) server_fns pulling non-allowlisted DI via use_context::<T>()
+      #   B) server_fns doing heavy service-layer orchestration that
+      #      diverges from the REST handler
+      #
+      # Pure bash + awk, no Rust toolchain required (~200ms).
+      # --------------------------------------------------------------------
+      - name: Server function / REST divergence lint
+        run: ./scripts/lint/check-server-fns.sh
+
+  # ---------------------------------------------------------------------------
+  # Security: Trivy filesystem vulnerability scan
+  # ---------------------------------------------------------------------------
+  trivy-scan:
+    name: Trivy Security Scan
+    runs-on: kyomi-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_SECRET_CONFIG: trivy-secret.yaml
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+          ignore-unfixed: true
+          format: 'table'
+
+  # ---------------------------------------------------------------------------
+  # Slow check: cargo clippy (compiles + lints the entire workspace)
+  # ---------------------------------------------------------------------------
+  clippy:
+    name: Clippy
+    runs-on: kyomi-ci
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /opt/cargo-cache/sccache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+
+      - name: Install sccache
+        run: |
+          if ! command -v sccache &>/dev/null; then
+            curl -fsSL https://github.com/mozilla/sccache/releases/download/v0.14.0/sccache-v0.14.0-x86_64-unknown-linux-musl.tar.gz -o sccache.tar.gz
+            echo "8424b38cda4ecce616a1557d81328f3d7c96503a171eab79942fad618b42af44  sccache.tar.gz" | sha256sum -c
+            tar xzf sccache.tar.gz
+            mv sccache-v0.14.0-x86_64-unknown-linux-musl/sccache "$CARGO_HOME/bin/"
+            rm -rf sccache.tar.gz sccache-v0.14.0-x86_64-unknown-linux-musl
+          fi
+          sccache --start-server || true
+
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
+
+      - name: Install tailwindcss
+        run: |
+          curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.2/tailwindcss-linux-x64
+          chmod +x tailwindcss-linux-x64
+          sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
+
+      - name: Strip local-dev patches from MCP chart app
+        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+
+
+      - name: Build MCP chart app WASM (required by kyomi-server include_str!)
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
+      # Strip the local-dev [patch.crates-io] block before clippy. The block
+      # points at /home/jason/repos/* paths that only exist on Jason's laptop;
+      # CI must resolve chartml-* etc. from crates.io. Mirrors the Dockerfile
+      # sed (which strips the same markers for production builds).
+      - name: Strip local-dev patch.crates-io block
+        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+
+      # RustEmbed's derive macro in apps/server/src/leptos_frontend.rs points at
+      # crates/kyomi-ui/dist/. If the folder is missing, the macro silently
+      # produces a struct without a `get()` method, causing E0599 in clippy.
+      # An empty folder is enough — we don't need real assets to lint.
+      - name: Ensure kyomi-ui/dist/ exists for RustEmbed
+        run: mkdir -p crates/kyomi-ui/dist
+
+      - name: Strip local-dev mold linker config
+        run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+
+      - name: cargo clippy (workspace, excluding desktop)
+        run: cargo clippy --locked --workspace --exclude kyomi-desktop -- -D warnings
+
+      - name: cargo clippy (kyomi-ui, wasm32)
+        run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+    <title>Kyomi</title>
+    <link rel="icon" type="image/svg+xml" href="/kyomi_small_logo.svg"/>
+    <link rel="apple-touch-icon" href="/kyomi_icon_192.png"/>
+
+    <!-- Detect theme before CSS loads — prevents flash of wrong theme.
+         Reads kyomi-theme from localStorage (light|dark|system).
+         Migrates old theme-preference key if present. -->
+    <script>
+        (function() {
+            var d = document.documentElement;
+            try {
+                var stored = localStorage.getItem('kyomi-theme');
+                if (!stored) {
+                    stored = localStorage.getItem('theme-preference');
+                    if (stored) {
+                        localStorage.setItem('kyomi-theme', stored);
+                        localStorage.removeItem('theme-preference');
+                    }
+                }
+                var isDark;
+                if (stored === 'dark') {
+                    isDark = true;
+                } else if (stored === 'light') {
+                    isDark = false;
+                } else {
+                    isDark = matchMedia('(prefers-color-scheme:dark)').matches;
+                }
+                if (isDark) d.classList.add('dark');
+                else d.classList.remove('dark');
+            } catch(e) {}
+        })();
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link data-trunk rel="css" href="style/output.css"/>
+    <link data-trunk rel="copy-dir" href="public"/>
+
+    <!-- Stripe.js — loaded from Stripe's CDN (required for embedded checkout) -->
+    <script src="https://js.stripe.com/v3/" async></script>
+
+    <!-- Loading screen styles — inlined so they render before any external CSS -->
+    <style>
+        .kyomi-loading {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: var(--color-background, #ffffff);
+            z-index: 99999;
+            transition: opacity 0.3s ease;
+        }
+        .dark .kyomi-loading {
+            background: var(--color-background, #12100F);
+        }
+        .kyomi-loading svg {
+            width: 48px;
+            height: 48px;
+        }
+        .kyomi-loading .ray {
+            fill: #d97706;
+            animation: sparkle 2s ease-in-out infinite;
+        }
+        .kyomi-loading .ray-1 { animation-delay: 0.6s; }
+        .kyomi-loading .ray-2 { animation-delay: 1.3s; }
+        .kyomi-loading .ray-3 { animation-delay: 0.2s; }
+        .kyomi-loading .ray-4 { animation-delay: 1.7s; }
+        .kyomi-loading .ray-5 { animation-delay: 0.9s; }
+        .kyomi-loading .ray-6 { animation-delay: 0.1s; }
+        .kyomi-loading .ray-7 { animation-delay: 1.4s; }
+        .kyomi-loading .ray-8 { animation-delay: 0.4s; }
+        .kyomi-loading .center {
+            fill: #d97706;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes sparkle {
+            0%, 100% { opacity: 0.4; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.1); }
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.15); }
+        }
+
+        /* SSR hydration gap — disable buttons and show progress bar until
+           WASM removes the data-ssr attribute from <body>. Inputs stay
+           enabled (typing works without JS). Links stay clickable. */
+        body[data-ssr] button {
+            pointer-events: none;
+            opacity: 0.5;
+        }
+        /* Progress bar via pseudo-element so no DOM node is injected into
+           <body> — a real element would break Leptos hydration (DOM/vdom
+           mismatch). The ::before disappears automatically when data-ssr
+           is removed from <body>. */
+        body[data-ssr]::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 2px;
+            background: var(--color-primary, #d97706);
+            z-index: 99999;
+            animation: ssr-bar 2.5s ease-out forwards;
+        }
+        @keyframes ssr-bar {
+            0%   { width: 0; }
+            100% { width: 90%; }
+        }
+    </style>
+
+    <script type="module">
+        // Ensure auth session is fresh before WASM boots.
+        // Access tokens expire after 15 min — refresh to get a new one.
+        await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    </script>
+    <link data-trunk rel="rust" data-cargo-features="hydrate"/>
+</head>
+<body class="min-h-screen bg-background text-foreground antialiased">
+
+<!-- Loading screen — visible immediately, replaced when WASM mounts -->
+<div class="kyomi-loading" id="kyomi-loading">
+    <svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+        <g transform="translate(30, 30)">
+            <polygon class="ray ray-1" points="0,-28 4.5,-11 0,-6 -4.5,-11"/>
+            <polygon class="ray ray-2" points="20,-20 11.5,-4 7,-7 11.5,-11.5"/>
+            <polygon class="ray ray-3" points="28,0 11.5,4.5 7,0 11.5,-4.5"/>
+            <polygon class="ray ray-4" points="20,20 4.5,11.5 0,7 4.5,11.5"/>
+            <polygon class="ray ray-5" points="0,28 -4.5,11.5 0,7 4.5,11.5"/>
+            <polygon class="ray ray-6" points="-20,20 -11.5,4.5 -7,7 -11.5,11.5"/>
+            <polygon class="ray ray-7" points="-28,0 -11.5,-4.5 -7,0 -11.5,4.5"/>
+            <polygon class="ray ray-8" points="-20,-20 -4.5,-11.5 0,-7 -4.5,-11.5"/>
+            <circle class="center" cx="0" cy="0" r="6"/>
+        </g>
+    </svg>
+</div>
+
+</body>
+</html>
