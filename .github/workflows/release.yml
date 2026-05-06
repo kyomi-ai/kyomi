@@ -287,7 +287,7 @@ jobs:
       - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: kyomi-*
+          pattern: kyomi-linux-*
           path: artifacts/
 
       - name: Generate checksums
