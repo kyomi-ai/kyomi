@@ -281,12 +281,13 @@ jobs:
   # GitHub Release
   # ---------------------------------------------------------------------------
   release:
-    needs: [prepare, docker-manifest, binaries]
+    needs: [prepare, binaries]
     runs-on: ubuntu-latest
     steps:
       - name: Download binary artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: kyomi-*
           path: artifacts/
 
       - name: Generate checksums
