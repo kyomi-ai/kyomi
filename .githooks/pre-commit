@@ -1,0 +1,168 @@
+#!/bin/bash
+# Pre-commit hook: blocks lint suppressions, server_fn/REST divergence, clippy
+# warnings, and unreviewed commits.
+# Order: cheap checks first (grep-based lints), then clippy, then expensive
+# review signature check. This avoids wasting an LLM review cycle on code that
+# fails basic linting.
+
+set -e
+
+# --- Check 1: Reject new lint suppressions in staged files ---
+echo "🔍 Checking for new lint suppressions..."
+
+# Check .rs files for #[allow(...)]
+rs_violations=$(git diff --cached -- '*.rs' | grep '^+' | grep -v '^+++' | grep '#\[allow(' || true)
+
+# Check Cargo.toml for = "allow" lint downgrades
+toml_violations=$(git diff --cached -- '*/Cargo.toml' 'Cargo.toml' | grep '^+' | grep -v '^+++' | grep '= "allow"' || true)
+
+violations="${rs_violations}${toml_violations}"
+
+if [ -n "$violations" ]; then
+    echo ""
+    echo "❌ New lint suppressions detected — commit blocked."
+    echo ""
+    [ -n "$rs_violations" ] && echo "In .rs files:" && echo "$rs_violations" && echo ""
+    [ -n "$toml_violations" ] && echo "In Cargo.toml:" && echo "$toml_violations" && echo ""
+    echo "Fix the lint warning instead of suppressing it."
+    exit 1
+fi
+
+echo "✅ No new lint suppressions."
+
+# --- Check 2: server_fn / REST divergence lint (KYO-122) ---
+# Runs before clippy because it is orders of magnitude faster (< 200ms)
+# and catches the class of bugs that triggered KYO-115. Only fires when
+# staged changes touch `crates/kyomi-ui/src/server_fns/*.rs`.
+echo "🔍 Checking server_fn / REST divergence..."
+
+staged_server_fns=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep '^crates/kyomi-ui/src/server_fns/.*\.rs$' || true)
+
+if [ -n "$staged_server_fns" ]; then
+    # shellcheck disable=SC2086  # word-splitting is intentional here
+    if ! ./scripts/lint/check-server-fns.sh $staged_server_fns; then
+        echo ""
+        echo "❌ server_fn lint failed — commit blocked."
+        echo "   Fix the reported violations or add a justified escape-hatch"
+        echo "   comment (see scripts/lint/check-server-fns.sh header)."
+        exit 1
+    fi
+    echo "✅ server_fn lint clean."
+else
+    echo "✅ server_fn lint skipped (no server_fns files staged)."
+fi
+
+# --- Check 3: Cargo clippy (staged crates only) ---
+# Only check crates that have staged .rs files, not the full workspace.
+# This prevents warnings in other crates (e.g. from parallel agents working
+# on the same branch) from blocking unrelated commits.
+echo "🔍 Running cargo clippy..."
+
+staged_rs_files=$(git diff --cached --name-only -- '*.rs' || true)
+
+if [ -z "$staged_rs_files" ]; then
+    echo "✅ Clippy skipped (no Rust files staged)."
+else
+    # Derive -p flags from staged file paths.
+    # Handles crates/, apps/, and enterprise/ directories.
+    staged_crates=$(echo "$staged_rs_files" \
+        | sed -n 's|^\(crates/[^/]*\)/.*|\1|p; s|^\(apps/[^/]*\)/.*|\1|p; s|^\(enterprise/[^/]*\)/.*|\1|p' \
+        | sort -u \
+        | while read -r crate_dir; do
+            if [ -f "$crate_dir/Cargo.toml" ]; then
+                pkg=$(grep '^name' "$crate_dir/Cargo.toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+                [ -n "$pkg" ] && echo "-p $pkg"
+            fi
+        done)
+
+    if [ -z "$staged_crates" ]; then
+        echo "✅ Clippy skipped (no crate detected)."
+    else
+        warnings=$(cargo clippy $staged_crates -- -D warnings 2>&1 \
+            | grep "^error\[" \
+            || true)
+
+        if [ -n "$warnings" ]; then
+            echo ""
+            echo "❌ Clippy warnings found — commit blocked."
+            echo ""
+            echo "$warnings"
+            echo ""
+            echo "Fix warnings and try again."
+            exit 1
+        fi
+
+        echo "✅ Clippy clean (host)."
+    fi
+
+    # --- Check 3b: wasm32 clippy for kyomi-ui (matches CI) ---
+    has_kyomi_ui=$(echo "$staged_rs_files" | grep '^crates/kyomi-ui/' || true)
+
+    if [ -n "$has_kyomi_ui" ]; then
+        echo "🔍 Running clippy (wasm32)..."
+
+        wasm_errors=$(cargo clippy -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings 2>&1 \
+            | grep "^error\[" \
+            || true)
+
+        if [ -n "$wasm_errors" ]; then
+            echo ""
+            echo "❌ Clippy warnings found (wasm32) — commit blocked."
+            echo ""
+            echo "$wasm_errors"
+            echo ""
+            echo "Fix warnings and try again."
+            exit 1
+        fi
+
+        echo "✅ Clippy clean (wasm32)."
+    fi
+fi
+
+# --- Check 4: Verify code review signature ---
+echo "🔍 Verifying code review approval..."
+
+REVIEW_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEApRtsZODQxaUNP383HB/iqLHSlrf92Fe3UB43Bc2TaG0=
+-----END PUBLIC KEY-----"
+
+DIFF_HASH=$(git diff --cached | sha256sum | awk '{print $1}')
+
+if [ ! -f .review-approval ]; then
+    echo ""
+    echo "❌ No code review approval found — commit blocked."
+    echo "   Run the code-review-architect agent to review and sign off on changes."
+    exit 1
+fi
+
+APPROVED_HASH=$(sed -n '1p' .review-approval)
+SIGNATURE=$(sed -n '2p' .review-approval)
+
+if [ "$DIFF_HASH" != "$APPROVED_HASH" ]; then
+    echo ""
+    echo "❌ Code review approval is stale — staged diff has changed since review."
+    echo "   Expected: $APPROVED_HASH"
+    echo "   Got:      $DIFF_HASH"
+    echo "   Re-run the code-review-architect agent to review current changes."
+    exit 1
+fi
+
+PUB_FILE=$(mktemp)
+SIG_FILE=$(mktemp)
+HASH_FILE=$(mktemp)
+trap 'rm -f "$PUB_FILE" "$SIG_FILE" "$HASH_FILE"' EXIT
+
+echo "$REVIEW_PUBLIC_KEY" > "$PUB_FILE"
+echo -n "$DIFF_HASH" > "$HASH_FILE"
+echo "$SIGNATURE" | base64 -d > "$SIG_FILE"
+
+if ! openssl pkeyutl -verify -pubin -inkey "$PUB_FILE" -in "$HASH_FILE" -sigfile "$SIG_FILE" >/dev/null 2>&1; then
+    echo ""
+    echo "❌ Code review signature is INVALID — commit blocked."
+    echo "   The approval file may have been tampered with."
+    echo "   Only the code-review-architect agent can produce valid signatures."
+    exit 1
+fi
+
+echo "✅ Code review signature verified."

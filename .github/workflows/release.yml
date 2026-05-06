@@ -1,0 +1,379 @@
+# =============================================================================
+# Kyomi — Release Workflow
+# =============================================================================
+# Triggered by version tags (v*). Builds a linux/amd64 Docker image on the
+# self-hosted kyomi-build runner, tags it via docker manifest, produces a
+# standalone kyomi binary for linux/amd64, then creates a GitHub Release
+# with all artifacts attached.
+#
+# arm64 and macOS targets are disabled until self-hosted runners are
+# provisioned for those platforms.
+#
+# Usage:
+#   git tag v2026.04.19.2
+#   git push --tags
+#
+# Each Docker matrix leg pre-builds the Leptos WASM frontend and MCP chart
+# app on its native runner, then builds and pushes a per-arch image tagged
+# `kyomi:VERSION-ARCH`. The docker-manifest job combines them into a
+# multi-arch manifest at `kyomi:VERSION` and `kyomi:latest`.
+#
+# Each binaries matrix leg builds the same WASM artifacts plus the server
+# binary, packages it as a .tar.gz, and uploads it as a workflow artifact.
+# The release job downloads all tarballs, generates SHA256SUMS.txt, and
+# attaches everything to the GitHub Release.
+#
+# Desktop installers (.dmg/.msi/.AppImage) for apps/desktop are tracked in
+# KYO-113.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GHCR_REGISTRY: ghcr.io/kyomi-ai
+  TRUNK_VERSION: 0.21.14
+  WASM_BINDGEN_VERSION: 0.2.114
+  TAILWIND_VERSION: v4.2.2
+  BINARYEN_VERSION: version_123
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Extract version from tag
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: kyomi-ci
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # Docker: per-arch images built natively (no QEMU)
+  # ---------------------------------------------------------------------------
+  # Each matrix leg pre-builds MCP chart app + Leptos WASM dist on its native
+  # runner, then builds and pushes a per-arch image tagged kyomi:VERSION-ARCH.
+  docker:
+    needs: [prepare]
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: kyomi-build
+            trunk_target: x86_64-unknown-linux-gnu
+            trunk_arch: x86_64
+            wasm_bindgen_arch: x86_64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-x64
+            binaryen_arch: x86_64-linux
+          # arm64 disabled — no self-hosted arm64 runner available (KYO-113)
+          # - arch: arm64
+          #   runner: ubuntu-24.04-arm
+          #   ...
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+      # Same local-dev strips as ci.yml / Dockerfile.
+      - name: Strip local-dev blocks
+        run: |
+          sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+          sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+          sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          sed -i '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
+
+      - name: Install brotli (Trunk post_build hook dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
+
+      # Trunk resolves wasm-opt from $HOME/.cache/trunk/... — on the runner
+      # that's /home/runner/.cache. The wasm-opt wrapper injects
+      # --enable-bulk-memory-opt and --enable-nontrapping-float-to-int so
+      # trunk's invocation doesn't need them spelled out.
+      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+        run: |
+          set -euo pipefail
+          sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-unknown-linux-gnu.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin trunk
+          sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin \
+                "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
+          sudo curl -fsSL -o /usr/local/bin/tailwindcss \
+            "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
+          sudo chmod +x /usr/local/bin/tailwindcss
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
+            | tar -xz -C /tmp
+          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
+          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
+          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+
+      - name: Build Leptos WASM frontend
+        working-directory: crates/kyomi-ui
+        run: trunk build --release
+
+      - name: Build MCP chart app WASM
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
+      - name: Build release binary
+        run: cargo build --release -p kyomi-server
+
+      - name: Collect runtime libs
+        run: |
+          set -euo pipefail
+          LIBS_DIR=target/release/runtime-libs/libs
+          ETC_DIR=target/release/runtime-libs/etc
+          TMP_DIR=target/release/runtime-libs/tmp
+          mkdir -p "$LIBS_DIR" "$ETC_DIR" "$TMP_DIR"
+
+          # Shared libraries the binary links against
+          ldd target/release/kyomi | awk '/=>/ {print $3}' | while read lib; do
+            cp "$lib" "$LIBS_DIR/"
+          done
+
+          # Dynamic linker
+          cp /lib64/ld-linux-x86-64.so.2 "$LIBS_DIR/"
+
+          # NSS modules — glibc loads these via dlopen() for DNS resolution
+          cp /lib/x86_64-linux-gnu/libnss_dns.so.2 "$LIBS_DIR/"
+          cp /lib/x86_64-linux-gnu/libnss_files.so.2 "$LIBS_DIR/"
+          cp /lib/x86_64-linux-gnu/libresolv.so.2 "$LIBS_DIR/"
+
+          # CA certificates + DNS config
+          cp /etc/ssl/certs/ca-certificates.crt "$ETC_DIR/"
+          printf 'hosts: files dns\n' > "$ETC_DIR/nsswitch.conf"
+
+          # Writable /tmp placeholder
+          touch "$TMP_DIR/.keep"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push per-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.GHCR_REGISTRY }}/kyomi:${{ needs.prepare.outputs.version }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+
+  # ---------------------------------------------------------------------------
+  # Docker manifest: combine per-arch images into a multi-arch manifest
+  # ---------------------------------------------------------------------------
+  docker-manifest:
+    needs: [prepare, docker]
+    runs-on: kyomi-ci
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Create and push multi-arch manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION} \
+            --tag ${{ env.GHCR_REGISTRY }}/kyomi:latest \
+            ${{ env.GHCR_REGISTRY }}/kyomi:${VERSION}-amd64
+
+  # ---------------------------------------------------------------------------
+  # Binaries: per-platform standalone kyomi binary tarballs
+  # ---------------------------------------------------------------------------
+  # Each matrix leg builds the full WASM frontend + MCP chart app + server
+  # binary on its native runner, then packages the binary as a .tar.gz and
+  # uploads it as a workflow artifact for the release job to collect.
+  binaries:
+    needs: [prepare]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: kyomi-build
+            rust_target: x86_64-unknown-linux-gnu
+            trunk_arch: x86_64
+            trunk_os_suffix: unknown-linux-gnu
+            wasm_bindgen_arch: x86_64-unknown-linux-musl
+            tailwind_binary: tailwindcss-linux-x64
+            binaryen_arch: x86_64-linux
+            sed_inplace: "sed -i"
+          # arm64 + macOS disabled — no self-hosted runners available
+          # Re-enable when arm64 and macOS runners are provisioned
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Add cargo bin to PATH
+        run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
+
+      - name: Install build dependencies (Linux only)
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang
+
+      # Same local-dev strips as ci.yml / Dockerfile.
+      - name: Strip local-dev blocks
+        run: |
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
+          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
+          ${{ matrix.sed_inplace }} '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
+
+      - name: Install brotli (Trunk post_build hook dependency)
+        run: |
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends brotli
+          else
+            brew install brotli
+          fi
+
+      # Trunk resolves wasm-opt from $HOME/.cache/trunk/... The wasm-opt
+      # wrapper injects --enable-bulk-memory-opt and
+      # --enable-nontrapping-float-to-int so trunk's invocation doesn't need
+      # them spelled out.
+      - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            sudo curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
+              | sudo tar -xz -C /usr/local/bin trunk
+            sudo curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+              | sudo tar -xz --strip-components=1 -C /usr/local/bin \
+                  "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
+            sudo curl -fsSL -o /usr/local/bin/tailwindcss \
+              "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
+            sudo chmod +x /usr/local/bin/tailwindcss
+          else
+            curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
+              | tar -xz -C /usr/local/bin trunk
+            curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+              | tar -xz --strip-components=1 -C /usr/local/bin \
+                  "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
+            curl -fsSL -o /usr/local/bin/tailwindcss \
+              "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/${{ matrix.tailwind_binary }}"
+            chmod +x /usr/local/bin/tailwindcss
+          fi
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
+            | tar -xz -C /tmp
+          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
+          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
+          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+
+      - name: Build Leptos WASM frontend
+        working-directory: crates/kyomi-ui
+        run: trunk build --release
+
+      - name: Build MCP chart app WASM
+        working-directory: apps/mcp-chart-app-wasm
+        run: bash build.sh
+
+      - name: Build release binary
+        run: cargo build --release -p kyomi-server
+
+      - name: Create tarball
+        run: tar -czf kyomi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz -C target/release kyomi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kyomi-${{ matrix.os }}-${{ matrix.arch }}
+          path: kyomi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [prepare, docker-manifest, binaries]
+    runs-on: kyomi-ci
+    steps:
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: |
+          for dir in kyomi-*/; do
+            mv "$dir"/*.tar.gz .
+          done
+          sha256sum kyomi-*.tar.gz > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/kyomi-*.tar.gz
+            artifacts/SHA256SUMS.txt
+          body: |
+            ## Installation
+
+            ### Docker (recommended)
+            ```bash
+            docker pull ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
+            ```
+
+            Then run:
+            ```bash
+            docker run -v kyomi-data:/data -p 3000:3000 \
+              -e ANTHROPIC_API_KEY=sk-ant-... \
+              ghcr.io/kyomi-ai/kyomi:${{ needs.prepare.outputs.version }}
+            ```
+
+            The image supports linux/amd64 and is fully
+            self-contained — frontend, ML model, and server in a single binary.
+            Requires an LLM API key (Anthropic, OpenAI, or Gemini).
+
+            ### Standalone binary
+            Download the tarball for your platform from the assets below,
+            then extract and run:
+            ```bash
+            tar -xzf kyomi-<os>-<arch>.tar.gz
+            ./kyomi
+            ```
+
+            See [Self-Hosting Guide](https://kyomi.ai/self-hosting) for full
+            setup instructions.

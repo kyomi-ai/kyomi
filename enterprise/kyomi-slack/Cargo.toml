@@ -1,0 +1,35 @@
+[package]
+name = "kyomi-slack"
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Alytic-Enterprise"
+
+[dependencies]
+kyomi-core = { workspace = true }
+kyomi-auth = { workspace = true }
+kyomi-agent = { workspace = true }
+kyomi-embed = { workspace = true }
+kyomi-datasource-server = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+regex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+bytes = { workspace = true }
+sqlx = { workspace = true }
+tokio-util = { workspace = true }
+serde_yaml = "0.9"
+
+[lints]
+workspace = true

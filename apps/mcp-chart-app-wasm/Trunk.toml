@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+filehash = false
+dist = "dist"
+
+[tools]
+wasm_bindgen = "0.2.114"
+
+[[hooks]]
+stage = "pre_build"
+command = "tailwindcss"
+command_arguments = [
+    "--input", "style/main.css",
+    "--output", "style/output.css",
+]

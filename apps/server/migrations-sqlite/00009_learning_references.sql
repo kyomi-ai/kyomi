@@ -1,0 +1,31 @@
+-- Materialized learning-to-entity references
+-- Replaces FalkorDB edges: MENTIONS_TABLE, MENTIONS_COLUMN, DEFINED_BY, APPLIES_TO
+CREATE TABLE IF NOT EXISTS learning_references (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    learning_id TEXT NOT NULL REFERENCES agent_learnings(learning_id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL,
+    ref_type TEXT NOT NULL,
+    ref_name TEXT NOT NULL,
+    UNIQUE(learning_id, ref_type, ref_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_refs_workspace ON learning_references(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_learning_refs_lookup ON learning_references(ref_type, ref_name, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_learning_refs_learning ON learning_references(learning_id);
+
+-- Episodic conversation tracking
+-- Replaces FalkorDB Conversation nodes and DISCUSSED edges
+CREATE TABLE IF NOT EXISTS conversation_discussed (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(session_id, entity_type, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_conv_discussed_session ON conversation_discussed(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_discussed_workspace ON conversation_discussed(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_conv_discussed_entity ON conversation_discussed(entity_type, entity_id, workspace_id);

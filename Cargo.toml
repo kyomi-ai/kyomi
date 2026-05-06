@@ -1,0 +1,275 @@
+[workspace]
+members = [
+    "crates/kyomi-core",
+    "crates/kyomi-auth",
+    "crates/kyomi-chart-theme",
+    "crates/kyomi-embed",
+    "crates/kyomi-datasource",
+    "crates/kyomi-agent",
+    "crates/kyomi-knowledge",
+    "apps/server",
+    "apps/desktop",
+    "enterprise/kyomi-slack",
+    "crates/kyomi-ui",
+    "crates/kyomi-ui-components",
+    "crates/kyomi-test-harness",
+    "crates/kyomi-types",
+]
+resolver = "3"
+
+[workspace.package]
+license = "AGPL-3.0-or-later"
+
+# Shared dependency versions — all crates use these
+[workspace.dependencies]
+# Web framework
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "limit", "normalize-path", "set-header", "trace"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring", "postgres", "sqlite", "mysql", "uuid", "chrono", "json", "macros", "rust_decimal", "migrate"] }
+pgvector = { version = "0.4", features = ["sqlx", "serde"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Auth
+jsonwebtoken = { version = "10", features = ["use_pem", "rust_crypto"] }
+bcrypt = "0.17"
+argon2 = "0.5"
+
+# Encryption
+aes-gcm = "0.10"
+base64 = "0.22"
+
+# Redis
+redis = { version = "0.29", features = ["tokio-rustls-comp", "connection-manager"] }
+
+# Embeddings (pure Rust via Candle)
+candle-core = "0.9"
+candle-nn = "0.9"
+candle-transformers = "0.9"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+safetensors = "0.7"
+memmap2 = "0.9"
+
+# HTTP client (for external APIs: Anthropic, Stripe, Slack, etc.)
+# Uses native-roots so reqwest trusts both public CAs and our internal CA
+# (distributed via trust-manager's SSL_CERT_FILE bundle).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+
+# WebAuthn (passkeys)
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+webauthn-rs-proto = "0.5"
+
+# Web Push (VAPID/ECE content encoding)
+web-push-native = "0.4"
+p256 = { version = "0.13", features = ["ecdh", "pkcs8", "pem"] }
+http = "1"
+
+# URL parsing
+url = "2"
+
+# Hashing
+sha2 = "0.10"
+
+# YAML parsing (ChartML validation)
+serde_yaml = "0.9"
+
+# Regex
+regex = "1"
+
+# Diff
+similar = "2"
+
+# URL-encoded form parsing (Slack command payloads)
+serde_urlencoded = "0.7"
+
+# IANA timezone parsing (Slack user timezones)
+chrono-tz = "0.10"
+
+# Random
+rand = "0.9"
+
+# Statistics (t-distribution for forecast prediction intervals)
+statrs = "0.18"
+
+# Apache Arrow IPC (query result → Arrow conversion for chartml-rs)
+arrow-schema = "57"
+arrow-array = "57"
+arrow-ipc = "57"
+arrow-select = "57"
+
+# SSH key generation (Ed25519)
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# Byte buffers
+bytes = "1"
+
+# Utilities
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Internal crates
+kyomi-core = { path = "crates/kyomi-core" }
+kyomi-auth = { path = "crates/kyomi-auth" }
+kyomi-embed = { path = "crates/kyomi-embed" }
+kyomi-datasource-server = { path = "crates/kyomi-datasource" }
+kyomi-agent = { path = "crates/kyomi-agent" }
+kyomi-chart-theme = { path = "crates/kyomi-chart-theme" }
+kyomi-knowledge = { path = "crates/kyomi-knowledge" }
+kyomi-ui = { path = "crates/kyomi-ui" }
+kyomi-server = { path = "apps/server" }
+kyomi-test-harness = { path = "crates/kyomi-test-harness" }
+kyomi-types = { path = "crates/kyomi-types" }
+kyomi-connect-protocol = "1.2"
+kyomi-datasource-drivers = { version = "1.2", package = "kyomi-datasource" }
+
+# ChartML rendering — `"5"` pulls from crates.io for CI/CD + Docker builds
+# (after the chartml 5.0 release reaches the registry). Local dev redirects
+# these to `/home/jason/repos/chartml` via the `[patch.crates-io]` block at
+# the bottom of this file (between BEGIN_LOCAL_DEV_PATCHES /
+# END_LOCAL_DEV_PATCHES). The Dockerfile strips that block before
+# `cargo build`, so production always resolves against the registry.
+chartml-core = { version = "5", features = ["wasm-indexeddb"] }
+chartml-render = "5"
+chartml-chart-cartesian = "5"
+chartml-chart-pie = "5"
+chartml-chart-scatter = "5"
+chartml-chart-metric = "5"
+chartml-chart-table = "5"
+chartml-datafusion = "5"
+chartml-leptos = "5"
+
+# Code editor (kode) — same pattern as chartml above.
+kode-leptos = "0.2"
+
+# Syntax grammars for the kode editor. kode-leptos 0.2+ no longer bundles
+# grammars — consumers opt in to what they need via arborium's feature set.
+# We use sql (SQL editor + chart builder), yaml (ChartML editor), and
+# markdown (dashboard docs). Adding more here costs ~1-12 MB of WASM per
+# grammar; SQL alone is ~11 MB.
+arborium = { version = "2.16", default-features = false, features = [
+    "lang-sql", "lang-yaml", "lang-markdown",
+] }
+
+# SQL parser (extract table/column references from agent-generated SQL)
+sqlparser = { version = "0.55", features = ["visitor"] }
+
+# Tokio utilities
+tokio-util = { version = "0.7", features = ["compat"] }
+
+# Async trait
+async-trait = "0.1"
+
+# Concurrent data structures
+dashmap = "6"
+
+# Stream utilities (for Redis pub/sub)
+futures-util = "0.3"
+
+# HMAC for trial token signing + Slack signature verification
+hmac = "0.12"
+
+# Hex encoding (Slack signature output)
+hex = "0.4"
+
+# Constant-time comparison (Slack signature verification)
+subtle = "2"
+
+# Embedded frontend assets
+rust-embed = "8"
+
+# Cron expression parsing
+cron = "0.15"
+
+# SMTP email sending (default-features off to exclude native-tls)
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "hostname", "builder", "pool"] }
+
+# Stripe billing API
+async-stripe = { version = "1.0.0-rc.1", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
+async-stripe-webhook = { version = "1.0.0-rc.1", features = [
+    "async-stripe-billing",
+    "async-stripe-checkout",
+    "async-stripe-core",
+] }
+async-stripe-billing = { version = "1.0.0-rc.1", features = [
+    "subscription",
+    "subscription_item",
+    "invoice",
+    "billing_portal_session",
+] }
+async-stripe-checkout = { version = "1.0.0-rc.1", features = ["checkout_session"] }
+async-stripe-core = { version = "1.0.0-rc.1", features = ["customer"] }
+async-stripe-product = { version = "1.0.0-rc.1", features = ["product"] }
+async-stripe-shared = { version = "1.0.0-rc.1" }
+async-stripe-types = { version = "1.0.0-rc.1" }
+
+# TOTP / 2FA
+totp-rs = { version = "5", features = ["otpauth", "gen_secret", "qr"] }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
+# WASM debug builds: disable debug info to keep link input manageable.
+# Without this, 17GB of debug symbols crashes rust-lld.
+[profile.dev]
+debug = false
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Fast incremental builds for local development: release optimizations without LTO.
+[profile.dev-server]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug-assertions = true
+
+# Fast WASM builds for dev iteration. Saves ~5 min per incremental build vs release
+# at a cost of ~1.4 MB extra brotli transfer. Use for dev.kyomi.ai; use release for prod.
+[profile.wasm-dev]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = "s"
+
+# Uncomment to use a local checkout of kyomi-connect for development:
+# kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
+# kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
+
+# Local checkout of chartml, kode, and kyomi-connect for development.
+# kyomi-connect 1.2.0 is published; patches here are for local iteration only.
+# The Dockerfile strips everything between BEGIN_LOCAL_DEV_PATCHES and
+# END_LOCAL_DEV_PATCHES before `cargo build`, so prod always uses crates.io.
+# BEGIN_LOCAL_DEV_PATCHES
+[patch.crates-io]
+kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
+kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
+chartml-core = { path = "/home/jason/repos/chartml/crates/chartml-core" }
+chartml-render = { path = "/home/jason/repos/chartml/crates/chartml-render" }
+chartml-chart-cartesian = { path = "/home/jason/repos/chartml/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "/home/jason/repos/chartml/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "/home/jason/repos/chartml/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "/home/jason/repos/chartml/crates/chartml-chart-metric" }
+chartml-chart-table = { path = "/home/jason/repos/chartml/crates/chartml-chart-table" }
+chartml-datafusion = { path = "/home/jason/repos/chartml/crates/chartml-datafusion" }
+chartml-leptos = { path = "/home/jason/repos/chartml/crates/chartml-leptos" }
+kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
+# END_LOCAL_DEV_PATCHES

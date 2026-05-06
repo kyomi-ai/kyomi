@@ -1,0 +1,67 @@
+{
+  "name": "Kyomi - Data Intelligence Platform",
+  "short_name": "Kyomi",
+  "description": "The Data Intelligence Platform. Connect any database, ask questions naturally, build dashboards, and set up AI-powered monitoring. Kyomi learns your business and watches your data while you sleep.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#d97706",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/kyomi_icon_192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/kyomi_icon_512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "business", "analytics"],
+  "screenshots": [],
+  "shortcuts": [
+    {
+      "name": "New Chat",
+      "short_name": "Chat",
+      "description": "Start a new AI chat session",
+      "url": "/chat",
+      "icons": [
+        {
+          "src": "/kyomi_icon_192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "SQL Editor",
+      "short_name": "SQL",
+      "description": "Open SQL editor",
+      "url": "/sql",
+      "icons": [
+        {
+          "src": "/kyomi_icon_192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Dashboards",
+      "short_name": "Dashboards",
+      "description": "View dashboards",
+      "url": "/dashboards",
+      "icons": [
+        {
+          "src": "/kyomi_icon_192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

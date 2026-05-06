@@ -1,0 +1,12 @@
+-- Add `provider_cost_usd` observability column to api_usage_log.
+--
+-- Semantics:
+--   * `cost_estimate`     — the amount billed against Kyomi bundle credits
+--                           (always populated for Kyomi-mode rows, 0.0 for BYOK rows).
+--   * `provider_cost_usd` — the real upstream provider cost in USD.
+--                           NULL for Kyomi-mode rows (cost_estimate IS the cost).
+--                           Populated for BYOK rows so we retain observability
+--                           into upstream provider spend without affecting billing.
+--
+-- Matches the `REAL` type used by `cost_estimate` in 00001_baseline.sql.
+ALTER TABLE api_usage_log ADD COLUMN provider_cost_usd REAL;

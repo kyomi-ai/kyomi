@@ -1,0 +1,11 @@
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/wasm32-unknown-unknown/release/deps/arrow_row-b6388c3341e92070.d: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/fixed.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/list.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/run.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/variable.rs
+
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/wasm32-unknown-unknown/release/deps/libarrow_row-b6388c3341e92070.rlib: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/fixed.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/list.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/run.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/variable.rs
+
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/wasm32-unknown-unknown/release/deps/libarrow_row-b6388c3341e92070.rmeta: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/fixed.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/list.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/run.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/variable.rs
+
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/lib.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/fixed.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/list.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/run.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-row-57.3.0/src/variable.rs:

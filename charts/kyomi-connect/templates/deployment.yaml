@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kyomi-connect.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "kyomi-connect.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "kyomi-connect.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "kyomi-connect.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "kyomi-connect.serviceAccountName" . }}
+      containers:
+        - name: kyomi-connect
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["run"]
+          env:
+            - name: KYOMI_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kyomi-connect.tokenSecretName" . }}
+                  key: {{ .Values.existingSecret.key | default "token" }}
+            - name: DB_HOST
+              value: {{ .Values.target.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.target.port | quote }}
+            {{- if .Values.target.database }}
+            - name: DB_NAME
+              value: {{ .Values.target.database | quote }}
+            {{- end }}
+            {{- if .Values.target.user }}
+            - name: DB_USER
+              value: {{ .Values.target.user | quote }}
+            {{- end }}
+            {{- if .Values.target.passwordSecretName }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.target.passwordSecretName }}
+                  key: {{ .Values.target.passwordSecretKey | default "password" }}
+            {{- end }}
+            - name: HEALTH_PORT
+              value: {{ .Values.healthPort | quote }}
+            - name: RUST_LOG
+              value: "info"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.healthPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.healthPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

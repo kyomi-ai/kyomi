@@ -1,0 +1,40 @@
+# Kyomi Connect token (required unless existingSecret is set)
+token: ""
+
+# Use an existing secret for the token
+existingSecret:
+  name: ""
+  key: "token"
+
+# Database target configuration
+target:
+  host: ""
+  port: 5432
+  database: ""
+  user: ""
+  # Password from a Kubernetes secret
+  passwordSecretName: ""
+  passwordSecretKey: "password"
+
+image:
+  repository: ghcr.io/kyomi-ai/kyomi-connect
+  tag: latest
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+healthPort: 9090
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []

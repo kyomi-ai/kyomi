@@ -1,0 +1,58 @@
+# This crate is NOT part of the kyomi workspace — it targets wasm32-unknown-unknown
+# and is built independently by Trunk.
+[workspace]
+
+[package]
+name = "mcp-chart-app-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+# ChartML — version "5" pulls from crates.io for CI/CD builds. Local dev
+# redirects via [patch.crates-io] below (stripped by CI sed, same as root).
+chartml-core = "5"
+chartml-chart-cartesian = "5"
+chartml-chart-pie = "5"
+chartml-chart-scatter = "5"
+chartml-chart-metric = "5"
+chartml-leptos = "5"
+
+kyomi-ui-components = { path = "../../crates/kyomi-ui-components" }
+
+leptos = { version = "0.8", features = ["csr"] }
+web-sys = { version = "0.3", features = [
+    "HtmlElement", "HtmlInputElement", "HtmlBodyElement", "Document", "Window", "Element",
+    "CustomEvent", "CustomEventInit", "Event", "EventTarget",
+    "CssStyleDeclaration", "DomTokenList", "DomRectReadOnly",
+    "Navigator", "Clipboard",
+    "MessageEvent",
+    "ResizeObserver", "ResizeObserverEntry",
+] }
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+console_error_panic_hook = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true
+panic = "abort"
+
+# Local checkout of chartml for development.
+# CI strips everything between BEGIN_LOCAL_DEV_PATCHES and END_LOCAL_DEV_PATCHES.
+# BEGIN_LOCAL_DEV_PATCHES
+[patch.crates-io]
+chartml-core = { path = "../../../chartml/crates/chartml-core" }
+chartml-chart-cartesian = { path = "../../../chartml/crates/chartml-chart-cartesian" }
+chartml-chart-pie = { path = "../../../chartml/crates/chartml-chart-pie" }
+chartml-chart-scatter = { path = "../../../chartml/crates/chartml-chart-scatter" }
+chartml-chart-metric = { path = "../../../chartml/crates/chartml-chart-metric" }
+chartml-leptos = { path = "../../../chartml/crates/chartml-leptos" }
+# END_LOCAL_DEV_PATCHES

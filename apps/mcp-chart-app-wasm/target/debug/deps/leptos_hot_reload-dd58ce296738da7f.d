@@ -1,0 +1,11 @@
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/debug/deps/leptos_hot_reload-dd58ce296738da7f.d: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/diff.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/node.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/parsing.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/patch.js
+
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/debug/deps/libleptos_hot_reload-dd58ce296738da7f.rlib: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/diff.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/node.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/parsing.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/patch.js
+
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/debug/deps/libleptos_hot_reload-dd58ce296738da7f.rmeta: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/diff.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/node.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/parsing.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/patch.js
+
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/lib.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/diff.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/node.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/parsing.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/leptos_hot_reload-0.8.6/src/patch.js:

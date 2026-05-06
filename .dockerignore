@@ -1,0 +1,27 @@
+# Exclude node_modules from all Docker build contexts
+**/node_modules
+
+# Rust build artifacts (large) — except release artifacts needed by Dockerfile
+target/
+!target/release/kyomi
+!target/release/runtime-libs/
+apps/backend-rust/target
+
+# Local dev data
+.data/
+postgres_data/
+.fastembed_cache/
+
+# Git
+.git
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+
+# Test artifacts
+test-results/
+playwright-report/
+htmlcov/
+coverage/

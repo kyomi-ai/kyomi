@@ -1,0 +1,11 @@
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/wasm32-unknown-unknown/release/deps/erased-bd8d935ef51ce19e.d: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_box.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_mut_ref.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_ref.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/../README.md
+
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/wasm32-unknown-unknown/release/deps/liberased-bd8d935ef51ce19e.rlib: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_box.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_mut_ref.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_ref.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/../README.md
+
+/home/jason/repos/kyomi/apps/mcp-chart-app-wasm/target/wasm32-unknown-unknown/release/deps/liberased-bd8d935ef51ce19e.rmeta: /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/lib.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_box.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_mut_ref.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_ref.rs /home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/../README.md
+
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/lib.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_box.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_mut_ref.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/erased_ref.rs:
+/home/jason/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/erased-0.1.2/src/../README.md:
