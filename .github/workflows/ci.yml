@@ -114,10 +114,11 @@ jobs:
       - name: Verify sccache can reach GHA cache
         run: |
           echo 'fn main(){}' > /tmp/sccache_test.rs
-          if sccache $(rustc --print sysroot)/bin/rustc /tmp/sccache_test.rs --crate-type lib -o /tmp/sccache_test_out 2>/dev/null; then
+          if sccache $(rustc --print sysroot)/bin/rustc /tmp/sccache_test.rs --crate-type bin -o /tmp/sccache_test_out; then
             echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+            sccache --show-stats 2>&1 | head -5
           else
-            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "::warning::sccache GHA cache probe failed (see above), building without cache"
             echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
           fi
           rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
