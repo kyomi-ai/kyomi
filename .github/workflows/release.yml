@@ -68,6 +68,15 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Verify sccache is usable
+        run: |
+          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
@@ -115,12 +124,12 @@ jobs:
 
       - name: Build release binary
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo build --release -p kyomi-server
 
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true
 
       - name: Collect runtime libs
         run: |
@@ -211,6 +220,15 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Verify sccache is usable
+        run: |
+          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
@@ -258,12 +276,12 @@ jobs:
 
       - name: Build release binary
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo build --release -p kyomi-server
 
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true
 
       - name: Create tarball
         run: tar -czf kyomi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz -C target/release kyomi

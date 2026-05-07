@@ -66,6 +66,29 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Verify sccache is usable
+        if: matrix.os != 'windows'
+        run: |
+          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Verify sccache is usable (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          sccache --start-server 2>$null
+          sccache --show-stats 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            echo "SCCACHE_AVAILABLE=true" >> $env:GITHUB_ENV
+          } else {
+            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $env:GITHUB_ENV
+          }
+
       # --- Linux/macOS build tools ---
       - name: Install build dependencies (Linux)
         if: matrix.os == 'linux'
@@ -166,7 +189,7 @@ jobs:
 
       - name: Bundle with cargo-tauri
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: |
           cargo install tauri-cli --version "^2" --locked
           cargo tauri build --bundles ${{ matrix.bundles }}
@@ -174,7 +197,7 @@ jobs:
 
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true
 
       - name: Upload artifacts to GitHub Release
         if: github.ref_type == 'tag'

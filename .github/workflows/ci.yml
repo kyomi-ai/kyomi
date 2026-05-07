@@ -111,6 +111,15 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
+      - name: Verify sccache is usable
+        run: |
+          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
 
@@ -150,15 +159,15 @@ jobs:
 
       - name: cargo clippy (workspace, excluding desktop)
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked --workspace --exclude kyomi-desktop -- -D warnings
 
       - name: cargo clippy (kyomi-ui, wasm32)
         env:
-          RUSTC_WRAPPER: sccache
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
 
       - name: sccache stats
         if: always()
-        run: sccache --show-stats
+        run: sccache --show-stats || true
 
