@@ -112,20 +112,16 @@ jobs:
         run: |
           echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
 
-      - name: Strip local-dev blocks (Linux/macOS)
+      - name: Strip local-dev linker and trunk profile (Linux/macOS)
         if: matrix.os != 'windows'
         run: |
-          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
-          ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
           ${{ matrix.sed_inplace }} '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
           ${{ matrix.sed_inplace }} '/cargo_profile/d' crates/kyomi-ui/Trunk.toml
 
-      - name: Strip local-dev blocks (Windows)
+      - name: Strip local-dev linker and trunk profile (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          (Get-Content -Raw Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES\r?\n?', '' | Set-Content Cargo.toml -NoNewline
-          (Get-Content -Raw apps/mcp-chart-app-wasm/Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES\r?\n?', '' | Set-Content apps/mcp-chart-app-wasm/Cargo.toml -NoNewline
           (Get-Content -Raw .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER\r?\n?', '' | Set-Content .cargo/config.toml -NoNewline
           (Get-Content crates/kyomi-ui/Trunk.toml) | Where-Object { $_ -notmatch 'cargo_profile' } | Set-Content crates/kyomi-ui/Trunk.toml
 
