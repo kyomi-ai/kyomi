@@ -26,7 +26,6 @@ __pycache__/
 
 # Claude Code
 .claude/
-CLAUDE.md
 
 # Local development data (NOT in version control)
 .data/
