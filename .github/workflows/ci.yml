@@ -160,6 +160,9 @@ jobs:
       - name: Strip local-dev mold linker config
         run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
 
+      - name: Regenerate lockfile to match stripped Cargo.toml
+        run: cargo generate-lockfile
+
       - name: cargo clippy (workspace, excluding desktop)
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
