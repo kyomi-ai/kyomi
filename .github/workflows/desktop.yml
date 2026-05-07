@@ -46,7 +46,7 @@ jobs:
             trunk_os_suffix: apple-darwin
             wasm_bindgen_arch: aarch64-apple-darwin
             tailwind_binary: tailwindcss-macos-arm64
-            binaryen_arch: arm64-macos
+            binaryen_arch: x86_64-macos
             bundles: dmg
             sed_inplace: "sed -i ''"
           - os: windows
