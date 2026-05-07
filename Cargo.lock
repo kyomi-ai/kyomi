@@ -628,9 +628,9 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-stripe"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03ec8493f89fb9d9ac1848988955ec192df8e0ebf4d4bbd85fd93df9f681e890"
+checksum = "4c6aaa2c8bfd6bf27ce8cee9dde8add5022adace89d47fa36f3b25beb8398c9d"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -647,9 +647,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-billing"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2340b289cd5e34bb9b8b3eebed4e7a9729831ebee01388965ad4d88fd7a5a3b"
+checksum = "0b8bfc62f2c4345083e6b0f2bb0b0ea2cdcc05fe313bfb8381c71f4166b111aa"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -662,9 +662,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-checkout"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d23c5f0fbbc4fef893e1c673438687e0b4e7970171fbf9fd011911643200e1b3"
+checksum = "8588372ae6238c781f7584e7f3a7705ccdce182f6337bd28e88349f340f7b708"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -677,9 +677,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-client-core"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10f095837711eb1c3ee02604b4e1d44b117014fb74da99ad4f2d70e907dbdc41"
+checksum = "8c5725ca1e8ac95a168390a3bcaf6088c2971c29faa5e3f7345461b37753b76d"
 dependencies = [
  "async-stripe-shared",
  "async-stripe-types",
@@ -695,9 +695,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-core"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee9710c3d64db48dda1ec0b4976d091b7f40cabc8ed7bcab9e93b608b70b405c"
+checksum = "24f6eef09c1b78f7b0fc339ac26eff57acbe8f5ee42c8800efb0eae4f9707c44"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -710,9 +710,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-product"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec3ca828f2568de98ac380c851519e7f1c4ef41beee801d3e8f5744ee93c8c53"
+checksum = "5184d0d8827768662d8757a0e8e3bc69445e5d3c752381fda04010efe0c070d1"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -725,9 +725,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-shared"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a352c5e36a92aa8bdd4326c8211b9a26e822e6cb4b7516a47282396a4938a231"
+checksum = "6279fb9ac52a333a8b2d57c1d1150a637326684014d00a6f059f38f0714e214f"
 dependencies = [
  "async-stripe-types",
  "miniserde",
@@ -738,9 +738,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-types"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e1ec9960b89b1f556bf885403dd208d173a8c42d028fcd7baeca9ad2bfb13f6"
+checksum = "84d8df3efeb9a4bff9b5b000d3b1fa2a3d849923230bf9c4d768d6f074310623"
 dependencies = [
  "miniserde",
  "serde",
@@ -749,9 +749,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-webhook"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca9c87559c92de1303032a73e632e080935abf10204831a01098d96c1e1a632e"
+checksum = "3daef54fbcc3446320b0443606193f564142e40103d9c478c30ffaeb84a418a6"
 dependencies = [
  "async-stripe-billing",
  "async-stripe-checkout",
@@ -1508,6 +1508,8 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "chartml-chart-cartesian"
 version = "5.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45d465a8d68117c11ebca89c09632d86fb1240c05c989907d2eca09def6d037f"
 dependencies = [
  "chartml-core",
  "serde_json",
@@ -1516,6 +1518,8 @@ dependencies = [
 [[package]]
 name = "chartml-chart-metric"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8f72d98a17ccb7421fb80c9198a08fd778e6cd04a412eacee403699c4f83799"
 dependencies = [
  "chartml-core",
 ]
@@ -1523,6 +1527,8 @@ dependencies = [
 [[package]]
 name = "chartml-chart-pie"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "931b7b48d49b80082289af32d04a871481c4c4318624cc13b4a108aabe3db5a3"
 dependencies = [
  "chartml-core",
 ]
@@ -1530,6 +1536,8 @@ dependencies = [
 [[package]]
 name = "chartml-chart-scatter"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c27fc1d9026efa102de10330bbb7a4ce9f99e10f895eab7455f67037bfba221"
 dependencies = [
  "chartml-core",
 ]
@@ -1537,6 +1545,8 @@ dependencies = [
 [[package]]
 name = "chartml-chart-table"
 version = "5.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd07adbfc76f22ca592500dcf767d8e15a3868d24bf6c667424e44a5ffc25ac7"
 dependencies = [
  "chartml-core",
 ]
@@ -1544,6 +1554,8 @@ dependencies = [
 [[package]]
 name = "chartml-core"
 version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54c3f80b70f824c3adc4aef1ad9ba7b134ba37c3ba09bfedac91ade1caee7808"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1570,6 +1582,8 @@ dependencies = [
 [[package]]
 name = "chartml-datafusion"
 version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a019107a5541dc6b454c12cb4ca2c8a84fe7d2f86ed2d07f66a6e2ad4ff2b312"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1588,6 +1602,8 @@ dependencies = [
 [[package]]
 name = "chartml-forecast"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34e2c594c819b6b8640261fbba0e6a1d277c430a43c39739575d92a33d7ba204"
 dependencies = [
  "augurs-core",
  "augurs-ets",
@@ -1605,6 +1621,8 @@ dependencies = [
 [[package]]
 name = "chartml-leptos"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96ab56d65f627ef17f4bdc152bed9e88722a4965b4adcf02e1a4338362b839ca"
 dependencies = [
  "chartml-core",
  "humantime",
@@ -1620,6 +1638,8 @@ dependencies = [
 [[package]]
 name = "chartml-render"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4ee4932cbde6fdd57b0b1cbe8f73cfddc456a040aa658fd44516f21fca4d44f"
 dependencies = [
  "chartml-core",
  "fontdb 0.22.0",
@@ -5703,6 +5723,8 @@ dependencies = [
 [[package]]
 name = "kode-core"
 version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f34bf59eee89a7759ca5e9a5caa2297152e7be05c6b87339a2bc38e69e37f3f1"
 dependencies = [
  "ropey",
 ]
@@ -5710,6 +5732,8 @@ dependencies = [
 [[package]]
 name = "kode-doc"
 version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c40ed456accfd3c6898832a317d67a017335ef46f467e95effa9061729085d4"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -5719,6 +5743,8 @@ dependencies = [
 [[package]]
 name = "kode-leptos"
 version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "424545609f9620bf421a946ff6c5efeefb41a9bd2307d06d8a0bee0b7fb4d125"
 dependencies = [
  "arborium",
  "arborium-theme",
@@ -5739,6 +5765,8 @@ dependencies = [
 [[package]]
 name = "kode-markdown"
 version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f54481d3cd2edb154fd1bcbb680839bb7aa7b8bfce809b6f8e459ac358a14ef4"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -5936,6 +5964,8 @@ dependencies = [
 [[package]]
 name = "kyomi-connect-protocol"
 version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b473e69ad579dff53f28dce2d13cca9002e391ce61ae784bfbbd48d4b9b2f80"
 dependencies = [
  "base64 0.22.1",
  "futures-util",
@@ -5976,6 +6006,8 @@ dependencies = [
 [[package]]
 name = "kyomi-datasource"
 version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf86c2970fcbc40a251c66f54e0f9fef7e2c942d2c90d519b49928492506a147"
 dependencies = [
  "arrow",
  "async-trait",
