@@ -149,6 +149,7 @@ jobs:
             | tar -xz -C /tmp
           sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
           if [ -f "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" ]; then
+            sudo mkdir -p /usr/local/lib
             sudo cp "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" /usr/local/lib/
           fi
 
