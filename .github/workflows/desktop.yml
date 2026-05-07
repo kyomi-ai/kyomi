@@ -64,7 +64,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: mozilla-actions/sccache-action@v0.0.7
+      - uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Verify sccache can reach GHA cache
         if: matrix.os != 'windows'
