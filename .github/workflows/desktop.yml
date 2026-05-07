@@ -202,6 +202,7 @@ jobs:
       - name: Bundle with cargo-tauri
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+          CARGO_PROFILE_RELEASE_LTO: ${{ matrix.os == 'windows' && 'false' || 'true' }}
         run: |
           cargo install tauri-cli --version "^2" --locked
           cargo tauri build --bundles ${{ matrix.bundles }}
