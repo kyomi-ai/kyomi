@@ -28,6 +28,7 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 portpicker = "0.1"
 dirs = "6"
+openssl = { version = "0.10", features = ["vendored"] }
 
 [build-dependencies]
 tauri-build = "2.5"

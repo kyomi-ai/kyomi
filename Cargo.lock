@@ -5722,18 +5722,18 @@ dependencies = [
 
 [[package]]
 name = "kode-core"
-version = "0.2.5"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f34bf59eee89a7759ca5e9a5caa2297152e7be05c6b87339a2bc38e69e37f3f1"
+checksum = "b56d95c99620d4132ad734ff299277dae6437b05af88c61fe2466d5a6369f1da"
 dependencies = [
  "ropey",
 ]
 
 [[package]]
 name = "kode-doc"
-version = "0.2.5"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c40ed456accfd3c6898832a317d67a017335ef46f467e95effa9061729085d4"
+checksum = "c3421cbf169eee2695c3efc328a47d004ca26337820047a1126a628603252366"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -5742,9 +5742,9 @@ dependencies = [
 
 [[package]]
 name = "kode-leptos"
-version = "0.2.5"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "424545609f9620bf421a946ff6c5efeefb41a9bd2307d06d8a0bee0b7fb4d125"
+checksum = "4c7aa59452094fa84fa1b6bbcd9770f511a1f57510802537c98229dfb42a74b2"
 dependencies = [
  "arborium",
  "arborium-theme",
@@ -5764,9 +5764,9 @@ dependencies = [
 
 [[package]]
 name = "kode-markdown"
-version = "0.2.5"
+version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f54481d3cd2edb154fd1bcbb680839bb7aa7b8bfce809b6f8e459ac358a14ef4"
+checksum = "ce16cd7f77881cafe991dfb9247b8a71673a83df1eceac0fc899351af82d4fa4"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -6070,6 +6070,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-server",
+ "openssl",
  "portpicker",
  "reqwest 0.12.28",
  "serde",
@@ -7653,6 +7654,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "openssl-src"
+version = "300.6.0+3.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8e8cbfd3a4a8c8f089147fd7aaa33cf8c7450c4d09f8f80698a0cf093abeff4"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "openssl-sys"
 version = "0.9.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7660,6 +7670,7 @@ checksum = "158fe5b292746440aa6e7a7e690e55aeb72d41505e2804c23c6973ad0e9c9781"
 dependencies = [
  "cc",
  "libc",
+ "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
