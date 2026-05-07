@@ -70,7 +70,7 @@ jobs:
 
       - name: Verify sccache is usable
         run: |
-          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+          if sccache --show-stats >/dev/null 2>&1; then
             echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
           else
             echo "::warning::sccache GHA cache unavailable, building without cache"
@@ -222,7 +222,7 @@ jobs:
 
       - name: Verify sccache is usable
         run: |
-          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+          if sccache --show-stats >/dev/null 2>&1; then
             echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
           else
             echo "::warning::sccache GHA cache unavailable, building without cache"
