@@ -334,9 +334,9 @@ pub fn SqlEditorPage() -> impl IntoView {
     }
 
     // Datasource slug as a Signal for passing to child components.
-    let ds_slug_signal: Signal<Option<String>> = Signal::derive(move || ds_selection.slug.get());
+    let ds_slug_signal: Signal<Option<String>> = Signal::derive(move || ds_selection.slug.try_get().flatten());
     // Track whether a datasource is selected (for empty state messaging).
-    let has_datasource = Memo::new(move |_| ds_selection.slug.get().is_some());
+    let has_datasource = Memo::new(move |_| ds_selection.slug.try_get().flatten().is_some());
 
     view! {
         <div class="flex flex-col h-full bg-background @container">
