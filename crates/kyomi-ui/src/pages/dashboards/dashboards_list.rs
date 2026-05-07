@@ -115,7 +115,12 @@ pub fn DashboardsListPage() -> impl IntoView {
     Effect::new(move |_| {
         if let Some(result) = delete_action.value().get() {
             match result {
-                Ok(()) => toast_success("Dashboard deleted"),
+                Ok(()) => {
+                    if let Some((id, _title)) = deleting_dashboard.try_get_untracked().flatten() {
+                        sync_store.remove_dashboard(&id);
+                    }
+                    toast_success("Dashboard deleted");
+                }
                 Err(e) => toast_error(format!("Failed to delete dashboard: {e}")),
             }
         }
