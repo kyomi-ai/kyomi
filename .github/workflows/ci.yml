@@ -1,22 +1,17 @@
 # =============================================================================
-# Kyomi — CI
+# Kyomi — CI (Pull Request Checks)
 # =============================================================================
-# Runs on every PR to main AND on push to main (post-merge).
+# Runs on every PR to main, including new pushes to existing PRs.
 # Three jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
 #   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check
-#
-# Push-to-main runs also warm the sccache under refs/heads/main so that
-# tag-triggered release builds get per-object cache hits.
 # =============================================================================
 
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -37,7 +32,6 @@ jobs:
           fetch-depth: 0
 
       - name: Reject new lint suppressions
-        if: github.event_name == 'pull_request'
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           # Check .rs files for #[allow(...)]
@@ -64,7 +58,6 @@ jobs:
       # Pure bash + awk, no Rust toolchain required (~200ms).
       # --------------------------------------------------------------------
       - name: Server function / REST divergence lint
-        if: github.event_name == 'pull_request'
         run: ./scripts/lint/check-server-fns.sh
 
   # ---------------------------------------------------------------------------
@@ -135,20 +128,9 @@ jobs:
           chmod +x tailwindcss-linux-x64
           sudo mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss
 
-      - name: Strip local-dev patches from MCP chart app
-        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' apps/mcp-chart-app-wasm/Cargo.toml
-
-
       - name: Build MCP chart app WASM (required by kyomi-server include_str!)
         working-directory: apps/mcp-chart-app-wasm
         run: bash build.sh
-
-      # Strip the local-dev [patch.crates-io] block before clippy. The block
-      # points at /home/jason/repos/* paths that only exist on Jason's laptop;
-      # CI must resolve chartml-* etc. from crates.io. Mirrors the Dockerfile
-      # sed (which strips the same markers for production builds).
-      - name: Strip local-dev patch.crates-io block
-        run: sed -i '/# BEGIN_LOCAL_DEV_PATCHES/,/# END_LOCAL_DEV_PATCHES/d' Cargo.toml
 
       # RustEmbed's derive macro in apps/server/src/leptos_frontend.rs points at
       # crates/kyomi-ui/dist/. If the folder is missing, the macro silently
@@ -159,9 +141,6 @@ jobs:
 
       - name: Strip local-dev mold linker config
         run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
-
-      - name: Regenerate lockfile to match stripped Cargo.toml
-        run: cargo generate-lockfile
 
       - name: cargo clippy (workspace, excluding desktop)
         env:

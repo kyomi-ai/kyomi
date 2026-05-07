@@ -253,23 +253,3 @@ opt-level = "s"
 # Uncomment to use a local checkout of kyomi-connect for development:
 # kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
 # kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
-
-# Local checkout of chartml, kode, and kyomi-connect for development.
-# kyomi-connect 1.2.0 is published; patches here are for local iteration only.
-# The Dockerfile strips everything between BEGIN_LOCAL_DEV_PATCHES and
-# END_LOCAL_DEV_PATCHES before `cargo build`, so prod always uses crates.io.
-# BEGIN_LOCAL_DEV_PATCHES
-[patch.crates-io]
-kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
-kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
-chartml-core = { path = "/home/jason/repos/chartml/crates/chartml-core" }
-chartml-render = { path = "/home/jason/repos/chartml/crates/chartml-render" }
-chartml-chart-cartesian = { path = "/home/jason/repos/chartml/crates/chartml-chart-cartesian" }
-chartml-chart-pie = { path = "/home/jason/repos/chartml/crates/chartml-chart-pie" }
-chartml-chart-scatter = { path = "/home/jason/repos/chartml/crates/chartml-chart-scatter" }
-chartml-chart-metric = { path = "/home/jason/repos/chartml/crates/chartml-chart-metric" }
-chartml-chart-table = { path = "/home/jason/repos/chartml/crates/chartml-chart-table" }
-chartml-datafusion = { path = "/home/jason/repos/chartml/crates/chartml-datafusion" }
-chartml-leptos = { path = "/home/jason/repos/chartml/crates/chartml-leptos" }
-kode-leptos = { path = "/home/jason/repos/kode/kode-leptos" }
-# END_LOCAL_DEV_PATCHES

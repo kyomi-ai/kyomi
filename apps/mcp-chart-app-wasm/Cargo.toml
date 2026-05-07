@@ -45,14 +45,3 @@ opt-level = "z"
 strip = true
 panic = "abort"
 
-# Local checkout of chartml for development.
-# CI strips everything between BEGIN_LOCAL_DEV_PATCHES and END_LOCAL_DEV_PATCHES.
-# BEGIN_LOCAL_DEV_PATCHES
-[patch.crates-io]
-chartml-core = { path = "../../../chartml/crates/chartml-core" }
-chartml-chart-cartesian = { path = "../../../chartml/crates/chartml-chart-cartesian" }
-chartml-chart-pie = { path = "../../../chartml/crates/chartml-chart-pie" }
-chartml-chart-scatter = { path = "../../../chartml/crates/chartml-chart-scatter" }
-chartml-chart-metric = { path = "../../../chartml/crates/chartml-chart-metric" }
-chartml-leptos = { path = "../../../chartml/crates/chartml-leptos" }
-# END_LOCAL_DEV_PATCHES
