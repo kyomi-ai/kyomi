@@ -56,7 +56,6 @@ jobs:
             binaryen_arch: x86_64-linux
     runs-on: ${{ matrix.runner }}
     env:
-      RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout code
@@ -115,6 +114,8 @@ jobs:
         run: bash build.sh
 
       - name: Build release binary
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo build --release -p kyomi-server
 
       - name: sccache stats
@@ -198,7 +199,6 @@ jobs:
             sed_inplace: "sed -i"
     runs-on: ${{ matrix.runner }}
     env:
-      RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout code
@@ -257,6 +257,8 @@ jobs:
         run: bash build.sh
 
       - name: Build release binary
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo build --release -p kyomi-server
 
       - name: sccache stats

@@ -55,7 +55,6 @@ jobs:
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
     env:
-      RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
@@ -166,6 +165,8 @@ jobs:
           Copy-Item dist/index.html chart_app.html
 
       - name: Bundle with cargo-tauri
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
           cargo install tauri-cli --version "^2" --locked
           cargo tauri build --bundles ${{ matrix.bundles }}
