@@ -305,10 +305,18 @@ jobs:
     needs: [prepare, docker-manifest]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.ARC_APP_ID }}
+          private-key: ${{ secrets.ARC_APP_PRIVATE_KEY }}
+          owner: kyomi-ai
+          repositories: kyomi-private
+
       - name: Dispatch deploy to kyomi-private
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           repository: kyomi-ai/kyomi-private
           event-type: public-repo-updated
           client-payload: >-
