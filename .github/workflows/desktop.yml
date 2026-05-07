@@ -148,6 +148,9 @@ jobs:
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
           sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
+          if [ -f "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" ]; then
+            sudo cp "/tmp/binaryen-${BINARYEN_VERSION}/lib/libbinaryen.dylib" /usr/local/lib/
+          fi
 
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
         if: matrix.os == 'windows'
