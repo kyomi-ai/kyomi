@@ -259,16 +259,16 @@ async fn refresh_connect(
         }
     }
 
-    finalize_refresh(
-        params.db,
-        params.workspace_id,
-        &datasource.id,
-        &seen_table_ids,
+    finalize_refresh(FinalizeParams {
+        db: params.db,
+        workspace_id: params.workspace_id,
+        datasource_id: &datasource.id,
+        seen_table_ids: &seen_table_ids,
         tables_indexed,
-        &[],
-        params.embedding,
-        true,
-    )
+        errors: &[],
+        embedding: params.embedding,
+        discovery_succeeded: true,
+    })
     .await
 }
 
@@ -432,16 +432,16 @@ async fn refresh_bigquery_rest(
         }
     }
 
-    finalize_refresh(
-        params.db,
-        params.workspace_id,
-        &datasource.id,
-        &seen_table_ids,
+    finalize_refresh(FinalizeParams {
+        db: params.db,
+        workspace_id: params.workspace_id,
+        datasource_id: &datasource.id,
+        seen_table_ids: &seen_table_ids,
         tables_indexed,
-        &errors,
-        params.embedding,
-        any_project_succeeded,
-    )
+        errors: &errors,
+        embedding: params.embedding,
+        discovery_succeeded: any_project_succeeded,
+    })
     .await
 }
 
@@ -725,16 +725,16 @@ async fn refresh_sql_based(
 
     provider.close().await;
 
-    finalize_refresh(
-        params.db,
-        params.workspace_id,
-        &datasource.id,
-        &seen_table_ids,
+    finalize_refresh(FinalizeParams {
+        db: params.db,
+        workspace_id: params.workspace_id,
+        datasource_id: &datasource.id,
+        seen_table_ids: &seen_table_ids,
         tables_indexed,
-        &errors,
-        params.embedding,
-        any_container_succeeded || containers.is_empty(),
-    )
+        errors: &errors,
+        embedding: params.embedding,
+        discovery_succeeded: any_container_succeeded || containers.is_empty(),
+    })
     .await
 }
 
@@ -742,16 +742,19 @@ async fn refresh_sql_based(
 // Shared finalization (archive, timestamps, embeddings, result)
 // ---------------------------------------------------------------------------
 
-async fn finalize_refresh(
-    db: &DbPool,
-    workspace_id: &str,
-    datasource_id: &str,
-    seen_table_ids: &HashSet<String>,
+struct FinalizeParams<'a> {
+    db: &'a DbPool,
+    workspace_id: &'a str,
+    datasource_id: &'a str,
+    seen_table_ids: &'a HashSet<String>,
     tables_indexed: usize,
-    errors: &[String],
-    embedding: &kyomi_embed::EmbeddingService,
+    errors: &'a [String],
+    embedding: &'a kyomi_embed::EmbeddingService,
     discovery_succeeded: bool,
-) -> Result<CatalogRefreshResult, kyomi_core::Error> {
+}
+
+async fn finalize_refresh(p: FinalizeParams<'_>) -> Result<CatalogRefreshResult, kyomi_core::Error> {
+    let FinalizeParams { db, workspace_id, datasource_id, seen_table_ids, tables_indexed, errors, embedding, discovery_succeeded } = p;
     tracing::info!(
         datasource_id,
         seen_table_ids = seen_table_ids.len(),

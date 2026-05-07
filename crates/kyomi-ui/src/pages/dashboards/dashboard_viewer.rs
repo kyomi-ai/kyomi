@@ -360,8 +360,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 Some(did.clone())
             };
             async move {
-                let result = set_user_default_dashboard(new_id).await;
-                result
+                set_user_default_dashboard(new_id).await
             }
         });
 
@@ -389,8 +388,7 @@ pub fn DashboardViewerPage() -> impl IntoView {
                 Some(did.clone())
             };
             async move {
-                let result = set_workspace_default_dashboard(new_id).await;
-                result
+                set_workspace_default_dashboard(new_id).await
             }
         });
 

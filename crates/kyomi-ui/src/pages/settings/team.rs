@@ -922,7 +922,6 @@ fn TransferOwnershipModal(
     let transfer_modal_footer: Arc<dyn Fn() -> AnyView + Send + Sync> =
         Arc::new(move || {
             let step = transfer_step.get();
-            let ws_name = workspace_name.get();
 
             if step == 1 {
                 let no_selection = transfer_selected_user_id.get().is_empty();

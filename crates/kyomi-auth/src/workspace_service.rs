@@ -777,6 +777,48 @@ pub async fn update_workspace_owner(
 
 // ─── Orchestration ─────────────────────────────────────────────────────────
 
+pub async fn initiate_transfer(
+    pool: &DbPool,
+    workspace_id: &str,
+    from_user_id: &str,
+    to_user_id: &str,
+    from_email: &str,
+    workspace_name: &str,
+    from_name: &str,
+) -> kyomi_core::Result<()> {
+    let existing = get_pending_transfer_for_workspace(pool, workspace_id).await?;
+    if existing.is_some() {
+        return Err(kyomi_core::Error::Conflict(
+            "There is already a pending ownership transfer for this workspace".into(),
+        ));
+    }
+
+    let transfer_id = format!(
+        "xfer-{}",
+        &sqlx::types::Uuid::new_v4().simple().to_string()[..24]
+    );
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
+
+    create_ownership_transfer(pool, &transfer_id, workspace_id, from_user_id, to_user_id, expires_at).await?;
+
+    let to_user = crate::user_service::get_user_by_id(pool, to_user_id).await?;
+    if let Some(to_user) = to_user {
+        let to_name = to_user.name.clone().unwrap_or_else(|| to_user.email.clone());
+        let to_email = to_user.email.clone();
+        let ws_name = workspace_name.to_string();
+        let f_name = from_name.to_string();
+        let f_email = from_email.to_string();
+
+        tokio::spawn(async move {
+            let svc = crate::email_service::EmailService::from_env();
+            svc.send_ownership_transfer(&to_email, &ws_name, &f_name, &to_name, "initiated").await;
+            svc.send_ownership_transfer(&f_email, &ws_name, &f_name, &to_name, "confirmation").await;
+        });
+    }
+
+    Ok(())
+}
+
 /// Enriched ownership transfer for display on the accept-ownership page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnershipTransferDetail {
