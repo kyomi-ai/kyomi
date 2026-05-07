@@ -111,14 +111,16 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.7
 
-      - name: Verify sccache is usable
+      - name: Verify sccache can reach GHA cache
         run: |
-          if sccache --show-stats >/dev/null 2>&1; then
+          echo 'fn main(){}' > /tmp/sccache_test.rs
+          if sccache $(rustc --print sysroot)/bin/rustc /tmp/sccache_test.rs --crate-type lib -o /tmp/sccache_test_out 2>/dev/null; then
             echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
           else
             echo "::warning::sccache GHA cache unavailable, building without cache"
             echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
           fi
+          rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
