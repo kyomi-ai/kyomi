@@ -357,7 +357,6 @@ pub async fn cancel_ownership_transfer(transfer_id: String) -> Result<(), Server
 pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    // Must be owner
     if !ac.auth.workspace.is_owner {
         return Err(ServerFnError::new(
             "Only the workspace owner can transfer ownership",
@@ -368,51 +367,20 @@ pub async fn initiate_ownership_transfer(to_user_id: String) -> Result<(), Serve
         return Err(ServerFnError::new("You are already the owner"));
     }
 
-    // Check no existing pending transfer
-    let existing =
-        kyomi_auth::workspace_service::get_pending_transfer_for_workspace(ac.db(), &ac.ws_id)
-            .await
-            .into_sfn()?;
-    if existing.is_some() {
-        return Err(ServerFnError::new(
-            "There is already a pending ownership transfer for this workspace",
-        ));
-    }
+    let workspace_name = ac.auth.workspace.workspace_name.clone().unwrap_or_default();
+    let from_name = ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone());
 
-    let transfer_id = format!(
-        "xfer-{}",
-        &sqlx::types::Uuid::new_v4().simple().to_string()[..24]
-    );
-    let expires_at = chrono::Utc::now() + chrono::Duration::days(7);
-
-    kyomi_auth::workspace_service::create_ownership_transfer(
+    kyomi_auth::workspace_service::initiate_transfer(
         ac.db(),
-        &transfer_id,
         &ac.ws_id,
         &ac.auth.user_id,
         &to_user_id,
-        expires_at,
+        &ac.auth.email,
+        &workspace_name,
+        &from_name,
     )
     .await
     .into_sfn()?;
-
-    // Send notification emails to both parties
-    let to_user = kyomi_auth::user_service::get_user_by_id(ac.db(), &to_user_id)
-        .await
-        .into_sfn()?;
-    if let Some(to_user) = to_user {
-        let workspace_name = ac.auth.workspace.workspace_name.clone().unwrap_or_default();
-        let from_name = ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone());
-        let to_name = to_user.name.clone().unwrap_or_else(|| to_user.email.clone());
-        let to_email = to_user.email.clone();
-        let from_email = ac.auth.email.clone();
-
-        tokio::spawn(async move {
-            let svc = kyomi_auth::email_service::EmailService::from_env();
-            svc.send_ownership_transfer(&to_email, &workspace_name, &from_name, &to_name, "initiated").await;
-            svc.send_ownership_transfer(&from_email, &workspace_name, &from_name, &to_name, "confirmation").await;
-        });
-    }
 
     Ok(())
 }

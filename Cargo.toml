@@ -196,23 +196,23 @@ cron = "0.15"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "hostname", "builder", "pool"] }
 
 # Stripe billing API
-async-stripe = { version = "1.0.0-rc.1", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
-async-stripe-webhook = { version = "1.0.0-rc.1", features = [
+async-stripe = { version = "=1.0.0-rc.1", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
+async-stripe-webhook = { version = "=1.0.0-rc.1", features = [
     "async-stripe-billing",
     "async-stripe-checkout",
     "async-stripe-core",
 ] }
-async-stripe-billing = { version = "1.0.0-rc.1", features = [
+async-stripe-billing = { version = "=1.0.0-rc.1", features = [
     "subscription",
     "subscription_item",
     "invoice",
     "billing_portal_session",
 ] }
-async-stripe-checkout = { version = "1.0.0-rc.1", features = ["checkout_session"] }
-async-stripe-core = { version = "1.0.0-rc.1", features = ["customer"] }
-async-stripe-product = { version = "1.0.0-rc.1", features = ["product"] }
-async-stripe-shared = { version = "1.0.0-rc.1" }
-async-stripe-types = { version = "1.0.0-rc.1" }
+async-stripe-checkout = { version = "=1.0.0-rc.1", features = ["checkout_session"] }
+async-stripe-core = { version = "=1.0.0-rc.1", features = ["customer"] }
+async-stripe-product = { version = "=1.0.0-rc.1", features = ["product"] }
+async-stripe-shared = { version = "=1.0.0-rc.1" }
+async-stripe-types = { version = "=1.0.0-rc.1" }
 
 # TOTP / 2FA
 totp-rs = { version = "5", features = ["otpauth", "gen_secret", "qr"] }

@@ -711,13 +711,13 @@ fn McpConnectionCard(is_personal: bool) -> impl IntoView {
 #[component]
 fn CopyButton(text: String) -> impl IntoView {
     let (copied, set_copied) = signal(false);
-    let text_stored = StoredValue::new(text);
+    let _text_stored = StoredValue::new(text);
 
     let on_click = move |_| {
         set_copied.set(true);
         #[cfg(target_arch = "wasm32")]
         {
-            let text = text_stored.get_value();
+            let text = _text_stored.get_value();
             leptos::task::spawn_local(async move {
                 if let Some(window) = web_sys::window() {
                     let clipboard = window.navigator().clipboard();
