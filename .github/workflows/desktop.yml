@@ -154,7 +154,11 @@ jobs:
           fi
           mkdir -p "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin"
           mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+            "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
+          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
+            "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
+            > "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          chmod +x "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
 
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
         if: matrix.os == 'windows'
@@ -168,7 +172,8 @@ jobs:
           tar -xzf binaryen.tar.gz -C $env:TEMP
           $wasmOptDir = "$env:LOCALAPPDATA\trunkrs\trunk\cache\wasm-opt-$env:BINARYEN_VERSION\bin"
           New-Item -ItemType Directory -Force -Path $wasmOptDir | Out-Null
-          Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$wasmOptDir\wasm-opt.exe"
+          Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$wasmOptDir\wasm-opt-real.exe"
+          Set-Content "$wasmOptDir\wasm-opt.cmd" "@`"%~dp0wasm-opt-real.exe`" --enable-bulk-memory-opt --enable-nontrapping-float-to-int %*"
 
       - name: Build Leptos WASM frontend
         working-directory: crates/kyomi-ui
