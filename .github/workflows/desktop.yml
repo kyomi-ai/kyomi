@@ -23,7 +23,7 @@ env:
   TRUNK_VERSION: 0.21.14
   WASM_BINDGEN_VERSION: 0.2.114
   TAILWIND_VERSION: v4.2.2
-  BINARYEN_VERSION: version_123
+  BINARYEN_VERSION: version_129
 
 jobs:
   desktop:
@@ -147,13 +147,14 @@ jobs:
           fi
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
-          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            TRUNK_CACHE="$HOME/Library/Caches/dev.trunkrs.trunk"
+          else
+            TRUNK_CACHE="$HOME/.cache/trunk"
+          fi
+          mkdir -p "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin"
           mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
-          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
-            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
-          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+            "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
 
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
         if: matrix.os == 'windows'
@@ -165,7 +166,7 @@ jobs:
           $binaryenUrl = "https://github.com/WebAssembly/binaryen/releases/download/$env:BINARYEN_VERSION/binaryen-$env:BINARYEN_VERSION-x86_64-windows.tar.gz"
           Invoke-WebRequest -Uri $binaryenUrl -OutFile binaryen.tar.gz
           tar -xzf binaryen.tar.gz -C $env:TEMP
-          $wasmOptDir = "$env:USERPROFILE\.cache\trunk\wasm-opt-$env:BINARYEN_VERSION\bin"
+          $wasmOptDir = "$env:LOCALAPPDATA\trunkrs\trunk\cache\wasm-opt-$env:BINARYEN_VERSION\bin"
           New-Item -ItemType Directory -Force -Path $wasmOptDir | Out-Null
           Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$wasmOptDir\wasm-opt.exe"
 

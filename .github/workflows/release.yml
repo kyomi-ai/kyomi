@@ -26,7 +26,7 @@ env:
   TRUNK_VERSION: 0.21.14
   WASM_BINDGEN_VERSION: 0.2.114
   TAILWIND_VERSION: v4.2.2
-  BINARYEN_VERSION: version_123
+  BINARYEN_VERSION: version_129
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -109,11 +109,7 @@ jobs:
             | tar -xz -C /tmp
           mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
           mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
-          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
-            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
-          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
 
       - name: Build Leptos WASM frontend
         working-directory: crates/kyomi-ui
@@ -262,11 +258,7 @@ jobs:
             | tar -xz -C /tmp
           mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
           mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
-          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
-            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
-          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
 
       - name: Build Leptos WASM frontend
         working-directory: crates/kyomi-ui
