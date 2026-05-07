@@ -26,7 +26,7 @@ env:
   TRUNK_VERSION: 0.21.14
   WASM_BINDGEN_VERSION: 0.2.114
   TAILWIND_VERSION: v4.2.2
-  BINARYEN_VERSION: version_129
+  BINARYEN_VERSION: version_128
 
 jobs:
   # ---------------------------------------------------------------------------

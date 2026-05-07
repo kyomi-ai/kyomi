@@ -39,4 +39,4 @@ command_arguments = [
 ]
 
 [tools]
-wasm_opt = "version_129"
+wasm_opt = "version_128"
