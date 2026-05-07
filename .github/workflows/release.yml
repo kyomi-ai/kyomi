@@ -55,6 +55,9 @@ jobs:
             tailwind_binary: tailwindcss-linux-x64
             binaryen_arch: x86_64-linux
     runs-on: ${{ matrix.runner }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,10 +67,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
@@ -116,6 +116,10 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release -p kyomi-server
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
       - name: Collect runtime libs
         run: |
@@ -193,6 +197,9 @@ jobs:
             binaryen_arch: x86_64-linux
             sed_inplace: "sed -i"
     runs-on: ${{ matrix.runner }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -202,10 +209,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release
-          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
@@ -254,6 +258,10 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release -p kyomi-server
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
       - name: Create tarball
         run: tar -czf kyomi-${{ matrix.os }}-${{ matrix.arch }}.tar.gz -C target/release kyomi

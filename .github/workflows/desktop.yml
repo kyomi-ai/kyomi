@@ -54,6 +54,9 @@ jobs:
             bundles: msi nsis
     name: Desktop (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -62,10 +65,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: desktop-${{ matrix.os }}
-          save-if: ${{ github.ref_type == 'tag' }}
+      - uses: mozilla-actions/sccache-action@v0.0.7
 
       # --- Linux/macOS build tools ---
       - name: Install build dependencies (Linux)
@@ -78,7 +78,14 @@ jobs:
 
       - name: Install build dependencies (macOS)
         if: matrix.os == 'macos'
-        run: brew install brotli
+        run: |
+          brew install brotli llvm
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+
+      - name: Set wasm32 C compiler (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
 
       - name: Strip local-dev blocks (Linux/macOS)
         if: matrix.os != 'windows'
@@ -92,9 +99,9 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         run: |
-          (Get-Content Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES', '' | Set-Content Cargo.toml
-          (Get-Content apps/mcp-chart-app-wasm/Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES', '' | Set-Content apps/mcp-chart-app-wasm/Cargo.toml
-          (Get-Content .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER', '' | Set-Content .cargo/config.toml
+          (Get-Content -Raw Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES\r?\n?', '' | Set-Content Cargo.toml -NoNewline
+          (Get-Content -Raw apps/mcp-chart-app-wasm/Cargo.toml) -replace '(?s)# BEGIN_LOCAL_DEV_PATCHES.*?# END_LOCAL_DEV_PATCHES\r?\n?', '' | Set-Content apps/mcp-chart-app-wasm/Cargo.toml -NoNewline
+          (Get-Content -Raw .cargo/config.toml) -replace '(?s)# BEGIN_LOCAL_DEV_LINKER.*?# END_LOCAL_DEV_LINKER\r?\n?', '' | Set-Content .cargo/config.toml -NoNewline
           (Get-Content crates/kyomi-ui/Trunk.toml) | Where-Object { $_ -notmatch 'cargo_profile' } | Set-Content crates/kyomi-ui/Trunk.toml
 
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Linux/macOS)
@@ -163,6 +170,10 @@ jobs:
           cargo install tauri-cli --version "^2" --locked
           cargo tauri build --bundles ${{ matrix.bundles }}
         working-directory: apps/desktop
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
       - name: Upload artifacts to GitHub Release
         if: github.ref_type == 'tag'
