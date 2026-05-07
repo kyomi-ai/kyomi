@@ -147,18 +147,7 @@ jobs:
           fi
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
-          if [ "${{ matrix.os }}" = "macos" ]; then
-            TRUNK_CACHE="$HOME/Library/Caches/dev.trunkrs.trunk"
-          else
-            TRUNK_CACHE="$HOME/.cache/trunk"
-          fi
-          mkdir -p "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin"
-          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
-          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
-            "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
-            > "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
-          chmod +x "$TRUNK_CACHE/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
 
       - name: Install trunk + wasm-bindgen-cli + tailwindcss + wasm-opt (Windows)
         if: matrix.os == 'windows'
@@ -170,14 +159,28 @@ jobs:
           $binaryenUrl = "https://github.com/WebAssembly/binaryen/releases/download/$env:BINARYEN_VERSION/binaryen-$env:BINARYEN_VERSION-x86_64-windows.tar.gz"
           Invoke-WebRequest -Uri $binaryenUrl -OutFile binaryen.tar.gz
           tar -xzf binaryen.tar.gz -C $env:TEMP
-          $wasmOptDir = "$env:LOCALAPPDATA\trunkrs\trunk\cache\wasm-opt-$env:BINARYEN_VERSION\bin"
-          New-Item -ItemType Directory -Force -Path $wasmOptDir | Out-Null
-          Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$wasmOptDir\wasm-opt-real.exe"
-          Set-Content "$wasmOptDir\wasm-opt.cmd" "@`"%~dp0wasm-opt-real.exe`" --enable-bulk-memory-opt --enable-nontrapping-float-to-int %*"
+          Move-Item "$env:TEMP\binaryen-$env:BINARYEN_VERSION\bin\wasm-opt.exe" "$env:CARGO_HOME\bin\wasm-opt.exe"
 
-      - name: Build Leptos WASM frontend
+      - name: Build Leptos WASM frontend (trunk, wasm-opt disabled)
         working-directory: crates/kyomi-ui
         run: trunk build --release
+
+      - name: Optimize WASM with wasm-opt (Linux/macOS)
+        if: matrix.os != 'windows'
+        run: |
+          for f in crates/kyomi-ui/dist/*_bg.wasm; do
+            wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "${f}.opt" "$f"
+            mv "${f}.opt" "$f"
+          done
+
+      - name: Optimize WASM with wasm-opt (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem crates/kyomi-ui/dist/*_bg.wasm | ForEach-Object {
+            wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "$($_.FullName).opt" $_.FullName
+            Move-Item -Force "$($_.FullName).opt" $_.FullName
+          }
 
       - name: Build MCP chart app WASM (Linux/macOS)
         if: matrix.os != 'windows'

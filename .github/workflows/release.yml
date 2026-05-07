@@ -107,17 +107,18 @@ jobs:
           sudo chmod +x /usr/local/bin/tailwindcss
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
-          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
-          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
-          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
-            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
-          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
 
-      - name: Build Leptos WASM frontend
+      - name: Build Leptos WASM frontend (trunk, wasm-opt disabled)
         working-directory: crates/kyomi-ui
         run: trunk build --release
+
+      - name: Optimize WASM with wasm-opt
+        run: |
+          for f in crates/kyomi-ui/dist/*_bg.wasm; do
+            wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "${f}.opt" "$f"
+            mv "${f}.opt" "$f"
+          done
 
       - name: Build MCP chart app WASM
         working-directory: apps/mcp-chart-app-wasm
@@ -260,17 +261,18 @@ jobs:
           sudo chmod +x /usr/local/bin/tailwindcss
           curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${{ matrix.binaryen_arch }}.tar.gz" \
             | tar -xz -C /tmp
-          mkdir -p "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin"
-          mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real"
-          printf '#!/bin/sh\nexec "%s" --enable-bulk-memory-opt --enable-nontrapping-float-to-int "$@"\n' \
-            "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt-real" \
-            > "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
-          chmod +x "$HOME/.cache/trunk/wasm-opt-${BINARYEN_VERSION}/bin/wasm-opt"
+          sudo mv "/tmp/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
 
-      - name: Build Leptos WASM frontend
+      - name: Build Leptos WASM frontend (trunk, wasm-opt disabled)
         working-directory: crates/kyomi-ui
         run: trunk build --release
+
+      - name: Optimize WASM with wasm-opt
+        run: |
+          for f in crates/kyomi-ui/dist/*_bg.wasm; do
+            wasm-opt --enable-bulk-memory-opt --enable-nontrapping-float-to-int -O -o "${f}.opt" "$f"
+            mv "${f}.opt" "$f"
+          done
 
       - name: Build MCP chart app WASM
         working-directory: apps/mcp-chart-app-wasm
