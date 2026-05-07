@@ -1,0 +1,10 @@
+# glib 0.18.5 — transitive dep from Tauri desktop GTK bindings.
+# Blocked until Tauri upgrades gtk bindings to glib 0.20.
+GHSA-wrw7-89jp-8q8g
+
+# rustls-webpki 0.101.7 — transitive dep from tiberius (SQL Server driver)
+# via kyomi-datasource. tiberius 0.12.3 pins rustls 0.21 which pins this.
+# Blocked until tiberius upgrades to rustls 0.23+.
+GHSA-82j2-j2ch-gfr8
+GHSA-xgp8-3hg3-c2mh
+GHSA-965h-392x-2mh5
