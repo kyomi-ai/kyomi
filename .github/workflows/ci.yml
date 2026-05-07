@@ -1,17 +1,22 @@
 # =============================================================================
-# Kyomi — CI (Pull Request Checks)
+# Kyomi — CI
 # =============================================================================
-# Runs on every PR to main, including new pushes to existing PRs.
+# Runs on every PR to main AND on push to main (post-merge).
 # Three jobs:
 #   1. lint-policy (fast, ~5s) — rejects new #[allow(...)] suppressions AND
 #      runs the server_fn/REST divergence linter across the full tree
 #   2. trivy-scan (~30s) — Trivy filesystem vulnerability scanner (HIGH/CRITICAL)
 #   3. clippy (slow, ~2-5min) — full workspace clippy + compilation check
+#
+# Push-to-main runs also warm the sccache under refs/heads/main so that
+# tag-triggered release builds get per-object cache hits.
 # =============================================================================
 
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -32,6 +37,7 @@ jobs:
           fetch-depth: 0
 
       - name: Reject new lint suppressions
+        if: github.event_name == 'pull_request'
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           # Check .rs files for #[allow(...)]
@@ -58,6 +64,7 @@ jobs:
       # Pure bash + awk, no Rust toolchain required (~200ms).
       # --------------------------------------------------------------------
       - name: Server function / REST divergence lint
+        if: github.event_name == 'pull_request'
         run: ./scripts/lint/check-server-fns.sh
 
   # ---------------------------------------------------------------------------
@@ -87,6 +94,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -100,7 +109,16 @@ jobs:
           components: clippy
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Verify sccache is usable
+        run: |
+          if sccache --start-server 2>/dev/null && sccache --show-stats >/dev/null 2>&1; then
+            echo "SCCACHE_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "::warning::sccache GHA cache unavailable, building without cache"
+            echo "SCCACHE_AVAILABLE=false" >> $GITHUB_ENV
+          fi
 
       - name: Add cargo bin to PATH
         run: echo "$CARGO_HOME/bin" >> $GITHUB_PATH
@@ -140,8 +158,16 @@ jobs:
         run: sed -i '/# BEGIN_LOCAL_DEV_LINKER/,/# END_LOCAL_DEV_LINKER/d' .cargo/config.toml
 
       - name: cargo clippy (workspace, excluding desktop)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked --workspace --exclude kyomi-desktop -- -D warnings
 
       - name: cargo clippy (kyomi-ui, wasm32)
+        env:
+          RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
         run: cargo clippy --locked -p kyomi-ui --target wasm32-unknown-unknown --features hydrate -- -D warnings
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
