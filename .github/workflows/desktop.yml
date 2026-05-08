@@ -10,9 +10,6 @@
 name: Desktop
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
