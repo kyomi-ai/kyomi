@@ -79,18 +79,10 @@ jobs:
           fi
           rm -f /tmp/sccache_test.rs /tmp/sccache_test_out
 
-      - name: Verify sccache is usable (Windows)
+      - name: Skip sccache on Windows (linker compatibility)
         if: matrix.os == 'windows'
         shell: pwsh
-        run: |
-          sccache --start-server 2>$null
-          sccache --show-stats 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0) {
-            echo "SCCACHE_AVAILABLE=true" >> $env:GITHUB_ENV
-          } else {
-            echo "::warning::sccache GHA cache unavailable, building without cache"
-            echo "SCCACHE_AVAILABLE=false" >> $env:GITHUB_ENV
-          }
+        run: echo "SCCACHE_AVAILABLE=false" >> $env:GITHUB_ENV
 
       # --- Linux/macOS build tools ---
       - name: Install build dependencies (Linux)
