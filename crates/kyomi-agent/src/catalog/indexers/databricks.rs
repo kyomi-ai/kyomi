@@ -11,10 +11,11 @@
 use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_core::Result;
-use kyomi_datasource_server::{DatasourceProvider, QueryStatus};
+use kyomi_datasource_server::DatasourceProvider;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 
+use super::extract_rows_from_batch;
 use crate::catalog::traits::{
     index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
 };
@@ -93,13 +94,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             .execute_query("SHOW CATALOGS", None, None, false, None)
             .await?;
 
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
-
+        let rows = extract_rows_from_batch(&result);
         let mut catalogs: Vec<String> = rows
             .iter()
             .filter_map(|row| {
@@ -128,16 +123,10 @@ impl SQLCatalogIndexer for DatabricksIndexer {
             .execute_query(&schema_sql, None, None, false, None)
             .await?;
 
-        if schema_result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(schema_rows) = &schema_result.rows else {
-            return Ok(Vec::new());
-        };
-
+        let schema_rows = extract_rows_from_batch(&schema_result);
         let mut tables = Vec::new();
 
-        for schema_row in schema_rows {
+        for schema_row in &schema_rows {
             let Some(schema_name) = schema_row.first().and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -157,14 +146,9 @@ impl SQLCatalogIndexer for DatabricksIndexer {
                 Err(_) => continue,
             };
 
-            if table_result.status != QueryStatus::Success {
-                continue;
-            }
-            let Some(table_rows) = &table_result.rows else {
-                continue;
-            };
+            let table_rows = extract_rows_from_batch(&table_result);
 
-            for row in table_rows {
+            for row in &table_rows {
                 // SHOW TABLES returns: (database, tableName, isTemporary)
                 let table_name = row
                     .get(1)
@@ -209,13 +193,7 @@ impl SQLCatalogIndexer for DatabricksIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()
