@@ -8,8 +8,9 @@
 //! correct indexer implementation, and dispatches the indexing call. Provider-
 //! specific indexer implementations are registered in [`get_indexer`].
 
-use kyomi_core::datasource_registry::{self, DatasourceType};
+use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_core::DbPool;
+use kyomi_datasource_server::ConnectRegistry;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 use std::str::FromStr;
@@ -21,14 +22,8 @@ use tracing::{info, warn};
 struct DsConfigRow {
     datasource_type: String,
     connection_config: Value,
+    connection_type: String,
     name: String,
-}
-
-/// Row type for listing datasource configs (id + type only).
-#[derive(sqlx::FromRow)]
-struct DsConfigIdTypeRow {
-    id: String,
-    datasource_type: String,
 }
 
 /// Row type for resolving a single datasource config ID.
@@ -83,6 +78,10 @@ pub struct IndexDatasourceParams<'a> {
     /// if a background run is in flight. Scheduler and post-create spawn
     /// leave this `false` so they defer to an in-flight run.
     pub force: bool,
+    /// Connect registry for datasources that tunnel through a Connect binary.
+    /// `None` is fine for callers that don't have a Connect registry (e.g.
+    /// the scheduler) — Connect datasources will be skipped with an error.
+    pub connect_registry: Option<&'a ConnectRegistry>,
 }
 
 /// How long a just-started indexing run blocks subsequent runs before
@@ -117,11 +116,13 @@ impl CatalogIndexingService {
             credentials,
             max_tables_per_dataset,
             force,
+            connect_registry,
         } = params;
         // Load datasource config
         let ds_config = kyomi_core::db_fetch_optional!(
             db, DsConfigRow,
-            "SELECT datasource_type, connection_config, name \
+            "SELECT datasource_type, connection_config, \
+                    COALESCE(connection_type, 'direct') AS connection_type, name \
              FROM datasource_configs \
              WHERE id = $1 AND workspace_id = $2",
             &datasource_config_id,
@@ -144,9 +145,15 @@ impl CatalogIndexingService {
 
         let ds_type_str = ds_config.datasource_type;
         let connection_config = ds_config.connection_config;
+        let connection_type = ds_config.connection_type;
         let ds_name = ds_config.name;
 
-        // Parse datasource type
+        // Connect datasources use their own indexer that talks through the
+        // Connect binary's WebSocket tunnel. They don't go through the
+        // DatasourceType / SQLCatalogIndexer dispatch.
+        let is_connect = connection_type == "connect";
+
+        // Parse datasource type (still needed for logging and non-connect dispatch)
         let ds_type = match DatasourceType::from_str(&ds_type_str) {
             Ok(t) => t,
             Err(_) => {
@@ -156,13 +163,28 @@ impl CatalogIndexingService {
             }
         };
 
-        // Get the indexer for this type
-        let indexer = match get_indexer(&ds_type) {
-            Some(i) => i,
-            None => {
-                return CatalogIndexResult::skipped(&format!(
-                    "No catalog indexer available for datasource type '{ds_type_str}'"
-                ));
+        // Build the indexer: Connect datasources get ConnectIndexer, others
+        // get the standard per-type indexer.
+        let indexer: Box<dyn CatalogIndexer> = if is_connect {
+            match connect_registry {
+                Some(registry) => {
+                    Box::new(indexers::ConnectIndexer::new(registry.clone()))
+                }
+                None => {
+                    return CatalogIndexResult::skipped(
+                        "Connect datasource skipped — no Connect registry available \
+                         (Connect binary may not be running)",
+                    );
+                }
+            }
+        } else {
+            match get_indexer(&ds_type) {
+                Some(i) => i,
+                None => {
+                    return CatalogIndexResult::skipped(&format!(
+                        "No catalog indexer available for datasource type '{ds_type_str}'"
+                    ));
+                }
             }
         };
 
@@ -232,73 +254,19 @@ impl CatalogIndexingService {
             "starting catalog indexing"
         );
 
-        indexer
+        let result = indexer
             .index_catalog(&ctx, db, embedding, user_email, credentials, max_tables_per_dataset)
-            .await
-    }
-
-    /// Index all datasources in a workspace.
-    ///
-    /// Iterates over all datasource configs for the workspace and indexes
-    /// each one that has a registered indexer.
-    pub async fn index_workspace(
-        db: &DbPool,
-        encryption_key: std::sync::Arc<[u8; 32]>,
-        embedding: &EmbeddingService,
-        workspace_id: &str,
-        user_email: Option<&str>,
-        credentials: Option<&Value>,
-        max_tables_per_dataset: Option<usize>,
-    ) -> Vec<CatalogIndexResult> {
-        let ds_configs = kyomi_core::db_fetch_all!(
-            db, DsConfigIdTypeRow,
-            "SELECT id, datasource_type FROM datasource_configs WHERE workspace_id = $1",
-            &workspace_id
-        );
-
-        let ds_configs = match ds_configs {
-            Ok(rows) => rows,
-            Err(e) => {
-                return vec![CatalogIndexResult::error(&format!(
-                    "Failed to list workspace datasources: {e}"
-                ))];
-            }
-        };
-
-        let mut results = Vec::new();
-
-        for row in &ds_configs {
-            let config_id = &row.id;
-            let ds_type_str = &row.datasource_type;
-
-            // Skip unsupported types
-            if !datasource_registry::is_supported_type(ds_type_str) {
-                warn!(
-                    workspace_id,
-                    datasource_config_id = %config_id,
-                    datasource_type = %ds_type_str,
-                    "skipping unsupported datasource type"
-                );
-                continue;
-            }
-
-            let result = Self::index_datasource(IndexDatasourceParams {
-                db,
-                encryption_key: encryption_key.clone(),
-                embedding,
-                workspace_id,
-                datasource_config_id: config_id,
-                user_email,
-                credentials,
-                max_tables_per_dataset,
-                force: false,
-            })
             .await;
 
-            results.push(result);
+        // Populate embeddings after successful indexing so the AI agent can
+        // search catalog data. This runs for all callers (scheduler, manual
+        // refresh, post-create) — a single code path.
+        if result.status == "completed" && result.tables_indexed > 0 {
+            populate_embeddings_after_indexing(db, embedding, workspace_id, datasource_config_id)
+                .await;
         }
 
-        results
+        result
     }
 
     /// Check if a datasource can be refreshed (respects 24hr rate limit).
@@ -343,6 +311,7 @@ impl CatalogIndexingService {
         embedding: kyomi_embed::LazyEmbedding,
         workspace_id: String,
         datasource_id: String,
+        connect_registry: Option<ConnectRegistry>,
     ) {
         tokio::spawn(async move {
             // Resolve workspace owner email so the third-tier credential
@@ -374,6 +343,7 @@ impl CatalogIndexingService {
                 credentials: None,
                 max_tables_per_dataset: None,
                 force: false,
+                connect_registry: connect_registry.as_ref(),
             })
             .await;
 
@@ -437,10 +407,11 @@ impl CatalogIndexingService {
                 embedding: embed,
                 workspace_id: &workspace_id,
                 datasource_config_id: &datasource_id,
-                user_email: None,         // shared credentials
-                credentials: None,        // uses connection_config
-                max_tables_per_dataset: None, // default max tables
+                user_email: None,
+                credentials: None,
+                max_tables_per_dataset: None,
                 force: false,
+                connect_registry: None,
             })
             .await;
 
@@ -477,6 +448,52 @@ impl CatalogIndexingService {
             Some(rows[0].id.clone())
         } else {
             None // ambiguous or none found
+        }
+    }
+}
+
+/// Generate embeddings for freshly indexed catalog data.
+///
+/// Failures are logged as warnings — they never fail the indexing response.
+async fn populate_embeddings_after_indexing(
+    db: &DbPool,
+    embedding: &EmbeddingService,
+    workspace_id: &str,
+    datasource_config_id: &str,
+) {
+    match kyomi_knowledge::populate::populate_table_embeddings(
+        db,
+        embedding,
+        workspace_id,
+        datasource_config_id,
+    )
+    .await
+    {
+        Ok(table_count) => {
+            match kyomi_knowledge::populate::populate_column_embeddings(
+                db,
+                embedding,
+                workspace_id,
+                datasource_config_id,
+            )
+            .await
+            {
+                Ok(col_count) => {
+                    info!(
+                        workspace_id,
+                        datasource_config_id,
+                        tables = table_count,
+                        columns = col_count,
+                        "Embeddings populated after catalog indexing"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Column embedding population failed, continuing");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "Table embedding population failed, continuing");
         }
     }
 }

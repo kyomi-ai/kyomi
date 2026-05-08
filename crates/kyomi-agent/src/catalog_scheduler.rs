@@ -466,6 +466,7 @@ impl CatalogRefreshScheduler {
                 credentials: indexing_creds.as_ref(),
                 max_tables_per_dataset: None,
                 force: false,
+                connect_registry: None,
             },
         )
         .await;
@@ -511,78 +512,7 @@ impl CatalogRefreshScheduler {
             }
         }
 
-        // Populate graph with the freshly indexed catalog data
-        self.populate_embeddings_for_datasource(workspace_id, datasource_config_id, datasource_name)
-            .await;
-
         RefreshResult::Refreshed
-    }
-
-    /// Fire-and-forget graph population for a datasource after catalog indexing.
-    ///
-    /// Connects to the workspace graph and populates table/column nodes from
-    /// the freshly cached catalog data in PostgreSQL. Failures are logged as
-    /// warnings -- they never fail the indexing operation.
-    async fn populate_embeddings_for_datasource(
-        &self,
-        workspace_id: &str,
-        datasource_config_id: &str,
-        datasource_name: &str,
-    ) {
-        let embed = match self.embedding.wait_ready().await {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(
-                    workspace_id,
-                    datasource = datasource_name,
-                    error = %e,
-                    "Embedding service not available, skipping embedding population"
-                );
-                return;
-            }
-        };
-
-        match kyomi_knowledge::populate::populate_table_embeddings(
-            &self.db,
-            embed,
-            workspace_id,
-            datasource_config_id,
-        )
-        .await
-        {
-            Ok(table_count) => {
-                match kyomi_knowledge::populate::populate_column_embeddings(
-                    &self.db,
-                    embed,
-                    workspace_id,
-                    datasource_config_id,
-                )
-                .await
-                {
-                    Ok(col_count) => {
-                        info!(
-                            workspace_id,
-                            datasource = datasource_name,
-                            tables = table_count,
-                            columns = col_count,
-                            "Embeddings populated for datasource after catalog refresh"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            "Column embedding population failed, continuing"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Table embedding population failed, continuing"
-                );
-            }
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -706,13 +636,37 @@ impl CatalogRefreshScheduler {
             _ => {}
         }
 
-        // Populate graph for the public dataset workspace
-        self.populate_embeddings_for_datasource(
-            kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID,
-            "bigquery-public-indexer",
-            "BigQuery Public Datasets",
-        )
-        .await;
+        // Public dataset indexing doesn't go through `index_datasource`, so
+        // populate embeddings explicitly for this path.
+        if result.tables_indexed > 0 {
+            let ws_id = kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID;
+            match kyomi_knowledge::populate::populate_table_embeddings(
+                &self.db,
+                embedding,
+                ws_id,
+                "bigquery-public-indexer",
+            )
+            .await
+            {
+                Ok(table_count) => {
+                    if let Err(e) = kyomi_knowledge::populate::populate_column_embeddings(
+                        &self.db,
+                        embedding,
+                        ws_id,
+                        "bigquery-public-indexer",
+                    )
+                    .await
+                    {
+                        warn!(error = %e, "Public dataset column embedding population failed");
+                    } else {
+                        info!(tables = table_count, "Public dataset embeddings populated");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Public dataset table embedding population failed");
+                }
+            }
+        }
     }
 
     /// Find a BigQuery datasource with service account auth and exchange for an access token.

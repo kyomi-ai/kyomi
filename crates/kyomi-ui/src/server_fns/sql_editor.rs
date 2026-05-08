@@ -633,12 +633,12 @@ pub async fn search_catalog(
 
 /// Trigger a manual catalog refresh for a datasource.
 ///
-/// Only workspace admins can trigger refreshes. Delegates to the shared
-/// catalog refresh service in [`super::catalog_refresh`] which handles all
-/// datasource types including BigQuery REST API indexing.
+/// Only workspace admins can trigger refreshes. Routes through the shared
+/// `CatalogIndexingService::index_datasource()` — the single catalog
+/// indexing pipeline used by all callers (manual refresh, scheduler,
+/// post-create spawn).
 ///
-/// Returns the status message from the catalog refresh pipeline on success
-/// (e.g. "Catalog refreshed: 12 tables indexed" or "Already running").
+/// Returns the status message on success (e.g. "12 tables indexed, 0 archived").
 #[server(prefix = "/leptos-api")]
 pub async fn refresh_catalog(
     datasource_slug: String,
@@ -667,11 +667,6 @@ pub async fn refresh_catalog(
     )
     .await
     .into_sfn()?;
-
-    // (The old "sample datasources cannot be refreshed manually" gate
-    // was valid when samples lived in a shared sentinel workspace. Samples
-    // are now indexed into the user's workspace by the generic per-workspace
-    // indexer, so the normal refresh path works for them too.)
 
     let encryption_key = ac.encryption_key()?;
 
@@ -711,9 +706,6 @@ pub async fn refresh_catalog(
         .await;
     }
 
-    let user_context =
-        super::datasources::build_user_context(&ac.ctx, &ac.auth).await?;
-
     let embedding = ac
         .ctx
         .embedding
@@ -721,27 +713,45 @@ pub async fn refresh_catalog(
         .await
         .into_sfn()?;
 
-    let params = super::catalog_refresh::CatalogRefreshParams {
-        db: ac.db(),
-        embedding,
-        encryption_key: &encryption_key,
-        datasource,
-        workspace_id: &ac.ws_id,
-        user_id: &ac.auth.user_id,
-        force: false,
-        connect_registry: ac.ctx.connect_registry.as_ref(),
-        user_context,
-        credentials,
-    };
+    let result = kyomi_agent::catalog::indexing_service::CatalogIndexingService::index_datasource(
+        kyomi_agent::catalog::indexing_service::IndexDatasourceParams {
+            db: ac.db(),
+            encryption_key,
+            embedding,
+            workspace_id: &ac.ws_id,
+            datasource_config_id: &datasource.id,
+            user_email: Some(&ac.auth.email),
+            credentials: Some(&credentials),
+            max_tables_per_dataset: None,
+            force: true,
+            connect_registry: ac.ctx.connect_registry.as_ref(),
+        },
+    )
+    .await;
 
-    let result = super::catalog_refresh::execute_catalog_refresh(params)
-        .await
-        .map_err(|e: kyomi_core::Error| ServerFnError::new(e.to_string()))?;
-
-    if result.status == "error" {
-        Err(ServerFnError::new(result.message))
-    } else {
-        Ok(result.message)
+    match result.status.as_str() {
+        "error" => {
+            let msg = result
+                .errors
+                .as_ref()
+                .and_then(|e| e.first())
+                .cloned()
+                .unwrap_or_else(|| "Catalog refresh failed".into());
+            Err(ServerFnError::new(msg))
+        }
+        "skipped" => {
+            let msg = result
+                .errors
+                .as_ref()
+                .and_then(|e| e.first())
+                .cloned()
+                .unwrap_or_else(|| "Catalog refresh skipped".into());
+            Ok(msg)
+        }
+        _ => Ok(format!(
+            "Catalog refreshed successfully. {} tables indexed, {} archived.",
+            result.tables_indexed, result.tables_archived
+        )),
     }
 }
 
