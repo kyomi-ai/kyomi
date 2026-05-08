@@ -205,6 +205,7 @@ pub async fn create_sample_datasource() -> Result<(), ServerFnError> {
             ac.ctx.embedding.clone(),
             ac.ws_id.clone(),
             ds.id.clone(),
+            ac.ctx.connect_registry.clone(),
         );
     } else {
         tracing::warn!(

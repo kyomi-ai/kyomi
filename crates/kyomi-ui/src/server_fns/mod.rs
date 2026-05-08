@@ -16,8 +16,6 @@ pub mod ai;
 pub mod analytics;
 pub mod auth;
 pub mod billing;
-#[cfg(feature = "ssr")]
-pub mod catalog_refresh;
 pub mod chat;
 pub mod collections;
 pub mod connect;
