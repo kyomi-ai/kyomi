@@ -10,11 +10,11 @@
 use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_core::Result;
-use kyomi_datasource_server::{DatasourceProvider, QueryStatus};
+use kyomi_datasource_server::DatasourceProvider;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 
-use super::{extract_string_column, sql_escape};
+use super::{extract_rows_from_batch, extract_string_column, sql_escape};
 use crate::catalog::traits::{
     index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
 };
@@ -122,13 +122,7 @@ impl SQLCatalogIndexer for ClickHouseIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()
@@ -162,13 +156,7 @@ impl SQLCatalogIndexer for ClickHouseIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()

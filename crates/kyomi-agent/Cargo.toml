@@ -28,6 +28,7 @@ web-push-native = { workspace = true }
 http = "1"
 regex = "1"
 serde_yaml = "0.9"
+arrow-array = { workspace = true }
 statrs = { workspace = true }
 rand = { workspace = true }
 

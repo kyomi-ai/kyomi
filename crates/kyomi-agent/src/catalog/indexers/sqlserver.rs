@@ -11,11 +11,11 @@
 use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_core::Result;
-use kyomi_datasource_server::{DatasourceProvider, QueryStatus};
+use kyomi_datasource_server::DatasourceProvider;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 
-use super::{is_tsql_system_schema, sql_escape, TSQL_SYSTEM_SCHEMAS};
+use super::{extract_rows_from_batch, is_tsql_system_schema, sql_escape, TSQL_SYSTEM_SCHEMAS};
 use crate::catalog::traits::{
     index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
 };
@@ -83,13 +83,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()
@@ -126,13 +120,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()
@@ -169,13 +157,7 @@ impl SQLCatalogIndexer for SqlServerIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()

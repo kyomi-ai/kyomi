@@ -11,11 +11,11 @@
 use async_trait::async_trait;
 use kyomi_core::datasource_registry::DatasourceType;
 use kyomi_core::Result;
-use kyomi_datasource_server::{DatasourceProvider, QueryStatus};
+use kyomi_datasource_server::DatasourceProvider;
 use kyomi_embed::EmbeddingService;
 use serde_json::Value;
 
-use super::sql_escape;
+use super::{extract_rows_from_batch, sql_escape};
 use crate::catalog::traits::{
     index_catalog_sql, CatalogIndexer, SQLCatalogIndexer,
 };
@@ -94,14 +94,8 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
             .execute_query("SHOW DATABASES", None, None, false, None)
             .await?;
 
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
-
         // SHOW DATABASES returns: (created_on, name, is_default, is_current, ...)
+        let rows = extract_rows_from_batch(&result);
         let mut databases: Vec<String> = rows
             .iter()
             .filter_map(|row| {
@@ -145,13 +139,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()
@@ -200,13 +188,7 @@ impl SQLCatalogIndexer for SnowflakeIndexer {
         );
 
         let result = provider.execute_query(&sql, None, None, false, None).await?;
-
-        if result.status != QueryStatus::Success {
-            return Ok(Vec::new());
-        }
-        let Some(rows) = &result.rows else {
-            return Ok(Vec::new());
-        };
+        let rows = extract_rows_from_batch(&result);
 
         Ok(rows
             .iter()

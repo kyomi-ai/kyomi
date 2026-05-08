@@ -55,6 +55,43 @@ pub fn extract_string_column(result: &QueryResult, col_index: usize) -> Vec<Stri
     )
 }
 
+/// Extract all rows from a query result as a Vec of JSON value rows.
+///
+/// Reads from `record_batch` (the Arrow path) rather than `rows`, which is
+/// always `None` since kyomi-datasource v1.2. Returns an empty Vec when no
+/// batch is present. String and LargeString columns are converted to
+/// `Value::String`; null cells become `Value::Null`.
+pub fn extract_rows_from_batch(result: &QueryResult) -> Vec<Vec<serde_json::Value>> {
+    let Some(batch) = result.record_batch.as_ref() else {
+        return Vec::new();
+    };
+    let num_rows = batch.num_rows();
+    let num_cols = batch.num_columns();
+    let mut rows = Vec::with_capacity(num_rows);
+    for row_idx in 0..num_rows {
+        let mut row = Vec::with_capacity(num_cols);
+        for col_idx in 0..num_cols {
+            let col = batch.column(col_idx);
+            let val = if col.is_null(row_idx) {
+                serde_json::Value::Null
+            } else if let Some(arr) =
+                col.as_any().downcast_ref::<arrow_array::StringArray>()
+            {
+                serde_json::Value::String(arr.value(row_idx).to_string())
+            } else if let Some(arr) =
+                col.as_any().downcast_ref::<arrow_array::LargeStringArray>()
+            {
+                serde_json::Value::String(arr.value(row_idx).to_string())
+            } else {
+                serde_json::Value::Null
+            };
+            row.push(val);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
 /// Escape single quotes in SQL string literals.
 ///
 /// Replaces `'` with `''` (SQL standard escaping). Used for interpolating
