@@ -139,9 +139,9 @@ pub fn ConnectSetupPage() -> impl IntoView {
     let (new_type, set_new_type) = signal("postgres".to_string());
     let (show_slug, set_show_slug) = signal(false);
     let (new_slug, set_new_slug) = signal(String::new());
-    let (creating, set_creating) = signal(false);
 
-    // Token generation in progress for a specific datasource ID
+    // Token generation in progress for a specific datasource ID — used to show
+    // the per-row spinner while the rotate action is pending.
     let (generating_token_for, set_generating_token_for) = signal(Option::<String>::None);
 
     // ── Fetch Connect datasources on mount ──────────────────────────────
@@ -165,6 +165,8 @@ pub fn ConnectSetupPage() -> impl IntoView {
     });
 
     // ── Deliver token to CLI callback ───────────────────────────────────
+    // Uses JsFuture + web_sys::window().fetch() + clipboard — all !Send on
+    // wasm32. Must remain spawn_local; try_set guards all deferred writes.
     let deliver_token = move |token_value: String| {
         if !has_callback.get_untracked() {
             return;
@@ -204,38 +206,104 @@ pub fn ConnectSetupPage() -> impl IntoView {
         });
     };
 
-    // ── Select existing datasource → rotate token ───────────────────────
-    let on_select_datasource = move |ds_id: String| {
-        set_generating_token_for.set(Some(ds_id.clone()));
-        set_error.set(None);
+    // ── Rotate token Action (select existing datasource) ────────────────
+    // Returns (ds_id, new_token) so the Effect can clear the per-row spinner
+    // using the same dispatch-time ds_id rather than reading a live signal.
+    let rotate_action =
+        Action::new(move |ds_id: &String| {
+            let ds_id = ds_id.clone();
+            async move {
+                rotate_connect_token(ds_id.clone())
+                    .await
+                    .map(|tok| (ds_id, tok))
+            }
+        });
 
-        let deliver = deliver_token;
-        leptos::task::spawn_local(async move {
-            match rotate_connect_token(ds_id.clone()).await {
-                Ok(new_token) => {
-                    set_token.try_set(Some(new_token.clone()));
-                    set_step.try_set(SetupStep::Success);
-                    deliver(new_token);
+    Effect::new(move |_| {
+        if let Some(result) = rotate_action.value().get() {
+            match result {
+                Ok((ds_id, new_token)) => {
+                    let _ = ds_id; // threaded back for identity; cleared by generating_token_for below
+                    set_generating_token_for.set(None);
+                    set_token.set(Some(new_token.clone()));
+                    set_step.set(SetupStep::Success);
+                    // deliver_token sets delivery_status synchronously, then
+                    // uses spawn_local internally for the !Send browser fetch.
+                    deliver_token(new_token);
                 }
                 Err(e) => {
-                    set_error.try_set(Some(format!("Failed to generate token: {e}")));
+                    set_generating_token_for.set(None);
+                    set_error.set(Some(format!("Failed to generate token: {e}")));
                 }
             }
-            set_generating_token_for.try_set(None);
-        });
+        }
+    });
+
+    let on_select_datasource = move |ds_id: String| {
+        if rotate_action.pending().get_untracked() {
+            return;
+        }
+        set_generating_token_for.set(Some(ds_id.clone()));
+        set_error.set(None);
+        rotate_action.dispatch(ds_id);
     };
 
-    // ── Create new datasource ───────────────────────────────────────────
+    // ── Create datasource Action ────────────────────────────────────────
+    // Input: (name, slug_opt, ds_type). Returns (submitted_name, server_result)
+    // so the Effect can use the dispatch-time name for slug conflict handling
+    // without reading the live signal (which the user may have edited).
+    let create_action = Action::new(
+        move |(name, slug, ds_type): &(String, Option<String>, String)| {
+            let name = name.clone();
+            let slug = slug.clone();
+            let ds_type = ds_type.clone();
+            async move {
+                let result = create_connect_datasource(name.clone(), slug, ds_type).await;
+                (name, result)
+            }
+        },
+    );
+
+    Effect::new(move |_| {
+        if let Some((submitted_name, result)) = create_action.value().get() {
+            match result {
+                Ok(resp) => {
+                    let tok = resp.connect_token;
+                    set_token.set(Some(tok.clone()));
+                    set_step.set(SetupStep::Success);
+                    // deliver_token sets delivery_status synchronously, then
+                    // uses spawn_local internally for the !Send browser fetch.
+                    deliver_token(tok);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    // 409 conflict — show slug field so user can customize.
+                    if msg.contains("already exists")
+                        || msg.contains("duplicate")
+                        || msg.contains("conflict")
+                    {
+                        set_show_slug.set(true);
+                        if new_slug.try_get_untracked().map(|s| s.is_empty()).unwrap_or(false) {
+                            set_new_slug.set(generate_slug(&submitted_name));
+                        }
+                    }
+                    set_error.set(Some(msg));
+                }
+            }
+        }
+    });
+
     let on_create_submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
+
+        if create_action.pending().get_untracked() {
+            return;
+        }
 
         let name = new_name.get_untracked().trim().to_string();
         if name.is_empty() {
             return;
         }
-
-        set_creating.set(true);
-        set_error.set(None);
 
         let slug = if show_slug.get_untracked() && !new_slug.get_untracked().is_empty() {
             Some(new_slug.get_untracked())
@@ -243,33 +311,9 @@ pub fn ConnectSetupPage() -> impl IntoView {
             None
         };
         let ds_type = new_type.get_untracked();
-        let deliver = deliver_token;
 
-        leptos::task::spawn_local(async move {
-            match create_connect_datasource(name.clone(), slug, ds_type).await {
-                Ok(result) => {
-                    let tok = result.connect_token;
-                    set_token.try_set(Some(tok.clone()));
-                    set_step.try_set(SetupStep::Success);
-                    deliver(tok);
-                }
-                Err(e) => {
-                    let msg = e.to_string();
-                    // 409 conflict — show slug field so user can customize
-                    if msg.contains("already exists")
-                        || msg.contains("duplicate")
-                        || msg.contains("conflict")
-                    {
-                        set_show_slug.try_set(true);
-                        if new_slug.try_get_untracked().map(|s| s.is_empty()).unwrap_or(false) {
-                            set_new_slug.try_set(generate_slug(&name));
-                        }
-                    }
-                    set_error.try_set(Some(msg));
-                }
-            }
-            set_creating.try_set(false);
-        });
+        set_error.set(None);
+        create_action.dispatch((name, slug, ds_type));
     };
 
     view! {
@@ -354,7 +398,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
                                     show_slug=show_slug
                                     new_type=new_type
                                     set_new_type=set_new_type
-                                    creating=creating
+                                    creating=Signal::from(create_action.pending())
                                     on_submit=on_create_submit
                                     on_back=move || {
                                         set_error.set(None);
@@ -535,7 +579,7 @@ fn CreateStep(
     show_slug: ReadSignal<bool>,
     new_type: ReadSignal<String>,
     set_new_type: WriteSignal<String>,
-    creating: ReadSignal<bool>,
+    creating: Signal<bool>,
     on_submit: impl Fn(leptos::ev::SubmitEvent) + Clone + Send + Sync + 'static,
     on_back: impl Fn() + Clone + Send + Sync + 'static,
 ) -> impl IntoView {

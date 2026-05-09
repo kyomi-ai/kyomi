@@ -45,11 +45,6 @@ pub fn ConnectStatusPanel(
     let (status, set_status) = signal::<Option<ConnectStatusResponse>>(None);
     let (loading, set_loading) = signal(true);
 
-    // Rotate / disconnect in-flight flags — disable the action buttons while
-    // a server_fn is pending.
-    let (rotating, set_rotating) = signal(false);
-    let (disconnecting, set_disconnecting) = signal(false);
-
     // Confirm dialog open state (one per action).
     let (show_rotate_confirm, set_show_rotate_confirm) = signal(false);
     let (show_disconnect_confirm, set_show_disconnect_confirm) = signal(false);
@@ -71,6 +66,9 @@ pub fn ConnectStatusPanel(
     let ds_id = datasource_id.clone();
     let ds_type_for_cmds = datasource_type.clone();
 
+    // fetch_status is a plain Fn() that spawns a status poll. Used by the
+    // polling interval (WASM only) and by the rotate/disconnect Effects.
+    // All deferred signal writes inside use try_set so navigation-away is safe.
     let fetch_status = {
         let ds_id = ds_id.clone();
         move || {
@@ -91,10 +89,61 @@ pub fn ConnectStatusPanel(
         }
     };
 
+    // ── Rotate token Action ───────────────────────────────────────────────
+    let rotate_action = Action::new(move |ds_id: &String| {
+        let ds_id = ds_id.clone();
+        async move { rotate_connect_token(ds_id).await }
+    });
+
+    {
+        let fetch_status = fetch_status.clone();
+        Effect::new(move |_| {
+            if let Some(result) = rotate_action.value().get() {
+                match result {
+                    Ok(token) => {
+                        set_new_token.set(Some(token));
+                        fetch_status();
+                    }
+                    Err(err) => {
+                        set_action_error.set(Some(format!("Failed to rotate token: {err}")));
+                    }
+                }
+            }
+        });
+    }
+
+    // ── Disconnect Action ─────────────────────────────────────────────────
+    let disconnect_action = Action::new(move |ds_id: &String| {
+        let ds_id = ds_id.clone();
+        async move { disconnect_connect_datasource(ds_id).await }
+    });
+
+    {
+        let fetch_status = fetch_status.clone();
+        Effect::new(move |_| {
+            if let Some(result) = disconnect_action.value().get() {
+                match result {
+                    Ok(()) => {
+                        // Drop any just-rotated token — after disconnect the
+                        // agent must be redeployed with a brand new one.
+                        set_new_token.set(None);
+                        fetch_status();
+                    }
+                    Err(err) => {
+                        set_action_error.set(Some(format!("Failed to disconnect: {err}")));
+                    }
+                }
+            }
+        });
+    }
+
     // ── Initial fetch + polling interval ─────────────────────────────────
     // The interval handle lives in a StoredValue so `on_cleanup` can drop it.
     // We deliberately do NOT use `.forget()` — that would leak the closure
     // and the timer would keep firing after the modal closed.
+    //
+    // fetch_status is also captured by the rotate/disconnect Effects above;
+    // no non-WASM suppressor needed since it is used unconditionally.
     #[cfg(target_arch = "wasm32")]
     {
         use send_wrapper::SendWrapper;
@@ -117,13 +166,6 @@ pub fn ConnectStatusPanel(
         });
     }
 
-    // On SSR the server_fn can't be invoked from the render pass — leave the
-    // loading state and let the WASM hydrate take over.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = fetch_status;
-    }
-
     // ── Rotate token ─────────────────────────────────────────────────────
     let on_rotate_click = move |_| {
         set_action_error.set(None);
@@ -136,26 +178,13 @@ pub fn ConnectStatusPanel(
 
     let on_rotate_confirm = {
         let ds_id = ds_id.clone();
-        let fetch_status = fetch_status.clone();
         Callback::new(move |()| {
+            if rotate_action.pending().get_untracked() {
+                return;
+            }
             set_show_rotate_confirm.set(false);
-            set_rotating.set(true);
             set_action_error.set(None);
-
-            let ds_id = ds_id.clone();
-            let fetch_status = fetch_status.clone();
-            leptos::task::spawn_local(async move {
-                match rotate_connect_token(ds_id).await {
-                    Ok(token) => {
-                        set_new_token.try_set(Some(token));
-                        fetch_status();
-                    }
-                    Err(err) => {
-                        set_action_error.try_set(Some(format!("Failed to rotate token: {err}")));
-                    }
-                }
-                set_rotating.try_set(false);
-            });
+            rotate_action.dispatch(ds_id.clone());
         })
     };
 
@@ -171,28 +200,13 @@ pub fn ConnectStatusPanel(
 
     let on_disconnect_confirm = {
         let ds_id = ds_id.clone();
-        let fetch_status = fetch_status.clone();
         Callback::new(move |()| {
+            if disconnect_action.pending().get_untracked() {
+                return;
+            }
             set_show_disconnect_confirm.set(false);
-            set_disconnecting.set(true);
             set_action_error.set(None);
-
-            let ds_id = ds_id.clone();
-            let fetch_status = fetch_status.clone();
-            leptos::task::spawn_local(async move {
-                match disconnect_connect_datasource(ds_id).await {
-                    Ok(()) => {
-                        // Drop any just-rotated token — after disconnect the
-                        // agent must be redeployed with a brand new one.
-                        set_new_token.try_set(None);
-                        fetch_status();
-                    }
-                    Err(err) => {
-                        set_action_error.try_set(Some(format!("Failed to disconnect: {err}")));
-                    }
-                }
-                set_disconnecting.try_set(false);
-            });
+            disconnect_action.dispatch(ds_id.clone());
         })
     };
 
@@ -314,17 +328,17 @@ pub fn ConnectStatusPanel(
             <div class="flex gap-3">
                 <Button
                     variant=ButtonVariant::Outline
-                    disabled=rotating
+                    disabled=Signal::derive(move || rotate_action.pending().get())
                     on:click=on_rotate_click
                 >
-                    {move || if rotating.get() { "Rotating..." } else { "Rotate Token" }}
+                    {move || if rotate_action.pending().get() { "Rotating..." } else { "Rotate Token" }}
                 </Button>
                 <Button
                     variant=ButtonVariant::Destructive
-                    disabled=disconnecting
+                    disabled=Signal::derive(move || disconnect_action.pending().get())
                     on:click=on_disconnect_click
                 >
-                    {move || if disconnecting.get() { "Disconnecting..." } else { "Disconnect" }}
+                    {move || if disconnect_action.pending().get() { "Disconnecting..." } else { "Disconnect" }}
                 </Button>
             </div>
             <p class="text-xs text-muted-foreground">
