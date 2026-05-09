@@ -186,6 +186,7 @@ pub fn register_server_functions() {
     register_explicit::<TestDatasourceStandalone>();
     register_explicit::<TestExistingDatasource>();
     register_explicit::<DiscoverDatasourceResources>();
+    register_explicit::<GetCatalogStats>();
 
     use server_fns::billing::*;
     register_explicit::<GetSubscriptionInfo>();
