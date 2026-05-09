@@ -676,6 +676,14 @@ pub fn DatasourceModal(
     // BigQuery-specific: whether to include public datasets in catalog indexing.
     let (bq_include_public, set_bq_include_public) = signal(false);
 
+    // ── Catalog tab state (create mode) ──────────────────────────────────
+    // These parallel the edit-mode signals above but are written only during
+    // create mode (discovery already ran on the Connection tab).  They are
+    // included in `build_connection_config` only when `is_create_mode` is true.
+    let (create_catalog_selected, set_create_catalog_selected) = signal::<Vec<String>>(vec![]);
+    let (create_catalog_text, set_create_catalog_text) = signal::<String>(String::new());
+    let (create_include_public_datasets, set_create_include_public_datasets) = signal(false);
+
     // ── Reset form ───────────────────────────────────────────────────────
     let reset_form = move || {
         set_name.set(String::new());
@@ -730,6 +738,9 @@ pub fn DatasourceModal(
         set_creating_sample.set(false);
         set_catalog_selected.set(vec![]);
         set_bq_include_public.set(false);
+        set_create_catalog_selected.set(vec![]);
+        set_create_catalog_text.set(String::new());
+        set_create_include_public_datasets.set(false);
     };
 
     // ── Load settings when switching to edit mode ─────────────────────────
@@ -1026,18 +1037,47 @@ pub fn DatasourceModal(
             map.insert("shared_credentials".to_string(), serde_json::json!(true));
         }
 
-        // Catalog scope — only written in edit mode (non-empty selection).
-        // In create mode these signals are always empty (reset_form clears them).
-        let selected = catalog_selected.get_untracked();
-        if !selected.is_empty() {
+        // Catalog scope — edit mode vs create mode are kept separate so the two
+        // sets of signals never conflict.
+        let in_create_mode = datasource_id.get_untracked().is_none();
+        if in_create_mode {
+            // Create-mode catalog scope: prefer checkbox selections, fall back to
+            // the comma-separated text input.
             let key = catalog_config_key_for_type(&t);
-            map.insert(key.to_string(), serde_json::json!(selected));
-        }
-        if bq_include_public.get_untracked() {
-            map.insert(
-                "include_public_datasets".to_string(),
-                serde_json::json!(true),
-            );
+            let selected = create_catalog_selected.get_untracked();
+            if !selected.is_empty() {
+                map.insert(key.to_string(), serde_json::json!(selected));
+            } else {
+                let text = create_catalog_text.get_untracked();
+                let items: Vec<String> = text
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !items.is_empty() {
+                    map.insert(key.to_string(), serde_json::json!(items));
+                }
+            }
+            if create_include_public_datasets.get_untracked() {
+                map.insert(
+                    "include_public_datasets".to_string(),
+                    serde_json::json!(true),
+                );
+            }
+        } else {
+            // Edit-mode catalog scope: written only when a non-empty selection
+            // exists (the picker in EditModeCatalogTab manages this signal).
+            let selected = catalog_selected.get_untracked();
+            if !selected.is_empty() {
+                let key = catalog_config_key_for_type(&t);
+                map.insert(key.to_string(), serde_json::json!(selected));
+            }
+            if bq_include_public.get_untracked() {
+                map.insert(
+                    "include_public_datasets".to_string(),
+                    serde_json::json!(true),
+                );
+            }
         }
 
         serde_json::Value::Object(map)
@@ -1754,6 +1794,11 @@ pub fn DatasourceModal(
                                                     set_discovered_schemas.set(vec![]);
                                                     set_discovered_warehouses.set(vec![]);
                                                     set_discovered_catalogs.set(vec![]);
+                                                    // Invalidate create-mode catalog selections
+                                                    // too — discovered items are for the old type.
+                                                    set_create_catalog_selected.set(vec![]);
+                                                    set_create_catalog_text.set(String::new());
+                                                    set_create_include_public_datasets.set(false);
                                                 }
                                             />
                                         </div>
@@ -2008,23 +2053,18 @@ pub fn DatasourceModal(
 
                             // ── CATALOG TAB (create mode only) ──
                             <Show when=move || active_tab.get() == "catalog" && is_create_mode.get()>
-                                <div class="space-y-4">
-                                    <div>
-                                        <h4 class="text-sm font-medium mb-1">"Catalog Configuration"</h4>
-                                        <p class="text-sm text-muted-foreground">
-                                            "Your datasource will be indexed automatically after creation. You can configure catalog settings in the datasource settings later."
-                                        </p>
-                                    </div>
-                                    <div class="p-4 border border-border rounded-lg bg-muted/30">
-                                        <div class="flex items-center gap-2">
-                                            <Icon icon=phosphor_leptos::CHECK attr:class="h-5 w-5 text-success-foreground"/>
-                                            <span class="text-sm font-medium">"Connection verified"</span>
-                                        </div>
-                                        <p class="text-xs text-muted-foreground mt-1">
-                                            "Click Create to add this datasource. The catalog will be indexed automatically."
-                                        </p>
-                                    </div>
-                                </div>
+                                <CreateModeCatalogPicker
+                                    datasource_type=Signal::derive(move || ds_type.get())
+                                    discovered_databases=discovered_databases
+                                    discovered_schemas=discovered_schemas
+                                    discovered_catalogs=discovered_catalogs
+                                    catalog_selected=create_catalog_selected
+                                    set_catalog_selected=set_create_catalog_selected
+                                    catalog_text=create_catalog_text
+                                    set_catalog_text=set_create_catalog_text
+                                    include_public_datasets=create_include_public_datasets
+                                    set_include_public_datasets=set_create_include_public_datasets
+                                />
                             </Show>
 
                             // ── CATALOG TAB (edit mode only) ──
@@ -3359,6 +3399,217 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                     }.into_any(),
 
                     _ => view! { <div></div> }.into_any(),
+                }
+            }}
+        </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Create-Mode Catalog Picker
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the discovered items relevant to catalog scope for a given datasource
+/// type, choosing from the three discovery buckets.
+fn catalog_items_for_type<'a>(
+    ds_type: &str,
+    databases: &'a [String],
+    schemas: &'a [String],
+    catalogs: &'a [String],
+) -> &'a [String] {
+    match ds_type {
+        "postgres" | "redshift" | "sqlserver" | "synapse" => schemas,
+        "databricks" => catalogs,
+        _ => databases,
+    }
+}
+
+/// Create-mode catalog tab body.
+///
+/// The user has already run "Test & Discover" on the Connection tab, so the
+/// three discovery signal buckets are already populated.  This component:
+///
+/// * When items are available — shows a checkbox list with Select All / Clear
+///   controls so the user can narrow which schemas/databases/catalogs get
+///   indexed on first run.
+/// * When no items were discovered (BigQuery, or pre-test fallback) — shows a
+///   comma-separated text input as a manual override.
+/// * BigQuery only — shows the "Include Public Datasets" toggle.
+///
+/// Header text uses `catalog_item_label_for_type` from KYO-300 (no duplication).
+#[component]
+fn CreateModeCatalogPicker(
+    /// The datasource type string (e.g. `"bigquery"`, `"postgres"`).
+    datasource_type: Signal<String>,
+    /// Databases discovered during the Connection tab test.
+    discovered_databases: ReadSignal<Vec<String>>,
+    /// Schemas discovered during the Connection tab test.
+    discovered_schemas: ReadSignal<Vec<String>>,
+    /// Catalogs discovered during the Connection tab test.
+    discovered_catalogs: ReadSignal<Vec<String>>,
+    /// Currently selected catalog scope items.
+    catalog_selected: ReadSignal<Vec<String>>,
+    set_catalog_selected: WriteSignal<Vec<String>>,
+    /// Comma-separated text fallback (used when no items were discovered).
+    catalog_text: ReadSignal<String>,
+    set_catalog_text: WriteSignal<String>,
+    /// BigQuery only: include public datasets in catalog indexing.
+    include_public_datasets: ReadSignal<bool>,
+    set_include_public_datasets: WriteSignal<bool>,
+) -> impl IntoView {
+    // Derive the available items for the current type from the discovery
+    // signals.  Recomputed reactively on type changes.
+    let available_items = Signal::derive(move || {
+        let ds_type = datasource_type.get();
+        let dbs = discovered_databases.get();
+        let schemas = discovered_schemas.get();
+        let cats = discovered_catalogs.get();
+        // We need owned Vecs — clone from whichever bucket is relevant.
+        let items_ref = catalog_items_for_type(&ds_type, &dbs, &schemas, &cats);
+        items_ref.to_vec()
+    });
+
+    view! {
+        <div class="space-y-4">
+            // Header
+            {move || {
+                let ds_type = datasource_type.get();
+                let label = catalog_item_label_for_type(&ds_type);
+                view! {
+                    <div>
+                        <h4 class="text-sm font-medium mb-1">"Catalog Scope"</h4>
+                        <p class="text-sm text-muted-foreground">
+                            "Select which "
+                            {label}
+                            " to include in the catalog. Leave all unchecked to index everything."
+                        </p>
+                    </div>
+                }
+            }}
+
+            // BigQuery: Include Public Datasets toggle
+            <Show when=move || datasource_type.get() == "bigquery">
+                <label class="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30 cursor-pointer">
+                    <div>
+                        <span class="text-sm font-medium text-foreground block">
+                            "Include Public Datasets"
+                        </span>
+                        <span class="text-xs text-muted-foreground">
+                            "Show BigQuery public datasets in search results"
+                        </span>
+                    </div>
+                    <Switch
+                        checked=Signal::from(include_public_datasets)
+                        on_change=Callback::new(move |val: bool| {
+                            set_include_public_datasets.set(val);
+                        })
+                    />
+                </label>
+            </Show>
+
+            // Checkbox picker (when items were discovered) or text input fallback
+            {move || {
+                let items = available_items.get();
+                if items.is_empty() {
+                    // No discovery results — render text input
+                    let ds_type = datasource_type.get();
+                    let placeholder = match ds_type.as_str() {
+                        "bigquery" => "Enter project IDs, comma-separated (leave blank to index all)",
+                        "clickhouse" | "mysql" | "snowflake" => "Enter database names, comma-separated (leave blank to index all)",
+                        "databricks" => "Enter catalog names, comma-separated (leave blank to index all)",
+                        _ => "Enter schema names, comma-separated (leave blank to index all)",
+                    };
+                    view! {
+                        <div class="space-y-1.5">
+                            <input
+                                type="text"
+                                class=MODAL_INPUT_CLASS
+                                placeholder=placeholder
+                                prop:value=move || catalog_text.get()
+                                on:input=move |ev| set_catalog_text.set(event_target_value(&ev))
+                            />
+                            <p class="text-xs text-muted-foreground">
+                                "Leave blank to index all available items."
+                            </p>
+                        </div>
+                    }.into_any()
+                } else {
+                    // Discovery succeeded — checkbox list with Select All / Clear
+                    view! {
+                        <div class="space-y-2">
+                            // Select all / Clear + count
+                            <div class="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    class="text-xs text-primary hover:underline"
+                                    on:click=move |_| {
+                                        set_catalog_selected.set(available_items.get_untracked());
+                                    }
+                                >
+                                    "Select all"
+                                </button>
+                                <span class="text-xs text-muted-foreground">"·"</span>
+                                <button
+                                    type="button"
+                                    class="text-xs text-primary hover:underline"
+                                    on:click=move |_| set_catalog_selected.set(vec![])
+                                >
+                                    "Clear"
+                                </button>
+                                <span class="text-xs text-muted-foreground ml-auto">
+                                    {move || {
+                                        let sel = catalog_selected.get().len();
+                                        let total = available_items.get().len();
+                                        if sel == 0 {
+                                            "all (leave unchecked to index everything)".to_string()
+                                        } else {
+                                            format!("{sel} of {total} selected")
+                                        }
+                                    }}
+                                </span>
+                            </div>
+                            // Scrollable checkbox list
+                            <div class="border border-border rounded-md divide-y divide-border max-h-60 overflow-y-auto">
+                                <For
+                                    each=move || available_items.get()
+                                    key=|item| item.clone()
+                                    let:item
+                                >
+                                    {
+                                        let item_for_change = item.clone();
+                                        let item_for_check = item.clone();
+                                        view! {
+                                            <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/40 transition-colors">
+                                                <input
+                                                    type="checkbox"
+                                                    class="h-4 w-4 rounded border-input accent-primary"
+                                                    prop:checked=move || {
+                                                        catalog_selected.get().contains(&item_for_check)
+                                                    }
+                                                    on:change=move |ev| {
+                                                        let checked = event_target_checked(&ev);
+                                                        let val = item_for_change.clone();
+                                                        set_catalog_selected.update(|list| {
+                                                            if checked {
+                                                                if !list.contains(&val) {
+                                                                    list.push(val);
+                                                                }
+                                                            } else {
+                                                                list.retain(|i| i != &val);
+                                                            }
+                                                        });
+                                                    }
+                                                />
+                                                <span class="text-sm font-mono text-foreground">
+                                                    {item.clone()}
+                                                </span>
+                                            </label>
+                                        }
+                                    }
+                                </For>
+                            </div>
+                        </div>
+                    }.into_any()
                 }
             }}
         </div>
