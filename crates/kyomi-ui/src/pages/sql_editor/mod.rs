@@ -21,6 +21,8 @@ pub use catalog_tree::CatalogTree;
 pub use code_editor::SqlCodeEditor;
 pub use datasource_selector::{DatasourceSelection, DatasourceSelector};
 pub use execution::run_query;
+#[cfg(target_arch = "wasm32")]
+pub use execution::RunQueryContext;
 pub use query_history::QueryHistory;
 pub use results_container::ResultsContainer;
 pub use results_table::ResultsTable;
@@ -82,6 +84,94 @@ pub fn SqlEditorPage() -> impl IntoView {
 
     // ── Query running signal ─────────────────────────────────────────────
     let (query_running, set_query_running) = signal(false);
+
+    // ── Query execution Actions (WASM-only) ──────────────────────────────
+    // Actions are created here (in component scope) so their result signals
+    // and Effects are tied to this component's reactive scope — no signal
+    // access can outlive the owning scope and cause disposal panics.
+    //
+    // Both actions use `new_unsync_local` because `fetch_arrow_buffered`
+    // uses !Send browser APIs (JsFuture, web_sys) that cannot cross threads.
+    //
+    // The context is provided so `run_query` / `rerun_query` (called from
+    // callbacks and child components via context) can dispatch them.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use execution::{
+            build_rerun_action, build_run_action, QueryOutcome, RunQueryContext,
+        };
+
+        let run_action = build_run_action();
+        let rerun_action = build_rerun_action();
+
+        provide_context(RunQueryContext { run_action, rerun_action });
+
+        // Effect: consume run_action results and update tab state.
+        Effect::new(move |_| {
+            let Some(outcome) = run_action.value().get() else {
+                return;
+            };
+            let QueryOutcome { tab_id, result, history_record } = outcome;
+            match result {
+                Ok(success) => {
+                    state.try_update_tab(&tab_id, move |tab| {
+                        tab.status = QueryStatus::Success;
+                        tab.result = Some(success.query_result);
+                    });
+                    set_query_running.try_set(false);
+                    execution::save_to_history(state, history_record);
+                }
+                Err(error_msg) => {
+                    let msg = error_msg.clone();
+                    state.try_update_tab(&tab_id, move |tab| {
+                        tab.status = QueryStatus::Error;
+                        tab.error = Some(QueryError {
+                            message: msg,
+                            code: None,
+                            line: None,
+                            column: None,
+                        });
+                    });
+                    set_query_running.try_set(false);
+                    execution::save_to_history(state, history_record);
+                }
+            }
+        });
+
+        // Effect: consume rerun_action results and update tab state.
+        // `on_complete` is called inside the action itself (at dispatch time)
+        // so there is no callback to invoke here — only tab state updates.
+        Effect::new(move |_| {
+            let Some(outcome) = rerun_action.value().get() else {
+                return;
+            };
+            let QueryOutcome { tab_id, result, history_record } = outcome;
+            match result {
+                Ok(success) => {
+                    state.try_update_tab(&tab_id, move |tab| {
+                        tab.status = QueryStatus::Success;
+                        tab.error = None;
+                        tab.needs_refresh = false;
+                        tab.result = Some(success.query_result);
+                    });
+                    execution::save_to_history(state, history_record);
+                }
+                Err(error_msg) => {
+                    let msg = error_msg.clone();
+                    state.try_update_tab(&tab_id, move |tab| {
+                        tab.status = QueryStatus::Error;
+                        tab.error = Some(QueryError {
+                            message: msg,
+                            code: None,
+                            line: None,
+                            column: None,
+                        });
+                    });
+                    execution::save_to_history(state, history_record);
+                }
+            }
+        });
+    }
 
     // ── Editor ↔ Results vertical split (percentage-based) ───────────────
     let (editor_pct, _set_editor_pct) = signal(50.0_f64);
