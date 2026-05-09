@@ -782,19 +782,15 @@ pub async fn get_catalog_stats(
     let bf = kyomi_core::sql_compat::bool_false(is_pg);
 
     // Verify the datasource belongs to this workspace.
-    #[derive(sqlx::FromRow)]
-    struct ExistsRow {
-        exists_val: i32,
-    }
-    let exists = kyomi_core::db_fetch_optional!(
+    let ds_count: i64 = kyomi_core::db_fetch_scalar!(
         ac.db(),
-        ExistsRow,
-        "SELECT 1 AS exists_val FROM datasource_configs WHERE id = $1 AND workspace_id = $2",
+        i64,
+        "SELECT COUNT(*) FROM datasource_configs WHERE id = $1 AND workspace_id = $2",
         &datasource_id,
         &ac.ws_id
     )
-    .into_sfn()?;
-    if exists.is_none() {
+    .map_err(|e| ServerFnError::new(format!("Failed to verify datasource: {e}")))?;
+    if ds_count == 0 {
         return Err(ServerFnError::new("Datasource not found"));
     }
 
