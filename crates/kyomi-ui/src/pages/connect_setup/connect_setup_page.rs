@@ -261,7 +261,7 @@ pub fn ConnectSetupPage() -> impl IntoView {
                         || msg.contains("conflict")
                     {
                         set_show_slug.try_set(true);
-                        if new_slug.get_untracked().is_empty() {
+                        if new_slug.try_get_untracked().map(|s| s.is_empty()).unwrap_or(false) {
                             set_new_slug.try_set(generate_slug(&name));
                         }
                     }
@@ -676,7 +676,9 @@ fn SuccessStep(
 
     // Copy install command to clipboard
     let on_copy_install = move |_: leptos::ev::MouseEvent| {
-        let tok = token.get_untracked();
+        let Some(tok) = token.try_get_untracked() else {
+            return;
+        };
         let cmd =
             format!("curl -fsSL https://connect.kyomi.ai/install.sh | sh -s -- --token \"{tok}\"");
         leptos::task::spawn_local(async move {

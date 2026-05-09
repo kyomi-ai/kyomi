@@ -152,10 +152,11 @@ BEGINFILE {
         in_test_module = 1
     }
 
-    # Detect deferred context entry: spawn_local, Timeout, TimeoutFuture
+    # Detect deferred context entry: spawn_local, Timeout, TimeoutFuture, set_timeout
     if (code ~ /spawn_local[[:space:]]*\(/ ||
         code ~ /Timeout::new[[:space:]]*\(/ ||
-        code ~ /TimeoutFuture::new[[:space:]]*\(/) {
+        code ~ /TimeoutFuture::new[[:space:]]*\(/ ||
+        code ~ /set_timeout[[:space:]]*\(/) {
         entering_spawn = 1
     }
 
@@ -174,7 +175,7 @@ BEGINFILE {
     # Skip lines with escape hatch
     if (has_escape_hatch(raw)) next
 
-    # Rule A: bare .set() / .update() inside spawn_local / deferred context
+    # Rule A: bare signal access inside spawn_local / deferred context
     if (spawn_stack_size > 0) {
         # Match .set( but not .try_set( or .set_untracked(
         if (match(code, /\.[[:space:]]*set[[:space:]]*\(/) &&
@@ -189,6 +190,12 @@ BEGINFILE {
             code !~ /\.[[:space:]]*update_value[[:space:]]*\(/ &&
             code !~ /\.[[:space:]]*update_untracked[[:space:]]*\(/) {
             printf "%s:%d:A bare .update() inside deferred context — use .try_update() to avoid disposal panic\n",
+                FILENAME, FNR
+        }
+        # Match .get_untracked( but not .try_get_untracked(
+        if (match(code, /\.[[:space:]]*get_untracked[[:space:]]*\(/) &&
+            code !~ /\.[[:space:]]*try_get_untracked[[:space:]]*\(/) {
+            printf "%s:%d:A bare .get_untracked() inside deferred context — use .try_get_untracked() to avoid disposal panic\n",
                 FILENAME, FNR
         }
     }

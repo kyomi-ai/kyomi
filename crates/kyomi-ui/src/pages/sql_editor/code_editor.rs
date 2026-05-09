@@ -195,9 +195,13 @@ fn use_debounced_dry_run(
 
             // If the editor has selected text, validate only the selection
             // (matches React's getSelectedOrFullText() pattern).
-            let validate_sql = editor_handle
-                .get_untracked()
-                .and_then(|h| h.selected_text())
+            // Use try_get_untracked — the component may have been disposed
+            // during the 1-second debounce delay.
+            let Some(handle) = editor_handle.try_get_untracked().flatten() else {
+                return;
+            };
+            let validate_sql = handle
+                .selected_text()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or(sql_trimmed);
@@ -244,7 +248,7 @@ fn apply_dry_run_markers(
     editor_handle: RwSignal<Option<kode_leptos::EditorHandle>>,
     result: &DryRunResult,
 ) {
-    let Some(handle) = editor_handle.get_untracked() else {
+    let Some(handle) = editor_handle.try_get_untracked().flatten() else {
         return;
     };
 
