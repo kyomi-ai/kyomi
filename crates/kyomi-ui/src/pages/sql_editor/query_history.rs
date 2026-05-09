@@ -26,6 +26,35 @@ use crate::server_fns::sql_editor::{
 
 const ITEMS_PER_PAGE: u32 = 50;
 
+// ─── Action input / output types ────────────────────────────────────────────
+
+/// Input for the load-history Action.
+#[derive(Clone, Debug)]
+struct LoadHistoryInput {
+    search: Option<String>,
+    saved_only: bool,
+    offset: u32,
+    /// When true, replace the existing list; when false, append (pagination).
+    reset: bool,
+}
+
+/// Input for the toggle-saved Action.
+///
+/// Carries both the query ID and the *current* saved state so the Effect can
+/// revert to the exact pre-dispatch value on failure.
+#[derive(Clone, Debug)]
+struct ToggleSavedInput {
+    query_id: String,
+    /// The state the entry had at dispatch time (before the optimistic flip).
+    was_saved: bool,
+}
+
+/// Input for the delete-query Action.
+#[derive(Clone, Debug)]
+struct DeleteQueryInput {
+    query_id: String,
+}
+
 // ─── Main component ────────────────────────────────────────────────────────
 
 /// Query history list with infinite scroll, search, and save/delete actions.
@@ -54,19 +83,68 @@ pub fn QueryHistory(
     // Sentinel element for infinite scroll.
     let sentinel_ref = NodeRef::<leptos::html::Div>::new();
 
-    // ── Load query history ──────────────────────────────────────────────
+    // ── Load history Action ─────────────────────────────────────────────
+    // Converts the previous `spawn_local` closure to an Action so the async
+    // future is scoped to this component's reactive owner.  When the user
+    // navigates away, the Action's future is dropped along with the owner —
+    // no disposed-signal panics from the deferred writes.
+    let load_action = Action::new(|input: &LoadHistoryInput| {
+        let search_opt = input.search.clone();
+        let saved_only = input.saved_only;
+        let offset = input.offset;
+        let reset = input.reset;
+        async move {
+            let result = list_query_history(
+                search_opt,
+                Some(saved_only),
+                ITEMS_PER_PAGE,
+                offset,
+            )
+            .await;
+            (reset, result)
+        }
+    });
+
+    // Effect: apply load results to local signals.
+    Effect::new(move |_| {
+        let Some((reset, result)) = load_action.value().get() else {
+            return;
+        };
+        match result {
+            Ok(new_data) => {
+                let count = new_data.len() as u32;
+                if reset {
+                    set_entries.set(new_data);
+                    set_offset.set(count);
+                } else {
+                    set_entries.update(|list| list.extend(new_data));
+                    set_offset.update(|o| *o += count);
+                }
+                set_has_more.set(count == ITEMS_PER_PAGE);
+            }
+            Err(e) => {
+                set_error.set(Some(e.to_string()));
+            }
+        }
+        set_loading.set(false);
+        set_loading_more.set(false);
+    });
+
+    // Helper closure that sets loading state and dispatches the load action.
+    // Does NOT contain any async work — it just prepares the input and
+    // dispatches, keeping the loading-state writes synchronous (safe with .set()).
     let load_history = move |reset: bool| {
         let Some(search) = search_query.try_get_untracked() else { return };
         let Some(saved_only) = show_saved_only.try_get_untracked() else { return };
         let current_offset = if reset { 0 } else { offset.try_get_untracked().unwrap_or(0) };
 
         if reset {
-            set_loading.try_set(true);
-            set_has_more.try_set(true);
+            set_loading.set(true);
+            set_has_more.set(true);
         } else {
-            set_loading_more.try_set(true);
+            set_loading_more.set(true);
         }
-        set_error.try_set(None);
+        set_error.set(None);
 
         let search_opt = if search.is_empty() {
             None
@@ -74,32 +152,11 @@ pub fn QueryHistory(
             Some(search.clone())
         };
 
-        leptos::task::spawn_local(async move {
-            match list_query_history(
-                search_opt,
-                Some(saved_only),
-                ITEMS_PER_PAGE,
-                current_offset,
-            )
-            .await
-            {
-                Ok(new_data) => {
-                    let count = new_data.len() as u32;
-                    if reset {
-                        set_entries.try_set(new_data);
-                        set_offset.try_set(count);
-                    } else {
-                        set_entries.try_update(|list| list.extend(new_data));
-                        set_offset.try_update(|o| *o += count);
-                    }
-                    set_has_more.try_set(count == ITEMS_PER_PAGE);
-                }
-                Err(e) => {
-                    set_error.try_set(Some(e.to_string()));
-                }
-            }
-            set_loading.try_set(false);
-            set_loading_more.try_set(false);
+        load_action.dispatch(LoadHistoryInput {
+            search: search_opt,
+            saved_only,
+            offset: current_offset,
+            reset,
         });
     };
 
@@ -174,23 +231,48 @@ pub fn QueryHistory(
     }
 
     // ── Toggle saved status ─────────────────────────────────────────────
+    // Optimistic update happens synchronously before dispatch (safe — signal
+    // is alive at this point).  The Action returns Ok/Err so the Effect can
+    // revert the optimistic update on failure, threading back the dispatch-time
+    // `was_saved` value rather than reading the live signal.
+    let toggle_action = Action::new(|input: &ToggleSavedInput| {
+        let query_id = input.query_id.clone();
+        let was_saved = input.was_saved;
+        async move {
+            let result = update_query_history(query_id.clone(), Some(!was_saved)).await;
+            (query_id, was_saved, result)
+        }
+    });
+
+    // Effect: revert optimistic update on failure.
+    Effect::new(move |_| {
+        let Some((query_id, was_saved, result)) = toggle_action.value().get() else {
+            return;
+        };
+        if result.is_err() {
+            // Revert to the pre-dispatch state (was_saved, not the flipped value).
+            set_entries.update(|list| {
+                if let Some(entry) = list.iter_mut().find(|e| e.id == query_id) {
+                    entry.is_saved = was_saved;
+                }
+            });
+        }
+    });
+
     let handle_toggle_saved = move |query_id: String, currently_saved: bool| {
-        // Optimistic UI update.
+        // Guard against double-dispatch while a toggle is in flight.
+        if toggle_action.pending().get_untracked() {
+            return;
+        }
+        // Optimistic UI update — synchronous, signal is guaranteed alive here.
         set_entries.update(|list| {
             if let Some(entry) = list.iter_mut().find(|e| e.id == query_id) {
                 entry.is_saved = !currently_saved;
             }
         });
-
-        leptos::task::spawn_local(async move {
-            if let Err(_e) = update_query_history(query_id.clone(), Some(!currently_saved)).await {
-                // Revert on failure.
-                set_entries.try_update(|list| {
-                    if let Some(entry) = list.iter_mut().find(|e| e.id == query_id) {
-                        entry.is_saved = currently_saved;
-                    }
-                });
-            }
+        toggle_action.dispatch(ToggleSavedInput {
+            query_id,
+            was_saved: currently_saved,
         });
     };
 
@@ -203,21 +285,36 @@ pub fn QueryHistory(
         set_delete_dialog_open.set(true);
     };
 
+    // Delete Action: removes the entry from the server.  On failure, the
+    // Effect reloads the full list to restore consistent state.
+    let delete_action = Action::new(|input: &DeleteQueryInput| {
+        let query_id = input.query_id.clone();
+        async move {
+            let result = delete_query_history(query_id.clone()).await;
+            (query_id, result)
+        }
+    });
+
+    // Effect: reload the list on delete failure so the optimistic removal is
+    // undone.
+    Effect::new(move |_| {
+        let Some((_query_id, result)) = delete_action.value().get() else {
+            return;
+        };
+        if result.is_err() {
+            load_history(true);
+        }
+    });
+
     let on_delete_confirm = Callback::new(move |()| {
         set_delete_dialog_open.set(false);
         if let Some(query_id) = pending_delete_id.get_untracked() {
             set_pending_delete_id.set(None);
-            // Remove from local state immediately.
+            // Remove from local state immediately (optimistic).
             set_entries.update(|list| {
                 list.retain(|e| e.id != query_id);
             });
-
-            leptos::task::spawn_local(async move {
-                if let Err(_e) = delete_query_history(query_id).await {
-                    // On failure, reload the list to restore correct state.
-                    load_history(true);
-                }
-            });
+            delete_action.dispatch(DeleteQueryInput { query_id });
         }
     });
 
