@@ -184,6 +184,14 @@ pub struct DiscoverResourcesResult {
     pub message: String,
 }
 
+/// Catalog statistics for a datasource.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CatalogStatsResult {
+    pub table_count: i64,
+    pub schema_count: i64,
+    pub last_indexed: Option<String>,
+}
+
 /// Create a new datasource (admin only).
 ///
 /// Mirrors `POST /api/v1/datasources` + optionally `POST /api/v1/datasources/{id}/credentials`.
@@ -759,6 +767,82 @@ pub(crate) async fn create_query_provider(
     .into_sfn()?;
 
     Ok((ds, provider))
+}
+
+/// Return table count, schema count, and last-indexed timestamp for a datasource.
+///
+/// Used by the datasource settings page to display catalog health at a glance.
+#[server(prefix = "/leptos-api")]
+pub async fn get_catalog_stats(
+    datasource_id: String,
+) -> Result<CatalogStatsResult, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+
+    let is_pg = ac.db().is_postgres();
+    let bf = kyomi_core::sql_compat::bool_false(is_pg);
+
+    // Verify the datasource belongs to this workspace.
+    #[derive(sqlx::FromRow)]
+    struct ExistsRow {
+        exists_val: i64,
+    }
+    let exists = kyomi_core::db_fetch_optional!(
+        ac.db(),
+        ExistsRow,
+        "SELECT 1 AS exists_val FROM datasource_configs WHERE id = $1 AND workspace_id = $2",
+        &datasource_id,
+        &ac.ws_id
+    )
+    .into_sfn()?;
+    if exists.is_none() {
+        return Err(ServerFnError::new("Datasource not found"));
+    }
+
+    let table_count: i64 = kyomi_core::db_fetch_scalar!(
+        ac.db(),
+        i64,
+        &format!(
+            "SELECT COUNT(*) FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bf}"
+        ),
+        &datasource_id
+    )
+    .map_err(|e| ServerFnError::new(format!("Failed to count tables: {e}")))?;
+
+    let schema_count: i64 = kyomi_core::db_fetch_scalar!(
+        ac.db(),
+        i64,
+        &format!(
+            "SELECT COUNT(DISTINCT dataset_id) FROM datasource_table_cache \
+             WHERE datasource_config_id = $1 AND is_archived = {bf}"
+        ),
+        &datasource_id
+    )
+    .map_err(|e| ServerFnError::new(format!("Failed to count schemas: {e}")))?;
+
+    #[derive(sqlx::FromRow)]
+    struct LastIndexedRow {
+        last_catalog_refresh: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    let row = kyomi_core::db_fetch_optional!(
+        ac.db(),
+        LastIndexedRow,
+        "SELECT last_catalog_refresh FROM datasource_configs \
+         WHERE id = $1 AND workspace_id = $2",
+        &datasource_id,
+        &ac.ws_id
+    )
+    .into_sfn()?;
+
+    let last_indexed = row
+        .and_then(|r| r.last_catalog_refresh)
+        .map(|dt| dt.to_rfc3339());
+
+    Ok(CatalogStatsResult {
+        table_count,
+        schema_count,
+        last_indexed,
+    })
 }
 
 /// Build a `UserContext` for BigQuery provider creation.
