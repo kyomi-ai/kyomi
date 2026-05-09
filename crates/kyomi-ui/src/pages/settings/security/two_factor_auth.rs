@@ -66,14 +66,14 @@ pub fn TwoFactorAuth() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match setup_totp().await {
                 Ok(data) => {
-                    setup_data.set(Some(data));
-                    current_view.set(View::Setup);
+                    setup_data.try_set(Some(data));
+                    current_view.try_set(View::Setup);
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.try_set(Some(e.to_string()));
                 }
             }
-            setup_loading.set(false);
+            setup_loading.try_set(false);
         });
     };
 
@@ -90,17 +90,17 @@ pub fn TwoFactorAuth() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match enable_totp(code).await {
                 Ok(message) => {
-                    success.set(Some(message));
-                    current_view.set(View::Status);
-                    setup_data.set(None);
-                    verification_code.set(String::new());
+                    success.try_set(Some(message));
+                    current_view.try_set(View::Status);
+                    setup_data.try_set(None);
+                    verification_code.try_set(String::new());
                     totp_status.refetch();
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.try_set(Some(e.to_string()));
                 }
             }
-            enable_loading.set(false);
+            enable_loading.try_set(false);
         });
     };
 
@@ -112,14 +112,14 @@ pub fn TwoFactorAuth() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match disable_totp().await {
                 Ok(message) => {
-                    success.set(Some(message));
+                    success.try_set(Some(message));
                     totp_status.refetch();
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.try_set(Some(e.to_string()));
                 }
             }
-            disable_loading.set(false);
+            disable_loading.try_set(false);
         });
     };
 
@@ -143,10 +143,10 @@ pub fn TwoFactorAuth() -> impl IntoView {
                     let clipboard = window.navigator().clipboard();
                     let promise = clipboard.write_text(&secret);
                     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                    copied.set(true);
+                    copied.try_set(true);
                     // Reset after 2 seconds
                     gloo_timers::future::TimeoutFuture::new(2_000).await;
-                    copied.set(false);
+                    copied.try_set(false);
                 }
             });
         }

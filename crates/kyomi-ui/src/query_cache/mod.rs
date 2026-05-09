@@ -333,8 +333,8 @@ where
         let fut = fetcher(deps.clone());
         leptos::task::spawn_local(async move {
             let result = fut.await;
-            entry_for_task.data.set(Some(result));
-            entry_for_task.inflight.set(false);
+            entry_for_task.data.try_set(Some(result));
+            entry_for_task.inflight.try_set(false);
         });
     })
 }

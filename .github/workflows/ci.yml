@@ -60,6 +60,18 @@ jobs:
       - name: Server function / REST divergence lint
         run: ./scripts/lint/check-server-fns.sh
 
+      # --------------------------------------------------------------------
+      # Signal disposal safety lint (KYO-289).
+      #
+      # Blocks bare .set()/.update() inside spawn_local/deferred contexts
+      # (must use .try_set()/.try_update() to avoid WASM panics when
+      # signals are disposed during page navigation).
+      #
+      # Pure bash + awk, no Rust toolchain required (~200ms).
+      # --------------------------------------------------------------------
+      - name: Signal disposal safety lint
+        run: ./scripts/lint/check-disposal-safety.sh
+
   # ---------------------------------------------------------------------------
   # Security: Trivy filesystem vulnerability scan
   # ---------------------------------------------------------------------------

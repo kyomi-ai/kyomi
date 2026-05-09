@@ -150,23 +150,23 @@ pub fn PasswordManager() -> impl IntoView {
                 set_password(new_pw).await
             };
 
-            loading.set(false);
+            loading.try_set(false);
 
             match result {
                 Ok(message) => {
-                    success.set(Some(message));
-                    current_password.set(String::new());
-                    new_password.set(String::new());
-                    confirm_password.set(String::new());
-                    show_current.set(false);
-                    show_new.set(false);
-                    show_confirm.set(false);
-                    editing.set(false);
+                    success.try_set(Some(message));
+                    current_password.try_set(String::new());
+                    new_password.try_set(String::new());
+                    confirm_password.try_set(String::new());
+                    show_current.try_set(false);
+                    show_new.try_set(false);
+                    show_confirm.try_set(false);
+                    editing.try_set(false);
                     // Refetch to update the has_password state
                     has_pw.refetch();
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.try_set(Some(e.to_string()));
                 }
             }
         });

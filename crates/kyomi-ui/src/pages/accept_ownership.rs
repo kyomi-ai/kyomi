@@ -73,12 +73,12 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
     {
         leptos::task::spawn_local(async move {
             if transfer_id.is_empty() {
-                set_state.set(PageState::Error {
+                set_state.try_set(PageState::Error {
                     message: "No transfer ID provided".to_string(),
                 });
                 return;
             }
-            set_state.set(fetch_ownership_transfer(transfer_id).await);
+            set_state.try_set(fetch_ownership_transfer(transfer_id).await);
         });
     }
 
@@ -99,7 +99,7 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match accept_ownership_transfer(transfer_id).await {
                 Ok(()) => {
-                    set_state.set(PageState::Success { workspace_name });
+                    set_state.try_set(PageState::Success { workspace_name });
 
                     // Auto-redirect to /settings/team after 3 seconds
                     #[cfg(target_arch = "wasm32")]
@@ -122,7 +122,7 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
                 }
                 Err(e) => {
                     crate::components::toast::toast_error(format!("Failed to accept transfer: {e}"));
-                    set_state.set(PageState::Ready { transfer });
+                    set_state.try_set(PageState::Ready { transfer });
                 }
             }
         });
@@ -167,7 +167,7 @@ pub fn AcceptOwnershipPage() -> impl IntoView {
                 }
                 Err(e) => {
                     crate::components::toast::toast_error(format!("Failed to decline transfer: {e}"));
-                    set_state.set(PageState::Ready { transfer });
+                    set_state.try_set(PageState::Ready { transfer });
                 }
             }
         });

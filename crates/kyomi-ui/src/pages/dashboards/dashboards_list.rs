@@ -76,8 +76,10 @@ pub fn DashboardsListPage() -> impl IntoView {
     // Client-side search + sort derived from the in-memory store.
     let dashboards_signal = Signal::derive(move || {
         let mut items = all_dashboards.get();
-        // Search filter
-        if let Some(ref q) = query_signal.get() {
+        // Search filter — use try_get because query_signal is page-scoped
+        // while all_dashboards is Layout-scoped (SyncStore). A sync update
+        // after navigation would re-evaluate this derive with disposed page signals.
+        if let Some(q) = query_signal.try_get().flatten() {
             let q_lower = q.to_lowercase();
             items.retain(|d| {
                 d.title.to_lowercase().contains(&q_lower)
@@ -85,7 +87,8 @@ pub fn DashboardsListPage() -> impl IntoView {
             });
         }
         // Sort
-        match sort_signal.get().as_str() {
+        let sort = sort_signal.try_get().unwrap_or_default();
+        match sort.as_str() {
             "updated_at" | "recent" | "" => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
             "created_at" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
             "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
@@ -603,7 +606,7 @@ fn AddToCollectionModal(
                                                         let result = crate::server_fns::collections::add_dashboard_to_collection(
                                                             coll_id, db_id,
                                                         ).await;
-                                                        set_adding.set(false);
+                                                        set_adding.try_set(false);
                                                         match result {
                                                             Ok(()) => on_added.run(()),
                                                             Err(e) => {

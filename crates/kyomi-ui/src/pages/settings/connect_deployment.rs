@@ -287,9 +287,9 @@ pub fn CopyButton(#[prop(into)] text: Signal<String>) -> impl IntoView {
                     let clipboard = window.navigator().clipboard();
                     let promise = clipboard.write_text(&to_copy);
                     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                    set_copied.set(true);
+                    set_copied.try_set(true);
                     gloo_timers::future::TimeoutFuture::new(2000).await;
-                    set_copied.set(false);
+                    set_copied.try_set(false);
                 }
             });
         }

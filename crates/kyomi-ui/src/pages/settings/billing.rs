@@ -126,28 +126,28 @@ async fn open_embedded_checkout(
                     leptos::task::spawn_local(async move {
                         let close = || {
                             ctx.checkout_handle.set_value(None);
-                            ctx.set_checkout_open.set(false);
-                            ctx.set_checkout_session_id.set(None);
+                            ctx.set_checkout_open.try_set(false);
+                            ctx.set_checkout_session_id.try_set(None);
                         };
                         match get_checkout_session_status(sid).await {
                             Ok(status) if status.status == "complete" => {
                                 close();
-                                ctx.set_success.set(Some(
+                                ctx.set_success.try_set(Some(
                                     "Payment successful! Your changes are being applied..."
                                         .to_string(),
                                 ));
-                                ctx.set_sub_version.update(|v| *v += 1);
+                                ctx.set_sub_version.try_update(|v| *v += 1);
                             }
                             Ok(status) => {
                                 close();
-                                ctx.set_error.set(Some(format!(
+                                ctx.set_error.try_set(Some(format!(
                                     "Checkout session status: {}. Please try again.",
                                     status.status
                                 )));
                             }
                             Err(e) => {
                                 close();
-                                ctx.set_error.set(Some(format!(
+                                ctx.set_error.try_set(Some(format!(
                                     "Failed to verify payment: {e}"
                                 )));
                             }
@@ -164,10 +164,10 @@ async fn open_embedded_checkout(
                         .set_value(Some(send_wrapper::SendWrapper::new(handle)));
                 }
                 Err(e) => {
-                    ctx.set_checkout_open.set(false);
-                    ctx.set_checkout_session_id.set(None);
+                    ctx.set_checkout_open.try_set(false);
+                    ctx.set_checkout_session_id.try_set(None);
                     ctx.set_error
-                        .set(Some(format!("Failed to mount checkout form: {e}")));
+                        .try_set(Some(format!("Failed to mount checkout form: {e}")));
                 }
             }
         });

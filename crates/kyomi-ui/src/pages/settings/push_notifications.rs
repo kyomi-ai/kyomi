@@ -175,23 +175,23 @@ pub fn PushNotificationsCard() -> impl IntoView {
                 };
 
                 if let Some(perm) = permission_result {
-                    set_perm.set(perm.clone());
+                    set_perm.try_set(perm.clone());
                     if perm == "granted" {
-                        set_sub.set(true);
+                        set_sub.try_set(true);
                         // In a full implementation, we would register with PushManager
                         // and send the subscription to the server. For now, we update
                         // the UI state to reflect the permission grant.
                     } else {
-                        set_err.set(Some(
+                        set_err.try_set(Some(
                             "Notification permission was not granted.".to_string(),
                         ));
                     }
                 } else {
-                    set_err.set(Some(
+                    set_err.try_set(Some(
                         "Failed to request notification permission.".to_string(),
                     ));
                 }
-                set_ld.set(false);
+                set_ld.try_set(false);
             });
         }
 

@@ -490,7 +490,7 @@ fn open_indexeddb_backend(workspace_id: &str) -> CacheBackendSignal {
                 Ok(backend) => {
                     let backend: chartml_leptos::CacheBackendRef =
                         std::rc::Rc::new(backend);
-                    backend_state.set(Some(backend));
+                    backend_state.try_set(Some(backend));
                 }
                 Err(e) => {
                     tracing::warn!(

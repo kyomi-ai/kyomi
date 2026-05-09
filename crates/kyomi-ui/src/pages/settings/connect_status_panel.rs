@@ -78,7 +78,7 @@ pub fn ConnectStatusPanel(
             leptos::task::spawn_local(async move {
                 match connect_status(ds_id).await {
                     Ok(resp) => {
-                        set_status.set(Some(resp));
+                        set_status.try_set(Some(resp));
                     }
                     Err(err) => {
                         // Don't surface polling failures in the UI — they'd
@@ -86,7 +86,7 @@ pub fn ConnectStatusPanel(
                         leptos::logging::warn!("Failed to fetch Connect status: {err}");
                     }
                 }
-                set_loading.set(false);
+                set_loading.try_set(false);
             });
         }
     };
@@ -147,14 +147,14 @@ pub fn ConnectStatusPanel(
             leptos::task::spawn_local(async move {
                 match rotate_connect_token(ds_id).await {
                     Ok(token) => {
-                        set_new_token.set(Some(token));
+                        set_new_token.try_set(Some(token));
                         fetch_status();
                     }
                     Err(err) => {
-                        set_action_error.set(Some(format!("Failed to rotate token: {err}")));
+                        set_action_error.try_set(Some(format!("Failed to rotate token: {err}")));
                     }
                 }
-                set_rotating.set(false);
+                set_rotating.try_set(false);
             });
         })
     };
@@ -184,14 +184,14 @@ pub fn ConnectStatusPanel(
                     Ok(()) => {
                         // Drop any just-rotated token — after disconnect the
                         // agent must be redeployed with a brand new one.
-                        set_new_token.set(None);
+                        set_new_token.try_set(None);
                         fetch_status();
                     }
                     Err(err) => {
-                        set_action_error.set(Some(format!("Failed to disconnect: {err}")));
+                        set_action_error.try_set(Some(format!("Failed to disconnect: {err}")));
                     }
                 }
-                set_disconnecting.set(false);
+                set_disconnecting.try_set(false);
             });
         })
     };

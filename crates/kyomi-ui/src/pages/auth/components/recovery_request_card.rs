@@ -52,8 +52,8 @@ pub fn RecoveryRequestCard(kind: RecoveryKind) -> impl IntoView {
 
         leptos::task::spawn_local(async move {
             let _ = recovery_start(current_email).await;
-            set_submitted.set(true);
-            set_loading.set(false);
+            set_submitted.try_set(true);
+            set_loading.try_set(false);
         });
     };
 

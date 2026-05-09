@@ -153,7 +153,7 @@ pub fn SignupCompletePage() -> impl IntoView {
 
             match result {
                 Ok(SignupCompleteResult::Success { .. }) => {
-                    set_page_state.set(PageState::Success);
+                    set_page_state.try_set(PageState::Success);
 
                     // Navigate to onboarding after 1.5 seconds (keeps WASM in memory)
                     #[cfg(target_arch = "wasm32")]
@@ -164,12 +164,12 @@ pub fn SignupCompletePage() -> impl IntoView {
                     }
                 }
                 Ok(SignupCompleteResult::Error { message }) => {
-                    set_error.set(Some(message));
-                    set_page_state.set(PageState::Form); // Allow retry
+                    set_error.try_set(Some(message));
+                    set_page_state.try_set(PageState::Form); // Allow retry
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Server error: {}", e)));
-                    set_page_state.set(PageState::Form); // Allow retry
+                    set_error.try_set(Some(format!("Server error: {}", e)));
+                    set_page_state.try_set(PageState::Form); // Allow retry
                 }
             }
         });

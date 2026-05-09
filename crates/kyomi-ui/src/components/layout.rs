@@ -181,10 +181,10 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
                         // no visible page reload.
                         leptos::task::spawn_local(async move {
                             let ok = auth_refresh::try_refresh().await;
-                            set_refreshing.set(false);
+                            set_refreshing.try_set(false);
                             if ok {
                                 // Cookies refreshed — refetch the resource
-                                set_auth_retry.update(|n| *n += 1);
+                                set_auth_retry.try_update(|n| *n += 1);
                             } else {
                                 // Refresh token also invalid — redirect to login
                                 if let Some(win) = web_sys::window() {

@@ -179,7 +179,7 @@ fn WorkspaceSlackCard() -> impl IntoView {
                     }
                 }
                 Err(e) => {
-                    set_slack_error.set(Some(e.to_string()));
+                    set_slack_error.try_set(Some(e.to_string()));
                 }
             }
         });
@@ -201,14 +201,14 @@ fn WorkspaceSlackCard() -> impl IntoView {
             leptos::task::spawn_local(async move {
                 match uninstall_workspace_slack(team_id).await {
                     Ok(()) => {
-                        set_slack_success.set(Some("Slack integration removed successfully.".to_string()));
+                        set_slack_success.try_set(Some("Slack integration removed successfully.".to_string()));
                         slack_status.refetch();
                     }
                     Err(e) => {
-                        set_slack_error.set(Some(e.to_string()));
+                        set_slack_error.try_set(Some(e.to_string()));
                     }
                 }
-                set_uninstalling.set(false);
+                set_uninstalling.try_set(false);
             });
         }
     };

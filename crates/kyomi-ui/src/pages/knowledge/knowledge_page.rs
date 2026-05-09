@@ -62,16 +62,15 @@ pub fn KnowledgePage() -> impl IntoView {
     // Client-side search + sort derived from the in-memory store.
     let knowledge_signal = Signal::derive(move || {
         let mut items = all_knowledge_docs.get();
-        // Search filter
-        if let Some(ref q) = query_signal.get() {
+        if let Some(q) = query_signal.try_get().flatten() {
             let q_lower = q.to_lowercase();
             items.retain(|d| {
                 d.title.to_lowercase().contains(&q_lower)
                     || d.summary.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
             });
         }
-        // Sort
-        match sort_signal.get().as_str() {
+        let sort = sort_signal.try_get().unwrap_or_default();
+        match sort.as_str() {
             "updated_at" | "recent" | "" => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
             "created_at" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
             "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
