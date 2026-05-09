@@ -412,7 +412,7 @@ pub fn ChatPage() -> impl IntoView {
                 // fresh data (checked untracked to avoid reactive dependency).
                 // Use try_ variants: the user may have navigated away while
                 // the IndexedDB read was in flight.
-                if !cached_messages.is_empty() && is_loading.get_untracked() {
+                if !cached_messages.is_empty() && is_loading.try_get_untracked().unwrap_or(false) {
                     engine_inner.try_set_messages(cached_messages);
                     set_is_loading.try_set(false);
                 }
@@ -1300,11 +1300,12 @@ pub fn ChatPage() -> impl IntoView {
                     // React does: response.user_message_id → update optimistic msg.
                     if !response.user_message_id.is_empty() {
                         let server_id = response.user_message_id.clone();
-                        let mut msgs = engine_inner.messages().get_untracked();
-                        if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == optimistic_id) {
-                            msg.message_id = server_id;
+                        if let Some(mut msgs) = engine_inner.messages().try_get_untracked() {
+                            if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == optimistic_id) {
+                                msg.message_id = server_id;
+                            }
+                            engine_inner.try_set_messages(msgs);
                         }
-                        engine_inner.try_set_messages(msgs);
                     }
 
                     // Phase 9 — If skip_ai was enabled, reset state and return
@@ -1371,9 +1372,10 @@ pub fn ChatPage() -> impl IntoView {
                         thinking_events: Vec::new(),
                         token_usage: None,
                     };
-                    let mut msgs = engine_inner.messages().get_untracked();
-                    msgs.push(error_msg);
-                    engine_inner.try_set_messages(msgs);
+                    if let Some(mut msgs) = engine_inner.messages().try_get_untracked() {
+                        msgs.push(error_msg);
+                        engine_inner.try_set_messages(msgs);
+                    }
 
                     // Guard: set_error() uses RwSignal::set() internally;
                     // check the state signal is still alive before calling.

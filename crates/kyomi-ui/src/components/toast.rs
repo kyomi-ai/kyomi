@@ -74,7 +74,7 @@ fn add_toast(variant: ToastVariant, message: impl Into<String>) {
         move || {
             state
                 .toasts
-                .update(|toasts| toasts.retain(|t| t.id != id));
+                .try_update(|toasts| toasts.retain(|t| t.id != id));
         },
         std::time::Duration::from_millis(dismiss_ms),
     );

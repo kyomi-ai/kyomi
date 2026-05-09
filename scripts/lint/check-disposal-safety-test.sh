@@ -188,6 +188,36 @@ fn my_component() {
 }
 RUST
 
+# ─── Test 14: .get_untracked() inside Timeout — should flag ──────────────
+run_test "timeout_bare_get_untracked" 1 0 <<'RUST'
+fn my_component() {
+    let timeout = Timeout::new(1_000, move || {
+        let val = signal.get_untracked();
+    });
+}
+RUST
+
+# ─── Test 15: .try_get_untracked() inside Timeout — should pass ─────────
+run_test "timeout_try_get_untracked" 0 0 <<'RUST'
+fn my_component() {
+    let timeout = Timeout::new(1_000, move || {
+        let val = signal.try_get_untracked();
+    });
+}
+RUST
+
+# ─── Test 16: set_timeout (leptos) with .update() — should flag ─────────
+run_test "leptos_set_timeout_update" 1 0 <<'RUST'
+fn my_component() {
+    set_timeout(
+        move || {
+            state.toasts.update(|t| t.clear());
+        },
+        std::time::Duration::from_millis(3000),
+    );
+}
+RUST
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

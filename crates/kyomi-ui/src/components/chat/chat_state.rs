@@ -319,7 +319,9 @@ impl ChatStateMachine {
             // SendWrapper is needed because gloo Timeout is !Send but Leptos may require Send.
             use send_wrapper::SendWrapper;
             let timeout = gloo_timers::callback::Timeout::new(100, move || {
-                tracing::debug!("Chat state auto-reset: {} -> idle (reason: {})", state.get_untracked(), reason);
+                if let Some(current) = state.try_get_untracked() {
+                    tracing::debug!("Chat state auto-reset: {current} -> idle (reason: {reason})");
+                }
                 state.try_set(ChatState::Idle);
                 active_message_id.try_set(None);
             });

@@ -127,7 +127,8 @@ fn run_arrow_query(
         // Default page size for the first page.
         let page_size = state
             .default_page_size
-            .get_untracked();
+            .try_get_untracked()
+            .unwrap_or(50);
 
         match crate::arrow_fetch::fetch_arrow_buffered(
             &ds_slug,
@@ -245,7 +246,7 @@ fn rerun_arrow_query(
 
     leptos::task::spawn_local(async move {
         let start = instant_now();
-        let page_size = state.default_page_size.get_untracked();
+        let page_size = state.default_page_size.try_get_untracked().unwrap_or(50);
 
         match crate::arrow_fetch::fetch_arrow_buffered(&ds_slug, &sql, page_size, 0, true, None)
             .await

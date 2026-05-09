@@ -134,7 +134,7 @@ pub fn GoogleCallbackPage() -> impl IntoView {
     let show_help_text = {
         let (show, set) = signal(false);
         use gloo_timers::callback::Timeout;
-        Timeout::new(10_000, move || set.set(true)).forget();
+        Timeout::new(10_000, move || { set.try_set(true); }).forget();
         Signal::derive(move || show.get())
     };
     #[cfg(not(target_arch = "wasm32"))]

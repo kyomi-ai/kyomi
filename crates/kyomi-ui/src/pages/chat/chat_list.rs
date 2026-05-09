@@ -398,9 +398,11 @@ pub fn ChatsListPage() -> impl IntoView {
     });
 
     // ── Derived: filtered + sorted sessions ──────────────────────────────
-    let filtered_sessions = move || -> Vec<ChatSessionItem> {
+    // Signal::derive so filter/sort changes DON'T force a <Transition>
+    // re-render (which disposes child reactive scopes mid-evaluation).
+    let filtered_sessions = Signal::derive(move || {
         let current_sessions = sessions.get();
-        let filter = chat_filter.get();
+        let filter = chat_filter.try_get().unwrap_or(ChatFilter::All);
 
         let user_id = user_ctx_resource
             .get()
@@ -427,36 +429,32 @@ pub fn ChatsListPage() -> impl IntoView {
                 .collect(),
         };
 
-        // Sort by most recent first. React sorts by `last_activity_at || created_at`,
-        // but `SessionListItem` from `kyomi_auth::chat_service` does not expose
-        // `last_activity_at`. We use `updated_at` which the service layer updates
-        // on every message, making it functionally equivalent.
         filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         filtered
-    };
+    });
 
     // ── Derived: multi_user_enabled capability ───────────────────────────
-    let multi_user_enabled = move || -> bool {
+    let multi_user_enabled = Signal::derive(move || {
         user_ctx_resource
             .get()
             .and_then(|r| r.ok())
             .and_then(|ctx| ctx.capabilities.get("multi_user_enabled").copied())
             .unwrap_or(false)
-    };
+    });
 
     // ── Derived: current user_id ─────────────────────────────────────────
-    let current_user_id = move || -> String {
+    let current_user_id = Signal::derive(move || {
         user_ctx_resource
             .get()
             .and_then(|r| r.ok())
             .map(|ctx| ctx.user_id.clone())
             .unwrap_or_default()
-    };
+    });
 
     // ── Derived: selectable sessions (owned by current user) ─────────────
     let selectable_session_ids = move || -> Vec<String> {
-        let uid = current_user_id();
-        filtered_sessions()
+        let uid = current_user_id.get();
+        filtered_sessions.get()
             .iter()
             .filter(|s| is_session_owned(s, &uid))
             .map(|s| s.session_id.clone())
@@ -562,7 +560,7 @@ pub fn ChatsListPage() -> impl IntoView {
                 <Show
                     when=has_selection
                     fallback=move || {
-                        let multi = multi_user_enabled();
+                        let multi = multi_user_enabled.get();
                         view! {
                             <div class="flex items-center gap-2 mt-3">
                                 <FilterButton
@@ -635,22 +633,14 @@ pub fn ChatsListPage() -> impl IntoView {
                 </Show>
             </div>
 
-            // Chats List
+            // Chats List — uses Show instead of Transition+Suspend to avoid
+            // disposing child reactive scopes when filter/search signals change.
             <div class="flex-1 overflow-y-auto p-4 md:p-6">
-                <Transition fallback=move || view! { <ChatsLoadingSkeleton /> }>
-                    {move || Suspend::new(async move {
-                        // Wait for user context to be available before rendering
-                        // the list. Awaiting the resource (rather than calling
-                        // `.get()`) prevents disposal panics when the resource
-                        // resolves and Leptos re-runs the reactive closure.
-                        let _ = user_ctx_resource.await;
-
-                        // Show skeleton until the SyncStore has been hydrated
-                        // from IndexedDB (or a search is in progress).
-                        if !store_initialized.get() {
-                            return view! { <ChatsLoadingSkeleton /> }.into_any();
-                        }
-
+                <Show
+                    when=move || user_ctx_resource.get().is_some() && store_initialized.get()
+                    fallback=move || view! { <ChatsLoadingSkeleton /> }
+                >
+                    {move || {
                         let current_sessions = sessions.get();
 
                         if current_sessions.is_empty() {
@@ -680,9 +670,9 @@ pub fn ChatsListPage() -> impl IntoView {
                             };
                         }
 
-                        let filtered = filtered_sessions();
-                        let uid = current_user_id();
-                        let multi = multi_user_enabled();
+                        let filtered = filtered_sessions.get();
+                        let uid = current_user_id.get();
+                        let multi = multi_user_enabled.get();
 
                         if filtered.is_empty() {
                             return view! {
@@ -848,8 +838,8 @@ pub fn ChatsListPage() -> impl IntoView {
                                 </div>
                             </div>
                         }.into_any()
-                    })}
-                </Transition>
+                    }}
+                </Show>
             </div>
 
             // Confirm Dialog
