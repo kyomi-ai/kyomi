@@ -138,7 +138,6 @@ pub fn run_query(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = (state, query_text, datasource_slug, datasource_type, query_running);
-        return;
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -205,7 +204,6 @@ pub fn rerun_query(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = (state, tab_id, query_text, datasource_slug, datasource_type, on_complete);
-        return;
     }
 
     #[cfg(target_arch = "wasm32")]
