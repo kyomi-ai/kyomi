@@ -2037,8 +2037,8 @@ pub fn DatasourceModal(
                                     })
                                     datasource_slug=Signal::derive(move || slug.get())
                                     datasource_type=Signal::derive(move || ds_type.get())
-                                    connection_config=Signal::derive(move || build_connection_config())
-                                    credentials=Signal::derive(move || build_credentials())
+                                    connection_config=Signal::derive(build_connection_config)
+                                    credentials=Signal::derive(build_credentials)
                                     is_sample=is_sample
                                     catalog_selected=catalog_selected
                                     set_catalog_selected=set_catalog_selected
@@ -3421,8 +3421,7 @@ fn EditModeCatalogTab(
     let refresh_action = Action::new(|slug: &String| {
         let slug = slug.clone();
         async move {
-            let result = refresh_catalog(slug).await;
-            result
+            refresh_catalog(slug).await
         }
     });
 
