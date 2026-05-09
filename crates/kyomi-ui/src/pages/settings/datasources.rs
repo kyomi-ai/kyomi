@@ -20,6 +20,7 @@ use crate::pages::settings::connect_status_panel::ConnectStatusPanel;
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::connect::create_connect_datasource;
 use crate::server_fns::datasources::*;
+use crate::server_fns::sql_editor::refresh_catalog;
 use crate::server_fns::onboarding::{
     check_sample_datasource_available, create_sample_datasource,
 };
@@ -48,6 +49,44 @@ fn generate_slug(name: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// Returns the `connection_config` key that holds the catalog scope list
+/// for a given datasource type.
+fn catalog_config_key_for_type(ds_type: &str) -> &'static str {
+    match ds_type {
+        "bigquery" => "catalog_projects",
+        "clickhouse" | "mysql" | "snowflake" => "catalog_databases",
+        "databricks" => "catalog_catalogs",
+        _ => "catalog_schemas",
+    }
+}
+
+/// Returns the human-readable label for the catalog scope items for a given
+/// datasource type.
+fn catalog_item_label_for_type(ds_type: &str) -> &'static str {
+    match ds_type {
+        "bigquery" => "projects",
+        "clickhouse" | "mysql" | "snowflake" => "databases",
+        "databricks" => "catalogs",
+        _ => "schemas",
+    }
+}
+
+/// Returns the key within the `DiscoverResourcesResult.resources` map that
+/// holds the items relevant to catalog scope selection for a given datasource
+/// type.  Matches the pairs emitted by `discover_datasource_resources` in
+/// `server_fns/datasources.rs`.
+fn discovery_resource_key_for_type(ds_type: &str) -> &'static str {
+    match ds_type {
+        // postgres / redshift / sqlserver / synapse: catalog scope = schemas
+        "postgres" | "redshift" | "sqlserver" | "synapse" => "schemas",
+        // databricks: catalog scope = catalogs
+        "databricks" => "catalogs",
+        // bigquery: no discovery support (text input only — requires auth flow)
+        // clickhouse / mysql / snowflake: catalog scope = databases
+        _ => "databases",
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -628,6 +667,15 @@ pub fn DatasourceModal(
     let (discovered_warehouses, set_discovered_warehouses) = signal::<Vec<String>>(vec![]);
     let (discovered_catalogs, set_discovered_catalogs) = signal::<Vec<String>>(vec![]);
 
+    // ── Catalog tab state (edit mode) ────────────────────────────────────
+    // Selected catalog scope items (projects / databases / schemas / catalogs).
+    // Stored at modal level so `build_connection_config` can include them when
+    // saving from the Connection tab after the user configures them on the
+    // Catalog tab.
+    let (catalog_selected, set_catalog_selected) = signal::<Vec<String>>(vec![]);
+    // BigQuery-specific: whether to include public datasets in catalog indexing.
+    let (bq_include_public, set_bq_include_public) = signal(false);
+
     // ── Reset form ───────────────────────────────────────────────────────
     let reset_form = move || {
         set_name.set(String::new());
@@ -680,6 +728,8 @@ pub fn DatasourceModal(
         // Don't reset sample_available / sample_already_added here — those are
         // refreshed by an async effect when the modal opens in create mode.
         set_creating_sample.set(false);
+        set_catalog_selected.set(vec![]);
+        set_bq_include_public.set(false);
     };
 
     // ── Load settings when switching to edit mode ─────────────────────────
@@ -766,6 +816,25 @@ pub fn DatasourceModal(
                             if let Some(ref email) = settings.service_account_email {
                                 set_service_account_email.try_set(email.clone());
                             }
+
+                            // Load catalog scope selections from connection_config
+                            let catalog_key =
+                                catalog_config_key_for_type(&settings.datasource_type);
+                            let selected_items: Vec<String> = cfg
+                                .get(catalog_key)
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            set_catalog_selected.try_set(selected_items);
+                            let include_public = cfg
+                                .get("include_public_datasets")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            set_bq_include_public.try_set(include_public);
 
                             // Load user settings (masked credentials)
                             let user = &settings.user_settings;
@@ -955,6 +1024,20 @@ pub fn DatasourceModal(
 
         if cfg_shared_credentials.get_untracked() {
             map.insert("shared_credentials".to_string(), serde_json::json!(true));
+        }
+
+        // Catalog scope — only written in edit mode (non-empty selection).
+        // In create mode these signals are always empty (reset_form clears them).
+        let selected = catalog_selected.get_untracked();
+        if !selected.is_empty() {
+            let key = catalog_config_key_for_type(&t);
+            map.insert(key.to_string(), serde_json::json!(selected));
+        }
+        if bq_include_public.get_untracked() {
+            map.insert(
+                "include_public_datasets".to_string(),
+                serde_json::json!(true),
+            );
         }
 
         serde_json::Value::Object(map)
@@ -1479,6 +1562,30 @@ pub fn DatasourceModal(
                             />
                         </Show>
 
+                        // Edit-mode tab bar — Connection | Catalog.
+                        // Hidden for sample and Connect datasources (both are
+                        // read-only in this modal; no catalog management applies).
+                        <Show when=move || {
+                            !is_create_mode.get()
+                                && !is_sample.get()
+                                && !is_connect.get()
+                        }>
+                            <div class="flex border-b border-border mb-4">
+                                <button
+                                    class=move || if active_tab.get() == "connection" { TAB_ACTIVE } else { TAB_INACTIVE }
+                                    on:click=move |_| set_active_tab.set("connection".to_string())
+                                >
+                                    "Connection"
+                                </button>
+                                <button
+                                    class=move || if active_tab.get() == "catalog" { TAB_ACTIVE } else { TAB_INACTIVE }
+                                    on:click=move |_| set_active_tab.set("catalog".to_string())
+                                >
+                                    "Catalog"
+                                </button>
+                            </div>
+                        </Show>
+
                         // Tab bar — hidden in Connect create-mode (the simplified
                         // Connect form has no separate Catalog step; the catalog
                         // is indexed automatically after agent registration) and
@@ -1918,6 +2025,26 @@ pub fn DatasourceModal(
                                         </p>
                                     </div>
                                 </div>
+                            </Show>
+
+                            // ── CATALOG TAB (edit mode only) ──
+                            <Show when=move || {
+                                active_tab.get() == "catalog" && !is_create_mode.get()
+                            }>
+                                <EditModeCatalogTab
+                                    datasource_id=Signal::derive(move || {
+                                        datasource_id.get().unwrap_or_default()
+                                    })
+                                    datasource_slug=Signal::derive(move || slug.get())
+                                    datasource_type=Signal::derive(move || ds_type.get())
+                                    connection_config=Signal::derive(move || build_connection_config())
+                                    credentials=Signal::derive(move || build_credentials())
+                                    is_sample=is_sample
+                                    catalog_selected=catalog_selected
+                                    set_catalog_selected=set_catalog_selected
+                                    bq_include_public=bq_include_public
+                                    set_bq_include_public=set_bq_include_public
+                                />
                             </Show>
 
                         </div>
@@ -3234,6 +3361,529 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                     _ => view! { <div></div> }.into_any(),
                 }
             }}
+        </div>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit-Mode Catalog Tab
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Edit-mode catalog tab — stats card, Refresh Now button, and schema/database
+/// picker.
+///
+/// Replaces `apps/frontend/src/components/settings/CatalogSection.jsx`.
+#[component]
+fn EditModeCatalogTab(
+    /// The datasource UUID (used to load stats via `get_catalog_stats`).
+    datasource_id: Signal<String>,
+    /// The datasource slug (used to trigger a refresh via `refresh_catalog`).
+    datasource_slug: Signal<String>,
+    /// The datasource type string (e.g. `"bigquery"`, `"postgres"`).
+    datasource_type: Signal<String>,
+    /// Current `connection_config` from the modal (used for discovery requests).
+    connection_config: Signal<serde_json::Value>,
+    /// Current credentials from the modal (used for discovery requests).
+    credentials: Signal<serde_json::Value>,
+    /// Whether this is a sample datasource (read-only).
+    is_sample: ReadSignal<bool>,
+    /// Selected catalog scope items (projects / databases / schemas / catalogs).
+    catalog_selected: ReadSignal<Vec<String>>,
+    set_catalog_selected: WriteSignal<Vec<String>>,
+    /// BigQuery only: include public datasets.
+    bq_include_public: ReadSignal<bool>,
+    set_bq_include_public: WriteSignal<bool>,
+) -> impl IntoView {
+    // ── Load catalog stats on mount ──────────────────────────────────────
+    // Input: datasource_id
+    let stats_action = Action::new(|ds_id: &String| {
+        let ds_id = ds_id.clone();
+        async move { get_catalog_stats(ds_id).await }
+    });
+
+    // Dispatch stats load once when the component first mounts.
+    Effect::new(move |_| {
+        let id = datasource_id.get();
+        if !id.is_empty() {
+            stats_action.dispatch(id);
+        }
+    });
+
+    // Derived stats from the action result.
+    let stats = Signal::derive(move || {
+        stats_action.value().get().and_then(|r| r.ok())
+    });
+
+    // ── Refresh catalog ──────────────────────────────────────────────────
+    // Input: datasource_slug — returned through result so the Effect can
+    // distinguish which invocation finished (double-dispatch guard uses
+    // `pending()`).
+    let refresh_action = Action::new(|slug: &String| {
+        let slug = slug.clone();
+        async move {
+            let result = refresh_catalog(slug).await;
+            result
+        }
+    });
+
+    // After a successful refresh, reload stats to show updated counts.
+    Effect::new(move |_| {
+        if let Some(result) = refresh_action.value().get() {
+            match result {
+                Ok(_msg) => {
+                    // Reload stats — re-dispatch the stats action.
+                    let id = datasource_id.get_untracked();
+                    if !id.is_empty() {
+                        stats_action.dispatch(id);
+                    }
+                }
+                Err(e) => {
+                    leptos::logging::error!("Catalog refresh failed: {e}");
+                }
+            }
+        }
+    });
+
+    let on_refresh_click = move |_: leptos::ev::MouseEvent| {
+        if refresh_action.pending().get_untracked() {
+            return;
+        }
+        let slug = datasource_slug.get_untracked();
+        if !slug.is_empty() {
+            refresh_action.dispatch(slug);
+        }
+    };
+
+    // ── Discover resources ───────────────────────────────────────────────
+    // Input: (ds_type, conn_cfg, creds, slug_opt)
+    type DiscoverInput = (String, serde_json::Value, serde_json::Value, Option<String>);
+
+    let discover_action = Action::new(|input: &DiscoverInput| {
+        let (ds_type_val, conn_cfg, creds, slug_opt) = input.clone();
+        async move {
+            discover_datasource_resources(ds_type_val, conn_cfg, creds, slug_opt).await
+        }
+    });
+
+    // "idle" | "loading" | "success" | "error"
+    let (discover_status, set_discover_status) = signal("idle".to_string());
+    let (discover_error, set_discover_error) = signal::<Option<String>>(None);
+    let (discovered_items, set_discovered_items) = signal::<Vec<String>>(vec![]);
+
+    Effect::new(move |_| {
+        if let Some(result) = discover_action.value().get() {
+            match result {
+                Ok(r) if r.success => {
+                    set_discover_status.set("success".to_string());
+                    set_discover_error.set(None);
+                    // Extract the items relevant to this datasource type.
+                    let ds_type_val = datasource_type.get_untracked();
+                    let key = discovery_resource_key_for_type(&ds_type_val);
+                    let items = r.resources.get(key).cloned().unwrap_or_default();
+                    set_discovered_items.set(items);
+                }
+                Ok(r) => {
+                    set_discover_status.set("error".to_string());
+                    set_discover_error.set(Some(r.message));
+                    set_discovered_items.set(vec![]);
+                }
+                Err(e) => {
+                    set_discover_status.set("error".to_string());
+                    set_discover_error.set(Some(e.to_string()));
+                    set_discovered_items.set(vec![]);
+                }
+            }
+        }
+    });
+
+    let on_discover_click = move |_: leptos::ev::MouseEvent| {
+        if discover_action.pending().get_untracked() {
+            return;
+        }
+        set_discover_status.set("loading".to_string());
+        set_discover_error.set(None);
+        set_discovered_items.set(vec![]);
+
+        let ds_type_val = datasource_type.get_untracked();
+        let conn_cfg = connection_config.get_untracked();
+        let creds = credentials.get_untracked();
+        let slug = datasource_slug.get_untracked();
+        let slug_opt = if slug.is_empty() { None } else { Some(slug) };
+
+        discover_action.dispatch((ds_type_val, conn_cfg, creds, slug_opt));
+    };
+
+    // ── Text input for manual item entry ──────────────────────────────────
+    let (new_item_input, set_new_item_input) = signal(String::new());
+
+    let on_add_item = move || {
+        let val = new_item_input.get_untracked().trim().to_string();
+        if val.is_empty() {
+            return;
+        }
+        let mut selected = catalog_selected.get_untracked();
+        if selected.contains(&val) {
+            return;
+        }
+        selected.push(val);
+        set_catalog_selected.set(selected);
+        set_new_item_input.set(String::new());
+    };
+
+    // ── Relative time formatter ───────────────────────────────────────────
+    let format_relative = |iso: &str| -> String {
+        // Parse the RFC3339 timestamp and compute a relative description.
+        use std::str::FromStr as _;
+        let Ok(dt) = chrono::DateTime::<chrono::Utc>::from_str(iso) else {
+            return iso.to_string();
+        };
+        let now = chrono::Utc::now();
+        let diff = now.signed_duration_since(dt);
+        let secs = diff.num_seconds();
+        if secs < 60 {
+            "just now".to_string()
+        } else if secs < 3600 {
+            let m = secs / 60;
+            format!("{m} minute{} ago", if m == 1 { "" } else { "s" })
+        } else if secs < 86400 {
+            let h = secs / 3600;
+            format!("{h} hour{} ago", if h == 1 { "" } else { "s" })
+        } else {
+            let d = secs / 86400;
+            format!("{d} day{} ago", if d == 1 { "" } else { "s" })
+        }
+    };
+
+    view! {
+        <div class="space-y-6">
+
+            // ── Stats card ──────────────────────────────────────────────────
+            <div class="rounded-lg border border-border bg-card">
+                // Card header with title + refresh button
+                <div class="flex items-center justify-between px-4 py-3 border-b border-border">
+                    <div class="flex items-center gap-2">
+                        <span class="h-4 w-4 text-muted-foreground inline-flex items-center justify-center">
+                            <Icon icon=phosphor_leptos::STACK/>
+                        </span>
+                        <span class="text-sm font-medium text-foreground">"Data Catalog"</span>
+                    </div>
+                    <Show when=move || !is_sample.get()>
+                        <Button
+                            variant=ButtonVariant::Outline
+                            size=ButtonSize::Sm
+                            disabled=Signal::derive(move || refresh_action.pending().get())
+                            on:click=on_refresh_click
+                        >
+                            <span class="h-4 w-4 inline-flex items-center justify-center">
+                                <Icon icon=phosphor_leptos::ARROWS_CLOCKWISE/>
+                            </span>
+                            {move || if refresh_action.pending().get() {
+                                "Refreshing..."
+                            } else {
+                                "Refresh Now"
+                            }}
+                        </Button>
+                    </Show>
+                </div>
+
+                // Stats grid
+                <div class="p-4">
+                    {move || {
+                        if stats_action.pending().get() && stats.get().is_none() {
+                            view! {
+                                <div class="grid grid-cols-3 gap-3">
+                                    <Skeleton class="h-14 w-full"/>
+                                    <Skeleton class="h-14 w-full"/>
+                                    <Skeleton class="h-14 w-full"/>
+                                </div>
+                            }.into_any()
+                        } else {
+                            let table_count = stats.get().map(|s| s.table_count).unwrap_or(0);
+                            let schema_count = stats.get().map(|s| s.schema_count).unwrap_or(0);
+                            let last_indexed_str = stats
+                                .get()
+                                .and_then(|s| s.last_indexed)
+                                .map(|iso| format_relative(&iso))
+                                .unwrap_or_else(|| "Never".to_string());
+                            let ds_type_val = datasource_type.get();
+                            let schema_label = match ds_type_val.as_str() {
+                                "bigquery" => "Datasets",
+                                _ => "Schemas",
+                            };
+                            view! {
+                                <div class="grid grid-cols-3 gap-3">
+                                    <div class="flex flex-col gap-0.5 p-3 rounded-md bg-muted/40">
+                                        <span class="text-lg font-semibold font-data text-foreground">
+                                            {table_count.to_string()}
+                                        </span>
+                                        <span class="text-xs text-muted-foreground">"Tables indexed"</span>
+                                    </div>
+                                    <div class="flex flex-col gap-0.5 p-3 rounded-md bg-muted/40">
+                                        <span class="text-lg font-semibold font-data text-foreground">
+                                            {schema_count.to_string()}
+                                        </span>
+                                        <span class="text-xs text-muted-foreground">{schema_label}</span>
+                                    </div>
+                                    <div class="flex flex-col gap-0.5 p-3 rounded-md bg-muted/40">
+                                        <span class="text-sm font-medium font-data text-foreground truncate">
+                                            {last_indexed_str}
+                                        </span>
+                                        <span class="text-xs text-muted-foreground">"Last indexed"</span>
+                                    </div>
+                                </div>
+                            }.into_any()
+                        }
+                    }}
+
+                    // Refresh error
+                    {move || refresh_action.value().get().and_then(|r| r.err()).map(|e| view! {
+                        <Alert variant=AlertVariant::Error class="mt-3">
+                            <AlertDescription>{e.to_string()}</AlertDescription>
+                        </Alert>
+                    })}
+                </div>
+            </div>
+
+            // ── Schema/catalog picker (admin only, not for sample) ──────────
+            <Show when=move || !is_sample.get()>
+                <div class="space-y-3">
+                    {move || {
+                        let ds_type_val = datasource_type.get();
+                        let item_label = catalog_item_label_for_type(&ds_type_val);
+                        let config_label = match ds_type_val.as_str() {
+                            "bigquery" => "Projects to Index",
+                            "clickhouse" | "mysql" | "snowflake" => "Databases to Index",
+                            "databricks" => "Catalogs to Index",
+                            _ => "Schemas to Index",
+                        };
+
+                        view! {
+                            <div>
+                                <h4 class="text-sm font-medium text-foreground mb-1">
+                                    {config_label}
+                                </h4>
+                                <p class="text-xs text-muted-foreground mb-3">
+                                    "Select which "
+                                    {item_label}
+                                    " to include in catalog indexing. Leave empty to index all available "
+                                    {item_label}
+                                    "."
+                                </p>
+                            </div>
+                        }
+                    }}
+
+                    // BigQuery: Include Public Datasets toggle
+                    <Show when=move || datasource_type.get() == "bigquery">
+                        <label class="flex items-center justify-between p-3 rounded-lg border border-border bg-muted/30 cursor-pointer">
+                            <div>
+                                <span class="text-sm font-medium text-foreground block">
+                                    "Include Public Datasets"
+                                </span>
+                                <span class="text-xs text-muted-foreground">
+                                    "Show BigQuery public datasets in search results"
+                                </span>
+                            </div>
+                            <Switch
+                                checked=Signal::from(bq_include_public)
+                                on_change=Callback::new(move |val: bool| set_bq_include_public.set(val))
+                            />
+                        </label>
+                    </Show>
+
+                    // Discover Available button
+                    <div class="flex items-center gap-2">
+                        <Button
+                            variant=ButtonVariant::Outline
+                            size=ButtonSize::Sm
+                            disabled=Signal::derive(move || discover_action.pending().get())
+                            on:click=on_discover_click
+                        >
+                            <span class="h-4 w-4 inline-flex items-center justify-center">
+                                <Icon icon=phosphor_leptos::MAGNIFYING_GLASS/>
+                            </span>
+                            {move || if discover_action.pending().get() {
+                                "Discovering..."
+                            } else {
+                                "Discover Available"
+                            }}
+                        </Button>
+                        {move || if discover_status.get() == "success" && !discovered_items.get().is_empty() {
+                            let count = discovered_items.get().len();
+                            Some(view! {
+                                <span class="text-xs text-muted-foreground">
+                                    {format!("{count} found")}
+                                </span>
+                            })
+                        } else {
+                            None
+                        }}
+                    </div>
+
+                    // Discovery error
+                    {move || discover_error.get().filter(|_| discover_status.get() == "error").map(|msg| view! {
+                        <Alert variant=AlertVariant::Warning class="mt-1">
+                            <AlertDescription>{msg}</AlertDescription>
+                        </Alert>
+                    })}
+
+                    // Discovered items: checkbox list
+                    <Show when=move || {
+                        discover_status.get() == "success" && !discovered_items.get().is_empty()
+                    }>
+                        <div class="space-y-2">
+                            // Select all / Clear buttons + count
+                            <div class="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    class="text-xs text-primary hover:underline"
+                                    on:click=move |_| {
+                                        set_catalog_selected.set(discovered_items.get_untracked());
+                                    }
+                                >
+                                    "Select all"
+                                </button>
+                                <span class="text-xs text-muted-foreground">"·"</span>
+                                <button
+                                    type="button"
+                                    class="text-xs text-primary hover:underline"
+                                    on:click=move |_| set_catalog_selected.set(vec![])
+                                >
+                                    "Clear"
+                                </button>
+                                <span class="text-xs text-muted-foreground ml-auto">
+                                    {move || {
+                                        let sel = catalog_selected.get().len();
+                                        let total = discovered_items.get().len();
+                                        format!("{sel} of {total} selected")
+                                    }}
+                                </span>
+                            </div>
+                            // Checkbox list
+                            <div class="border border-border rounded-md divide-y divide-border max-h-60 overflow-y-auto">
+                                <For
+                                    each=move || discovered_items.get()
+                                    key=|item| item.clone()
+                                    let:item
+                                >
+                                    {
+                                        let item_for_change = item.clone();
+                                        let item_for_check = item.clone();
+                                        view! {
+                                            <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-muted/40 transition-colors">
+                                                <input
+                                                    type="checkbox"
+                                                    class="h-4 w-4 rounded border-input accent-primary"
+                                                    prop:checked=move || catalog_selected.get().contains(&item_for_check)
+                                                    on:change=move |ev| {
+                                                        let checked = event_target_checked(&ev);
+                                                        let val = item_for_change.clone();
+                                                        set_catalog_selected.update(|list| {
+                                                            if checked {
+                                                                if !list.contains(&val) {
+                                                                    list.push(val);
+                                                                }
+                                                            } else {
+                                                                list.retain(|i| i != &val);
+                                                            }
+                                                        });
+                                                    }
+                                                />
+                                                <span class="text-sm font-mono text-foreground">
+                                                    {item.clone()}
+                                                </span>
+                                            </label>
+                                        }
+                                    }
+                                </For>
+                            </div>
+                        </div>
+                    </Show>
+
+                    // Currently selected items (chip list)
+                    <Show when=move || !catalog_selected.get().is_empty()>
+                        <div class="space-y-1">
+                            <p class="text-xs text-muted-foreground font-medium">"Currently selected:"</p>
+                            <div class="flex flex-wrap gap-1.5">
+                                <For
+                                    each=move || catalog_selected.get()
+                                    key=|item| item.clone()
+                                    let:item
+                                >
+                                    {
+                                        let item_for_remove = item.clone();
+                                        view! {
+                                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-border bg-muted/40 text-xs font-mono text-foreground">
+                                                {item.clone()}
+                                                <button
+                                                    type="button"
+                                                    class="h-3.5 w-3.5 inline-flex items-center justify-center text-muted-foreground hover:text-foreground transition-colors"
+                                                    on:click=move |_| {
+                                                        let val = item_for_remove.clone();
+                                                        set_catalog_selected.update(|list| {
+                                                            list.retain(|i| i != &val);
+                                                        });
+                                                    }
+                                                >
+                                                    <Icon icon=phosphor_leptos::X size="10px"/>
+                                                </button>
+                                            </span>
+                                        }
+                                    }
+                                </For>
+                            </div>
+                        </div>
+                    </Show>
+
+                    // Manual text input (always shown as fallback / supplement)
+                    <Show when=move || {
+                        discover_status.get() != "success" || discovered_items.get().is_empty()
+                    }>
+                        <div class="space-y-1.5">
+                            <p class="text-xs text-muted-foreground">
+                                "Or add items manually:"
+                            </p>
+                            <div class="flex gap-2">
+                                <input
+                                    type="text"
+                                    class=MODAL_INPUT_CLASS
+                                    placeholder=move || {
+                                        let ds_type_val = datasource_type.get();
+                                        match ds_type_val.as_str() {
+                                            "bigquery" => "Enter project ID",
+                                            "clickhouse" | "mysql" | "snowflake" => "Enter database name",
+                                            "databricks" => "Enter catalog name (e.g. main)",
+                                            _ => "Enter schema name (e.g. public)",
+                                        }
+                                    }
+                                    prop:value=move || new_item_input.get()
+                                    on:input=move |ev| set_new_item_input.set(event_target_value(&ev))
+                                    on:keydown=move |ev| {
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            on_add_item();
+                                        }
+                                    }
+                                />
+                                <Button
+                                    variant=ButtonVariant::Outline
+                                    size=ButtonSize::Sm
+                                    disabled=Signal::derive(move || new_item_input.get().trim().is_empty())
+                                    on:click=move |_| on_add_item()
+                                >
+                                    <span class="h-4 w-4 inline-flex items-center justify-center">
+                                        <Icon icon=phosphor_leptos::PLUS/>
+                                    </span>
+                                </Button>
+                            </div>
+                        </div>
+                    </Show>
+
+                    <p class="text-xs text-muted-foreground">
+                        "Changes to the catalog scope take effect on the next refresh."
+                    </p>
+                </div>
+            </Show>
         </div>
     }
 }
