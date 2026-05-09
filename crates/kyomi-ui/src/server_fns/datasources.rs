@@ -784,7 +784,7 @@ pub async fn get_catalog_stats(
     // Verify the datasource belongs to this workspace.
     #[derive(sqlx::FromRow)]
     struct ExistsRow {
-        exists_val: i64,
+        exists_val: i32,
     }
     let exists = kyomi_core::db_fetch_optional!(
         ac.db(),
