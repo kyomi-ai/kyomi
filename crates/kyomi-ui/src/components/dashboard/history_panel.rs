@@ -248,11 +248,11 @@ pub fn HistoryPanel(
             match get_version(did, version_number).await {
                 Ok(detail) => {
                     if let Some(cb) = on_preview { cb.run(Some(detail.content.clone())); }
-                    set_previewing.set(Some(detail));
-                    set_show_diff.set(false);
+                    set_previewing.try_set(Some(detail));
+                    set_show_diff.try_set(false);
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to load version: {e}")));
+                    set_error.try_set(Some(format!("Failed to load version: {e}")));
                 }
             }
         });
@@ -270,16 +270,16 @@ pub fn HistoryPanel(
         leptos::task::spawn_local(async move {
             match diff_versions(did, from_version, to_version).await {
                 Ok(diff) => {
-                    set_diff_data.set(Some(diff));
-                    set_show_diff.set(true);
-                    set_previewing.set(None);
+                    set_diff_data.try_set(Some(diff));
+                    set_show_diff.try_set(true);
+                    set_previewing.try_set(None);
                     if let Some(cb) = on_preview { cb.run(None); }
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to load diff: {e}")));
+                    set_error.try_set(Some(format!("Failed to load diff: {e}")));
                 }
             }
-            set_is_diff_loading.set(false);
+            set_is_diff_loading.try_set(false);
         });
     };
 
@@ -291,18 +291,18 @@ pub fn HistoryPanel(
         leptos::task::spawn_local(async move {
             match restore_version(did, ver_num).await {
                 Ok(()) => {
-                    set_previewing.set(None);
-                    set_show_diff.set(false);
+                    set_previewing.try_set(None);
+                    set_show_diff.try_set(false);
                     if let Some(cb) = on_preview { cb.run(None); }
                     on_restore.run(());
                     // Refetch versions
-                    set_version_counter.update(|c| *c += 1);
+                    set_version_counter.try_update(|c| *c += 1);
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to restore version: {e}")));
+                    set_error.try_set(Some(format!("Failed to restore version: {e}")));
                 }
             }
-            set_is_restoring.set(false);
+            set_is_restoring.try_set(false);
         });
     };
 

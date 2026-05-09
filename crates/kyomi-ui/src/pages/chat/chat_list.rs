@@ -145,17 +145,15 @@ pub fn ChatsListPage() -> impl IntoView {
     // When a text search is active, use the server search results.
     // Otherwise, use the SyncStore (with client-side pinned filter).
     let sessions = Signal::derive(move || {
-        if let Some(results) = search_results.get() {
-            // Server search results — apply pinned filter if needed
-            if show_pinned_only.get() {
+        if let Some(results) = search_results.try_get().flatten() {
+            if show_pinned_only.try_get().unwrap_or(false) {
                 results.into_iter().filter(|s| s.pinned_count > 0).collect()
             } else {
                 results
             }
         } else {
-            // SyncStore — apply client-side pinned filter
             let mut items = all_sessions_from_store.get();
-            if show_pinned_only.get() {
+            if show_pinned_only.try_get().unwrap_or(false) {
                 items.retain(|s| s.pinned_count > 0);
             }
             items
@@ -191,17 +189,17 @@ pub fn ChatsListPage() -> impl IntoView {
             }
 
             let handle = gloo_timers::callback::Timeout::new(300, move || {
-                set_is_searching.set(true);
+                set_is_searching.try_set(true);
                 leptos::task::spawn_local(async move {
                     match search_chat_messages(value).await {
                         Ok(results) => {
-                            set_search_results.set(Some(results));
+                            set_search_results.try_set(Some(results));
                         }
                         Err(_) => {
-                            set_search_results.set(Some(Vec::new()));
+                            set_search_results.try_set(Some(Vec::new()));
                         }
                     }
-                    set_is_searching.set(false);
+                    set_is_searching.try_set(false);
                 });
             });
 
@@ -302,7 +300,7 @@ pub fn ChatsListPage() -> impl IntoView {
                             for id in &deleted_ids {
                                 store_for_delete.remove_chat_session(id);
                             }
-                            set_selected_chats.update(|selected| {
+                            set_selected_chats.try_update(|selected| {
                                 selected.retain(|id| !deleted_ids.contains(id));
                             });
                         }
@@ -382,11 +380,11 @@ pub fn ChatsListPage() -> impl IntoView {
                         for id in &ids {
                             store.remove_chat_session(id);
                         }
-                        set_selected_chats.set(Vec::new());
+                        set_selected_chats.try_set(Vec::new());
                         #[cfg(target_arch = "wasm32")]
                         dispatch_sessions_deleted(&ids);
                     }
-                    set_is_bulk_deleting.set(false);
+                    set_is_bulk_deleting.try_set(false);
                 });
             }
             None => {}

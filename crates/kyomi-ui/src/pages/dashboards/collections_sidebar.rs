@@ -658,7 +658,7 @@ pub fn CollectionsSidebar(
                 }
                 // If deleted collection was active, clear filter
                 if active.as_deref() == Some(&id) {
-                    set_active_collection_id.set(None);
+                    set_active_collection_id.try_set(None);
                 }
                 on_changed.run(());
             });

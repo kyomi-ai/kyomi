@@ -218,8 +218,8 @@ pub fn SessionManagement() -> impl IntoView {
                         }
                     }
                     Err(e) => {
-                        error.set(Some(format!("Failed to logout from all devices: {e}")));
-                        loading.set(false);
+                        error.try_set(Some(format!("Failed to logout from all devices: {e}")));
+                        loading.try_set(false);
                     }
                 }
             });
@@ -232,23 +232,23 @@ pub fn SessionManagement() -> impl IntoView {
             leptos::task::spawn_local(async move {
                 match revoke_session(token_id).await {
                     Ok(_) => {
-                        revoking_id.set(None);
+                        revoking_id.try_set(None);
                         // Reload sessions
-                        loading.set(true);
+                        loading.try_set(true);
                         match get_sessions().await {
                             Ok(data) => {
-                                sessions.set(data);
-                                loading.set(false);
+                                sessions.try_set(data);
+                                loading.try_set(false);
                             }
                             Err(e) => {
-                                error.set(Some(format!("Failed to reload sessions: {e}")));
-                                loading.set(false);
+                                error.try_set(Some(format!("Failed to reload sessions: {e}")));
+                                loading.try_set(false);
                             }
                         }
                     }
                     Err(e) => {
-                        revoking_id.set(None);
-                        error.set(Some(format!("Failed to disconnect session: {e}")));
+                        revoking_id.try_set(None);
+                        error.try_set(Some(format!("Failed to disconnect session: {e}")));
                     }
                 }
             });

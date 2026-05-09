@@ -198,8 +198,8 @@ pub fn ConnectSetupPage() -> impl IntoView {
             .await;
 
             match result {
-                Ok(()) => set_delivery_status.set(Some(DeliveryStatus::Delivered)),
-                Err(_) => set_delivery_status.set(Some(DeliveryStatus::Failed)),
+                Ok(()) => { set_delivery_status.try_set(Some(DeliveryStatus::Delivered)); }
+                Err(_) => { set_delivery_status.try_set(Some(DeliveryStatus::Failed)); }
             }
         });
     };
@@ -213,15 +213,15 @@ pub fn ConnectSetupPage() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match rotate_connect_token(ds_id.clone()).await {
                 Ok(new_token) => {
-                    set_token.set(Some(new_token.clone()));
-                    set_step.set(SetupStep::Success);
+                    set_token.try_set(Some(new_token.clone()));
+                    set_step.try_set(SetupStep::Success);
                     deliver(new_token);
                 }
                 Err(e) => {
-                    set_error.set(Some(format!("Failed to generate token: {e}")));
+                    set_error.try_set(Some(format!("Failed to generate token: {e}")));
                 }
             }
-            set_generating_token_for.set(None);
+            set_generating_token_for.try_set(None);
         });
     };
 
@@ -249,8 +249,8 @@ pub fn ConnectSetupPage() -> impl IntoView {
             match create_connect_datasource(name.clone(), slug, ds_type).await {
                 Ok(result) => {
                     let tok = result.connect_token;
-                    set_token.set(Some(tok.clone()));
-                    set_step.set(SetupStep::Success);
+                    set_token.try_set(Some(tok.clone()));
+                    set_step.try_set(SetupStep::Success);
                     deliver(tok);
                 }
                 Err(e) => {
@@ -260,15 +260,15 @@ pub fn ConnectSetupPage() -> impl IntoView {
                         || msg.contains("duplicate")
                         || msg.contains("conflict")
                     {
-                        set_show_slug.set(true);
+                        set_show_slug.try_set(true);
                         if new_slug.get_untracked().is_empty() {
-                            set_new_slug.set(generate_slug(&name));
+                            set_new_slug.try_set(generate_slug(&name));
                         }
                     }
-                    set_error.set(Some(msg));
+                    set_error.try_set(Some(msg));
                 }
             }
-            set_creating.set(false);
+            set_creating.try_set(false);
         });
     };
 
@@ -667,9 +667,9 @@ fn SuccessStep(
                 let clipboard = window.navigator().clipboard();
                 let promise = clipboard.write_text(&text);
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                set_copied.set(true);
+                set_copied.try_set(true);
                 gloo_timers::future::TimeoutFuture::new(2000).await;
-                set_copied.set(false);
+                set_copied.try_set(false);
             }
         });
     };
@@ -684,9 +684,9 @@ fn SuccessStep(
                 let clipboard = window.navigator().clipboard();
                 let promise = clipboard.write_text(&cmd);
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-                set_install_copied.set(true);
+                set_install_copied.try_set(true);
                 gloo_timers::future::TimeoutFuture::new(2000).await;
-                set_install_copied.set(false);
+                set_install_copied.try_set(false);
             }
         });
     };

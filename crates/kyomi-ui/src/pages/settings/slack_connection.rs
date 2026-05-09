@@ -118,9 +118,9 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
         leptos::task::spawn_local(async move {
             match set_default_watch_channel(id, name).await {
                 Ok(_) => {}
-                Err(e) => set_err.set(Some(e.to_string())),
+                Err(e) => { set_err.try_set(Some(e.to_string())); }
             }
-            set_saving.set(false);
+            set_saving.try_set(false);
         });
     };
 

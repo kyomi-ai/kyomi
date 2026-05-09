@@ -704,10 +704,10 @@ pub fn DatasourceModal(
                 leptos::task::spawn_local(async move {
                     match get_datasource_settings(ds_id).await {
                         Ok(settings) => {
-                            set_name.set(settings.name.clone());
-                            set_slug.set(settings.slug.clone());
-                            set_ds_type.set(settings.datasource_type.clone());
-                            set_connection_type.set(settings.connection_type.clone());
+                            set_name.try_set(settings.name.clone());
+                            set_slug.try_set(settings.slug.clone());
+                            set_ds_type.try_set(settings.datasource_type.clone());
+                            set_connection_type.try_set(settings.connection_type.clone());
 
                             // Load connection_config fields
                             let cfg = &settings.connection_config;
@@ -722,49 +722,49 @@ pub fn DatasourceModal(
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(false)
                             };
-                            set_cfg_host.set(str_val("host"));
-                            set_cfg_port.set(
+                            set_cfg_host.try_set(str_val("host"));
+                            set_cfg_port.try_set(
                                 cfg.get("port")
                                     .and_then(|v| v.as_i64())
                                     .map(|n| n.to_string())
                                     .unwrap_or_default(),
                             );
-                            set_cfg_ssl_mode.set(
+                            set_cfg_ssl_mode.try_set(
                                 if str_val("ssl_mode").is_empty() {
                                     "require".to_string()
                                 } else {
                                     str_val("ssl_mode")
                                 }
                             );
-                            set_cfg_database.set(str_val("database"));
-                            set_cfg_schema.set(str_val("schema"));
-                            set_cfg_warehouse.set(str_val("warehouse"));
-                            set_cfg_account.set(str_val("account"));
-                            set_cfg_role.set(str_val("role"));
-                            set_cfg_catalog.set(str_val("catalog"));
-                            set_cfg_server_hostname.set(str_val("server_hostname"));
-                            set_cfg_http_path.set(str_val("http_path"));
-                            set_cfg_secure.set(bool_val("secure"));
-                            set_cfg_encrypt.set(
+                            set_cfg_database.try_set(str_val("database"));
+                            set_cfg_schema.try_set(str_val("schema"));
+                            set_cfg_warehouse.try_set(str_val("warehouse"));
+                            set_cfg_account.try_set(str_val("account"));
+                            set_cfg_role.try_set(str_val("role"));
+                            set_cfg_catalog.try_set(str_val("catalog"));
+                            set_cfg_server_hostname.try_set(str_val("server_hostname"));
+                            set_cfg_http_path.try_set(str_val("http_path"));
+                            set_cfg_secure.try_set(bool_val("secure"));
+                            set_cfg_encrypt.try_set(
                                 cfg.get("encrypt")
                                     .and_then(|v| v.as_bool())
                                     .unwrap_or(true),
                             );
-                            set_cfg_trust_cert.set(bool_val("trust_server_certificate"));
-                            set_is_sample.set(bool_val("is_sample"));
-                            set_cfg_shared_credentials.set(settings.shared_credentials);
-                            set_cfg_oauth_client_id.set(str_val("oauth_client_id"));
-                            set_cfg_oauth_client_secret.set(str_val("oauth_client_secret"));
+                            set_cfg_trust_cert.try_set(bool_val("trust_server_certificate"));
+                            set_is_sample.try_set(bool_val("is_sample"));
+                            set_cfg_shared_credentials.try_set(settings.shared_credentials);
+                            set_cfg_oauth_client_id.try_set(str_val("oauth_client_id"));
+                            set_cfg_oauth_client_secret.try_set(str_val("oauth_client_secret"));
 
                             // BigQuery auth mode
                             if let Some(ref auth_mode) = settings.auth_mode {
-                                set_bq_auth_mode.set(auth_mode.clone());
-                                set_sf_auth_mode.set(auth_mode.clone());
+                                set_bq_auth_mode.try_set(auth_mode.clone());
+                                set_sf_auth_mode.try_set(auth_mode.clone());
                             }
 
                             // Service account
                             if let Some(ref email) = settings.service_account_email {
-                                set_service_account_email.set(email.clone());
+                                set_service_account_email.try_set(email.clone());
                             }
 
                             // Load user settings (masked credentials)
@@ -775,15 +775,15 @@ pub fn DatasourceModal(
                                     .unwrap_or("")
                                     .to_string()
                             };
-                            set_cred_billing_project.set(user_str("billing_project"));
-                            set_cred_default_project.set(user_str("default_project"));
+                            set_cred_billing_project.try_set(user_str("billing_project"));
+                            set_cred_default_project.try_set(user_str("default_project"));
                             // Note: passwords are not pre-filled (security)
                         }
                         Err(e) => {
-                            set_error_msg.set(Some(format!("Failed to load settings: {e}")));
+                            set_error_msg.try_set(Some(format!("Failed to load settings: {e}")));
                         }
                     }
-                    set_settings_loading.set(false);
+                    set_settings_loading.try_set(false);
                 });
             }
         }
@@ -803,12 +803,12 @@ pub fn DatasourceModal(
         leptos::task::spawn_local(async move {
             match check_sample_datasource_available().await {
                 Ok(result) => {
-                    set_sample_available.set(result.configured && result.is_admin);
-                    set_sample_already_added.set(result.already_added);
+                    set_sample_available.try_set(result.configured && result.is_admin);
+                    set_sample_already_added.try_set(result.already_added);
                 }
                 Err(_) => {
-                    set_sample_available.set(false);
-                    set_sample_already_added.set(false);
+                    set_sample_available.try_set(false);
+                    set_sample_already_added.try_set(false);
                 }
             }
         });
@@ -834,12 +834,12 @@ pub fn DatasourceModal(
                 Err(e) => {
                     let msg = e.to_string();
                     if msg.contains("already") {
-                        set_sample_already_added.set(true);
+                        set_sample_already_added.try_set(true);
                     }
-                    set_error_msg.set(Some(msg));
+                    set_error_msg.try_set(Some(msg));
                 }
             }
-            set_creating_sample.set(false);
+            set_creating_sample.try_set(false);
         });
     };
 
@@ -1169,15 +1169,15 @@ pub fn DatasourceModal(
         leptos::task::spawn_local(async move {
             match create_connect_datasource(name_val.clone(), slug_opt, ds_type_val.clone()).await {
                 Ok(result) => {
-                    set_connect_created_name.set(name_val);
-                    set_connect_created_type.set(ds_type_val);
-                    set_connect_token.set(Some(result.connect_token));
+                    set_connect_created_name.try_set(name_val);
+                    set_connect_created_type.try_set(ds_type_val);
+                    set_connect_token.try_set(Some(result.connect_token));
                 }
                 Err(e) => {
-                    set_error_msg.set(Some(e.to_string()));
+                    set_error_msg.try_set(Some(e.to_string()));
                 }
             }
-            set_creating_connect.set(false);
+            set_creating_connect.try_set(false);
         });
     };
 

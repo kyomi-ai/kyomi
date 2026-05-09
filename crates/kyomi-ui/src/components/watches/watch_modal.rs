@@ -336,7 +336,7 @@ pub fn WatchModal(
 
             match result {
                 Ok(_) => {
-                    set_is_saving.set(false);
+                    set_is_saving.try_set(false);
                     if is_editing {
                         toast_success("Watch updated successfully");
                     } else {
@@ -352,7 +352,7 @@ pub fn WatchModal(
                         .unwrap_or(&e.to_string())
                         .to_string();
                     toast_error(msg);
-                    set_is_saving.set(false);
+                    set_is_saving.try_set(false);
                 }
             }
         });

@@ -428,7 +428,7 @@ pub fn PasskeyManager() -> impl IntoView {
             {
                 use gloo_timers::callback::Timeout;
                 let timeout = Timeout::new(5_000, move || {
-                    success.set(None);
+                    success.try_set(None);
                 });
                 timeout.forget();
             }
@@ -453,19 +453,19 @@ pub fn PasskeyManager() -> impl IntoView {
         leptos::task::spawn_local(async move {
             let result = add_passkey_flow(&device_name).await;
 
-            add_loading.set(false);
+            add_loading.try_set(false);
 
             match result {
                 Ok(msg) => {
-                    success.set(Some(msg));
-                    add_modal_open.set(false);
-                    add_device_name.set(String::new());
+                    success.try_set(Some(msg));
+                    add_modal_open.try_set(false);
+                    add_device_name.try_set(String::new());
                     // Reload passkeys
-                    loading.set(true);
+                    loading.try_set(true);
                     passkeys_resource.refetch();
                 }
                 Err(e) => {
-                    error.set(Some(e));
+                    error.try_set(Some(e));
                 }
             }
         });
@@ -491,19 +491,19 @@ pub fn PasskeyManager() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match rename_passkey(cred_id, name.trim().to_string()).await {
                 Ok(msg) => {
-                    success.set(Some(msg));
-                    rename_modal_open.set(false);
-                    rename_credential_id.set(None);
-                    rename_device_name.set(String::new());
+                    success.try_set(Some(msg));
+                    rename_modal_open.try_set(false);
+                    rename_credential_id.try_set(None);
+                    rename_device_name.try_set(String::new());
                     // Reload passkeys
-                    loading.set(true);
+                    loading.try_set(true);
                     passkeys_resource.refetch();
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.try_set(Some(e.to_string()));
                 }
             }
-            rename_loading.set(false);
+            rename_loading.try_set(false);
         });
     };
 
@@ -533,12 +533,12 @@ pub fn PasskeyManager() -> impl IntoView {
         leptos::task::spawn_local(async move {
             match delete_passkey(cred_id).await {
                 Ok(msg) => {
-                    success.set(Some(msg));
+                    success.try_set(Some(msg));
                     passkeys_resource.refetch();
                 }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
-                    loading.set(false);
+                    error.try_set(Some(e.to_string()));
+                    loading.try_set(false);
                 }
             }
         });

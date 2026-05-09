@@ -191,7 +191,7 @@ fn use_debounced_dry_run(
         let pending_clone = pending.clone();
         let timeout = Timeout::new(1_000, move || {
             // Clear the pending handle since this callback is now executing.
-            pending_clone.set(None);
+            pending_clone.set(None); // lint-allow: disposal-safe=Rc<Cell> not a reactive signal
 
             // If the editor has selected text, validate only the selection
             // (matches React's getSelectedOrFullText() pattern).

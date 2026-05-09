@@ -333,7 +333,7 @@ fn DashboardEditorInner(
             });
 
             let handle = gloo_timers::callback::Timeout::new(500, move || {
-                set_preview_content.set(preview_text);
+                set_preview_content.try_set(preview_text);
             });
 
             debounce_handle.set_value(Some(SendWrapper::new(handle)));
@@ -875,11 +875,11 @@ fn DashboardEditorInner(
         if let Some(did) = did {
             leptos::task::spawn_local(async move {
                 if let Ok(dashboard) = get_dashboard(did).await {
-                    set_title.set(dashboard.title.clone());
-                    set_editor_content.set(dashboard.content.clone());
-                    set_preview_content.set(dashboard.content.clone());
-                    set_original_title.set(dashboard.title);
-                    set_original_content.set(dashboard.content);
+                    set_title.try_set(dashboard.title.clone());
+                    set_editor_content.try_set(dashboard.content.clone());
+                    set_preview_content.try_set(dashboard.content.clone());
+                    set_original_title.try_set(dashboard.title);
+                    set_original_content.try_set(dashboard.content);
                 }
             });
         }
