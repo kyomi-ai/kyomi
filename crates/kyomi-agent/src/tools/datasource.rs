@@ -153,7 +153,11 @@ impl AgentTool for QueryDatasourceTool {
         match result.status {
             kyomi_datasource_server::provider::QueryStatus::Success => {
                 let columns = result.columns.unwrap_or_default();
-                let mut rows = result.rows.unwrap_or_default();
+                let mut rows = result
+                    .record_batch
+                    .as_ref()
+                    .map(super::query_utils::record_batch_to_rows)
+                    .unwrap_or_default();
                 // Defensive truncation: cap at 20 rows even if provider
                 // returns more (shouldn't happen, but belt-and-suspenders).
                 rows.truncate(20);
@@ -173,14 +177,12 @@ impl AgentTool for QueryDatasourceTool {
                         serde_json::Value::Array(Vec::new()),
                     );
                 }
-                for row in &rows {
-                    for (i, col) in columns.iter().enumerate() {
+                for row in rows {
+                    for (col, value) in columns.iter().zip(row) {
                         if let Some(arr) =
                             col_data.get_mut(&col.name).and_then(|v| v.as_array_mut())
                         {
-                            arr.push(
-                                row.get(i).cloned().unwrap_or(serde_json::Value::Null),
-                            );
+                            arr.push(value);
                         }
                     }
                 }

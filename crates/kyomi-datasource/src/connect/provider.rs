@@ -287,7 +287,6 @@ impl DatasourceProvider for ConnectProvider {
                 Ok(QueryResult {
                     status: crate::provider::QueryStatus::Success,
                     columns: Some(columns),
-                    rows: None,
                     total_rows,
                     has_more: false,
                     bytes_processed,
@@ -656,7 +655,6 @@ mod tests {
                     name: "id".into(),
                     col_type: crate::provider::SimpleType::Number,
                 }]),
-                rows: Some(vec![vec![serde_json::json!(1)]]),
                 total_rows: Some(1),
                 has_more: false,
                 bytes_processed: None,
@@ -687,7 +685,6 @@ mod tests {
             .expect("should succeed");
 
         assert_eq!(result.status, crate::provider::QueryStatus::Success);
-        assert_eq!(result.rows.as_ref().unwrap().len(), 1);
         assert_eq!(result.execution_time_ms, Some(5));
 
         handle.await.unwrap();
@@ -1175,7 +1172,6 @@ mod tests {
         assert_eq!(batch.num_columns(), 2);
         assert_eq!(result.total_rows, Some(2));
         assert_eq!(result.execution_time_ms, Some(15));
-        assert!(result.rows.is_none());
         assert_eq!(result.job_id, None);
 
         handle.await.unwrap();

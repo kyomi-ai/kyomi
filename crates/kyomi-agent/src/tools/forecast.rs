@@ -177,7 +177,11 @@ impl AgentTool for ForecastDataTool {
         }
 
         let columns = result.columns.unwrap_or_default();
-        let rows = result.rows.unwrap_or_default();
+        let rows = result
+            .record_batch
+            .as_ref()
+            .map(super::query_utils::record_batch_to_rows)
+            .unwrap_or_default();
 
         if rows.is_empty() {
             return Ok(serde_json::json!({ "error": "Query returned no data." }).to_string());
