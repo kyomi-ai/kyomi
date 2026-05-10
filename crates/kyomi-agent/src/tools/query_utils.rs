@@ -13,11 +13,95 @@
 
 use std::sync::OnceLock;
 
+use arrow_array::{
+    Array, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, LargeStringArray,
+    StringArray, TimestampMicrosecondArray, UInt64Array,
+};
 use regex::Regex;
 use serde_json::Value;
 use tracing;
 
 use super::QueryContext;
+
+// ---------------------------------------------------------------------------
+// Arrow → JSON conversion
+// ---------------------------------------------------------------------------
+
+/// Convert an Arrow [`RecordBatch`] to a row-major `Vec<Vec<Value>>`.
+///
+/// This is the single authoritative place where Arrow columnar data is
+/// converted to JSON values for the tool→LLM text boundary. It handles all
+/// concrete array types that datasource providers produce. Unknown types fall
+/// back to `Value::Null` rather than panicking.
+///
+/// **Only call this at the tool output boundary.** The Arrow pipeline must
+/// stay intact through query execution; JSON conversion belongs here, not
+/// inside providers or the query executor.
+pub fn record_batch_to_rows(
+    batch: &arrow_array::RecordBatch,
+) -> Vec<Vec<Value>> {
+    let num_rows = batch.num_rows();
+    let num_cols = batch.num_columns();
+    let mut rows = Vec::with_capacity(num_rows);
+    for row_idx in 0..num_rows {
+        let mut row = Vec::with_capacity(num_cols);
+        for col_idx in 0..num_cols {
+            let col = batch.column(col_idx);
+            let val = arrow_cell_to_json(col.as_ref(), row_idx);
+            row.push(val);
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Convert a single cell from an Arrow array to a [`serde_json::Value`].
+fn arrow_cell_to_json(col: &dyn Array, row_idx: usize) -> Value {
+    if col.is_null(row_idx) {
+        return Value::Null;
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
+        return serde_json::Number::from_f64(arr.value(row_idx))
+            .map(Value::Number)
+            .unwrap_or(Value::Null);
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
+        return Value::Number(arr.value(row_idx).into());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
+        return Value::Number(arr.value(row_idx).into());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
+        return Value::Number(arr.value(row_idx).into());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
+        return Value::String(arr.value(row_idx).to_string());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<LargeStringArray>() {
+        return Value::String(arr.value(row_idx).to_string());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<BooleanArray>() {
+        return Value::Bool(arr.value(row_idx));
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<Date32Array>() {
+        // Date32 stores days since Unix epoch (1970-01-01)
+        let days = arr.value(row_idx);
+        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+        let date = epoch + chrono::Duration::days(i64::from(days));
+        return Value::String(date.format("%Y-%m-%d").to_string());
+    }
+    if let Some(arr) = col.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        let micros = arr.value(row_idx);
+        let secs = micros.div_euclid(1_000_000);
+        let sub_micros = micros.rem_euclid(1_000_000);
+        let nsec = (sub_micros * 1_000) as u32;
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, nsec) {
+            return Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string());
+        }
+        return Value::Null;
+    }
+    Value::Null
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -144,16 +228,19 @@ pub async fn execute_datasource_query(
 
     // 5. Convert to column names + dict rows
     let columns = result.columns.unwrap_or_default();
-    let raw_rows = result.rows.unwrap_or_default();
-
     let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
 
-    let dict_rows: Vec<serde_json::Map<String, Value>> = raw_rows
+    let positional_rows = result
+        .record_batch
+        .as_ref()
+        .map(record_batch_to_rows)
+        .unwrap_or_default();
+
+    let dict_rows: Vec<serde_json::Map<String, Value>> = positional_rows
         .into_iter()
         .map(|row| {
             let mut map = serde_json::Map::new();
-            for (i, col_name) in col_names.iter().enumerate() {
-                let value = row.get(i).cloned().unwrap_or(Value::Null);
+            for (col_name, value) in col_names.iter().zip(row) {
                 map.insert(col_name.clone(), value);
             }
             map
