@@ -557,11 +557,12 @@ pub fn ChartBuilderModal(
     let is_edit_mode = existing_yaml.is_some();
     let existing_yaml_stored = StoredValue::new(existing_yaml.clone());
 
-    // Must capture before spawn_local — the Leptos owner is lost across awaits,
-    // so use_theme() returns None inside async closures.
-    let initial_is_dark = crate::components::theme::use_theme()
-        .map(|s| s.effective.get_untracked() == "dark")
-        .unwrap_or(false);
+    let theme_state = crate::components::theme::use_theme();
+    let is_dark = Memo::new(move |_| {
+        theme_state
+            .map(|s| s.effective.get() == "dark")
+            .unwrap_or(false)
+    });
 
     // ── Canonical state: the chart-document AST ─────────────────────────
     // All three sub-tabs read from and write to this signal. There is NO
@@ -847,7 +848,7 @@ pub fn ChartBuilderModal(
     // mounts outside DashboardChartProviders, so ChartMLChart's context
     // fallback finds nothing. We register directly here.
     let inline_chartml: StoredValue<chartml_leptos::ChartMLRef, LocalStorage> = {
-        let chartml = configured_chartml("kyomi", initial_is_dark);
+        let chartml = configured_chartml("kyomi", is_dark.get());
         if !workspace_id.is_empty() {
             let provider: chartml_leptos::ProviderRef = std::sync::Arc::new(
                 crate::chartml_provider::KyomiDatasourceProvider::new(workspace_id.clone()),
@@ -864,10 +865,11 @@ pub fn ChartBuilderModal(
         let initial_sql = ast_get_query(&initial_ast_val);
         if !initial_ds.is_empty() && !initial_sql.trim().is_empty() {
             set_preview_loading.set(true);
+            let dark = is_dark.get();
             leptos::task::spawn_local(async move {
                 match crate::arrow_fetch::fetch_arrow_stream(&initial_ds, &initial_sql).await {
                     Ok(data_table) => {
-                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
+                        let chartml_inst = build_remote_chartml(data_table, dark);
                         _set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
                             chartml_leptos::ChartMLRef::new(chartml_inst),
                         )));
@@ -1578,10 +1580,12 @@ pub fn ChartBuilderModal(
                                             set_preview_error.set(None);
 
                                             #[cfg(target_arch = "wasm32")]
+                                            {
+                                            let dark = is_dark.get();
                                             leptos::task::spawn_local(async move {
                                                 match crate::arrow_fetch::fetch_arrow_stream(&ds_slug, &query_text).await {
                                                     Ok(data_table) => {
-                                                        let chartml_inst = build_remote_chartml(data_table, initial_is_dark);
+                                                        let chartml_inst = build_remote_chartml(data_table, dark);
                                                         _set_preview_chartml.try_set(Some(send_wrapper::SendWrapper::new(
                                                             chartml_leptos::ChartMLRef::new(chartml_inst),
                                                         )));
@@ -1593,6 +1597,7 @@ pub fn ChartBuilderModal(
                                                     }
                                                 }
                                             });
+                                            }
                                         }
                                     >
                                         {move || {
