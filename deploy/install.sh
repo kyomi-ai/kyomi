@@ -10,7 +10,7 @@
 #   sh install.sh
 #
 # Pin to a specific version:
-#   KYOMI_VERSION=1.4.0 curl -fsSL https://get.kyomi.ai | sh
+#   KYOMI_VERSION=2.0.0 curl -fsSL https://get.kyomi.ai | sh
 #
 # Requirements: Docker with Compose plugin, openssl, curl
 # =============================================================================

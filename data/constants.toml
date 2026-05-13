@@ -6,7 +6,7 @@
 # Secrets (JWT secret, encryption key, DB URLs) are NOT here — they stay in env vars.
 
 [api]
-version = "1.0.0"
+version = "2.0.0"
 
 [analytics]
 collector_url = "https://analytics.kyomi.ai"

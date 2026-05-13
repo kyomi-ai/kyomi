@@ -18,6 +18,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
+version = "2.0.0"
 license = "AGPL-3.0-or-later"
 
 # Shared dependency versions — all crates use these
