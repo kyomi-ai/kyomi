@@ -6,8 +6,8 @@
 # creates a GitHub Release, and dispatches a deploy to kyomi-private.
 #
 # Usage:
-#   git tag v2026.05.06.1
-#   git push --tags
+#   git tag -a v2.1.0 -m "Release v2.1.0"
+#   git push origin v2.1.0
 # =============================================================================
 
 name: Release
