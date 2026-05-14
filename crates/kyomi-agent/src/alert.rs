@@ -483,7 +483,7 @@ async fn process_message_for_email(
                             r#"<img src="cid:{cid}" alt="{title}" "#,
                             r#"style="max-width: 100%; height: auto; border-radius: 8px; "#,
                             r#"box-shadow: 0 2px 8px rgba(0,0,0,0.1);">"#,
-                            r#"<p style="color: #6b7280; font-size: 12px; margin-top: 8px;">{title}</p>"#,
+                            r#"<p style="color: #9C9790; font-size: 12px; margin-top: 8px;">{title}</p>"#,
                             r#"</div>"#,
                         ),
                         cid = cid,
@@ -849,7 +849,7 @@ fn markdown_table_to_html(table_text: &str) -> String {
         ));
         for cell in row {
             html.push_str(&format!(
-                "<td style=\"padding: 10px 16px; color: #4b5563;\">{cell}</td>"
+                "<td style=\"padding: 10px 16px; color: #6B6660;\">{cell}</td>"
             ));
         }
         html.push_str("</tr>");
@@ -1202,6 +1202,7 @@ mod tests {
         let result = markdown_table_to_html(table);
         assert!(result.contains("#FFFFFF")); // Even rows
         assert!(result.contains("#F5F3EF")); // Odd rows
+        assert!(result.contains("color: #6B6660")); // Warm text-secondary token
     }
 
     #[test]
