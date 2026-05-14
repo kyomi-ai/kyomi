@@ -1572,20 +1572,43 @@ async fn list_docs_for_sync(
         updated_at: String,
         created_at: String,
         doc_type: String,
+        view_count: i64,
+        recent_views: i64,
     }
+
+    let recent_cutoff = Utc::now() - Duration::days(30);
+
+    // Build SQL with LEFT JOIN on dashboard_views to include view metrics.
+    // Parameter numbering: $1 = workspace_id, $2 = recent_cutoff, $3 = doc_type.
+    // SUM(CASE WHEN ...) avoids FILTER (WHERE ...) which is Postgres-only.
+    let sql = r#"
+        SELECT d.dashboard_id, d.user_id, d.workspace_id, d.title, d.content,
+               d.last_change_summary,
+               CAST(d.updated_at AS TEXT) AS updated_at,
+               CAST(d.created_at AS TEXT) AS created_at,
+               d.doc_type,
+               COALESCE(v.view_count, 0) AS view_count,
+               COALESCE(v.recent_views, 0) AS recent_views
+        FROM dashboards d
+        LEFT JOIN (
+            SELECT
+                dashboard_id,
+                COUNT(*) AS view_count,
+                SUM(CASE WHEN viewed_at >= $2 THEN 1 ELSE 0 END) AS recent_views
+            FROM dashboard_views
+            WHERE workspace_id = $1
+            GROUP BY dashboard_id
+        ) v ON d.dashboard_id = v.dashboard_id
+        WHERE d.workspace_id = $1 AND d.doc_type = $3
+        ORDER BY d.updated_at DESC
+    "#;
 
     let rows: Vec<DocSyncRow> = kyomi_core::db_fetch_all!(
         db,
         DocSyncRow,
-        r#"SELECT dashboard_id, user_id, workspace_id, title, content,
-                  last_change_summary,
-                  CAST(updated_at AS TEXT) AS updated_at,
-                  CAST(created_at AS TEXT) AS created_at,
-                  doc_type
-           FROM dashboards
-           WHERE workspace_id = $1 AND doc_type = $2
-           ORDER BY updated_at DESC"#,
+        sql,
         workspace_id,
+        recent_cutoff,
         doc_type
     )
     .map_err(|e| {
@@ -1615,6 +1638,8 @@ async fn list_docs_for_sync(
                 "updated_at": row.updated_at,
                 "created_at": row.created_at,
                 "doc_type": row.doc_type,
+                "view_count": row.view_count,
+                "recent_views": row.recent_views,
             })
         })
         .collect();
