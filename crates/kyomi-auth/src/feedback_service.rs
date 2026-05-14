@@ -886,19 +886,19 @@ async fn send_feedback_email_notification(
     if let Some(obj) = context.as_object() {
         if let Some(url) = obj.get("url").and_then(|v| v.as_str()) {
             context_rows.push_str(&format!(
-                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">Page</td><td style="padding:4px 0;color:#4b5563;">{}</td></tr>"#,
+                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">Page</td><td style="padding:4px 0;">{}</td></tr>"#,
                 html_escape(url)
             ));
         }
         if let Some(browser) = obj.get("browser").and_then(|v| v.as_str()) {
             context_rows.push_str(&format!(
-                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">Browser</td><td style="padding:4px 0;color:#4b5563;">{}</td></tr>"#,
+                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">Browser</td><td style="padding:4px 0;">{}</td></tr>"#,
                 html_escape(browser)
             ));
         }
         if let Some(os) = obj.get("os").and_then(|v| v.as_str()) {
             context_rows.push_str(&format!(
-                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">OS</td><td style="padding:4px 0;color:#4b5563;">{}</td></tr>"#,
+                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">OS</td><td style="padding:4px 0;">{}</td></tr>"#,
                 html_escape(os)
             ));
         }
@@ -923,7 +923,7 @@ async fn send_feedback_email_notification(
                 format!("Console Error{}", if total > 1 { "s" } else { "" })
             };
             context_rows.push_str(&format!(
-                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">{label}</td><td style="padding:4px 0;color:#4b5563;"><ul style="margin:0;padding-left:16px;">{}</ul></td></tr>"#,
+                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">{label}</td><td style="padding:4px 0;"><ul style="margin:0;padding-left:16px;">{}</ul></td></tr>"#,
                 error_html.join("")
             ));
         }
@@ -955,7 +955,7 @@ async fn send_feedback_email_notification(
                 format!("Failed Request{}", if total > 1 { "s" } else { "" })
             };
             context_rows.push_str(&format!(
-                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">{label}</td><td style="padding:4px 0;color:#4b5563;"><ul style="margin:0;padding-left:16px;">{}</ul></td></tr>"#,
+                r#"<tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">{label}</td><td style="padding:4px 0;"><ul style="margin:0;padding-left:16px;">{}</ul></td></tr>"#,
                 request_html.join("")
             ));
         }
@@ -973,14 +973,14 @@ async fn send_feedback_email_notification(
             format!("data:image/png;base64,{screenshot_b64}")
         };
         format!(
-            r#"<h3 style="color:#111827;margin:20px 0 8px 0;font-size:16px;">Screenshot</h3><img src="{src}" alt="Feedback screenshot" style="max-width:100%;border:1px solid #e5e7eb;border-radius:8px;" />"#
+            r#"<h3 style="margin:20px 0 8px 0;font-size:16px;">Screenshot</h3><img src="{src}" alt="Feedback screenshot" style="max-width:100%;border:1px solid #E8E5DE;border-radius:8px;" />"#
         )
     } else if context.as_object()
         .and_then(|obj| obj.get("screenshot_too_large"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        r#"<p style="color:#9ca3af;font-style:italic;">Screenshot was too large (max 2MB)</p>"#.to_string()
+        r#"<p style="color:#9C9790;font-style:italic;">Screenshot was too large (max 2MB)</p>"#.to_string()
     } else {
         String::new()
     };
@@ -991,23 +991,68 @@ async fn send_feedback_email_notification(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #374151; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff; }}
+        :root {{ color-scheme: light dark; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #1C1917;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #FAFAF8;
+        }}
+        h2 {{
+            color: #1C1917;
+        }}
+        h3 {{
+            color: #1C1917;
+        }}
+        td {{
+            color: #6B6660;
+        }}
+        td:first-child {{
+            color: #1C1917;
+        }}
+        .content-card {{
+            background: #F5F3EF;
+        }}
+        .footer {{
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid #E8E5DE;
+            color: #9C9790;
+            font-size: 12px;
+        }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h2 {{ color: #F5F3EF !important; }}
+            h3 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            .content-card {{ background: #24201E !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+            td {{ color: #A8A29E !important; }}
+            td:first-child {{ color: #F5F3EF !important; }}
+        }}
     </style>
 </head>
 <body>
-    <h2 style="color:#111827;margin:0 0 16px 0;">{subject}</h2>
+    <h2 style="margin:0 0 16px 0;">{subject}</h2>
+    <div class="content-card" style="border-radius:8px;padding:16px;margin-bottom:16px;">
     <table style="border-collapse:collapse;width:100%;font-size:14px;">
-        <tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">Type</td><td style="padding:4px 0;color:#4b5563;">{feedback_type}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">From</td><td style="padding:4px 0;color:#4b5563;">{user_email}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">Workspace</td><td style="padding:4px 0;color:#4b5563;">{workspace_display}</td></tr>
-        <tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">Description</td><td style="padding:4px 0;color:#4b5563;">{description_escaped}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">Type</td><td style="padding:4px 0;">{feedback_type}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">From</td><td style="padding:4px 0;">{user_email}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">Workspace</td><td style="padding:4px 0;">{workspace_display}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">Description</td><td style="padding:4px 0;">{description_escaped}</td></tr>
         {context_rows}
-        <tr><td style="padding:4px 12px 4px 0;font-weight:600;color:#374151;vertical-align:top;">Feedback ID</td><td style="padding:4px 0;color:#4b5563;"><code>{feedback_id}</code></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;font-weight:600;vertical-align:top;">Feedback ID</td><td style="padding:4px 0;"><code>{feedback_id}</code></td></tr>
     </table>
+    </div>
     {screenshot_html}
-    <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;" />
-    <p style="color:#9ca3af;font-size:12px;margin:0;">kyomi.ai</p>
+    <div class="footer">kyomi.ai</div>
 </body>
 </html>"#,
         subject = html_escape(&subject),
