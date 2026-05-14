@@ -593,24 +593,24 @@ fn build_watch_alert_email(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="color-scheme" content="light">
-    <meta name="supported-color-schemes" content="light">
+    <meta name="color-scheme" content="light dark">
+    <meta name="supported-color-schemes" content="light dark">
     <style>
-        :root {{ color-scheme: light; }}
+        :root {{ color-scheme: light dark; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: #374151;
+            color: #1C1917;
             max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background-color: #ffffff;
+            background-color: #FAFAF8;
         }}
         .header {{
             text-align: center;
             margin-bottom: 16px;
             padding: 16px 0;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #E8E5DE;
         }}
         .logo-img {{
             height: 48px;
@@ -620,25 +620,25 @@ fn build_watch_alert_email(
             padding: 20px 0;
         }}
         h1 {{
-            color: #111827;
+            color: #1C1917;
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 16px;
         }}
         h2 {{
-            color: #1f2937;
+            color: #1C1917;
             font-size: 20px;
             font-weight: 600;
             margin: 24px 0 12px 0;
         }}
         h3 {{
-            color: #374151;
+            color: #1C1917;
             font-size: 18px;
             font-weight: 600;
             margin: 20px 0 10px 0;
         }}
         p {{
-            color: #4b5563;
+            color: #6B6660;
             font-size: 14px;
             margin: 12px 0;
         }}
@@ -666,21 +666,34 @@ fn build_watch_alert_email(
         .footer {{
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #E8E5DE;
             text-align: center;
-            color: #9ca3af;
+            color: #9C9790;
             font-size: 12px;
         }}
         .footer a {{
-            color: #6b7280;
+            color: #6B6660;
             text-decoration: none;
         }}
         .footer a:hover {{
             text-decoration: underline;
         }}
+        @media (prefers-color-scheme: dark) {{
+            body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
+            h1, h2, h3, h4 {{ color: #F5F3EF !important; }}
+            p {{ color: #A8A29E !important; }}
+            strong {{ color: #F5F3EF !important; }}
+            .content-card {{ background: #24201E !important; }}
+            .header {{ border-bottom-color: #2E2925 !important; }}
+            .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
+            .footer a {{ color: #A8A29E !important; }}
+            th {{ color: #F5F3EF !important; background-color: #24201E !important; }}
+            td {{ background-color: #1A1715 !important; color: #A8A29E !important; }}
+            tr {{ border-color: #2E2925 !important; }}
+        }}
     </style>
 </head>
-<body style="background-color: #ffffff !important; color: #374151;">
+<body style="background-color: #FAFAF8 !important; color: #1C1917;">
     <div class="header">
         <a href="https://kyomi.ai" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -696,17 +709,17 @@ fn build_watch_alert_email(
         </div>
 
         <!-- Title -->
-        <h1 style="color: #111827; font-size: 24px; font-weight: 700; margin: 0 0 8px 0; line-height: 1.3;">
+        <h1 style="color: #1C1917; font-size: 24px; font-weight: 700; margin: 0 0 8px 0; line-height: 1.3;">
             {title_text}
         </h1>
 
         <!-- Watch name -->
-        <p style="color: #6b7280; font-size: 14px; margin: 0 0 24px 0;">
-            From: <strong style="color: #374151;">{watch_name}</strong>
+        <p style="color: #6B6660; font-size: 14px; margin: 0 0 24px 0;">
+            From: <strong style="color: #1C1917;">{watch_name}</strong>
         </p>
 
         <!-- Content card -->
-        <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
+        <div class="content-card" style="background: #ffffff; border: 1px solid #E8E5DE; border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
             {message_html}
         </div>
 
@@ -718,7 +731,7 @@ fn build_watch_alert_email(
         </div>
 
         <!-- Attribution -->
-        <p style="color: #9ca3af; font-size: 13px; text-align: center; margin: 24px 0 0 0;">
+        <p style="color: #9C9790; font-size: 13px; text-align: center; margin: 24px 0 0 0;">
             {attribution_html}
         </p>
     </div>
@@ -818,21 +831,21 @@ fn markdown_table_to_html(table_text: &str) -> String {
     // IMPORTANT: No newlines in output — `markdown_to_simple_html` converts
     // newlines to `<br>` tags, which would inject whitespace inside the table.
     let mut html = String::from(
-        r#"<table style="border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px;"><thead><tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0;">"#,
+        r#"<table style="border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px;"><thead><tr style="background-color: #F5F3EF; border-bottom: 2px solid #E8E5DE;">"#,
     );
 
     for header in &headers {
         html.push_str(&format!(
-            "<th style=\"padding: 12px 16px; text-align: left; font-weight: 600; color: #374151;\">{header}</th>"
+            "<th style=\"padding: 12px 16px; text-align: left; font-weight: 600; color: #1C1917;\">{header}</th>"
         ));
     }
 
     html.push_str("</tr></thead><tbody>");
 
     for (i, row) in rows.iter().enumerate() {
-        let bg = if i % 2 == 0 { "#ffffff" } else { "#f9fafb" };
+        let bg = if i % 2 == 0 { "#FFFFFF" } else { "#F5F3EF" };
         html.push_str(&format!(
-            "<tr style=\"background-color: {bg}; border-bottom: 1px solid #e5e7eb;\">"
+            "<tr style=\"background-color: {bg}; border-bottom: 1px solid #E8E5DE;\">"
         ));
         for cell in row {
             html.push_str(&format!(
@@ -926,7 +939,7 @@ fn markdown_to_simple_html(text: &str) -> String {
     result = RE_HR
         .replace_all(
             &result,
-            r#"<hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">"#,
+            r#"<hr style="border: none; border-top: 1px solid #E8E5DE; margin: 24px 0;">"#,
         )
         .into_owned();
 
@@ -1187,16 +1200,16 @@ mod tests {
     fn markdown_table_alternating_row_colors() {
         let table = "| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |";
         let result = markdown_table_to_html(table);
-        assert!(result.contains("#ffffff")); // Even rows
-        assert!(result.contains("#f9fafb")); // Odd rows
+        assert!(result.contains("#FFFFFF")); // Even rows
+        assert!(result.contains("#F5F3EF")); // Odd rows
     }
 
     #[test]
     fn markdown_table_header_styling() {
         let table = "| Col1 | Col2 |\n|------|------|\n| a | b |";
         let result = markdown_table_to_html(table);
-        assert!(result.contains("background-color: #f8fafc")); // Header bg
-        assert!(result.contains("border-bottom: 2px solid #e2e8f0")); // Header border
+        assert!(result.contains("background-color: #F5F3EF")); // Header bg
+        assert!(result.contains("border-bottom: 2px solid #E8E5DE")); // Header border
         assert!(result.contains("font-weight: 600")); // Header font
     }
 
@@ -1249,7 +1262,7 @@ mod tests {
     fn markdown_horizontal_rule() {
         let result = markdown_to_simple_html("Before\n\n---\n\nAfter");
         assert!(result.contains("<hr"));
-        assert!(result.contains("border-top: 1px solid #e5e7eb"));
+        assert!(result.contains("border-top: 1px solid #E8E5DE"));
     }
 
     // -- Additional email template edge cases --
@@ -1300,11 +1313,44 @@ mod tests {
         );
         // Button uses primary color (#d97706), not dark (#111827)
         assert!(html.contains("background-color: #d97706"));
-        // Header has border-bottom
-        assert!(html.contains("border-bottom: 1px solid #e5e7eb"));
+        // Header has border-bottom using warm token
+        assert!(html.contains("border-bottom: 1px solid #E8E5DE"));
         // Footer has privacy and terms links
         assert!(html.contains("kyomi.ai/privacy"));
         assert!(html.contains("kyomi.ai/terms"));
+    }
+
+    #[test]
+    fn email_dark_mode_media_query_present() {
+        let (_, html) = build_watch_alert_email(
+            "user@example.com",
+            "Watch",
+            "Alert",
+            "Message",
+            1,
+            "https://app.kyomi.ai",
+            None,
+            WatchMode::Alert,
+        );
+        assert!(html.contains("@media (prefers-color-scheme: dark)"));
+        assert!(html.contains("background-color: #12100F !important"));
+        assert!(html.contains("color: #F5F3EF !important"));
+    }
+
+    #[test]
+    fn email_color_scheme_meta_tag_includes_dark() {
+        let (_, html) = build_watch_alert_email(
+            "user@example.com",
+            "Watch",
+            "Alert",
+            "Message",
+            1,
+            "https://app.kyomi.ai",
+            None,
+            WatchMode::Alert,
+        );
+        assert!(html.contains(r#"content="light dark""#));
+        assert!(html.contains("color-scheme: light dark"));
     }
 
     #[test]
