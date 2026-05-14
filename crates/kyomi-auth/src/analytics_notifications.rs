@@ -99,43 +99,31 @@ async fn dispatch_inner(
         .flatten()
         .unwrap_or_else(|| "Your workspace".into());
 
-        let (subject, body_text) = match threshold {
+        let settings_url = format!("{}/settings/analytics", frontend_url);
+
+        let (subject, status_message) = match threshold {
             "80" => (
                 format!("Analytics usage at 80% — {}", workspace_name),
-                format!(
-                    "Your analytics event usage has reached 80% of your monthly quota.\n\n\
-                     Consider upgrading your plan to avoid interruption.\n\n\
-                     Manage your analytics: {}/settings/analytics",
-                    frontend_url
-                ),
+                format!("Your analytics usage has reached 80% of your monthly limit. Manage your analytics settings at {settings_url}"),
             ),
             "100" => (
                 format!("Analytics quota reached — {}", workspace_name),
-                format!(
-                    "Your analytics event quota has been reached. Events are still being \
-                     accepted during a grace period, but you should upgrade soon to avoid \
-                     losing data.\n\n\
-                     Manage your analytics: {}/settings/analytics",
-                    frontend_url
-                ),
+                format!("Your analytics usage has reached 100% of your monthly limit. Events are no longer being tracked. Manage your analytics settings at {settings_url}"),
             ),
             "grace" => (
                 format!("Analytics events paused — {}", workspace_name),
-                format!(
-                    "Your analytics event quota (including grace period) has been exceeded. \
-                     New events are being dropped.\n\n\
-                     Upgrade your plan or wait for your monthly reset.\n\n\
-                     Manage your analytics: {}/settings/analytics",
-                    frontend_url
-                ),
+                format!("Your analytics grace period has ended. Events are no longer being tracked. Manage your analytics settings at {settings_url}"),
             ),
             _ => continue,
         };
 
-        let body_html = body_text.replace('\n', "<br>");
+        let sections: Vec<(&str, &str)> = vec![
+            ("Workspace", workspace_name.as_str()),
+            ("Status", status_message.as_str()),
+        ];
 
         for (admin_email, _admin_name) in &admins {
-            if !email.send_email(admin_email, &subject, &body_html, Some(&body_text), None, &[]).await {
+            if !email.send_admin_notification(admin_email, &subject, &sections, None).await {
                 warn!(email = %admin_email, "Failed to send analytics notification email");
             }
         }
