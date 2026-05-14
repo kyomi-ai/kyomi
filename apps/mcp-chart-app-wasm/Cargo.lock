@@ -373,7 +373,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chartml-chart-cartesian"
-version = "5.0.1"
+version = "5.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45d465a8d68117c11ebca89c09632d86fb1240c05c989907d2eca09def6d037f"
 dependencies = [
  "chartml-core",
  "serde_json",
@@ -381,7 +383,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-chart-metric"
-version = "5.0.1"
+version = "5.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d9b9203c35927cad7b3ccb3a0f5cec7cfb561e34595a710709c5b1f24872849"
 dependencies = [
  "chartml-core",
 ]
@@ -389,6 +393,8 @@ dependencies = [
 [[package]]
 name = "chartml-chart-pie"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "931b7b48d49b80082289af32d04a871481c4c4318624cc13b4a108aabe3db5a3"
 dependencies = [
  "chartml-core",
 ]
@@ -396,13 +402,17 @@ dependencies = [
 [[package]]
 name = "chartml-chart-scatter"
 version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c27fc1d9026efa102de10330bbb7a4ce9f99e10f895eab7455f67037bfba221"
 dependencies = [
  "chartml-core",
 ]
 
 [[package]]
 name = "chartml-core"
-version = "5.0.1"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54c3f80b70f824c3adc4aef1ad9ba7b134ba37c3ba09bfedac91ade1caee7808"
 dependencies = [
  "arrow",
  "async-trait",
@@ -425,7 +435,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "5.0.1"
+version = "5.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df7869e5f61e18f1a96b4395e273392831b584f8a567b5c7d92273296ca7554"
 dependencies = [
  "chartml-core",
  "humantime",

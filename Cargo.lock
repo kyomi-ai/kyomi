@@ -1517,9 +1517,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-chart-metric"
-version = "5.0.1"
+version = "5.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f72d98a17ccb7421fb80c9198a08fd778e6cd04a412eacee403699c4f83799"
+checksum = "5d9b9203c35927cad7b3ccb3a0f5cec7cfb561e34595a710709c5b1f24872849"
 dependencies = [
  "chartml-core",
 ]
@@ -1544,9 +1544,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-chart-table"
-version = "5.0.2"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd07adbfc76f22ca592500dcf767d8e15a3868d24bf6c667424e44a5ffc25ac7"
+checksum = "0ab0c2fe33cc88d64023f670bcc990fdfce4a2431d5b11dd2b8fd0a87affe464"
 dependencies = [
  "chartml-core",
 ]
@@ -1620,9 +1620,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "5.0.1"
+version = "5.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96ab56d65f627ef17f4bdc152bed9e88722a4965b4adcf02e1a4338362b839ca"
+checksum = "3df7869e5f61e18f1a96b4395e273392831b584f8a567b5c7d92273296ca7554"
 dependencies = [
  "chartml-core",
  "humantime",

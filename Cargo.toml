@@ -146,10 +146,10 @@ chartml-render = "5"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
 chartml-chart-scatter = "5"
-chartml-chart-metric = "5"
-chartml-chart-table = "5"
+chartml-chart-metric = "5.0.2"
+chartml-chart-table = "5.0.3"
 chartml-datafusion = "5"
-chartml-leptos = "5"
+chartml-leptos = "5.0.2"
 
 # Code editor (kode) — same pattern as chartml above.
 kode-leptos = "0.2"
