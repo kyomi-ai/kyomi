@@ -90,7 +90,13 @@ pub async fn initialize(state: AppState) -> Result<(), String> {
 
     // Register tool result handler
     transport.set_on_tool_result(move |params| {
-        let payload: ToolResultPayload = match serde_json::from_value(params) {
+        // claude.ai wraps structuredContent inside the tool result envelope:
+        // { content: [...], isError: false, structuredContent: { spec, palette, ... } }
+        let payload_value = params
+            .get("structuredContent")
+            .cloned()
+            .unwrap_or(params.clone());
+        let payload: ToolResultPayload = match serde_json::from_value(payload_value) {
             Ok(p) => p,
             Err(e) => {
                 web_sys::console::error_1(&format!("Failed to parse tool result: {e}").into());

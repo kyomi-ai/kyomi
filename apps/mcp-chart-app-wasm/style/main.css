@@ -4,6 +4,23 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+:root {
+  --chartml-title-font: 'Instrument Serif', Georgia, serif;
+  --chartml-title-font-size: 22px;
+  --chartml-title-font-weight: 400;
+  --chartml-title-font-style: normal;
+  --chartml-label-font: 'DM Sans', system-ui, sans-serif;
+  --chartml-label-font-size: 10px;
+  --chartml-label-font-weight: 500;
+  --chartml-label-letter-spacing: 1.2px;
+  --chartml-label-text-transform: uppercase;
+  --chartml-numeric-font: 'Geist Mono', ui-monospace, monospace;
+  --chartml-numeric-font-size: 11px;
+  --chartml-legend-font: 'DM Sans', system-ui, sans-serif;
+  --chartml-legend-font-size: 11px;
+  --chartml-legend-font-weight: 500;
+}
+
 @theme {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;

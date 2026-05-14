@@ -44,6 +44,7 @@ for css_file in dist.glob("*.css"):
     css_parts.append(css_file.read_text())
 css_content = "\n".join(css_parts)
 
+
 # Patch the JS glue to load WASM from inline base64 instead of fetch()
 # wasm-bindgen's init function does:
 #   module_or_path = fetch(module_or_path);
@@ -73,7 +74,10 @@ final_html = f"""<!DOCTYPE html>
             <svg width="32" height="32" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ag" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#d97706"/><stop offset="100%" style="stop-color:#b45309"/></linearGradient><style>.r{{fill:url(#ag);animation:s 2s ease-in-out infinite}}.r1{{animation-delay:.6s}}.r2{{animation-delay:1.3s}}.r3{{animation-delay:.2s}}.r4{{animation-delay:1.7s}}.r5{{animation-delay:.9s}}.r6{{animation-delay:.1s}}.r7{{animation-delay:1.4s}}.r8{{animation-delay:.4s}}.c{{fill:url(#ag);animation:p 2s ease-in-out infinite}}@keyframes s{{0%,100%{{opacity:.4;transform:scale(1)}}50%{{opacity:1;transform:scale(1.1)}}}}@keyframes p{{0%,100%{{opacity:.6;transform:scale(1)}}50%{{opacity:1;transform:scale(1.15)}}}}</style></defs><g transform="translate(30,30)"><polygon class="r r1" points="0,-28 4.5,-11 0,-6 -4.5,-11"/><polygon class="r r2" points="20,-20 11.5,-4 7,-7 11.5,-11.5"/><polygon class="r r3" points="28,0 11.5,4.5 7,0 11.5,-4.5"/><polygon class="r r4" points="20,20 4.5,11.5 0,7 4.5,11.5"/><polygon class="r r5" points="0,28 -4.5,11.5 0,7 4.5,11.5"/><polygon class="r r6" points="-20,20 -11.5,4.5 -7,7 -11.5,11.5"/><polygon class="r r7" points="-28,0 -11.5,-4.5 -7,0 -11.5,4.5"/><polygon class="r r8" points="-20,-20 -4.5,-11.5 0,-7 -4.5,-11.5"/><circle class="c" cx="0" cy="0" r="6"/></g></svg>
         </div>
     </div>
-    <script type="module">{js_patched}</script>
+    <script type="module">
+{js_patched}
+await __wbg_init();
+</script>
 </body>
 </html>"""
 

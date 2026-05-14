@@ -1620,9 +1620,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "5.0.2"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df7869e5f61e18f1a96b4395e273392831b584f8a567b5c7d92273296ca7554"
+checksum = "de369f6a40b462149541d197d4b68b2eb5afe8bdbb3e01a70ff53469fd53d6ca"
 dependencies = [
  "chartml-core",
  "humantime",
