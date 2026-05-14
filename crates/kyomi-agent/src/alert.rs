@@ -104,7 +104,7 @@ pub async fn deliver_watch_alert(
                         charts: vec![],
                         execution_id,
                         web_url: format!(
-                            "{}/watches/alerts?alert={}",
+                            "{}/inbox?alert={}",
                             config.frontend_url, execution_id
                         ),
                         mode,
@@ -213,7 +213,7 @@ pub async fn deliver_watch_alert(
             execution_id,
             title: alert_title.to_string(),
             body: preview.clone(),  // Uses summary (clean plain text) when available
-            url: format!("/watches/alerts?alert={execution_id}"),
+            url: format!("/inbox?alert={execution_id}"),
             icon: "/kyomi_icon_192.png".to_string(),
         };
 
@@ -549,7 +549,7 @@ fn build_watch_alert_email(
     let emoji = if is_report { "📊" } else { "🔔" };
     let subject = format!("{emoji} {subject_text}");
 
-    let view_url = format!("{frontend_url}/watches/alerts?alert={execution_id}");
+    let view_url = format!("{frontend_url}/inbox?alert={execution_id}");
 
     // Attribution text (matches Python build_watch_alert_with_content wording)
     let (attribution_html, footer_reason) = match configured_by_email {
@@ -1319,7 +1319,7 @@ mod tests {
             None,
             WatchMode::Alert,
         );
-        assert!(html.contains("https://app.kyomi.ai/watches/alerts?alert=777"));
+        assert!(html.contains("https://app.kyomi.ai/inbox?alert=777"));
     }
 
     // -- process_message_for_email --
