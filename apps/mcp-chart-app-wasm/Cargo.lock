@@ -419,7 +419,9 @@ dependencies = [
  "chrono",
  "futures",
  "humantime",
+ "idb",
  "indexmap",
+ "js-sys",
  "pollster",
  "reqwest",
  "serde",
@@ -428,6 +430,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
  "xxhash-rust",
@@ -435,9 +438,9 @@ dependencies = [
 
 [[package]]
 name = "chartml-leptos"
-version = "5.0.2"
+version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3df7869e5f61e18f1a96b4395e273392831b584f8a567b5c7d92273296ca7554"
+checksum = "de369f6a40b462149541d197d4b68b2eb5afe8bdbb3e01a70ff53469fd53d6ca"
 dependencies = [
  "chartml-core",
  "humantime",
@@ -1196,6 +1199,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
+name = "idb"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6554f394e990a1af530a528a7fdcad6e01b29cb1b990f89df3ffd62cf15f7828"
+dependencies = [
+ "indexmap",
+ "js-sys",
+ "num-traits",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "idna"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1273,6 +1291,13 @@ checksum = "b49715b7073f385ba4bc528e5747d02e66cb39c6146efb66b781f131f0fb399c"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kyomi-chart-theme"
+version = "0.1.0"
+dependencies = [
+ "chartml-core",
 ]
 
 [[package]]
@@ -1546,8 +1571,10 @@ dependencies = [
  "console_error_panic_hook",
  "futures",
  "js-sys",
+ "kyomi-chart-theme",
  "kyomi-ui-components",
  "leptos",
+ "send_wrapper",
  "serde",
  "serde_json",
  "serde_yaml",

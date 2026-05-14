@@ -16,9 +16,11 @@ chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
 chartml-chart-scatter = "5"
 chartml-chart-metric = "5"
-chartml-leptos = "5"
+chartml-leptos = "5.0.3"
 
 kyomi-ui-components = { path = "../../crates/kyomi-ui-components" }
+kyomi-chart-theme = { path = "../../crates/kyomi-chart-theme" }
+send_wrapper = "0.6"
 
 leptos = { version = "0.8", features = ["csr"] }
 web-sys = { version = "0.3", features = [

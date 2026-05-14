@@ -325,19 +325,11 @@ impl McpTransport {
         let parent = Self::get_parent_window();
 
         let handler = Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
-            if let Some(ref expected_parent) = parent {
-                let Some(source) = event.source() else {
-                    web_sys::console::log_1(&"[kyomi-mcp] msg dropped: no source".into());
-                    return;
-                };
-                let Ok(source_window) = source.dyn_into::<web_sys::Window>() else {
-                    web_sys::console::log_1(&"[kyomi-mcp] msg dropped: source not a Window".into());
-                    return;
-                };
-                if !js_sys::Object::is(source_window.as_ref(), expected_parent.as_ref()) {
-                    return; // not from parent — expected (React scheduler, other iframes)
-                }
-            }
+            // Accept messages from any source. In claude.ai's sandbox proxy
+            // architecture, messages are relayed through the proxy frame so
+            // event.source may not be a Window or may not match window.parent.
+            // JSON-RPC parsing below filters out irrelevant messages.
+            let _ = &parent; // keep parent alive for the closure's lifetime
 
             let data = event.data();
             let json_str = match js_sys::JSON::stringify(&data) {

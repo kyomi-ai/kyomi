@@ -67,7 +67,7 @@ impl AppState {
 // ChartML setup
 // ---------------------------------------------------------------------------
 
-fn setup_chartml() -> Rc<ChartML> {
+fn setup_chartml(is_dark: bool, palette: Option<&[String]>) -> Rc<ChartML> {
     let mut c = ChartML::new();
     c.register_renderer("bar", CartesianRenderer::new());
     c.register_renderer("line", CartesianRenderer::new());
@@ -76,6 +76,11 @@ fn setup_chartml() -> Rc<ChartML> {
     c.register_renderer("doughnut", PieRenderer::new());
     c.register_renderer("scatter", ScatterRenderer::new());
     c.register_renderer("metric", MetricRenderer::new());
+    let colors = palette
+        .map(|p| p.to_vec())
+        .unwrap_or_else(|| kyomi_chart_theme::kyomi_palette("kyomi", is_dark));
+    c.set_default_palette(colors);
+    c.set_theme(kyomi_chart_theme::kyomi_theme(is_dark));
     Rc::new(c)
 }
 
@@ -147,8 +152,20 @@ pub fn App() -> impl IntoView {
         state.spec.get().and_then(|s| get_chart_mode(&s))
     });
 
-    // ChartML instance — created once, palette is pre-injected into specs by server
-    let chartml = StoredValue::new_local(setup_chartml());
+    // ChartML instance — recreated when theme or palette changes.
+    // RwSignal + Effect (not Memo/derive) so the ChartMLRef is stable
+    // between renders and only rebuilt on actual theme/palette changes.
+    let chartml_signal = RwSignal::new_local(
+        setup_chartml(false, None)
+    );
+    Effect::new(move |prev: Option<(bool, Option<Vec<String>>)>| {
+        let is_dark = state.theme.get() == "dark";
+        let palette = state.palette.get();
+        if prev.is_some() {
+            chartml_signal.set(setup_chartml(is_dark, palette.as_deref()));
+        }
+        (is_dark, palette)
+    });
 
     // -- Header event callbacks --
 
@@ -263,10 +280,15 @@ pub fn App() -> impl IntoView {
                     <DashboardPanel />
                 })}
 
-                <ChartMLChart
-                    spec=Signal::derive(move || spec_yaml.get())
-                    chartml=chartml.get_value()
-                />
+                {move || {
+                    let chartml_ref = chartml_signal.get();
+                    view! {
+                        <ChartMLChart
+                            spec=Signal::derive(move || spec_yaml.get())
+                            chartml=chartml_ref
+                        />
+                    }
+                }}
             }
         })}
     }
