@@ -326,14 +326,19 @@ impl McpTransport {
 
         let handler = Closure::<dyn Fn(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if let Some(ref expected_parent) = parent {
-                let Some(source) = event.source() else { return };
-                let Ok(source_window) = source.dyn_into::<web_sys::Window>() else { return };
-                if !js_sys::Object::is(source_window.as_ref(), expected_parent.as_ref()) {
+                let Some(source) = event.source() else {
+                    web_sys::console::log_1(&"[kyomi-mcp] msg dropped: no source".into());
                     return;
+                };
+                let Ok(source_window) = source.dyn_into::<web_sys::Window>() else {
+                    web_sys::console::log_1(&"[kyomi-mcp] msg dropped: source not a Window".into());
+                    return;
+                };
+                if !js_sys::Object::is(source_window.as_ref(), expected_parent.as_ref()) {
+                    return; // not from parent — expected (React scheduler, other iframes)
                 }
             }
 
-            // Parse JSON-RPC message
             let data = event.data();
             let json_str = match js_sys::JSON::stringify(&data) {
                 Ok(s) => String::from(s),
@@ -342,10 +347,18 @@ impl McpTransport {
 
             let msg: JsonRpcMessage = match serde_json::from_str(&json_str) {
                 Ok(m) => m,
-                Err(_) => return, // Not a valid JSON-RPC message
+                Err(e) => {
+                    web_sys::console::warn_1(&format!("[kyomi-mcp] JSON-RPC parse failed: {e}").into());
+                    return;
+                }
             };
 
-            // Response to a pending request (has id + result/error, no method)
+            if let Some(method) = msg.method.as_deref() {
+                web_sys::console::log_1(&format!("[kyomi-mcp] ← {method}").into());
+            } else if let Some(id) = msg.id {
+                web_sys::console::log_1(&format!("[kyomi-mcp] ← response id={id}").into());
+            }
+
             if let Some(id) = msg.id {
                 if msg.method.is_none() {
                     if let Some(cb) = pending.borrow_mut().remove(&id) {
@@ -364,7 +377,6 @@ impl McpTransport {
                 }
             }
 
-            // Notification from host (has method, no id or id with method)
             if let Some(method) = msg.method.as_deref() {
                 let params = msg.params.unwrap_or(Value::Null);
                 let h = handlers.borrow();
@@ -372,6 +384,8 @@ impl McpTransport {
                     METHOD_TOOL_RESULT => {
                         if let Some(ref cb) = h.on_tool_result {
                             cb(params);
+                        } else {
+                            web_sys::console::warn_1(&"[kyomi-mcp] tool-result arrived but no handler registered".into());
                         }
                     }
                     METHOD_TOOL_INPUT => {
@@ -384,9 +398,7 @@ impl McpTransport {
                             cb(params);
                         }
                     }
-                    _ => {
-                        // Unknown method — ignore (ping, list_changed, etc.)
-                    }
+                    _ => {}
                 }
             }
         });

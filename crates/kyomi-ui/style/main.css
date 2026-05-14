@@ -429,6 +429,14 @@ html {
   --chartml-bg: #FAFAF8;
   --chartml-annotation: #9C9790;
 
+  /* Table chrome — matches kyomi_theme() table_* fields */
+  --chartml-table-header-bg: #EDE9E0;
+  --chartml-table-header-text: #1C1917;
+  --chartml-table-row-bg: #FAFAF8;
+  --chartml-table-row-bg-alt: #EDE9E0;
+  --chartml-table-border: #EDE9E0;
+  --chartml-table-text: #1C1917;
+
   /* Typography — title */
   --chartml-title-font: 'Instrument Serif', Georgia, serif;
   --chartml-title-font-size: 22px;
@@ -858,6 +866,12 @@ html {
   --chartml-axis-line: #A8A29E;
   --chartml-bg: #12100F;
   --chartml-annotation: #78716C;
+  --chartml-table-header-bg: #2E2925;
+  --chartml-table-header-text: #F5F3EF;
+  --chartml-table-row-bg: #12100F;
+  --chartml-table-row-bg-alt: #2E2925;
+  --chartml-table-border: #2E2925;
+  --chartml-table-text: #F5F3EF;
 }
 
 :root.dark { color-scheme: dark; }
