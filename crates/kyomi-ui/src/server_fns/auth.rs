@@ -612,6 +612,54 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
 }
 
 // ---------------------------------------------------------------------------
+// Email Verification
+// ---------------------------------------------------------------------------
+
+/// Result of verifying an email address from a link in the verification email.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum VerifyEmailResult {
+    Success { email: String },
+    InvalidToken,
+    Error { message: String },
+}
+
+/// Verify an email address using the raw token from the verification link.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors the email verification logic in `apps/server/src/routes/auth_password.rs`.
+///
+/// Checks the token against bcrypt hashes in `verification_tokens`, marks it
+/// used, and marks the user's email as verified via `mark_user_verified`.
+#[server(prefix = "/leptos-api")]
+pub async fn verify_email(token: String) -> Result<VerifyEmailResult, ServerFnError> {
+    let ctx = extract_context()?;
+
+    let email = kyomi_auth::token_service::verify_verification_token(
+        &ctx.db,
+        &token,
+        "email_verification",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "verify_verification_token error");
+        ServerFnError::new(format!("{e}"))
+    })?;
+
+    let Some(email) = email else {
+        return Ok(VerifyEmailResult::InvalidToken);
+    };
+
+    kyomi_auth::user_service::mark_user_verified(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "mark_user_verified error");
+            ServerFnError::new(format!("{e}"))
+        })?;
+
+    Ok(VerifyEmailResult::Success { email })
+}
+
+// ---------------------------------------------------------------------------
 // Account Recovery
 // ---------------------------------------------------------------------------
 

@@ -24,6 +24,7 @@ use crate::pages::auth::oauth_complete::OAuthCompletePage;
 use crate::pages::auth::passkey_recovery_complete::PasskeyRecoveryCompletePage;
 use crate::pages::auth::passkey_signup_complete::PasskeySignupCompletePage;
 use crate::pages::auth::signup_complete::SignupCompletePage;
+use crate::pages::auth::verify_email::VerifyEmailPage;
 use crate::pages::chat::{ChatPage, ChatsListPage};
 use crate::pages::connect_setup::ConnectSetupPage;
 use crate::pages::dashboards::{DashboardEditorPage, DashboardsListPage, DashboardViewerPage};
@@ -97,8 +98,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/auth/passkey-signup") view=PasskeySignupCompletePage/>
                     <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
                     <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
-                    // Auth pages — not yet implemented
-                    <Route path=path!("/verify-email") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
+                    <Route path=path!("/verify-email") view=VerifyEmailPage/>
                     <Route path=path!("/verify") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
                     <Route path=path!("/oauth-complete") view=OAuthCompletePage/>
                     <Route path=path!("/auth/slack-connect") view=|| view! { <NotImplementedPage name="Slack Connect"/> }/>

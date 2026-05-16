@@ -51,6 +51,7 @@ pub fn register_server_functions() {
     register_explicit::<GoogleLinkCallback>();
     register_explicit::<DatasourceOauthCallback>();
     register_explicit::<ResendVerification>();
+    register_explicit::<VerifyEmail>();
     register_explicit::<RecoveryStart>();
     register_explicit::<RecoveryVerify>();
     register_explicit::<RecoverySetPassword>();
