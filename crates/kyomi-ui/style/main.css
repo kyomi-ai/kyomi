@@ -1126,7 +1126,7 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   background-color: var(--color-card, #24201e);
 }
 
-.chartml-spinner {
+.chartml-loading .chartml-spinner {
   width: 32px;
   height: 32px;
   border: none;
