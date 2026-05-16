@@ -754,6 +754,352 @@ async fn update_google_oauth_data(
 }
 
 // ---------------------------------------------------------------------------
+// Google account link callback
+// ---------------------------------------------------------------------------
+
+/// Outcome of `google_link_callback_service`.
+pub struct GoogleLinkCallbackServiceResult {
+    /// The Google account email that was linked.
+    pub google_email: String,
+    /// BigQuery access level ("read", "write", "none", etc.).
+    pub bigquery_access: String,
+    /// The workspace_id from the OAuth CSRF state, if present.
+    /// The caller (route handler) uses this to send a WebSocket notification.
+    pub workspace_id: Option<String>,
+    /// The user_id extracted from the CSRF state.
+    pub user_id: String,
+}
+
+/// Parameters for `google_link_callback_service`.
+pub struct GoogleLinkCallbackParams<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub encryption_key: &'a [u8; 32],
+    pub code: &'a str,
+    pub state: &'a str,
+    pub client_id: &'a str,
+    pub client_secret: &'a str,
+    pub frontend_url: &'a str,
+    pub ip: &'a str,
+}
+
+/// Full Google account link callback orchestration.
+///
+/// Verifies the CSRF state, exchanges the authorization code for tokens,
+/// fetches user info from Google, and updates the stored OAuth data.
+///
+/// Does NOT send WebSocket notifications — that is the caller's responsibility
+/// since `ws_manager` is server-crate-specific and not available in kyomi-auth.
+/// The returned `workspace_id` and `user_id` provide the data the caller needs
+/// to fire the notification.
+pub async fn google_link_callback_service(
+    params: GoogleLinkCallbackParams<'_>,
+) -> kyomi_core::Result<GoogleLinkCallbackServiceResult> {
+    use crate::google_oauth::{OAuthData, GoogleOAuthTokens};
+
+    let GoogleLinkCallbackParams {
+        db, kv, encryption_key, code, state, client_id, client_secret, frontend_url, ip,
+    } = params;
+
+    // Rate limit
+    let rate = crate::rate_limiter::check_rate_limit(kv, ip, "login", None).await?;
+    if !rate.allowed {
+        return Err(kyomi_core::Error::TooManyRequests(
+            format!("Rate limited. Try again in {} seconds", rate.retry_after_secs),
+            rate.retry_after_secs,
+        ));
+    }
+
+    // Verify CSRF state
+    let state_data = crate::redis_ops::verify_oauth_state(kv, "google_link", state)
+        .await?
+        .ok_or_else(|| {
+            tracing::warn!(ip = %ip, "Google link-callback: invalid or expired CSRF state");
+            kyomi_core::Error::BadRequest("Invalid or expired state".into())
+        })?;
+
+    let action = state_data["action"].as_str().unwrap_or("");
+    if action != "link_account" {
+        return Err(kyomi_core::Error::BadRequest("Invalid state action".into()));
+    }
+
+    let link_user_id = state_data["user_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing user_id in state".into()))?;
+
+    // Exchange code for tokens
+    let redirect_uri = format!(
+        "{}/auth/google/link-callback",
+        frontend_url.trim_end_matches('/')
+    );
+    let token_data =
+        crate::google_oauth::exchange_code_for_tokens(client_id, client_secret, code, &redirect_uri)
+            .await?;
+
+    tracing::info!(
+        scope = ?token_data.scope,
+        has_refresh_token = token_data.refresh_token.is_some(),
+        expires_in = ?token_data.expires_in,
+        "Google link-callback: token exchange response — ACTUAL scopes Google granted"
+    );
+
+    // Get user info from Google
+    let user_info = crate::google_oauth::get_user_info(&token_data.access_token).await?;
+
+    // Find the user
+    let user = crate::user_service::get_user_by_id(db, link_user_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
+
+    // Parse existing OAuth data to preserve any existing refresh token
+    let existing_oauth = crate::google_oauth::parse_oauth_data(
+        user.oauth_data.as_deref(),
+        encryption_key,
+    )?;
+
+    // Preserve existing refresh token if Google doesn't return a new one
+    let existing_refresh = existing_oauth
+        .as_ref()
+        .and_then(|o| o.google_oauth_tokens.as_ref())
+        .and_then(|t| t.refresh_token.clone());
+
+    let new_refresh_token = token_data.refresh_token.or(existing_refresh);
+
+    let expires_in = token_data.expires_in.unwrap_or(3600);
+    let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
+
+    let google_email = user_info.email.clone();
+
+    // Build updated oauth data WITH tokens (this is the BigQuery connect flow)
+    let updated_oauth = OAuthData {
+        google_id: Some(user_info.id),
+        oauth_provider: Some("google".to_string()),
+        picture: user_info.picture,
+        last_oauth_login: Some(chrono::Utc::now().to_rfc3339()),
+        google_oauth_tokens: Some(GoogleOAuthTokens {
+            access_token: token_data.access_token,
+            refresh_token: new_refresh_token,
+            token_type: "Bearer".to_string(),
+            scope: token_data.scope.unwrap_or_default(),
+            expires_in: Some(expires_in),
+            expires_at: Some(expires_at),
+            email: Some(google_email.clone()),
+            name: user_info.name,
+        }),
+        ..Default::default()
+    };
+
+    let encrypted = crate::google_oauth::build_oauth_data(&updated_oauth, encryption_key)?;
+    crate::user_service::update_user_oauth_data(db, &user.user_id, Some(&encrypted)).await?;
+
+    // Determine BigQuery access level
+    let bigquery_access = updated_oauth
+        .google_oauth_tokens
+        .as_ref()
+        .map(|t| crate::google_oauth::bigquery_access_level(&t.scope))
+        .unwrap_or("none")
+        .to_string();
+
+    let workspace_id = state_data
+        .get("workspace_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(GoogleLinkCallbackServiceResult {
+        google_email,
+        bigquery_access,
+        workspace_id,
+        user_id: link_user_id.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Datasource OAuth callback
+// ---------------------------------------------------------------------------
+
+/// Outcome of `datasource_oauth_callback_service`.
+///
+/// The caller (route handler or server fn) is responsible for sending
+/// WebSocket notifications using the returned identifiers, since
+/// `ws_manager` is server-crate-specific and not available in kyomi-auth.
+pub struct DatasourceOAuthCallbackServiceResult {
+    /// The provider string (e.g. "snowflake", "databricks").
+    pub provider: String,
+    /// The email address associated with the linked provider account, if available.
+    pub provider_email: Option<String>,
+    /// The Kyomi user_id from the CSRF state.
+    pub user_id: String,
+    /// The workspace_id from the CSRF state.
+    pub workspace_id: String,
+    /// The datasource slug from the CSRF state.
+    pub datasource_slug: String,
+    /// The datasource type string (e.g. "snowflake"), for the WS notification.
+    pub datasource_type: String,
+}
+
+/// Parameters for `datasource_oauth_callback_service`.
+pub struct DatasourceOAuthCallbackParams<'a> {
+    pub db: &'a kyomi_core::DbPool,
+    pub kv: &'a kyomi_core::KVPool,
+    pub encryption_key: &'a [u8; 32],
+    /// The authorization code returned by the OAuth provider.
+    pub code: &'a str,
+    /// The CSRF state value — required; return error if None.
+    pub state: Option<&'a str>,
+    /// The provider path segment (e.g. "snowflake", "databricks").
+    pub provider: &'a str,
+    /// Full frontend URL used to reconstruct the redirect URI.
+    pub frontend_url: &'a str,
+    /// Client IP for rate limiting.
+    pub ip: &'a str,
+}
+
+/// Full per-datasource OAuth callback orchestration.
+///
+/// Verifies the CSRF state, loads the datasource config, exchanges the
+/// authorization code for tokens, fetches user info, and persists the
+/// encrypted credentials.
+///
+/// Does NOT send WebSocket notifications — that is the caller's responsibility.
+/// The returned identifiers provide the data the caller needs to fire
+/// the notification.
+pub async fn datasource_oauth_callback_service(
+    params: DatasourceOAuthCallbackParams<'_>,
+) -> kyomi_core::Result<DatasourceOAuthCallbackServiceResult> {
+    use crate::datasource_oauth::{OAuthProvider, ProviderConfig};
+
+    let DatasourceOAuthCallbackParams {
+        db, kv, encryption_key, code, state, provider: provider_str, frontend_url, ip,
+    } = params;
+
+    // Rate limit
+    let rate = crate::rate_limiter::check_rate_limit(kv, ip, "login", None).await?;
+    if !rate.allowed {
+        return Err(kyomi_core::Error::TooManyRequests(
+            format!("Rate limited. Try again in {} seconds", rate.retry_after_secs),
+            rate.retry_after_secs,
+        ));
+    }
+
+    // State is required
+    let csrf_state = state.ok_or_else(|| {
+        kyomi_core::Error::BadRequest("Missing state parameter".into())
+    })?;
+
+    // Verify CSRF state
+    let state_data = crate::redis_ops::verify_oauth_state(
+        kv,
+        &format!("datasource_{}", provider_str),
+        csrf_state,
+    )
+    .await?
+    .ok_or_else(|| {
+        tracing::warn!(ip = %ip, provider = %provider_str, "Datasource OAuth callback: invalid or expired CSRF state");
+        kyomi_core::Error::BadRequest(format!(
+            "Invalid or expired state parameter for {} account linking",
+            provider_str
+        ))
+    })?;
+
+    // Verify action
+    let action = state_data["action"].as_str().unwrap_or("");
+    if action != "link_account" {
+        return Err(kyomi_core::Error::BadRequest("Invalid linking state".into()));
+    }
+
+    let user_id = state_data["user_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing user_id in state".into()))?;
+
+    let workspace_id = state_data["workspace_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing workspace_id in state".into()))?;
+
+    let datasource_slug = state_data["datasource_slug"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing datasource_slug in state".into()))?;
+
+    // Parse provider enum
+    let provider = OAuthProvider::parse(provider_str).ok_or_else(|| {
+        kyomi_core::Error::BadRequest(format!("Unknown OAuth provider: {provider_str}"))
+    })?;
+
+    // Load datasource config (active only)
+    let ds = crate::datasource_service::resolve_datasource(db, datasource_slug, workspace_id, false)
+        .await?;
+
+    // Extract provider config from connection_config
+    let provider_config = ProviderConfig::from_connection_config(provider, &ds.connection_config)?;
+
+    // Build redirect URI (must match the one used in /connect)
+    let redirect_uri = format!(
+        "{}/auth/oauth/{}/callback",
+        frontend_url.trim_end_matches('/'),
+        provider_str
+    );
+
+    // Exchange code for tokens
+    let code_verifier = state_data["code_verifier"].as_str();
+    let token_data = crate::datasource_oauth::exchange_code_for_tokens(
+        &provider_config,
+        code,
+        &redirect_uri,
+        code_verifier,
+    )
+    .await?;
+
+    // Fetch user info from provider
+    let user_info = crate::datasource_oauth::get_user_info(
+        provider,
+        &token_data.access_token,
+        &provider_config.account_or_host,
+    )
+    .await?;
+
+    // Build OAuth credential JSON
+    let expires_in = token_data.expires_in.unwrap_or(3600);
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
+
+    let oauth_credentials = serde_json::json!({
+        "auth_type": "oauth",
+        "oauth_access_token": token_data.access_token,
+        "oauth_refresh_token": token_data.refresh_token,
+        "oauth_token_expiry": expires_at,
+        "oauth_scope": token_data.scope,
+        "oauth_username": user_info.username.as_deref().or(user_info.email.as_deref()),
+        "oauth_email": user_info.email,
+    });
+
+    // Persist encrypted credentials (upserts; merges with any existing creds)
+    crate::datasource_service::save_user_credential(
+        db,
+        encryption_key,
+        user_id,
+        &ds.id,
+        workspace_id,
+        &oauth_credentials,
+    )
+    .await?;
+
+    tracing::info!(
+        provider = provider_str,
+        datasource_slug = datasource_slug,
+        user_id = user_id,
+        "Saved OAuth credentials"
+    );
+
+    Ok(DatasourceOAuthCallbackServiceResult {
+        provider: provider_str.to_string(),
+        provider_email: user_info.email,
+        user_id: user_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        datasource_slug: datasource_slug.to_string(),
+        datasource_type: ds.datasource_type.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Account recovery
 // ---------------------------------------------------------------------------
 

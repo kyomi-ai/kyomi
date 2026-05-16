@@ -104,6 +104,96 @@ pub enum GoogleCallbackResult {
     RateLimited { retry_after_secs: u64 },
 }
 
+/// Result of a Google account link callback.
+///
+/// Used by the `/auth/google/link-callback` route. The user is already
+/// authenticated; this flow links their Google account for BigQuery access.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum GoogleLinkCallbackResult {
+    /// Google account successfully linked.
+    Success {
+        google_email: String,
+        bigquery_access: String,
+    },
+    /// Error during account linking.
+    Error { message: String },
+}
+
+/// Result of a per-datasource OAuth account link callback.
+///
+/// Used by the `/auth/oauth/:provider/callback` route. The user has just
+/// completed OAuth consent for a datasource (Snowflake, Databricks, etc.).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DatasourceOAuthCallbackResult {
+    /// Provider account successfully linked.
+    Success {
+        provider: String,
+        provider_email: Option<String>,
+    },
+    /// Error during account linking.
+    Error { message: String },
+}
+
+/// Exchange a per-datasource OAuth authorization code for tokens and persist
+/// the resulting credentials.
+///
+/// Public endpoint — no session cookie required; the user identity is carried
+/// in the CSRF state stored in Redis during the `/connect` initiation step.
+/// Mirrors `POST /api/v1/auth/oauth/{provider}/callback` in
+/// `apps/server/src/routes/auth_datasource_oauth.rs`.
+///
+/// Delegates all orchestration to
+/// `kyomi_auth::auth_service::datasource_oauth_callback_service`.
+/// The WebSocket notification is not fired here — the client that initiated
+/// the link will redirect to settings and reload, so the WS notification is
+/// superfluous on this code path.
+#[server(prefix = "/leptos-api")]
+pub async fn datasource_oauth_callback(
+    provider: String,
+    code: String,
+    state: Option<String>,
+) -> Result<DatasourceOAuthCallbackResult, ServerFnError> {
+    use kyomi_auth::auth_service::{
+        datasource_oauth_callback_service, DatasourceOAuthCallbackParams,
+    };
+
+    let ctx = extract_context()?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    let encryption_key = ctx
+        .encryption_key
+        .clone()
+        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+
+    let ip = extract_client_ip(&headers);
+
+    let result = datasource_oauth_callback_service(DatasourceOAuthCallbackParams {
+        db: &ctx.db,
+        kv: &kv,
+        encryption_key: &encryption_key,
+        code: &code,
+        state: state.as_deref(),
+        provider: &provider,
+        frontend_url: &ctx.config.frontend_url,
+        ip: &ip,
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, provider = %provider, "datasource_oauth_callback_service error");
+        ServerFnError::new(format!("{e}"))
+    })?;
+
+    Ok(DatasourceOAuthCallbackResult::Success {
+        provider: result.provider,
+        provider_email: result.provider_email,
+    })
+}
+
 /// Get the auth configuration (which methods are available).
 ///
 /// Public endpoint — no authentication required.
@@ -396,6 +486,73 @@ pub async fn google_oauth_callback(
     }
 }
 
+/// Handle Google account link callback — exchange code for tokens and store OAuth data.
+///
+/// Authenticated endpoint — the user must be signed in.
+/// Mirrors `POST /auth/google/link-callback` in
+/// `apps/server/src/routes/auth_google_oauth.rs`.
+///
+/// Delegates all orchestration to `kyomi_auth::auth_service::google_link_callback_service`.
+/// The WebSocket notification is not fired here — the client that initiated the
+/// link will redirect to settings and reload, so the WS notification is
+/// superfluous on this code path.
+#[server(prefix = "/leptos-api")]
+pub async fn google_link_callback(
+    code: String,
+    state: String,
+) -> Result<GoogleLinkCallbackResult, ServerFnError> {
+    use kyomi_auth::auth_service::{google_link_callback_service, GoogleLinkCallbackParams};
+
+    let ctx = extract_context()?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    let encryption_key = ctx
+        .encryption_key
+        .clone()
+        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+    let client_id = ctx
+        .config
+        .google_oauth_client_id
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("GOOGLE_OAUTH_CLIENT_ID not configured"))?
+        .clone();
+    let client_secret = ctx
+        .config
+        .google_oauth_client_secret
+        .as_ref()
+        .ok_or_else(|| ServerFnError::new("GOOGLE_OAUTH_CLIENT_SECRET not configured"))?
+        .clone();
+
+    let ip = extract_client_ip(&headers);
+
+    let result = google_link_callback_service(GoogleLinkCallbackParams {
+        db: &ctx.db,
+        kv: &kv,
+        encryption_key: &encryption_key,
+        code: &code,
+        state: &state,
+        client_id: &client_id,
+        client_secret: &client_secret,
+        frontend_url: &ctx.config.frontend_url,
+        ip: &ip,
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "google_link_callback_service error");
+        ServerFnError::new(format!("{e}"))
+    })?;
+
+    Ok(GoogleLinkCallbackResult::Success {
+        google_email: result.google_email,
+        bigquery_access: result.bigquery_access,
+    })
+}
+
 /// Resend the verification email for a pending signup.
 ///
 /// Public endpoint — no authentication required.
@@ -452,6 +609,54 @@ pub async fn resend_verification(email: String) -> Result<(), ServerFnError> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Email Verification
+// ---------------------------------------------------------------------------
+
+/// Result of verifying an email address from a link in the verification email.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum VerifyEmailResult {
+    Success { email: String },
+    InvalidToken,
+    Error { message: String },
+}
+
+/// Verify an email address using the raw token from the verification link.
+///
+/// Public endpoint — no authentication required.
+/// Mirrors the email verification logic in `apps/server/src/routes/auth_password.rs`.
+///
+/// Checks the token against bcrypt hashes in `verification_tokens`, marks it
+/// used, and marks the user's email as verified via `mark_user_verified`.
+#[server(prefix = "/leptos-api")]
+pub async fn verify_email(token: String) -> Result<VerifyEmailResult, ServerFnError> {
+    let ctx = extract_context()?;
+
+    let email = kyomi_auth::token_service::verify_verification_token(
+        &ctx.db,
+        &token,
+        "email_verification",
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "verify_verification_token error");
+        ServerFnError::new(format!("{e}"))
+    })?;
+
+    let Some(email) = email else {
+        return Ok(VerifyEmailResult::InvalidToken);
+    };
+
+    kyomi_auth::user_service::mark_user_verified(&ctx.db, &email)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "mark_user_verified error");
+            ServerFnError::new(format!("{e}"))
+        })?;
+
+    Ok(VerifyEmailResult::Success { email })
 }
 
 // ---------------------------------------------------------------------------

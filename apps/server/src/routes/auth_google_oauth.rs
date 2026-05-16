@@ -21,7 +21,7 @@ use axum::{
 use serde::Deserialize;
 
 use kyomi_auth::{
-    google_oauth::{self, OAuthData, GoogleOAuthTokens},
+    google_oauth::{self, OAuthData},
     middleware::AuthUser,
     rate_limiter,
     redis_ops,
@@ -559,111 +559,35 @@ async fn google_link_callback(
     headers: HeaderMap,
     Json(data): Json<LinkCallbackRequest>,
 ) -> Result<Json<serde_json::Value>, kyomi_core::Error> {
+    use kyomi_auth::auth_service::{google_link_callback_service, GoogleLinkCallbackParams};
+
     let (client_id, client_secret) = get_oauth_credentials(&state)?;
-
-    // Rate limit
     let ip = extract_client_ip(&headers);
-    let rate_result = rate_limiter::check_rate_limit(&state.kv, &ip, "login", None).await?;
-    if !rate_result.allowed {
-        tracing::warn!(ip = %ip, "Google link-callback rate limited");
-        return Err(kyomi_core::Error::TooManyRequests(
-            format!("Rate limited. Try again in {} seconds", rate_result.retry_after_secs),
-            rate_result.retry_after_secs,
-        ));
-    }
 
-    // Verify CSRF state
-    let state_data = redis_ops::verify_oauth_state(&state.kv, "google_link", &data.state)
-        .await?
-        .ok_or_else(|| {
-            tracing::warn!(ip = %ip, "Google link-callback: invalid or expired CSRF state");
-            kyomi_core::Error::BadRequest("Invalid or expired state".into())
-        })?;
+    let result = google_link_callback_service(GoogleLinkCallbackParams {
+        db: &state.db,
+        kv: &state.kv,
+        encryption_key: &state.encryption_key,
+        code: &data.code,
+        state: &data.state,
+        client_id: &client_id,
+        client_secret: &client_secret,
+        frontend_url: &state.config.frontend_url,
+        ip: &ip,
+    })
+    .await?;
 
-    let action = state_data["action"].as_str().unwrap_or("");
-    if action != "link_account" {
-        return Err(kyomi_core::Error::BadRequest("Invalid state action".into()));
-    }
-
-    let link_user_id = state_data["user_id"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing user_id in state".into()))?;
-
-    // Exchange code for tokens
-    let redirect_uri = format!(
-        "{}/auth/google/link-callback",
-        state.config.frontend_url.trim_end_matches('/')
-    );
-    let token_data =
-        google_oauth::exchange_code_for_tokens(&client_id, &client_secret, &data.code, &redirect_uri)
-            .await?;
-
-    tracing::info!(
-        scope = ?token_data.scope,
-        has_refresh_token = token_data.refresh_token.is_some(),
-        expires_in = ?token_data.expires_in,
-        "Google link-callback: token exchange response — ACTUAL scopes Google granted"
-    );
-
-    // Get user info from Google
-    let user_info = google_oauth::get_user_info(&token_data.access_token).await?;
-
-    // Find the user
-    let user = user_service::get_user_by_id(&state.db, link_user_id)
-        .await?
-        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
-
-    // Check if Google account is already linked to another user
-    let existing_oauth = google_oauth::parse_oauth_data(
-        user.oauth_data.as_deref(),
-        &state.encryption_key,
-    )?;
-
-    // Preserve existing refresh token if Google doesn't return a new one
-    let existing_refresh = existing_oauth
-        .as_ref()
-        .and_then(|o| o.google_oauth_tokens.as_ref())
-        .and_then(|t| t.refresh_token.clone());
-
-    let new_refresh_token = token_data.refresh_token.or(existing_refresh);
-
-    let expires_in = token_data.expires_in.unwrap_or(3600);
-    let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
-
-    let google_email = user_info.email.clone();
-
-    // Build updated oauth data WITH tokens (this is the BigQuery connect flow)
-    let updated_oauth = OAuthData {
-        google_id: Some(user_info.id),
-        oauth_provider: Some("google".to_string()),
-        picture: user_info.picture,
-        last_oauth_login: Some(chrono::Utc::now().to_rfc3339()),
-        google_oauth_tokens: Some(GoogleOAuthTokens {
-            access_token: token_data.access_token,
-            refresh_token: new_refresh_token,
-            token_type: "Bearer".to_string(),
-            scope: token_data.scope.unwrap_or_default(),
-            expires_in: Some(expires_in),
-            expires_at: Some(expires_at),
-            email: Some(google_email.clone()),
-            name: user_info.name,
-        }),
-        ..Default::default()
-    };
-
-    let encrypted = google_oauth::build_oauth_data(&updated_oauth, &state.encryption_key)?;
-    user_service::update_user_oauth_data(&state.db, &user.user_id, Some(&encrypted)).await?;
-
-    // Send credential_status_changed WebSocket notification (for BigQuery kyomi_oauth mode)
-    if let Some(workspace_id) = state_data.get("workspace_id").and_then(|v| v.as_str()) {
+    // Send credential_status_changed WebSocket notification (for BigQuery kyomi_oauth mode).
+    // The service function does not have access to ws_manager (server-crate-specific),
+    // so the route handler fires the notification using the data returned by the service.
+    if let Some(workspace_id) = result.workspace_id {
         let ws_manager = state.ws_manager.clone();
-        let ws_user_id = link_user_id.to_string();
-        let ws_workspace_id = workspace_id.to_string();
+        let ws_user_id = result.user_id.clone();
         tokio::spawn(async move {
             ws_helpers::send_credential_status_changed(
                 &ws_manager,
                 &ws_user_id,
-                &ws_workspace_id,
+                &workspace_id,
                 // Global OAuth — no specific datasource slug; affects all BigQuery datasources
                 "",
                 "connected",
@@ -673,17 +597,10 @@ async fn google_link_callback(
         });
     }
 
-    // Determine BigQuery access level
-    let bq_access = updated_oauth
-        .google_oauth_tokens
-        .as_ref()
-        .map(|t| google_oauth::bigquery_access_level(&t.scope))
-        .unwrap_or("none");
-
     Ok(Json(serde_json::json!({
         "message": "Google account successfully linked",
-        "google_email": google_email,
-        "bigquery_access": bq_access,
+        "google_email": result.google_email,
+        "bigquery_access": result.bigquery_access,
         "linked_at": chrono::Utc::now().to_rfc3339(),
     })))
 }
