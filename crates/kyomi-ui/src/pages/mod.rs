@@ -12,7 +12,6 @@ pub mod home;
 pub mod inbox;
 pub mod knowledge;
 pub mod not_found;
-pub mod not_implemented;
 pub mod onboarding;
 pub mod settings;
 pub mod setup;

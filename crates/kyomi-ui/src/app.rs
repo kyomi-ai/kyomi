@@ -32,7 +32,6 @@ use crate::pages::home::HomePage;
 use crate::pages::inbox::InboxPage;
 use crate::pages::knowledge::KnowledgePage;
 use crate::pages::not_found::NotFoundPage;
-use crate::pages::not_implemented::NotImplementedPage;
 use crate::pages::onboarding::DatasourceOnboardingPage;
 use crate::pages::settings::ai::AiPage;
 use crate::pages::settings::analytics::AnalyticsPage;
@@ -99,9 +98,8 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/auth/recover-passkey") view=PasskeyRecoveryPage/>
                     <Route path=path!("/auth/recover-passkey/complete") view=PasskeyRecoveryCompletePage/>
                     <Route path=path!("/verify-email") view=VerifyEmailPage/>
-                    <Route path=path!("/verify") view=|| view! { <NotImplementedPage name="Verify Email"/> }/>
+                    <Route path=path!("/verify") view=|| view! { <Redirect path="/verify-email"/> }/>
                     <Route path=path!("/oauth-complete") view=OAuthCompletePage/>
-                    <Route path=path!("/auth/slack-connect") view=|| view! { <NotImplementedPage name="Slack Connect"/> }/>
                     <Route path=path!("/auth/google/link-callback") view=GoogleLinkCallbackPage/>
                     <Route path=path!("/auth/oauth/:provider/callback") view=DatasourceOAuthCallbackPage/>
                     // Public pages — NO layout, NO auth
