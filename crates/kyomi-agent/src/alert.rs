@@ -483,7 +483,7 @@ async fn process_message_for_email(
                             r#"<img src="cid:{cid}" alt="{title}" "#,
                             r#"style="max-width: 100%; height: auto; border-radius: 8px; "#,
                             r#"box-shadow: 0 2px 8px rgba(0,0,0,0.1);">"#,
-                            r#"<p style="color: #9C9790; font-size: 12px; margin-top: 8px;">{title}</p>"#,
+                            r#"<p class="attribution" style="font-size: 12px; margin-top: 8px;">{title}</p>"#,
                             r#"</div>"#,
                         ),
                         cid = cid,
@@ -678,6 +678,8 @@ fn build_watch_alert_email(
         .footer a:hover {{
             text-decoration: underline;
         }}
+        .attribution {{ color: #9C9790; }}
+        .content-card {{ background: #ffffff; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3, h4 {{ color: #F5F3EF !important; }}
@@ -690,10 +692,14 @@ fn build_watch_alert_email(
             th {{ color: #F5F3EF !important; background-color: #24201E !important; }}
             td {{ background-color: #1A1715 !important; color: #A8A29E !important; }}
             tr {{ border-color: #2E2925 !important; }}
+            thead tr {{ background-color: #24201E !important; }}
+            tbody tr {{ background-color: #1A1715 !important; }}
+            .attribution {{ color: #78716C !important; }}
+            .badge {{ background: #2E2925 !important; color: #F5F3EF !important; }}
         }}
     </style>
 </head>
-<body style="background-color: #FAFAF8 !important; color: #1C1917;">
+<body style="background-color: #FAFAF8;">
     <div class="header">
         <a href="https://kyomi.ai" style="text-decoration: none;">
             <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
@@ -703,23 +709,23 @@ fn build_watch_alert_email(
     <div class="content">
         <!-- Header with badge -->
         <div style="margin-bottom: 24px;">
-            <span style="display: inline-block; background: {badge_bg}; color: {accent_color}; padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
+            <span class="badge" style="display: inline-block; background: {badge_bg}; color: {accent_color}; padding: 4px 12px; border-radius: 16px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
                 {emoji} {type_label}
             </span>
         </div>
 
         <!-- Title -->
-        <h1 style="color: #1C1917; font-size: 24px; font-weight: 700; margin: 0 0 8px 0; line-height: 1.3;">
+        <h1 style="font-size: 24px; font-weight: 700; margin: 0 0 8px 0; line-height: 1.3;">
             {title_text}
         </h1>
 
         <!-- Watch name -->
-        <p style="color: #6B6660; font-size: 14px; margin: 0 0 24px 0;">
-            From: <strong style="color: #1C1917;">{watch_name}</strong>
+        <p style="font-size: 14px; margin: 0 0 24px 0;">
+            From: <strong>{watch_name}</strong>
         </p>
 
         <!-- Content card -->
-        <div class="content-card" style="background: #ffffff; border: 1px solid #E8E5DE; border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
+        <div class="content-card" style="border: 1px solid #E8E5DE; border-radius: 12px; padding: 24px; margin: 0 0 24px 0;">
             {message_html}
         </div>
 
@@ -731,7 +737,7 @@ fn build_watch_alert_email(
         </div>
 
         <!-- Attribution -->
-        <p style="color: #9C9790; font-size: 13px; text-align: center; margin: 24px 0 0 0;">
+        <p class="attribution" style="font-size: 13px; text-align: center; margin: 24px 0 0 0;">
             {attribution_html}
         </p>
     </div>
@@ -836,7 +842,7 @@ fn markdown_table_to_html(table_text: &str) -> String {
 
     for header in &headers {
         html.push_str(&format!(
-            "<th style=\"padding: 12px 16px; text-align: left; font-weight: 600; color: #1C1917;\">{header}</th>"
+            "<th style=\"padding: 12px 16px; text-align: left; font-weight: 600;\">{header}</th>"
         ));
     }
 
@@ -849,7 +855,7 @@ fn markdown_table_to_html(table_text: &str) -> String {
         ));
         for cell in row {
             html.push_str(&format!(
-                "<td style=\"padding: 10px 16px; color: #6B6660;\">{cell}</td>"
+                "<td style=\"padding: 10px 16px;\">{cell}</td>"
             ));
         }
         html.push_str("</tr>");
@@ -1202,7 +1208,8 @@ mod tests {
         let result = markdown_table_to_html(table);
         assert!(result.contains("#FFFFFF")); // Even rows
         assert!(result.contains("#F5F3EF")); // Odd rows
-        assert!(result.contains("color: #6B6660")); // Warm text-secondary token
+        // color is now in the stylesheet dark-mode rule, not inline — no color: assertion
+        assert!(result.contains("<td style=\"padding: 10px 16px;\"")); // Layout-only inline style
     }
 
     #[test]
