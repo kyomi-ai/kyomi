@@ -6,6 +6,7 @@ pub mod account_recovery;
 pub mod account_recovery_complete;
 pub mod auth_layout;
 pub mod components;
+pub mod datasource_oauth_callback;
 pub mod google_callback;
 pub mod google_link_callback;
 pub mod login;

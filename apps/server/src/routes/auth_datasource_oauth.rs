@@ -27,7 +27,6 @@ use kyomi_auth::{
     datasource_oauth::{self, OAuthProvider, ProviderConfig},
     encryption,
     middleware::AuthUser,
-    rate_limiter,
     redis_ops,
     websocket::helpers as ws_helpers,
 };
@@ -244,161 +243,46 @@ async fn handle_callback(
     Path(provider_str): Path<String>,
     Json(data): Json<CallbackRequest>,
 ) -> Result<Json<serde_json::Value>, kyomi_core::Error> {
-    let provider = parse_provider(&provider_str)?;
+    use kyomi_auth::auth_service::{
+        datasource_oauth_callback_service, DatasourceOAuthCallbackParams,
+    };
 
-    // Rate limit
+    // Validate the provider string before delegating
+    parse_provider(&provider_str)?;
+
     let ip = extract_client_ip(&headers);
-    let rate_result =
-        rate_limiter::check_rate_limit(&state.kv, &ip, "login", None).await?;
-    if !rate_result.allowed {
-        tracing::warn!(ip = %ip, provider = provider.as_str(), "OAuth callback rate limited");
-        return Err(kyomi_core::Error::TooManyRequests(
-            format!(
-                "Rate limited. Try again in {} seconds",
-                rate_result.retry_after_secs
-            ),
-            rate_result.retry_after_secs,
-        ));
-    }
 
-    // Validate state
-    let csrf_state = data.state.as_deref().ok_or_else(|| {
-        kyomi_core::Error::BadRequest("Missing state parameter".into())
-    })?;
-
-    let state_data = redis_ops::verify_oauth_state(
-        &state.kv,
-        &format!("datasource_{}", provider.as_str()),
-        csrf_state,
-    )
-    .await?
-    .ok_or_else(|| {
-        kyomi_core::Error::BadRequest(format!(
-            "Invalid or expired state parameter for {} account linking",
-            provider.as_str()
-        ))
-    })?;
-
-    // Verify this is a linking action
-    let action = state_data["action"].as_str().unwrap_or("");
-    if action != "link_account" {
-        return Err(kyomi_core::Error::BadRequest(
-            "Invalid linking state".into(),
-        ));
-    }
-
-    let user_id = state_data["user_id"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing user_id in state".into()))?;
-
-    let workspace_id = state_data["workspace_id"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing workspace_id in state".into()))?;
-
-    let datasource_slug = state_data["datasource_slug"]
-        .as_str()
-        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing datasource_slug in state".into()))?;
-
-    // Load datasource connection_config
-    let ds = load_datasource(&state.db, datasource_slug, workspace_id).await?;
-
-    // Extract provider config
-    let provider_config = ProviderConfig::from_connection_config(provider, &ds.connection_config)?;
-
-    // Build redirect URI (must match what was used in /connect)
-    let redirect_uri = format!(
-        "{}/auth/oauth/{}/callback",
-        state.config.frontend_url.trim_end_matches('/'),
-        provider.as_str()
-    );
-
-    // Exchange code for tokens
-    let code_verifier = state_data["code_verifier"].as_str();
-    let token_data = datasource_oauth::exchange_code_for_tokens(
-        &provider_config,
-        &data.code,
-        &redirect_uri,
-        code_verifier,
-    )
+    let result = datasource_oauth_callback_service(DatasourceOAuthCallbackParams {
+        db: &state.db,
+        kv: &state.kv,
+        encryption_key: &state.encryption_key,
+        code: &data.code,
+        state: data.state.as_deref(),
+        provider: &provider_str,
+        frontend_url: &state.config.frontend_url,
+        ip: &ip,
+    })
     .await?;
-
-    // Get user info from provider
-    let user_info = datasource_oauth::get_user_info(
-        provider,
-        &token_data.access_token,
-        &provider_config.account_or_host,
-    )
-    .await?;
-
-    // Calculate token expiry
-    let expires_in = token_data.expires_in.unwrap_or(3600);
-    let expires_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
-
-    // Build OAuth credential JSON
-    let oauth_credentials = serde_json::json!({
-        "auth_type": "oauth",
-        "oauth_access_token": token_data.access_token,
-        "oauth_refresh_token": token_data.refresh_token,
-        "oauth_token_expiry": expires_at,
-        "oauth_scope": token_data.scope,
-        "oauth_username": user_info.username.as_deref().or(user_info.email.as_deref()),
-        "oauth_email": user_info.email,
-    });
-
-    // Encrypt credentials
-    let encrypted = encryption::encrypt_json(
-        &oauth_credentials,
-        &state.encryption_key,
-    )?;
-
-    // Upsert user_datasource_credentials
-    let now = chrono::Utc::now();
-    let now_str = now.to_rfc3339();
-    kyomi_core::db_execute!(
-        &state.db,
-        "INSERT INTO user_datasource_credentials (user_id, datasource_config_id, workspace_id, credentials, enabled, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, true, $5, $5) \
-         ON CONFLICT (user_id, datasource_config_id) \
-         DO UPDATE SET credentials = $4, updated_at = $5",
-        user_id,
-        &ds.id,
-        workspace_id,
-        &encrypted,
-        &now_str
-    )
-    .map_err(|e| kyomi_core::Error::Internal(format!("DB error saving credentials: {e}")))?;
-
-    tracing::info!(
-        provider = provider.as_str(),
-        datasource_slug = datasource_slug,
-        user_id = user_id,
-        "Saved OAuth credentials"
-    );
 
     // Send WebSocket credential_status_changed notification
     let ws_manager = state.ws_manager.clone();
-    let ws_user_id = user_id.to_string();
-    let ws_workspace_id = workspace_id.to_string();
-    let ws_ds_slug = datasource_slug.to_string();
-    let ws_ds_type = ds.datasource_type.to_string();
     tokio::spawn(async move {
         ws_helpers::send_credential_status_changed(
             &ws_manager,
-            &ws_user_id,
-            &ws_workspace_id,
-            &ws_ds_slug,
+            &result.user_id,
+            &result.workspace_id,
+            &result.datasource_slug,
             "connected",
-            &ws_ds_type,
+            &result.datasource_type,
         )
         .await;
     });
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "message": format!("{} account linked successfully", provider.as_str()),
-        "provider": provider.as_str(),
-        "provider_email": user_info.email,
+        "message": format!("{} account linked successfully", result.provider),
+        "provider": result.provider,
+        "provider_email": result.provider_email,
         "linked_at": chrono::Utc::now().to_rfc3339(),
     })))
 }

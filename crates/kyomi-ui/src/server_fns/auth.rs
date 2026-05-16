@@ -119,6 +119,81 @@ pub enum GoogleLinkCallbackResult {
     Error { message: String },
 }
 
+/// Result of a per-datasource OAuth account link callback.
+///
+/// Used by the `/auth/oauth/:provider/callback` route. The user has just
+/// completed OAuth consent for a datasource (Snowflake, Databricks, etc.).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DatasourceOAuthCallbackResult {
+    /// Provider account successfully linked.
+    Success {
+        provider: String,
+        provider_email: Option<String>,
+    },
+    /// Error during account linking.
+    Error { message: String },
+}
+
+/// Exchange a per-datasource OAuth authorization code for tokens and persist
+/// the resulting credentials.
+///
+/// Public endpoint — no session cookie required; the user identity is carried
+/// in the CSRF state stored in Redis during the `/connect` initiation step.
+/// Mirrors `POST /api/v1/auth/oauth/{provider}/callback` in
+/// `apps/server/src/routes/auth_datasource_oauth.rs`.
+///
+/// Delegates all orchestration to
+/// `kyomi_auth::auth_service::datasource_oauth_callback_service`.
+/// The WebSocket notification is not fired here — the client that initiated
+/// the link will redirect to settings and reload, so the WS notification is
+/// superfluous on this code path.
+#[server(prefix = "/leptos-api")]
+pub async fn datasource_oauth_callback(
+    provider: String,
+    code: String,
+    state: Option<String>,
+) -> Result<DatasourceOAuthCallbackResult, ServerFnError> {
+    use kyomi_auth::auth_service::{
+        datasource_oauth_callback_service, DatasourceOAuthCallbackParams,
+    };
+
+    let ctx = extract_context()?;
+    let headers: axum::http::HeaderMap = leptos_axum::extract()
+        .await
+        .map_err(|e| ServerFnError::new(format!("Failed to extract headers: {e}")))?;
+    let kv = ctx
+        .kv
+        .clone()
+        .ok_or_else(|| ServerFnError::new("KV store not available"))?;
+    let encryption_key = ctx
+        .encryption_key
+        .clone()
+        .ok_or_else(|| ServerFnError::new("Encryption key not available"))?;
+
+    let ip = extract_client_ip(&headers);
+
+    let result = datasource_oauth_callback_service(DatasourceOAuthCallbackParams {
+        db: &ctx.db,
+        kv: &kv,
+        encryption_key: &encryption_key,
+        code: &code,
+        state: state.as_deref(),
+        provider: &provider,
+        frontend_url: &ctx.config.frontend_url,
+        ip: &ip,
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, provider = %provider, "datasource_oauth_callback_service error");
+        ServerFnError::new(format!("{e}"))
+    })?;
+
+    Ok(DatasourceOAuthCallbackResult::Success {
+        provider: result.provider,
+        provider_email: result.provider_email,
+    })
+}
+
 /// Get the auth configuration (which methods are available).
 ///
 /// Public endpoint — no authentication required.

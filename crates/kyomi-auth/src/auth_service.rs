@@ -914,6 +914,192 @@ pub async fn google_link_callback_service(
 }
 
 // ---------------------------------------------------------------------------
+// Datasource OAuth callback
+// ---------------------------------------------------------------------------
+
+/// Outcome of `datasource_oauth_callback_service`.
+///
+/// The caller (route handler or server fn) is responsible for sending
+/// WebSocket notifications using the returned identifiers, since
+/// `ws_manager` is server-crate-specific and not available in kyomi-auth.
+pub struct DatasourceOAuthCallbackServiceResult {
+    /// The provider string (e.g. "snowflake", "databricks").
+    pub provider: String,
+    /// The email address associated with the linked provider account, if available.
+    pub provider_email: Option<String>,
+    /// The Kyomi user_id from the CSRF state.
+    pub user_id: String,
+    /// The workspace_id from the CSRF state.
+    pub workspace_id: String,
+    /// The datasource slug from the CSRF state.
+    pub datasource_slug: String,
+    /// The datasource type string (e.g. "snowflake"), for the WS notification.
+    pub datasource_type: String,
+}
+
+/// Parameters for `datasource_oauth_callback_service`.
+pub struct DatasourceOAuthCallbackParams<'a> {
+    pub db: &'a kyomi_core::DbPool,
+    pub kv: &'a kyomi_core::KVPool,
+    pub encryption_key: &'a [u8; 32],
+    /// The authorization code returned by the OAuth provider.
+    pub code: &'a str,
+    /// The CSRF state value — required; return error if None.
+    pub state: Option<&'a str>,
+    /// The provider path segment (e.g. "snowflake", "databricks").
+    pub provider: &'a str,
+    /// Full frontend URL used to reconstruct the redirect URI.
+    pub frontend_url: &'a str,
+    /// Client IP for rate limiting.
+    pub ip: &'a str,
+}
+
+/// Full per-datasource OAuth callback orchestration.
+///
+/// Verifies the CSRF state, loads the datasource config, exchanges the
+/// authorization code for tokens, fetches user info, and persists the
+/// encrypted credentials.
+///
+/// Does NOT send WebSocket notifications — that is the caller's responsibility.
+/// The returned identifiers provide the data the caller needs to fire
+/// the notification.
+pub async fn datasource_oauth_callback_service(
+    params: DatasourceOAuthCallbackParams<'_>,
+) -> kyomi_core::Result<DatasourceOAuthCallbackServiceResult> {
+    use crate::datasource_oauth::{OAuthProvider, ProviderConfig};
+
+    let DatasourceOAuthCallbackParams {
+        db, kv, encryption_key, code, state, provider: provider_str, frontend_url, ip,
+    } = params;
+
+    // Rate limit
+    let rate = crate::rate_limiter::check_rate_limit(kv, ip, "login", None).await?;
+    if !rate.allowed {
+        return Err(kyomi_core::Error::TooManyRequests(
+            format!("Rate limited. Try again in {} seconds", rate.retry_after_secs),
+            rate.retry_after_secs,
+        ));
+    }
+
+    // State is required
+    let csrf_state = state.ok_or_else(|| {
+        kyomi_core::Error::BadRequest("Missing state parameter".into())
+    })?;
+
+    // Verify CSRF state
+    let state_data = crate::redis_ops::verify_oauth_state(
+        kv,
+        &format!("datasource_{}", provider_str),
+        csrf_state,
+    )
+    .await?
+    .ok_or_else(|| {
+        tracing::warn!(ip = %ip, provider = %provider_str, "Datasource OAuth callback: invalid or expired CSRF state");
+        kyomi_core::Error::BadRequest(format!(
+            "Invalid or expired state parameter for {} account linking",
+            provider_str
+        ))
+    })?;
+
+    // Verify action
+    let action = state_data["action"].as_str().unwrap_or("");
+    if action != "link_account" {
+        return Err(kyomi_core::Error::BadRequest("Invalid linking state".into()));
+    }
+
+    let user_id = state_data["user_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing user_id in state".into()))?;
+
+    let workspace_id = state_data["workspace_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing workspace_id in state".into()))?;
+
+    let datasource_slug = state_data["datasource_slug"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing datasource_slug in state".into()))?;
+
+    // Parse provider enum
+    let provider = OAuthProvider::parse(provider_str).ok_or_else(|| {
+        kyomi_core::Error::BadRequest(format!("Unknown OAuth provider: {provider_str}"))
+    })?;
+
+    // Load datasource config (active only)
+    let ds = crate::datasource_service::resolve_datasource(db, datasource_slug, workspace_id, false)
+        .await?;
+
+    // Extract provider config from connection_config
+    let provider_config = ProviderConfig::from_connection_config(provider, &ds.connection_config)?;
+
+    // Build redirect URI (must match the one used in /connect)
+    let redirect_uri = format!(
+        "{}/auth/oauth/{}/callback",
+        frontend_url.trim_end_matches('/'),
+        provider_str
+    );
+
+    // Exchange code for tokens
+    let code_verifier = state_data["code_verifier"].as_str();
+    let token_data = crate::datasource_oauth::exchange_code_for_tokens(
+        &provider_config,
+        code,
+        &redirect_uri,
+        code_verifier,
+    )
+    .await?;
+
+    // Fetch user info from provider
+    let user_info = crate::datasource_oauth::get_user_info(
+        provider,
+        &token_data.access_token,
+        &provider_config.account_or_host,
+    )
+    .await?;
+
+    // Build OAuth credential JSON
+    let expires_in = token_data.expires_in.unwrap_or(3600);
+    let expires_at =
+        (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
+
+    let oauth_credentials = serde_json::json!({
+        "auth_type": "oauth",
+        "oauth_access_token": token_data.access_token,
+        "oauth_refresh_token": token_data.refresh_token,
+        "oauth_token_expiry": expires_at,
+        "oauth_scope": token_data.scope,
+        "oauth_username": user_info.username.as_deref().or(user_info.email.as_deref()),
+        "oauth_email": user_info.email,
+    });
+
+    // Persist encrypted credentials (upserts; merges with any existing creds)
+    crate::datasource_service::save_user_credential(
+        db,
+        encryption_key,
+        user_id,
+        &ds.id,
+        workspace_id,
+        &oauth_credentials,
+    )
+    .await?;
+
+    tracing::info!(
+        provider = provider_str,
+        datasource_slug = datasource_slug,
+        user_id = user_id,
+        "Saved OAuth credentials"
+    );
+
+    Ok(DatasourceOAuthCallbackServiceResult {
+        provider: provider_str.to_string(),
+        provider_email: user_info.email,
+        user_id: user_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        datasource_slug: datasource_slug.to_string(),
+        datasource_type: ds.datasource_type.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Account recovery
 // ---------------------------------------------------------------------------
 

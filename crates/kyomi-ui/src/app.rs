@@ -15,6 +15,7 @@ use crate::pages::accept_ownership::AcceptOwnershipPage;
 use crate::pages::billing_return::BillingReturnPage;
 use crate::pages::auth::account_recovery::AccountRecoveryPage;
 use crate::pages::auth::account_recovery_complete::AccountRecoveryCompletePage;
+use crate::pages::auth::datasource_oauth_callback::DatasourceOAuthCallbackPage;
 use crate::pages::auth::google_callback::GoogleCallbackPage;
 use crate::pages::auth::google_link_callback::GoogleLinkCallbackPage;
 use crate::pages::auth::login::LoginPage;
@@ -102,7 +103,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/oauth-complete") view=OAuthCompletePage/>
                     <Route path=path!("/auth/slack-connect") view=|| view! { <NotImplementedPage name="Slack Connect"/> }/>
                     <Route path=path!("/auth/google/link-callback") view=GoogleLinkCallbackPage/>
-                    <Route path=path!("/auth/oauth/:provider/callback") view=|| view! { <NotImplementedPage name="OAuth Callback"/> }/>
+                    <Route path=path!("/auth/oauth/:provider/callback") view=DatasourceOAuthCallbackPage/>
                     // Public pages — NO layout, NO auth
                     // `/try` (trial chat) was removed; redirect external links to /login.
                     <Route path=path!("/try") view=|| view! { <Redirect path="/login"/> }/>
