@@ -754,6 +754,166 @@ async fn update_google_oauth_data(
 }
 
 // ---------------------------------------------------------------------------
+// Google account link callback
+// ---------------------------------------------------------------------------
+
+/// Outcome of `google_link_callback_service`.
+pub struct GoogleLinkCallbackServiceResult {
+    /// The Google account email that was linked.
+    pub google_email: String,
+    /// BigQuery access level ("read", "write", "none", etc.).
+    pub bigquery_access: String,
+    /// The workspace_id from the OAuth CSRF state, if present.
+    /// The caller (route handler) uses this to send a WebSocket notification.
+    pub workspace_id: Option<String>,
+    /// The user_id extracted from the CSRF state.
+    pub user_id: String,
+}
+
+/// Parameters for `google_link_callback_service`.
+pub struct GoogleLinkCallbackParams<'a> {
+    pub db: &'a DbPool,
+    pub kv: &'a KVPool,
+    pub encryption_key: &'a [u8; 32],
+    pub code: &'a str,
+    pub state: &'a str,
+    pub client_id: &'a str,
+    pub client_secret: &'a str,
+    pub frontend_url: &'a str,
+    pub ip: &'a str,
+}
+
+/// Full Google account link callback orchestration.
+///
+/// Verifies the CSRF state, exchanges the authorization code for tokens,
+/// fetches user info from Google, and updates the stored OAuth data.
+///
+/// Does NOT send WebSocket notifications — that is the caller's responsibility
+/// since `ws_manager` is server-crate-specific and not available in kyomi-auth.
+/// The returned `workspace_id` and `user_id` provide the data the caller needs
+/// to fire the notification.
+pub async fn google_link_callback_service(
+    params: GoogleLinkCallbackParams<'_>,
+) -> kyomi_core::Result<GoogleLinkCallbackServiceResult> {
+    use crate::google_oauth::{OAuthData, GoogleOAuthTokens};
+
+    let GoogleLinkCallbackParams {
+        db, kv, encryption_key, code, state, client_id, client_secret, frontend_url, ip,
+    } = params;
+
+    // Rate limit
+    let rate = crate::rate_limiter::check_rate_limit(kv, ip, "login", None).await?;
+    if !rate.allowed {
+        return Err(kyomi_core::Error::TooManyRequests(
+            format!("Rate limited. Try again in {} seconds", rate.retry_after_secs),
+            rate.retry_after_secs,
+        ));
+    }
+
+    // Verify CSRF state
+    let state_data = crate::redis_ops::verify_oauth_state(kv, "google_link", state)
+        .await?
+        .ok_or_else(|| {
+            tracing::warn!(ip = %ip, "Google link-callback: invalid or expired CSRF state");
+            kyomi_core::Error::BadRequest("Invalid or expired state".into())
+        })?;
+
+    let action = state_data["action"].as_str().unwrap_or("");
+    if action != "link_account" {
+        return Err(kyomi_core::Error::BadRequest("Invalid state action".into()));
+    }
+
+    let link_user_id = state_data["user_id"]
+        .as_str()
+        .ok_or_else(|| kyomi_core::Error::BadRequest("Missing user_id in state".into()))?;
+
+    // Exchange code for tokens
+    let redirect_uri = format!(
+        "{}/auth/google/link-callback",
+        frontend_url.trim_end_matches('/')
+    );
+    let token_data =
+        crate::google_oauth::exchange_code_for_tokens(client_id, client_secret, code, &redirect_uri)
+            .await?;
+
+    tracing::info!(
+        scope = ?token_data.scope,
+        has_refresh_token = token_data.refresh_token.is_some(),
+        expires_in = ?token_data.expires_in,
+        "Google link-callback: token exchange response — ACTUAL scopes Google granted"
+    );
+
+    // Get user info from Google
+    let user_info = crate::google_oauth::get_user_info(&token_data.access_token).await?;
+
+    // Find the user
+    let user = crate::user_service::get_user_by_id(db, link_user_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
+
+    // Parse existing OAuth data to preserve any existing refresh token
+    let existing_oauth = crate::google_oauth::parse_oauth_data(
+        user.oauth_data.as_deref(),
+        encryption_key,
+    )?;
+
+    // Preserve existing refresh token if Google doesn't return a new one
+    let existing_refresh = existing_oauth
+        .as_ref()
+        .and_then(|o| o.google_oauth_tokens.as_ref())
+        .and_then(|t| t.refresh_token.clone());
+
+    let new_refresh_token = token_data.refresh_token.or(existing_refresh);
+
+    let expires_in = token_data.expires_in.unwrap_or(3600);
+    let expires_at = (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339();
+
+    let google_email = user_info.email.clone();
+
+    // Build updated oauth data WITH tokens (this is the BigQuery connect flow)
+    let updated_oauth = OAuthData {
+        google_id: Some(user_info.id),
+        oauth_provider: Some("google".to_string()),
+        picture: user_info.picture,
+        last_oauth_login: Some(chrono::Utc::now().to_rfc3339()),
+        google_oauth_tokens: Some(GoogleOAuthTokens {
+            access_token: token_data.access_token,
+            refresh_token: new_refresh_token,
+            token_type: "Bearer".to_string(),
+            scope: token_data.scope.unwrap_or_default(),
+            expires_in: Some(expires_in),
+            expires_at: Some(expires_at),
+            email: Some(google_email.clone()),
+            name: user_info.name,
+        }),
+        ..Default::default()
+    };
+
+    let encrypted = crate::google_oauth::build_oauth_data(&updated_oauth, encryption_key)?;
+    crate::user_service::update_user_oauth_data(db, &user.user_id, Some(&encrypted)).await?;
+
+    // Determine BigQuery access level
+    let bigquery_access = updated_oauth
+        .google_oauth_tokens
+        .as_ref()
+        .map(|t| crate::google_oauth::bigquery_access_level(&t.scope))
+        .unwrap_or("none")
+        .to_string();
+
+    let workspace_id = state_data
+        .get("workspace_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(GoogleLinkCallbackServiceResult {
+        google_email,
+        bigquery_access,
+        workspace_id,
+        user_id: link_user_id.to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Account recovery
 // ---------------------------------------------------------------------------
 
