@@ -1106,6 +1106,35 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
   min-height: 0;
 }
 
+/* KYO-9: overlay the loading state so it doesn't stack below existing chart
+ * content and cause layout shift on refresh. The animated Kyomi logo replaces
+ * the default CSS spinner. `.chartml-container` already sets `position:
+ * relative` inline, so `inset: 0` anchors correctly to the chart tile. */
+.chartml-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background-color: var(--color-card, #ffffff);
+  opacity: 0.9;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dark .chartml-loading {
+  background-color: var(--color-card, #24201e);
+}
+
+.chartml-spinner {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 0;
+  animation: none;
+  background: url('/kyomi_animated_logo.svg') no-repeat center / contain;
+}
+
 /* ChartML chart CSS (animations, tooltips, hover effects) is injected
  * automatically by chartml-leptos's ChartMLChart component on mount.
  * No manual CSS needed — styles are embedded in the chartml-leptos crate. */
