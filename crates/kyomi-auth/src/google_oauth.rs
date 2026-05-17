@@ -660,7 +660,7 @@ pub async fn google_oauth_projects_service(
         })
         .collect();
 
-    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    projects.sort_by_key(|a| a.name.to_lowercase());
 
     Ok(GoogleOAuthProjectsResult {
         projects,
