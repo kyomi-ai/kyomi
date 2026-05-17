@@ -149,6 +149,11 @@ pub fn DatasourceOAuthCallbackPage() -> impl IntoView {
     let (code, state_param, error): (Option<String>, Option<String>, Option<String>) =
         (None, None, None);
 
+    // Clone provider before it is consumed by process_datasource_oauth_callback,
+    // so the popup postMessage block can use it independently.
+    #[cfg(target_arch = "wasm32")]
+    let provider_for_msg = provider.clone();
+
     // Cannot use Action: uses gloo_timers::future::TimeoutFuture (timer-based
     // delay before navigation) and use_navigate() — both !Send browser APIs on
     // wasm32. Signal writes inside the async block use try_set for
@@ -156,11 +161,69 @@ pub fn DatasourceOAuthCallbackPage() -> impl IntoView {
     leptos::task::spawn_local(async move {
         let outcome =
             process_datasource_oauth_callback(provider, code, state_param, error).await;
-        set_status.try_set(outcome.status);
+        set_status.try_set(outcome.status.clone());
         if !outcome.message.is_empty() {
-            set_message.try_set(outcome.message);
+            set_message.try_set(outcome.message.clone());
         }
 
+        // If opened as a popup, postMessage to the opener window then close.
+        // Otherwise fall through to the normal redirect behavior.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::utils::oauth_popup::{send_oauth_error_to_opener, send_oauth_success_to_opener};
+
+            let opener = web_sys::window()
+                .and_then(|w| w.opener().ok())
+                .and_then(|o| {
+                    use wasm_bindgen::JsCast;
+                    o.dyn_into::<web_sys::Window>().ok()
+                });
+
+            if let Some(opener_win) = opener {
+                let is_success = outcome.status == LinkStatus::Success;
+                let msg_type = match (is_success, provider_for_msg.as_str()) {
+                    (true, "snowflake") => Some("SNOWFLAKE_OAUTH_SUCCESS"),
+                    (true, "databricks") => Some("DATABRICKS_OAUTH_SUCCESS"),
+                    (true, "bigquery-enterprise") => Some("BIGQUERY_ENTERPRISE_OAUTH_SUCCESS"),
+                    (true, "microsoft-enterprise") => Some("MICROSOFT_ENTERPRISE_OAUTH_SUCCESS"),
+                    (false, "snowflake") => Some("SNOWFLAKE_OAUTH_ERROR"),
+                    (false, "databricks") => Some("DATABRICKS_OAUTH_ERROR"),
+                    (false, "bigquery-enterprise") => Some("BIGQUERY_ENTERPRISE_OAUTH_ERROR"),
+                    (false, "microsoft-enterprise") => Some("MICROSOFT_ENTERPRISE_OAUTH_ERROR"),
+                    // Every provider the backend supports is mapped above — reaching this
+                    // arm means the route received an unrecognised provider slug, which
+                    // indicates a bug. Log a warning so it shows up in the browser console.
+                    _ => {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[oauth_popup] unrecognised provider '{}' — no postMessage sent",
+                                provider_for_msg
+                            )
+                            .into(),
+                        );
+                        None
+                    }
+                };
+
+                if let Some(t) = msg_type {
+                    if is_success {
+                        // provider_email is not surfaced through this callback page —
+                        // the parent window can refetch state after receiving the message.
+                        send_oauth_success_to_opener(&opener_win, t, None);
+                    } else {
+                        send_oauth_error_to_opener(&opener_win, t, &outcome.message);
+                    }
+                }
+
+                // Close the popup — parent window handles the next step
+                if let Some(w) = web_sys::window() {
+                    w.close().ok();
+                }
+                return;
+            }
+        }
+
+        // Not a popup — use normal redirect behavior.
         // Redirect handling — gloo_timers and use_navigate are browser-only,
         // but reading redirect_url must happen on both targets to consume the field.
         if let Some(_redirect_url) = outcome.redirect_url {

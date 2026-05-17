@@ -35,53 +35,73 @@ struct LinkOutcome {
 }
 
 /// Process the link callback result and produce the next page state.
+///
+/// Returns a `(LinkOutcome, Option<String>)` tuple where the second element
+/// is the linked Google email address (present on success). The email is used
+/// by the popup postMessage path to notify the opener window.
+///
 /// Not cfg-gated so the compiler sees all `LinkStatus` variants constructed.
 async fn process_google_link_callback(
     code: Option<String>,
     state_param: Option<String>,
     error: Option<String>,
-) -> LinkOutcome {
+) -> (LinkOutcome, Option<String>) {
     use crate::server_fns::auth::{google_link_callback, GoogleLinkCallbackResult};
 
     // Check for error param (Google returns this on denial, e.g. access_denied)
     if let Some(err) = error {
-        return LinkOutcome {
-            status: LinkStatus::Error,
-            message: format!("Google OAuth error: {err}"),
-            redirect_url: None,
-        };
+        return (
+            LinkOutcome {
+                status: LinkStatus::Error,
+                message: format!("Google OAuth error: {err}"),
+                redirect_url: None,
+            },
+            None,
+        );
     }
 
     // Validate required params — both code and state are mandatory
     let (Some(code), Some(state_val)) = (code, state_param) else {
-        return LinkOutcome {
-            status: LinkStatus::Error,
-            message: "Missing authorization code or state parameter".to_string(),
-            redirect_url: None,
-        };
+        return (
+            LinkOutcome {
+                status: LinkStatus::Error,
+                message: "Missing authorization code or state parameter".to_string(),
+                redirect_url: None,
+            },
+            None,
+        );
     };
 
     // Call the server function
     match google_link_callback(code, state_val).await {
-        Ok(GoogleLinkCallbackResult::Success { .. }) => LinkOutcome {
-            status: LinkStatus::Success,
-            message: "Your Google account has been linked for BigQuery access.".to_string(),
-            redirect_url: Some("/settings?tab=profile&google=connected".to_string()),
-        },
-        Ok(GoogleLinkCallbackResult::Error { message: msg }) => LinkOutcome {
-            status: LinkStatus::Error,
-            message: msg,
-            redirect_url: None,
-        },
-        Err(e) => LinkOutcome {
-            status: LinkStatus::Error,
-            message: e
-                .to_string()
-                .strip_prefix("error running server function: ")
-                .unwrap_or(&e.to_string())
-                .to_string(),
-            redirect_url: None,
-        },
+        Ok(GoogleLinkCallbackResult::Success { google_email, .. }) => (
+            LinkOutcome {
+                status: LinkStatus::Success,
+                message: "Your Google account has been linked for BigQuery access.".to_string(),
+                redirect_url: Some("/settings?tab=profile&google=connected".to_string()),
+            },
+            Some(google_email),
+        ),
+        Ok(GoogleLinkCallbackResult::Error { message: msg }) => (
+            LinkOutcome {
+                status: LinkStatus::Error,
+                message: msg,
+                redirect_url: None,
+            },
+            None,
+        ),
+        Err(e) => (
+            LinkOutcome {
+                status: LinkStatus::Error,
+                message: e
+                    .to_string()
+                    .strip_prefix("error running server function: ")
+                    .unwrap_or(&e.to_string())
+                    .to_string(),
+                redirect_url: None,
+            },
+            None,
+        ),
     }
 }
 
@@ -131,12 +151,54 @@ pub fn GoogleLinkCallbackPage() -> impl IntoView {
     // wasm32. Signal writes inside the async block use try_set for
     // deferred-write safety.
     leptos::task::spawn_local(async move {
-        let outcome = process_google_link_callback(code, state_param, error).await;
-        set_status.try_set(outcome.status);
+        let (outcome, google_email) =
+            process_google_link_callback(code, state_param, error).await;
+        set_status.try_set(outcome.status.clone());
         if !outcome.message.is_empty() {
-            set_message.try_set(outcome.message);
+            set_message.try_set(outcome.message.clone());
         }
 
+        // If opened as a popup, postMessage to the opener window then close.
+        // Otherwise fall through to the normal redirect behavior.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::utils::oauth_popup::{send_oauth_error_to_opener, send_oauth_success_to_opener};
+
+            let opener = web_sys::window()
+                .and_then(|w| w.opener().ok())
+                .and_then(|o| {
+                    use wasm_bindgen::JsCast;
+                    o.dyn_into::<web_sys::Window>().ok()
+                });
+
+            if let Some(opener_win) = opener {
+                if outcome.status == LinkStatus::Success {
+                    send_oauth_success_to_opener(
+                        &opener_win,
+                        "GOOGLE_OAUTH_SUCCESS",
+                        google_email.as_deref(),
+                    );
+                } else {
+                    send_oauth_error_to_opener(
+                        &opener_win,
+                        "GOOGLE_OAUTH_ERROR",
+                        &outcome.message,
+                    );
+                }
+
+                // Close the popup — parent window handles the next step
+                if let Some(w) = web_sys::window() {
+                    w.close().ok();
+                }
+                return;
+            }
+        }
+
+        // Not a popup — `google_email` is unused on SSR and non-popup WASM paths;
+        // consume it here so both targets compile without warnings.
+        let _ = google_email;
+
+        // Not a popup — use normal redirect behavior.
         // Redirect handling — gloo_timers and use_navigate are browser-only,
         // but reading redirect_url must happen on both targets to consume the field.
         if let Some(_redirect_url) = outcome.redirect_url {
