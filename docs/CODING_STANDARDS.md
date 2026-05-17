@@ -221,6 +221,30 @@ let derived = Signal::derive(move || signal_prop.get());
 // child re-renders when signal_prop changes
 ```
 
+### Resolve derived signal values at click time, not render time
+
+When a reactive closure (`{move || ...}`) builds a button whose `on:click` opens a popup or navigates to a URL derived from signals, the URL must be resolved inside the click handler — not captured into the closure's scope at render time. The outer closure re-runs when its tracked signals change, but intermediate signal values (like a `slug`-derived URL) may update independently without re-triggering the closure.
+
+**Rule:** Use `signal.get_untracked()` inside `on:click` handlers for values that should reflect the current state at interaction time.
+
+```rust
+// WRONG — URL captured at render time, stale if slug changes
+let connect_url_val = connect_url.get(); // captured when closure runs
+view! {
+    <button on:click=move |_| {
+        open_oauth_popup(&connect_url_val); // uses stale value
+    }>"Connect"</button>
+}
+
+// RIGHT — URL resolved at click time
+view! {
+    <button on:click=move |_| {
+        let url = connect_url.get_untracked(); // fresh value at click time
+        open_oauth_popup(&url);
+    }>"Connect"</button>
+}
+```
+
 ### Never read signals eagerly inside `ChildrenFn` / `Arc<dyn Fn() -> AnyView>` closures that share scope with inputs
 
 If a `ChildrenFn` closure (used by `Modal` footer, `Transition` fallback, etc.) reads a signal with `.get()`, every signal change re-executes the entire closure and rebuilds its DOM. If the Modal/component re-renders children alongside the footer, this destroys any `<input>` elements in the body — causing focus loss on every keystroke.
@@ -326,6 +350,26 @@ pub async fn link_google_account(code: String) -> Result<LinkResult, ServerFnErr
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(result)
 }
+```
+
+### Never reimplement server-owned URL/routing logic on the client
+
+When the server already owns logic for computing a URL or routing decision (e.g., which OAuth endpoint to use based on datasource type and auth_mode), the client must call a server_fn that delegates to that logic — not reimplement it with string matching. Client-side reimplementations drift silently when new cases are added server-side.
+
+**Rule:** If the server already has a function that computes the right URL/path/config, expose it as a server_fn and call it from the client. If you need the value at render time (not just on button click), fetch it in an Effect or Resource.
+
+```rust
+// WRONG — client reimplements server routing logic, will drift
+fn oauth_url_for_datasource(ds_type: &str) -> String {
+    match ds_type {
+        "bigquery" => "/api/v1/auth/google-oauth/connect".to_string(),
+        "snowflake" => "/api/v1/auth/oauth/snowflake/connect".to_string(),
+        // silently wrong for bigquery enterprise_oauth mode
+    }
+}
+
+// RIGHT — call existing server_fn that owns the logic
+let url = get_oauth_connect_url(slug.clone()).await?;
 ```
 
 ## Data & State Management
