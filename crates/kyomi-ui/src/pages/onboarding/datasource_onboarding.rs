@@ -307,95 +307,54 @@ fn CredentialSetup(
     // ── OAuth message listener ───────────────────────────────────────────
     // Listen for postMessage from OAuth popup windows. On success, refetch
     // the state_resource (the Effect above handles the rest).
-    #[cfg(feature = "hydrate")]
+    #[cfg(target_arch = "wasm32")]
     {
-        Effect::new(move |_| {
-            use wasm_bindgen::prelude::*;
-            use wasm_bindgen::JsCast;
+        use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
 
-            let Some(window) = web_sys::window() else {
-                return;
-            };
-
-            // OAuth success message types per provider
-            let success_types: Vec<String> = [
-                "GOOGLE_OAUTH_SUCCESS",
-                "BIGQUERY_ENTERPRISE_OAUTH_SUCCESS",
-                "SNOWFLAKE_OAUTH_SUCCESS",
-                "MICROSOFT_ENTERPRISE_OAUTH_SUCCESS",
-                "DATABRICKS_OAUTH_SUCCESS",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-            let error_types: Vec<String> = [
-                "GOOGLE_OAUTH_ERROR",
-                "BIGQUERY_ENTERPRISE_OAUTH_ERROR",
-                "SNOWFLAKE_OAUTH_ERROR",
-                "MICROSOFT_ENTERPRISE_OAUTH_ERROR",
-                "DATABRICKS_OAUTH_ERROR",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-            let closure = Closure::<dyn Fn(web_sys::MessageEvent)>::new(
-                move |event: web_sys::MessageEvent| {
-                    // Verify origin matches current window
-                    if let Some(win) = web_sys::window() {
-                        let origin = win.location().origin().unwrap_or_default();
-                        if event.origin() != origin {
-                            return;
-                        }
-                    }
-
-                    // Parse message data
-                    let data = event.data();
-                    let msg_type = js_sys::Reflect::get(&data, &JsValue::from_str("type"))
-                        .ok()
-                        .and_then(|v| v.as_string());
-
-                    let Some(ref msg_type) = msg_type else {
-                        return;
-                    };
-
-                    if success_types.iter().any(|t| t == msg_type) {
-                        set_oauth_connecting.set(None);
-                        let provider = match msg_type.as_str() {
-                            "GOOGLE_OAUTH_SUCCESS" | "BIGQUERY_ENTERPRISE_OAUTH_SUCCESS" => {
-                                "BigQuery"
-                            }
-                            "SNOWFLAKE_OAUTH_SUCCESS" => "Snowflake",
-                            "MICROSOFT_ENTERPRISE_OAUTH_SUCCESS" => "Azure Synapse",
-                            "DATABRICKS_OAUTH_SUCCESS" => "Databricks",
-                            _ => "datasource",
-                        };
-                        toast_success(format!("{provider} connected successfully"));
-                        // Trigger re-fetch — the Effect above handles redirect/update
-                        state_resource.refetch();
-                    } else if error_types.iter().any(|t| t == msg_type) {
-                        set_oauth_connecting.set(None);
-                        let error_msg =
-                            js_sys::Reflect::get(&data, &JsValue::from_str("error"))
-                                .ok()
-                                .and_then(|v| v.as_string())
-                                .unwrap_or_else(|| "Failed to connect".to_string());
-                        toast_error(error_msg);
-                    }
-                },
-            );
-
-            let _ = window.add_event_listener_with_callback(
-                "message",
-                closure.as_ref().unchecked_ref(),
-            );
-
-            // Store closure in SendWrapper so it can be cleaned up on unmount
-            let wrapper = send_wrapper::SendWrapper::new(closure);
-            on_cleanup(move || {
-                drop(wrapper);
-            });
+        let cleanup = install_oauth_listener(move |msg| {
+            match msg {
+                OAuthMessage::GoogleSuccess { .. } | OAuthMessage::BigqueryEnterpriseSuccess { .. } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_success("BigQuery connected successfully");
+                    state_resource.refetch();
+                }
+                OAuthMessage::SnowflakeSuccess { .. } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_success("Snowflake connected successfully");
+                    state_resource.refetch();
+                }
+                OAuthMessage::MicrosoftEnterpriseSuccess { .. } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_success("Azure Synapse connected successfully");
+                    state_resource.refetch();
+                }
+                OAuthMessage::DatabricksSuccess { .. } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_success("Databricks connected successfully");
+                    state_resource.refetch();
+                }
+                OAuthMessage::MicrosoftSuccess { .. } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_success("Microsoft connected successfully");
+                    state_resource.refetch();
+                }
+                OAuthMessage::GoogleError { error }
+                | OAuthMessage::SnowflakeError { error }
+                | OAuthMessage::DatabricksError { error }
+                | OAuthMessage::MicrosoftError { error }
+                | OAuthMessage::MicrosoftEnterpriseError { error }
+                | OAuthMessage::BigqueryEnterpriseError { error } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_error(error);
+                }
+            }
+        });
+        let cleanup_cell = std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
+        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
+        on_cleanup(move || {
+            if let Some(f) = cleanup_wrapper.take().take() {
+                f();
+            }
         });
     }
 
@@ -519,7 +478,61 @@ fn CredentialRow(
                 {
                     Ok(url) => {
                         set_oauth_connecting.set(Some(ds_id.clone()));
-                        open_oauth_popup(&url, &ds_id, set_oauth_connecting);
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use crate::utils::oauth_popup::open_oauth_popup;
+                            use wasm_bindgen::prelude::*;
+                            use wasm_bindgen::JsCast;
+
+                            match open_oauth_popup(&url, &ds_id) {
+                                Some(popup_window) => {
+                                    // Monitor popup for manual close. When the popup
+                                    // closes (user dismissed it without completing OAuth),
+                                    // clear the connecting state so the button re-enables.
+                                    let ds_id_monitor = ds_id.clone();
+                                    type PopupMonitorState = std::rc::Rc<std::cell::RefCell<Option<(i32, Closure<dyn Fn()>)>>>;
+                                    let state: PopupMonitorState =
+                                        std::rc::Rc::new(std::cell::RefCell::new(None));
+                                    let state_inner = state.clone();
+
+                                    let closure = Closure::<dyn Fn()>::new(move || {
+                                        let closed = popup_window.closed().unwrap_or(true);
+                                        if closed {
+                                            set_oauth_connecting.update(|current| {
+                                                if current.as_deref() == Some(ds_id_monitor.as_str()) {
+                                                    *current = None;
+                                                }
+                                            });
+                                            if let Some((interval_id, _)) = state_inner.borrow().as_ref()
+                                                && let Some(win) = web_sys::window() {
+                                                    win.clear_interval_with_handle(*interval_id);
+                                                }
+                                            state_inner.borrow_mut().take();
+                                        }
+                                    });
+
+                                    if let Some(window) = web_sys::window() {
+                                        let id = window
+                                            .set_interval_with_callback_and_timeout_and_arguments_0(
+                                                closure.as_ref().unchecked_ref(),
+                                                500,
+                                            )
+                                            .unwrap_or(0);
+                                        *state.borrow_mut() = Some((id, closure));
+                                    }
+                                }
+                                None => {
+                                    set_oauth_connecting.set(None);
+                                    toast_error(
+                                        "Popup was blocked. Please allow popups for this site.",
+                                    );
+                                }
+                            }
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let _ = url;
+                        }
                     }
                     Err(e) => {
                         toast_error(format!("Failed to get OAuth URL: {e}"));
@@ -703,102 +716,3 @@ fn WaitingForSetup(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// OAuth Popup Helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Open a centered OAuth popup window and monitor it for closure.
-///
-/// When the popup is closed (either by the user or after OAuth completion),
-/// clears the connecting state. OAuth success/error is handled separately
-/// via the `message` event listener.
-fn open_oauth_popup(
-    url: &str,
-    datasource_id: &str,
-    set_connecting: WriteSignal<Option<String>>,
-) {
-    #[cfg(feature = "hydrate")]
-    {
-        use wasm_bindgen::prelude::*;
-        use wasm_bindgen::JsCast;
-
-        let Some(window) = web_sys::window() else {
-            toast_error("Browser window not available");
-            return;
-        };
-
-        // Calculate centered popup position
-        let width = 500;
-        let height = 600;
-        let screen_x = window.screen_x().ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
-        let outer_width = window.outer_width().ok().and_then(|v| v.as_f64()).unwrap_or(1024.0) as i32;
-        let screen_y = window.screen_y().ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
-        let outer_height = window.outer_height().ok().and_then(|v| v.as_f64()).unwrap_or(768.0) as i32;
-        let left = screen_x + (outer_width - width) / 2;
-        let top = screen_y + (outer_height - height) / 2;
-
-        let features = format!(
-            "width={width},height={height},left={left},top={top},popup=1"
-        );
-
-        let popup = window.open_with_url_and_target_and_features(
-            url,
-            "oauth-connect",
-            &features,
-        );
-
-        match popup {
-            Ok(Some(popup_window)) => {
-                // Monitor popup for manual close. When the popup closes
-                // (either by user or after OAuth redirect), clear the
-                // connecting state and stop polling.
-                let ds_id = datasource_id.to_string();
-
-                // Use shared state so the closure can clear its own interval
-                // and drop itself (no leak via forget).
-                type PopupMonitorState = std::rc::Rc<std::cell::RefCell<Option<(i32, Closure<dyn Fn()>)>>>;
-                let state: PopupMonitorState =
-                    std::rc::Rc::new(std::cell::RefCell::new(None));
-                let state_inner = state.clone();
-
-                let closure = Closure::<dyn Fn()>::new(move || {
-                    let closed = popup_window.closed().unwrap_or(true);
-                    if closed {
-                        // Clear connecting state if still set to this datasource
-                        set_connecting.update(|current| {
-                            if current.as_deref() == Some(ds_id.as_str()) {
-                                *current = None;
-                            }
-                        });
-                        // Self-clear the interval and drop the closure
-                        if let Some((interval_id, _)) = state_inner.borrow().as_ref()
-                            && let Some(win) = web_sys::window() {
-                                win.clear_interval_with_handle(*interval_id);
-                            }
-                        state_inner.borrow_mut().take();
-                    }
-                });
-
-                let id = window
-                    .set_interval_with_callback_and_timeout_and_arguments_0(
-                        closure.as_ref().unchecked_ref(),
-                        500, // Check every 500ms
-                    )
-                    .unwrap_or(0);
-
-                // Store both the interval ID and the closure so the closure stays
-                // alive without forget(). When the popup closes, both are dropped.
-                *state.borrow_mut() = Some((id, closure));
-            }
-            _ => {
-                set_connecting.set(None);
-                toast_error("Popup was blocked. Please allow popups for this site.");
-            }
-        }
-    }
-
-    #[cfg(not(feature = "hydrate"))]
-    {
-        let _ = (url, datasource_id, set_connecting);
-    }
-}
