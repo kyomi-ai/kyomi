@@ -865,6 +865,15 @@ pub fn DatasourceModal(
     // Snowflake-specific
     let (sf_auth_mode, set_sf_auth_mode) = signal("password".to_string());
 
+    // Synapse-specific
+    // auth_mode: "sql" | "service_principal" | "enterprise_oauth"
+    let (synapse_auth_mode, set_synapse_auth_mode) = signal("sql".to_string());
+    // Tenant ID — used for both service_principal and enterprise_oauth modes
+    let (cfg_tenant_id, set_cfg_tenant_id) = signal(String::new());
+    // Service Principal credentials (distinct from cred_client_id used for other purposes)
+    let (cred_sp_client_id, set_cred_sp_client_id) = signal(String::new());
+    let (cred_sp_client_secret, set_cred_sp_client_secret) = signal(String::new());
+
     // Credentials form
     let (cred_username, set_cred_username) = signal(String::new());
     let (cred_password, set_cred_password) = signal(String::new());
@@ -984,6 +993,10 @@ pub fn DatasourceModal(
         set_cfg_service_account_json.set(String::new());
         set_service_account_email.set(String::new());
         set_sf_auth_mode.set("password".to_string());
+        set_synapse_auth_mode.set("sql".to_string());
+        set_cfg_tenant_id.set(String::new());
+        set_cred_sp_client_id.set(String::new());
+        set_cred_sp_client_secret.set(String::new());
         set_cred_username.set(String::new());
         set_cred_password.set(String::new());
         set_cred_access_token.set(String::new());
@@ -1094,10 +1107,21 @@ pub fn DatasourceModal(
                             set_cfg_oauth_client_id.try_set(str_val("oauth_client_id"));
                             set_cfg_oauth_client_secret.try_set(str_val("oauth_client_secret"));
 
-                            // BigQuery auth mode
+                            // Auth mode — branched by datasource type so each
+                            // provider's signal gets its own authoritative value.
                             if let Some(ref auth_mode) = settings.auth_mode {
-                                set_bq_auth_mode.try_set(auth_mode.clone());
-                                set_sf_auth_mode.try_set(auth_mode.clone());
+                                match settings.datasource_type.as_str() {
+                                    "bigquery" => {
+                                        set_bq_auth_mode.try_set(auth_mode.clone());
+                                    }
+                                    "snowflake" => {
+                                        set_sf_auth_mode.try_set(auth_mode.clone());
+                                    }
+                                    "synapse" => {
+                                        set_synapse_auth_mode.try_set(auth_mode.clone());
+                                    }
+                                    _ => {}
+                                }
                             }
 
                             // Service account
@@ -1135,6 +1159,19 @@ pub fn DatasourceModal(
                             set_cred_billing_project.try_set(user_str("billing_project"));
                             set_cred_default_project.try_set(user_str("default_project"));
                             // Note: passwords are not pre-filled (security)
+
+                            // Synapse: load tenant_id and service principal creds
+                            if settings.datasource_type == "synapse" {
+                                set_cfg_tenant_id.try_set(str_val("tenant_id"));
+                                // SP client_id lives in user_settings (per-user credential)
+                                let sp_client_id = user
+                                    .get("client_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                set_cred_sp_client_id.try_set(sp_client_id);
+                                // Note: sp_client_secret is not pre-filled (security)
+                            }
 
                             // Seed OAuth status from settings as initial state
                             // while the dedicated status fetch runs.
@@ -1203,6 +1240,28 @@ pub fn DatasourceModal(
                                         "databricks" => {
                                             match get_datasource_oauth_status(
                                                 "databricks".to_string(),
+                                                slug_for_fetch,
+                                            )
+                                            .await
+                                            {
+                                                Ok(s) => (
+                                                    s.connected,
+                                                    s.provider_email,
+                                                    s.token_expired,
+                                                ),
+                                                Err(_) => return,
+                                            }
+                                        }
+                                        "synapse" => {
+                                            // Only enterprise_oauth mode has OAuth status
+                                            let mode = auth_mode_for_fetch
+                                                .as_deref()
+                                                .unwrap_or("sql");
+                                            if mode != "enterprise_oauth" {
+                                                return;
+                                            }
+                                            match get_datasource_oauth_status(
+                                                "microsoft-enterprise".to_string(),
                                                 slug_for_fetch,
                                             )
                                             .await
@@ -1367,7 +1426,7 @@ pub fn DatasourceModal(
                     map.insert("schema".to_string(), serde_json::json!(cfg_schema.get_untracked()));
                 }
             }
-            "sqlserver" | "synapse" => {
+            "sqlserver" => {
                 if !cfg_host.get_untracked().is_empty() {
                     map.insert("host".to_string(), serde_json::json!(cfg_host.get_untracked()));
                 }
@@ -1381,6 +1440,37 @@ pub fn DatasourceModal(
                 }
                 if !cfg_schema.get_untracked().is_empty() {
                     map.insert("schema".to_string(), serde_json::json!(cfg_schema.get_untracked()));
+                }
+            }
+            "synapse" => {
+                if !cfg_host.get_untracked().is_empty() {
+                    map.insert("host".to_string(), serde_json::json!(cfg_host.get_untracked()));
+                }
+                if let Ok(port) = cfg_port.get_untracked().parse::<i64>() {
+                    map.insert("port".to_string(), serde_json::json!(port));
+                }
+                map.insert("encrypt".to_string(), serde_json::json!(cfg_encrypt.get_untracked()));
+                map.insert("trust_server_certificate".to_string(), serde_json::json!(cfg_trust_cert.get_untracked()));
+                if !cfg_database.get_untracked().is_empty() {
+                    map.insert("database".to_string(), serde_json::json!(cfg_database.get_untracked()));
+                }
+                if !cfg_schema.get_untracked().is_empty() {
+                    map.insert("schema".to_string(), serde_json::json!(cfg_schema.get_untracked()));
+                }
+                // Synapse auth-mode fields
+                let syn_mode = synapse_auth_mode.get_untracked();
+                map.insert("auth_mode".to_string(), serde_json::json!(syn_mode.clone()));
+                if !cfg_tenant_id.get_untracked().is_empty() {
+                    map.insert("tenant_id".to_string(), serde_json::json!(cfg_tenant_id.get_untracked()));
+                }
+                // Enterprise OAuth admin credentials live in connection_config
+                if syn_mode == "enterprise_oauth" {
+                    if !cfg_oauth_client_id.get_untracked().is_empty() {
+                        map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
+                    }
+                    if !cfg_oauth_client_secret.get_untracked().is_empty() {
+                        map.insert("oauth_client_secret".to_string(), serde_json::json!(cfg_oauth_client_secret.get_untracked()));
+                    }
                 }
             }
             "bigquery" => {
@@ -1471,6 +1561,31 @@ pub fn DatasourceModal(
                         }
                     }
                     _ => {}
+                }
+            }
+            "synapse" => {
+                let syn_mode = synapse_auth_mode.get_untracked();
+                match syn_mode.as_str() {
+                    "service_principal" => {
+                        if !cred_sp_client_id.get_untracked().is_empty() {
+                            map.insert("client_id".to_string(), serde_json::json!(cred_sp_client_id.get_untracked()));
+                        }
+                        if !cred_sp_client_secret.get_untracked().is_empty() {
+                            map.insert("client_secret".to_string(), serde_json::json!(cred_sp_client_secret.get_untracked()));
+                        }
+                    }
+                    "enterprise_oauth" => {
+                        map.insert("auth_type".to_string(), serde_json::json!("oauth"));
+                    }
+                    _ => {
+                        // SQL authentication — username + password
+                        if !cred_username.get_untracked().is_empty() {
+                            map.insert("username".to_string(), serde_json::json!(cred_username.get_untracked()));
+                        }
+                        if !cred_password.get_untracked().is_empty() {
+                            map.insert("password".to_string(), serde_json::json!(cred_password.get_untracked()));
+                        }
+                    }
                 }
             }
             _ => {
@@ -1783,9 +1898,17 @@ pub fn DatasourceModal(
                     set_modal_oauth_connecting.try_set(false);
                     toast_error(error);
                 }
-                OAuthMessage::MicrosoftSuccess { .. }
-                | OAuthMessage::MicrosoftEnterpriseSuccess { .. } => {
+                OAuthMessage::MicrosoftSuccess { .. } => {
                     set_modal_oauth_connecting.try_set(false);
+                }
+                OAuthMessage::MicrosoftEnterpriseSuccess { email } => {
+                    // Microsoft Enterprise OAuth success — used by Synapse enterprise_oauth mode
+                    set_modal_oauth_connected.try_set(true);
+                    set_modal_oauth_email.try_set(email);
+                    set_modal_oauth_expired.try_set(false);
+                    set_modal_oauth_connecting.try_set(false);
+                    // Auto-run Test & Discover so schema dropdowns populate
+                    do_test_and_discover();
                 }
             }
         });
@@ -2405,11 +2528,32 @@ pub fn DatasourceModal(
                                         />
                                     </Show>
 
+                                    // Synapse auth mode selector
+                                    <Show when=move || ds_type.get() == "synapse">
+                                        <SynapseAuthModeSection
+                                            synapse_auth_mode=synapse_auth_mode
+                                            set_synapse_auth_mode=set_synapse_auth_mode
+                                            slug=slug
+                                            cfg_oauth_client_id=cfg_oauth_client_id
+                                            set_cfg_oauth_client_id=set_cfg_oauth_client_id
+                                            cfg_oauth_client_secret=cfg_oauth_client_secret
+                                            set_cfg_oauth_client_secret=set_cfg_oauth_client_secret
+                                            oauth_connected=modal_oauth_connected
+                                            oauth_email=modal_oauth_email
+                                            oauth_expired=modal_oauth_expired
+                                            oauth_connecting=modal_oauth_connecting
+                                            set_oauth_connecting=set_modal_oauth_connecting
+                                            datasource_disconnect_action=datasource_disconnect_action
+                                            is_create_mode=is_create_mode
+                                        />
+                                    </Show>
+
                                     // Connection fields (provider-specific)
                                     <ProviderConnectionFields
                                         signals=ConnectionFieldsSignals {
                                             ds_type,
                                             sf_auth_mode,
+                                            synapse_auth_mode,
                                             cfg_host,
                                             set_cfg_host,
                                             cfg_port,
@@ -2430,6 +2574,8 @@ pub fn DatasourceModal(
                                             set_cfg_encrypt,
                                             cfg_trust_cert,
                                             set_cfg_trust_cert,
+                                            cfg_tenant_id,
+                                            set_cfg_tenant_id,
                                             cfg_oauth_client_id,
                                             set_cfg_oauth_client_id,
                                             cfg_oauth_client_secret,
@@ -2443,6 +2589,7 @@ pub fn DatasourceModal(
                                             ds_type,
                                             sf_auth_mode,
                                             bq_auth_mode,
+                                            synapse_auth_mode,
                                             cred_username,
                                             set_cred_username,
                                             cred_password,
@@ -2451,17 +2598,28 @@ pub fn DatasourceModal(
                                             set_cred_access_token,
                                             cred_private_key,
                                             set_cred_private_key,
+                                            cred_sp_client_id,
+                                            set_cred_sp_client_id,
+                                            cred_sp_client_secret,
+                                            set_cred_sp_client_secret,
                                             cfg_shared_credentials,
                                             set_cfg_shared_credentials,
                                         }
                                     />
 
                                     // Test & Discover button
-                                    // Hidden for BigQuery (uses OAuth) and Snowflake OAuth mode
+                                    // Hidden for BigQuery (uses OAuth), Snowflake OAuth mode,
+                                    // and Synapse Enterprise OAuth when not yet connected.
                                     <Show when=move || {
                                         let t = ds_type.get();
                                         let sf = sf_auth_mode.get();
-                                        !(t == "bigquery" || (t == "snowflake" && sf == "oauth"))
+                                        let syn = synapse_auth_mode.get();
+                                        let synapse_eo_not_connected = t == "synapse"
+                                            && syn == "enterprise_oauth"
+                                            && !modal_oauth_connected.get();
+                                        !(t == "bigquery"
+                                            || (t == "snowflake" && sf == "oauth")
+                                            || synapse_eo_not_connected)
                                     }>
                                         <div class="border-t border-border pt-4 mt-4">
                                             <div class="flex items-center gap-3">
@@ -3422,6 +3580,170 @@ fn SnowflakeAuthModeSection(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Synapse Auth Mode Section
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn SynapseAuthModeSection(
+    synapse_auth_mode: ReadSignal<String>,
+    set_synapse_auth_mode: WriteSignal<String>,
+    /// Datasource slug — used to build the Microsoft Enterprise OAuth connect URL.
+    slug: ReadSignal<String>,
+    /// Admin-level OAuth client ID (enterprise_oauth mode, stored in connection_config).
+    cfg_oauth_client_id: ReadSignal<String>,
+    set_cfg_oauth_client_id: WriteSignal<String>,
+    /// Admin-level OAuth client secret (enterprise_oauth mode, stored in connection_config).
+    cfg_oauth_client_secret: ReadSignal<String>,
+    set_cfg_oauth_client_secret: WriteSignal<String>,
+    /// Whether the OAuth account is currently connected.
+    oauth_connected: ReadSignal<bool>,
+    /// The connected account email, if any.
+    oauth_email: ReadSignal<Option<String>>,
+    /// Whether the OAuth token has expired.
+    oauth_expired: ReadSignal<bool>,
+    /// Whether an OAuth popup is currently in progress.
+    oauth_connecting: ReadSignal<bool>,
+    /// Setter for the connecting state.
+    set_oauth_connecting: WriteSignal<bool>,
+    /// Action to disconnect a per-datasource OAuth account.
+    datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
+    /// True in create mode — OAuth status panel is hidden in create mode.
+    is_create_mode: Signal<bool>,
+) -> impl IntoView {
+    // Microsoft Enterprise OAuth connect URL — slug-scoped
+    let enterprise_oauth_url = Signal::derive(move || {
+        let s = slug.get();
+        format!(
+            "/api/v1/auth/oauth/microsoft-enterprise/connect?datasource_slug={s}"
+        )
+    });
+
+    // "not configured" when client ID/secret are empty
+    let enterprise_cfg_missing = Signal::derive(move || {
+        cfg_oauth_client_id.get().is_empty() && cfg_oauth_client_secret.get().is_empty()
+    });
+
+    let slug_for_disconnect = slug;
+    let on_enterprise_disconnect = Callback::new(move |()| {
+        if !datasource_disconnect_action.pending().get_untracked() {
+            let slug_val = slug_for_disconnect.get_untracked();
+            datasource_disconnect_action
+                .dispatch(("microsoft-enterprise".to_string(), slug_val));
+        }
+    });
+
+    let enterprise_disconnect_pending =
+        Signal::derive(move || datasource_disconnect_action.pending().get());
+
+    // Redirect URL for display in enterprise OAuth mode
+    // On native (non-WASM) targets, we have no window.location.origin — use a placeholder.
+    #[cfg(target_arch = "wasm32")]
+    let redirect_url = {
+        let origin = web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_default();
+        format!("{origin}/auth/oauth/microsoft-enterprise/callback")
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let redirect_url = "/auth/oauth/microsoft-enterprise/callback".to_string();
+
+    let redirect_url_signal = Signal::stored(redirect_url);
+
+    view! {
+        <div class="space-y-2 pb-4 border-b border-border">
+            <label class="block text-sm font-medium">"Authentication Mode"</label>
+            <DynSelect
+                value=Signal::derive(move || synapse_auth_mode.get())
+                options=Signal::stored(vec![
+                    ("sql".to_string(), "SQL Authentication".to_string()),
+                    ("service_principal".to_string(), "Service Principal".to_string()),
+                    ("enterprise_oauth".to_string(), "Enterprise OAuth (Microsoft)".to_string()),
+                ])
+                on_change=move |val| set_synapse_auth_mode.set(val)
+            />
+            <p class="text-xs text-muted-foreground">
+                {move || match synapse_auth_mode.get().as_str() {
+                    "sql" => "Users authenticate with SQL username and password.",
+                    "service_principal" => "All users share a service principal (app registration) identity.",
+                    "enterprise_oauth" => "Users authenticate with their Microsoft accounts via your Azure AD app.",
+                    _ => "",
+                }}
+            </p>
+        </div>
+
+        // Enterprise OAuth admin configuration + user connection panel
+        <Show when=move || synapse_auth_mode.get() == "enterprise_oauth">
+            <div class="space-y-4 border-t border-border pt-4 mt-4">
+                // Admin OAuth configuration
+                <div class="space-y-3 pb-4 border-b border-border">
+                    <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
+                    <p class="text-xs text-muted-foreground">
+                        "Configure your organization's Azure AD app registration."
+                    </p>
+                    // Redirect URL copy block
+                    <div class="p-3 bg-muted/30 rounded-lg space-y-1">
+                        <label class="block text-xs font-medium text-muted-foreground">
+                            "Redirect URL (add as a redirect URI in your Azure AD app)"
+                        </label>
+                        <div class="flex items-center gap-2 mt-1">
+                            <code class="flex-1 text-xs font-mono text-foreground break-all">
+                                {move || redirect_url_signal.get()}
+                            </code>
+                            <CopyButton text=redirect_url_signal/>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
+                            <input type="text" class=MODAL_INPUT_CLASS
+                                placeholder="Application (client) ID"
+                                prop:value=move || cfg_oauth_client_id.get()
+                                on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
+                            <input type="password" class=MODAL_INPUT_CLASS
+                                placeholder="Client secret value"
+                                prop:value=move || cfg_oauth_client_secret.get()
+                                on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
+                            />
+                        </div>
+                    </div>
+                </div>
+                // User connection — 4-state status panel.
+                // Hidden in create mode (no slug yet for the enterprise endpoint).
+                <Show when=move || !is_create_mode.get()>
+                    <div class="space-y-3">
+                        <h4 class="text-sm font-medium">"Your Connection"</h4>
+                        <ModalOAuthStatusPanel
+                            oauth_connected=oauth_connected
+                            oauth_email=oauth_email
+                            oauth_expired=oauth_expired
+                            oauth_connecting=oauth_connecting
+                            set_oauth_connecting=set_oauth_connecting
+                            provider_name="Microsoft"
+                            connect_url=enterprise_oauth_url
+                            cfg_missing=enterprise_cfg_missing
+                            on_disconnect=on_enterprise_disconnect
+                            disconnect_pending=enterprise_disconnect_pending
+                        />
+                    </div>
+                </Show>
+                <Show when=move || is_create_mode.get()>
+                    <p class="text-xs text-muted-foreground">
+                        "After saving, connect your Microsoft account from this settings panel."
+                    </p>
+                </Show>
+            </div>
+        </Show>
+
+        // Service Principal credentials are rendered by ProviderCredentialsFields
+        // when synapse_auth_mode == "service_principal".
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Provider Connection Fields
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3432,6 +3754,7 @@ fn SnowflakeAuthModeSection(
 struct ConnectionFieldsSignals {
     ds_type: ReadSignal<String>,
     sf_auth_mode: ReadSignal<String>,
+    synapse_auth_mode: ReadSignal<String>,
     cfg_host: ReadSignal<String>,
     set_cfg_host: WriteSignal<String>,
     cfg_port: ReadSignal<String>,
@@ -3452,6 +3775,8 @@ struct ConnectionFieldsSignals {
     set_cfg_encrypt: WriteSignal<bool>,
     cfg_trust_cert: ReadSignal<bool>,
     set_cfg_trust_cert: WriteSignal<bool>,
+    cfg_tenant_id: ReadSignal<String>,
+    set_cfg_tenant_id: WriteSignal<String>,
     cfg_oauth_client_id: ReadSignal<String>,
     set_cfg_oauth_client_id: WriteSignal<String>,
     cfg_oauth_client_secret: ReadSignal<String>,
@@ -3466,6 +3791,7 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
     let ConnectionFieldsSignals {
         ds_type,
         sf_auth_mode,
+        synapse_auth_mode,
         cfg_host,
         set_cfg_host,
         cfg_port,
@@ -3486,6 +3812,8 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
         set_cfg_encrypt,
         cfg_trust_cert,
         set_cfg_trust_cert,
+        cfg_tenant_id,
+        set_cfg_tenant_id,
         cfg_oauth_client_id,
         set_cfg_oauth_client_id,
         cfg_oauth_client_secret,
@@ -3657,7 +3985,7 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
                     </div>
                 }.into_any(),
 
-                "sqlserver" | "synapse" => view! {
+                "sqlserver" => view! {
                     <div class="space-y-4">
                         <h4 class="text-sm font-medium">"Connection Settings"</h4>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -3688,6 +4016,84 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
                                 on:input=move |ev| set_cfg_database.set(event_target_value(&ev))
                             />
                         </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    class="h-4 w-4 rounded-md border-input"
+                                    prop:checked=move || cfg_encrypt.get()
+                                    on:change=move |ev| {
+                                        set_cfg_encrypt.set(event_target_checked(&ev));
+                                    }
+                                />
+                                <span class="text-sm">"Encrypt Connection"</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    class="h-4 w-4 rounded-md border-input"
+                                    prop:checked=move || cfg_trust_cert.get()
+                                    on:change=move |ev| {
+                                        set_cfg_trust_cert.set(event_target_checked(&ev));
+                                    }
+                                />
+                                <span class="text-sm">"Trust Server Certificate"</span>
+                            </label>
+                        </div>
+                    </div>
+                }.into_any(),
+
+                "synapse" => view! {
+                    <div class="space-y-4">
+                        <h4 class="text-sm font-medium">"Connection Settings"</h4>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">
+                                    "Host " <span class="text-error-foreground">"*"</span>
+                                </label>
+                                <input type="text" class=MODAL_INPUT_CLASS
+                                    placeholder="myworkspace.sql.azuresynapse.net"
+                                    prop:value=move || cfg_host.get()
+                                    on:input=move |ev| set_cfg_host.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">"Port"</label>
+                                <input type="number" class=MODAL_INPUT_CLASS
+                                    placeholder="1433"
+                                    prop:value=move || cfg_port.get()
+                                    on:input=move |ev| set_cfg_port.set(event_target_value(&ev))
+                                />
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"Database"</label>
+                            <input type="text" class=MODAL_INPUT_CLASS
+                                placeholder="master"
+                                prop:value=move || cfg_database.get()
+                                on:input=move |ev| set_cfg_database.set(event_target_value(&ev))
+                            />
+                        </div>
+                        // Tenant ID — required for Service Principal and Enterprise OAuth
+                        <Show when=move || {
+                            let syn = synapse_auth_mode.get();
+                            syn == "service_principal" || syn == "enterprise_oauth"
+                        }>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">
+                                    "Tenant ID " <span class="text-error-foreground">"*"</span>
+                                </label>
+                                <input type="text" class=MODAL_INPUT_CLASS
+                                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                    prop:value=move || cfg_tenant_id.get()
+                                    on:input=move |ev| set_cfg_tenant_id.set(event_target_value(&ev))
+                                />
+                                <p class="text-xs text-muted-foreground mt-1">
+                                    "Required for Microsoft OAuth and Service Principal. \
+                                     Find in Azure Portal → Directory ID."
+                                </p>
+                            </div>
+                        </Show>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <label class="flex items-center gap-2 cursor-pointer">
                                 <input
@@ -3758,6 +4164,7 @@ struct CredentialsFieldsSignals {
     ds_type: ReadSignal<String>,
     sf_auth_mode: ReadSignal<String>,
     bq_auth_mode: ReadSignal<String>,
+    synapse_auth_mode: ReadSignal<String>,
     cred_username: ReadSignal<String>,
     set_cred_username: WriteSignal<String>,
     cred_password: ReadSignal<String>,
@@ -3766,6 +4173,10 @@ struct CredentialsFieldsSignals {
     set_cred_access_token: WriteSignal<String>,
     cred_private_key: ReadSignal<String>,
     set_cred_private_key: WriteSignal<String>,
+    cred_sp_client_id: ReadSignal<String>,
+    set_cred_sp_client_id: WriteSignal<String>,
+    cred_sp_client_secret: ReadSignal<String>,
+    set_cred_sp_client_secret: WriteSignal<String>,
     cfg_shared_credentials: ReadSignal<bool>,
     set_cfg_shared_credentials: WriteSignal<bool>,
 }
@@ -3778,6 +4189,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         ds_type,
         sf_auth_mode,
         bq_auth_mode,
+        synapse_auth_mode,
         cred_username,
         set_cred_username,
         cred_password,
@@ -3786,6 +4198,10 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         set_cred_access_token,
         cred_private_key,
         set_cred_private_key,
+        cred_sp_client_id,
+        set_cred_sp_client_id,
+        cred_sp_client_secret,
+        set_cred_sp_client_secret,
         cfg_shared_credentials,
         set_cfg_shared_credentials,
     } = signals;
@@ -3794,6 +4210,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
             let t = ds_type.get();
             let sf = sf_auth_mode.get();
             let _bq = bq_auth_mode.get();
+            let syn = synapse_auth_mode.get();
 
             // BigQuery is handled entirely in BigQueryAuthModeSection
             if t == "bigquery" {
@@ -3803,6 +4220,45 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
             // Snowflake OAuth — no password fields shown
             if t == "snowflake" && sf == "oauth" {
                 return view! { <div></div> }.into_any();
+            }
+
+            // Synapse Enterprise OAuth — credentials handled via OAuth popup
+            if t == "synapse" && syn == "enterprise_oauth" {
+                return view! { <div></div> }.into_any();
+            }
+
+            // Synapse Service Principal — show SP credentials section
+            if t == "synapse" && syn == "service_principal" {
+                return view! {
+                    <div class="space-y-4 border-t border-border pt-4 mt-4">
+                        <h4 class="text-sm font-medium">"Service Principal Credentials"</h4>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">
+                                    "Client ID " <span class="text-error-foreground">"*"</span>
+                                </label>
+                                <input type="text" class=MODAL_INPUT_CLASS
+                                    placeholder="Application (client) ID"
+                                    prop:value=move || cred_sp_client_id.get()
+                                    on:input=move |ev| set_cred_sp_client_id.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">
+                                    "Client Secret " <span class="text-error-foreground">"*"</span>
+                                </label>
+                                <input type="password" class=MODAL_INPUT_CLASS
+                                    placeholder="Client secret value"
+                                    prop:value=move || cred_sp_client_secret.get()
+                                    on:input=move |ev| set_cred_sp_client_secret.set(event_target_value(&ev))
+                                />
+                                <p class="text-xs text-muted-foreground mt-1">
+                                    "Credentials are encrypted at rest"
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                }.into_any();
             }
 
             view! {
