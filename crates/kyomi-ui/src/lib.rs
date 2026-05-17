@@ -62,6 +62,13 @@ pub fn register_server_functions() {
     register_explicit::<PasskeySignupComplete>();
     register_explicit::<PasskeyRecoveryVerify>();
 
+    use server_fns::datasource_oauth::*;
+    register_explicit::<GetGoogleOauthStatus>();
+    register_explicit::<GetGoogleOauthProjects>();
+    register_explicit::<DisconnectGoogleOauth>();
+    register_explicit::<GetDatasourceOauthStatus>();
+    register_explicit::<DisconnectDatasourceOauth>();
+
     use server_fns::context::*;
     register_explicit::<GetUserContext>();
 
