@@ -1983,10 +1983,8 @@ pub fn DatasourceModal(
                             })
                             .collect();
                         set_bq_projects.try_set(options);
-                        if let Some(msg) = result.message {
-                            if !msg.is_empty() {
-                                set_bq_projects_error.try_set(Some(msg));
-                            }
+                        if let Some(msg) = result.message.filter(|m| !m.is_empty()) {
+                            set_bq_projects_error.try_set(Some(msg));
                         }
                     }
                     Err(e) => {
