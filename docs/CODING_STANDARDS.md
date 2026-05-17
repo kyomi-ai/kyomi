@@ -275,42 +275,34 @@ let footer: Arc<dyn Fn() -> AnyView> = Arc::new(move || {
 1. Move the input outside the reactive closure (into static view structure)
 2. Use `Signal::derive` so the signal subscription is scoped to a leaf attribute, not the whole closure
 
-### Resolve derived signal values at click time, not render time
+### Use `<Show>` for conditional component rendering, not reactive closure branches
 
-When a `Signal::derive` or `Memo` produces a value used inside an `on:click` handler, the handler must call `.get_untracked()` at click time — not capture the value at render time via the outer reactive closure. If the outer closure re-runs (e.g. because `oauth_connected` or `cfg_missing` changes), it captures a new `connect_url` value — but if the underlying signal (e.g. `slug`) changes *without* triggering the outer closure, the handler holds a stale URL.
+When a reactive closure (`{move || { ... }.into_any()}`) conditionally renders a component that owns its own reactive scope (e.g., `DynSelect` → `Popover` → `Effect::new`), the branch switch destroys and recreates the component's internal signals. If the component's `Effect` fires during disposal, it accesses dead signals → panic. The Leptos `<Show>` component handles component lifecycle correctly — it mounts/unmounts through the framework's ownership tree.
 
-**Rule:** For any `on:click` handler that uses a derived signal, call `.get_untracked()` inside the click handler itself, not in the enclosing reactive closure.
+**Rule:** Never gate a component with internal reactive state (popover, modal, effect-owning widget) inside a `{move || ...}` view closure. Use `<Show when=condition>` with a `fallback` instead.
 
 ```rust
-// WRONG — URL captured at render time, stale if slug changes
-let connect_url = Signal::derive(move || format!("/auth/oauth/{}/connect?slug={}", provider, slug.get()));
+// WRONG — reactive closure branch creates/destroys DynSelect (which owns Popover/Effect)
 view! {
     {move || {
-        let url = connect_url.get();  // captured when this closure runs
-        view! {
-            <button on:click=move |_| open_oauth_popup(&url)>  // stale if slug changed
-                "Connect"
-            </button>
+        if has_projects.get() {
+            view! { <DynSelect options=projects /> }.into_any()
+        } else {
+            view! { <input type="text" /> }.into_any()
         }
     }}
 }
 
-// RIGHT — URL resolved at click time
+// RIGHT — <Show> manages component lifecycle safely
 view! {
-    {move || {
-        view! {
-            <button on:click=move |_| {
-                let url = connect_url.get_untracked();  // fresh at click time
-                open_oauth_popup(&url);
-            }>
-                "Connect"
-            </button>
-        }
-    }}
+    <Show when=move || has_projects.get()
+          fallback=move || view! { <input type="text" /> }>
+        <DynSelect options=projects />
+    </Show>
 }
 ```
 
-This is the sister rule to "Never snapshot a Signal prop into a local variable" — both prevent freezing reactive values at the wrong moment. Flagged in KYO-13 review (stale enterprise OAuth URL after slug edit).
+Flagged in KYO-14 review — four `DynSelect` instances gated by reactive closures caused disposal panic risk on OAuth connect.
 
 ### Add `Effect::new` re-fetch when auth mode toggles in an open modal
 
