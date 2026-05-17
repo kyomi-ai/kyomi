@@ -3407,6 +3407,20 @@ fn BigQueryAuthModeSection(
         cfg_oauth_client_id.get().is_empty() && cfg_oauth_client_secret.get().is_empty()
     });
 
+    // ── Enterprise OAuth: redirect URL for display so admins can configure their OAuth client.
+    // On native (non-WASM) targets, we have no window.location.origin — use a placeholder.
+    #[cfg(target_arch = "wasm32")]
+    let redirect_url = {
+        let origin = web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_default();
+        format!("{origin}/auth/oauth/bigquery-enterprise/callback")
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let redirect_url = "/auth/oauth/bigquery-enterprise/callback".to_string();
+
+    let redirect_url_signal = Signal::stored(redirect_url);
+
     // ── Disconnect callbacks — wraps the Action dispatch in a Callback<()>.
     let on_google_disconnect = Callback::new(move |()| {
         if !google_disconnect_action.pending().get_untracked() {
@@ -3559,6 +3573,12 @@ fn BigQueryAuthModeSection(
                             <label class="block text-xs font-medium text-muted-foreground">
                                 "Redirect URL (use when creating Google Cloud OAuth client)"
                             </label>
+                            <div class="flex items-center gap-2 mt-1">
+                                <code class="flex-1 text-xs font-mono text-foreground break-all">
+                                    {move || redirect_url_signal.get()}
+                                </code>
+                                <CopyButton text=redirect_url_signal/>
+                            </div>
                         </div>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
