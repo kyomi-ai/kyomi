@@ -3466,6 +3466,21 @@ fn BigQueryAuthModeSection(
         });
     });
 
+    // Redirect URL shown in the Enterprise OAuth configuration panel so users
+    // know what to enter in the Google Cloud OAuth client settings.
+    // Only computed on WASM — the component won't render server-side.
+    #[cfg(target_arch = "wasm32")]
+    let enterprise_redirect_url = {
+        let origin = web_sys::window()
+            .map(|w| w.location().origin().unwrap_or_default())
+            .unwrap_or_default();
+        format!("{}/auth/oauth/bigquery-enterprise/callback", origin)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let enterprise_redirect_url = String::new();
+
+    let enterprise_redirect_url_signal = Signal::stored(enterprise_redirect_url.clone());
+
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
             <label class="block text-sm font-medium">"Authentication Mode"</label>
@@ -3559,6 +3574,10 @@ fn BigQueryAuthModeSection(
                             <label class="block text-xs font-medium text-muted-foreground">
                                 "Redirect URL (use when creating Google Cloud OAuth client)"
                             </label>
+                            <div class="flex items-center gap-2">
+                                <code class="text-xs font-mono break-all flex-1">{move || enterprise_redirect_url_signal.get()}</code>
+                                <CopyButton text=enterprise_redirect_url_signal/>
+                            </div>
                         </div>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <div>
