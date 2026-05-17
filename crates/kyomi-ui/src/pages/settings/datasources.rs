@@ -865,6 +865,9 @@ pub fn DatasourceModal(
     // Snowflake-specific
     let (sf_auth_mode, set_sf_auth_mode) = signal("password".to_string());
 
+    // Databricks-specific
+    let (db_auth_mode, set_db_auth_mode) = signal("token".to_string());
+
     // Credentials form
     let (cred_username, set_cred_username) = signal(String::new());
     let (cred_password, set_cred_password) = signal(String::new());
@@ -984,6 +987,7 @@ pub fn DatasourceModal(
         set_cfg_service_account_json.set(String::new());
         set_service_account_email.set(String::new());
         set_sf_auth_mode.set("password".to_string());
+        set_db_auth_mode.set("token".to_string());
         set_cred_username.set(String::new());
         set_cred_password.set(String::new());
         set_cred_access_token.set(String::new());
@@ -1094,10 +1098,11 @@ pub fn DatasourceModal(
                             set_cfg_oauth_client_id.try_set(str_val("oauth_client_id"));
                             set_cfg_oauth_client_secret.try_set(str_val("oauth_client_secret"));
 
-                            // BigQuery auth mode
+                            // BigQuery / Snowflake / Databricks auth mode
                             if let Some(ref auth_mode) = settings.auth_mode {
                                 set_bq_auth_mode.try_set(auth_mode.clone());
                                 set_sf_auth_mode.try_set(auth_mode.clone());
+                                set_db_auth_mode.try_set(auth_mode.clone());
                             }
 
                             // Service account
@@ -1354,6 +1359,7 @@ pub fn DatasourceModal(
                 }
             }
             "databricks" => {
+                map.insert("auth_mode".to_string(), serde_json::json!(db_auth_mode.get_untracked()));
                 if !cfg_server_hostname.get_untracked().is_empty() {
                     map.insert("server_hostname".to_string(), serde_json::json!(cfg_server_hostname.get_untracked()));
                 }
@@ -1365,6 +1371,14 @@ pub fn DatasourceModal(
                 }
                 if !cfg_schema.get_untracked().is_empty() {
                     map.insert("schema".to_string(), serde_json::json!(cfg_schema.get_untracked()));
+                }
+                if db_auth_mode.get_untracked() == "oauth" {
+                    if !cfg_oauth_client_id.get_untracked().is_empty() {
+                        map.insert("oauth_client_id".to_string(), serde_json::json!(cfg_oauth_client_id.get_untracked()));
+                    }
+                    if !cfg_oauth_client_secret.get_untracked().is_empty() {
+                        map.insert("oauth_client_secret".to_string(), serde_json::json!(cfg_oauth_client_secret.get_untracked()));
+                    }
                 }
             }
             "sqlserver" | "synapse" => {
@@ -1455,7 +1469,9 @@ pub fn DatasourceModal(
 
         match t.as_str() {
             "databricks" => {
-                if !cred_access_token.get_untracked().is_empty() {
+                if db_auth_mode.get_untracked() == "oauth" {
+                    map.insert("auth_type".to_string(), serde_json::json!("oauth"));
+                } else if !cred_access_token.get_untracked().is_empty() {
                     map.insert("access_token".to_string(), serde_json::json!(cred_access_token.get_untracked()));
                 }
             }
@@ -2405,6 +2421,29 @@ pub fn DatasourceModal(
                                         />
                                     </Show>
 
+                                    // Databricks auth mode selector
+                                    <Show when=move || ds_type.get() == "databricks">
+                                        <DatabricksAuthModeSection
+                                            db_auth_mode=db_auth_mode
+                                            set_db_auth_mode=set_db_auth_mode
+                                            slug=slug
+                                            oauth_connected=modal_oauth_connected
+                                            set_oauth_connected=set_modal_oauth_connected
+                                            oauth_email=modal_oauth_email
+                                            set_oauth_email=set_modal_oauth_email
+                                            oauth_expired=modal_oauth_expired
+                                            set_oauth_expired=set_modal_oauth_expired
+                                            oauth_connecting=modal_oauth_connecting
+                                            set_oauth_connecting=set_modal_oauth_connecting
+                                            datasource_disconnect_action=datasource_disconnect_action
+                                            is_create_mode=is_create_mode
+                                            cfg_oauth_client_id=cfg_oauth_client_id
+                                            set_cfg_oauth_client_id=set_cfg_oauth_client_id
+                                            cfg_oauth_client_secret=cfg_oauth_client_secret
+                                            set_cfg_oauth_client_secret=set_cfg_oauth_client_secret
+                                        />
+                                    </Show>
+
                                     // Connection fields (provider-specific)
                                     <ProviderConnectionFields
                                         signals=ConnectionFieldsSignals {
@@ -2437,12 +2476,13 @@ pub fn DatasourceModal(
                                         }
                                     />
 
-                                    // Credentials section (non-BigQuery / non-Snowflake-OAuth)
+                                    // Credentials section (non-BigQuery / non-Snowflake-OAuth / non-Databricks-OAuth)
                                     <ProviderCredentialsFields
                                         signals=CredentialsFieldsSignals {
                                             ds_type,
                                             sf_auth_mode,
                                             bq_auth_mode,
+                                            db_auth_mode,
                                             cred_username,
                                             set_cred_username,
                                             cred_password,
@@ -2457,11 +2497,14 @@ pub fn DatasourceModal(
                                     />
 
                                     // Test & Discover button
-                                    // Hidden for BigQuery (uses OAuth) and Snowflake OAuth mode
+                                    // Hidden for BigQuery (uses OAuth), Snowflake OAuth mode,
+                                    // and Databricks OAuth mode when not yet connected.
                                     <Show when=move || {
                                         let t = ds_type.get();
                                         let sf = sf_auth_mode.get();
-                                        !(t == "bigquery" || (t == "snowflake" && sf == "oauth"))
+                                        let db = db_auth_mode.get();
+                                        let db_oauth_not_ready = t == "databricks" && db == "oauth" && !modal_oauth_connected.get();
+                                        !(t == "bigquery" || (t == "snowflake" && sf == "oauth") || db_oauth_not_ready)
                                     }>
                                         <div class="border-t border-border pt-4 mt-4">
                                             <div class="flex items-center gap-3">
@@ -3422,6 +3465,192 @@ fn SnowflakeAuthModeSection(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Databricks Auth Mode Section
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn DatabricksAuthModeSection(
+    db_auth_mode: ReadSignal<String>,
+    set_db_auth_mode: WriteSignal<String>,
+    /// Datasource slug — used to build the Databricks OAuth connect URL.
+    slug: ReadSignal<String>,
+    /// Whether the OAuth account is currently connected.
+    oauth_connected: ReadSignal<bool>,
+    /// Setter for the connected state (used by re-fetch Effect on mode change).
+    set_oauth_connected: WriteSignal<bool>,
+    /// The connected account email, if any.
+    oauth_email: ReadSignal<Option<String>>,
+    /// Setter for the email state (used by re-fetch Effect on mode change).
+    set_oauth_email: WriteSignal<Option<String>>,
+    /// Whether the OAuth token has expired.
+    oauth_expired: ReadSignal<bool>,
+    /// Setter for the expired state (used by re-fetch Effect on mode change).
+    set_oauth_expired: WriteSignal<bool>,
+    /// Whether an OAuth popup is currently in progress.
+    oauth_connecting: ReadSignal<bool>,
+    /// Setter for the connecting state.
+    set_oauth_connecting: WriteSignal<bool>,
+    /// Action to disconnect the per-datasource OAuth account.
+    datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
+    /// True in create mode — OAuth status panel is hidden in create mode.
+    is_create_mode: Signal<bool>,
+    /// OAuth Client ID (admin-configured).
+    cfg_oauth_client_id: ReadSignal<String>,
+    set_cfg_oauth_client_id: WriteSignal<String>,
+    /// OAuth Client Secret (admin-configured).
+    cfg_oauth_client_secret: ReadSignal<String>,
+    set_cfg_oauth_client_secret: WriteSignal<String>,
+) -> impl IntoView {
+    // Databricks connect URL is slug-scoped.
+    let db_connect_url = Signal::derive(move || {
+        let s = slug.get();
+        format!("/api/v1/auth/oauth/databricks/connect?datasource_slug={s}")
+    });
+
+    let slug_for_disconnect = slug;
+    let on_db_disconnect = Callback::new(move |()| {
+        if !datasource_disconnect_action.pending().get_untracked() {
+            let slug_val = slug_for_disconnect.get_untracked();
+            datasource_disconnect_action.dispatch(("databricks".to_string(), slug_val));
+        }
+    });
+
+    let db_disconnect_pending =
+        Signal::derive(move || datasource_disconnect_action.pending().get());
+
+    // cfg_missing: true when admin has not configured OAuth Client ID/Secret.
+    let db_cfg_missing = Signal::derive(move || {
+        cfg_oauth_client_id.get().is_empty() || cfg_oauth_client_secret.get().is_empty()
+    });
+
+    // Re-fetch OAuth status whenever db_auth_mode changes to "oauth" so the
+    // status panel reflects the current account state.
+    Effect::new(move |_| {
+        let current_mode = db_auth_mode.get();
+        let slug_val = slug.get();
+        if slug_val.is_empty() || current_mode != "oauth" {
+            return;
+        }
+        set_oauth_connected.set(false);
+        set_oauth_email.set(None);
+        set_oauth_expired.set(false);
+
+        leptos::task::spawn_local(async move {
+            if let Ok(status) =
+                get_datasource_oauth_status("databricks".to_string(), slug_val).await
+            {
+                set_oauth_connected.try_set(status.connected);
+                set_oauth_email.try_set(status.provider_email);
+                set_oauth_expired.try_set(status.token_expired);
+            }
+        });
+    });
+
+    // Redirect URL for the Databricks OAuth app registration.
+    // Only computed on WASM — the component won't render server-side.
+    #[cfg(target_arch = "wasm32")]
+    let redirect_url_text = {
+        let origin = web_sys::window()
+            .map(|w| w.location().origin().unwrap_or_default())
+            .unwrap_or_default();
+        format!("{}/auth/oauth/databricks/callback", origin)
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let redirect_url_text = String::new();
+
+    let redirect_url_signal = Signal::stored(redirect_url_text);
+
+    view! {
+        <div class="space-y-2 pb-4 border-b border-border">
+            <label class="block text-sm font-medium">"Authentication Mode"</label>
+            <DynSelect
+                value=Signal::derive(move || db_auth_mode.get())
+                options=Signal::stored(vec![
+                    ("token".to_string(), "Personal Access Token".to_string()),
+                    ("oauth".to_string(), "OAuth".to_string()),
+                ])
+                on_change=move |val| set_db_auth_mode.set(val)
+            />
+            <p class="text-xs text-muted-foreground">
+                {move || match db_auth_mode.get().as_str() {
+                    "oauth" => "Users authenticate with their Databricks accounts via OAuth.",
+                    _ => "Users authenticate with a Personal Access Token.",
+                }}
+            </p>
+        </div>
+
+        // OAuth configuration — shown only when OAuth mode is selected.
+        <Show when=move || db_auth_mode.get() == "oauth">
+            <div class="space-y-3 border-t border-border pt-4 mt-4">
+                // Admin OAuth Client ID/Secret configuration
+                <div class="space-y-3 pb-4 border-b border-border">
+                    <h4 class="text-sm font-medium">"OAuth Configuration"</h4>
+                    <p class="text-xs text-muted-foreground">
+                        "Configure your organization's Databricks OAuth app."
+                    </p>
+                    // Redirect URL helper
+                    <div class="mt-3 p-3 rounded-md bg-muted">
+                        <p class="text-xs text-muted-foreground mb-1">
+                            "Redirect URL (use when creating Databricks OAuth app)"
+                        </p>
+                        <div class="flex items-center gap-2">
+                            <code class="text-xs font-mono break-all flex-1">
+                                {move || redirect_url_signal.get()}
+                            </code>
+                            <CopyButton text=redirect_url_signal/>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"OAuth Client ID"</label>
+                            <input
+                                type="text"
+                                class=MODAL_INPUT_CLASS
+                                placeholder="From Databricks OAuth app"
+                                prop:value=move || cfg_oauth_client_id.get()
+                                on:input=move |ev| set_cfg_oauth_client_id.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">"OAuth Client Secret"</label>
+                            <input
+                                type="password"
+                                class=MODAL_INPUT_CLASS
+                                placeholder="OAuth client secret"
+                                prop:value=move || cfg_oauth_client_secret.get()
+                                on:input=move |ev| set_cfg_oauth_client_secret.set(event_target_value(&ev))
+                            />
+                        </div>
+                    </div>
+                </div>
+                // User connection status
+                <h4 class="text-sm font-medium">"Your Databricks Connection"</h4>
+                // 4-state status panel — hidden in create mode (no slug yet).
+                <Show when=move || !is_create_mode.get()>
+                    <ModalOAuthStatusPanel
+                        oauth_connected=oauth_connected
+                        oauth_email=oauth_email
+                        oauth_expired=oauth_expired
+                        oauth_connecting=oauth_connecting
+                        set_oauth_connecting=set_oauth_connecting
+                        provider_name="Databricks"
+                        connect_url=db_connect_url
+                        cfg_missing=db_cfg_missing
+                        on_disconnect=on_db_disconnect
+                        disconnect_pending=db_disconnect_pending
+                    />
+                </Show>
+                <Show when=move || is_create_mode.get()>
+                    <p class="text-xs text-muted-foreground">
+                        "After saving, connect your Databricks account from this settings panel."
+                    </p>
+                </Show>
+            </div>
+        </Show>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Provider Connection Fields
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3758,6 +3987,7 @@ struct CredentialsFieldsSignals {
     ds_type: ReadSignal<String>,
     sf_auth_mode: ReadSignal<String>,
     bq_auth_mode: ReadSignal<String>,
+    db_auth_mode: ReadSignal<String>,
     cred_username: ReadSignal<String>,
     set_cred_username: WriteSignal<String>,
     cred_password: ReadSignal<String>,
@@ -3778,6 +4008,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         ds_type,
         sf_auth_mode,
         bq_auth_mode,
+        db_auth_mode,
         cred_username,
         set_cred_username,
         cred_password,
@@ -3793,6 +4024,7 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
         {move || {
             let t = ds_type.get();
             let sf = sf_auth_mode.get();
+            let db = db_auth_mode.get();
             let _bq = bq_auth_mode.get();
 
             // BigQuery is handled entirely in BigQueryAuthModeSection
@@ -3802,6 +4034,11 @@ fn ProviderCredentialsFields(signals: CredentialsFieldsSignals) -> impl IntoView
 
             // Snowflake OAuth — no password fields shown
             if t == "snowflake" && sf == "oauth" {
+                return view! { <div></div> }.into_any();
+            }
+
+            // Databricks OAuth — no access token fields shown
+            if t == "databricks" && db == "oauth" {
                 return view! { <div></div> }.into_any();
             }
 
