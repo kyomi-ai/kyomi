@@ -302,7 +302,7 @@ fn DatasourcesContent(
     #[cfg(target_arch = "wasm32")]
     {
         use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
-        let query_cache_for_oauth = query_cache.clone();
+        let query_cache_for_oauth = query_cache;
         let cleanup = install_oauth_listener(move |msg| {
             match msg {
                 OAuthMessage::GoogleSuccess { .. }
