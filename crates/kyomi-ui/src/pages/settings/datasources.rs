@@ -28,6 +28,10 @@ use crate::server_fns::sql_editor::refresh_catalog;
 use crate::server_fns::onboarding::{
     check_sample_datasource_available, create_sample_datasource,
 };
+use crate::server_fns::datasource_oauth::{
+    get_google_oauth_status, get_datasource_oauth_status,
+    disconnect_google_oauth, disconnect_datasource_oauth,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -940,6 +944,19 @@ pub fn DatasourceModal(
     let (create_catalog_text, set_create_catalog_text) = signal::<String>(String::new());
     let (create_include_public_datasets, set_create_include_public_datasets) = signal(false);
 
+    // ── Modal-level OAuth status state ───────────────────────────────────
+    // Tracks the OAuth connection status for whichever provider is active in
+    // the modal (BigQuery kyomi_oauth, BigQuery enterprise_oauth, Snowflake,
+    // or Databricks).  Seeded from `DatasourceSettingsResult` on modal open,
+    // then refreshed by a separate `spawn_local` status fetch.
+    //
+    // These are distinct from the list-level `oauth_connecting` signal that
+    // only tracks whether a popup is open for a given row.
+    let (modal_oauth_connected, set_modal_oauth_connected) = signal(false);
+    let (modal_oauth_email, set_modal_oauth_email) = signal::<Option<String>>(None);
+    let (modal_oauth_expired, set_modal_oauth_expired) = signal(false);
+    let (modal_oauth_connecting, set_modal_oauth_connecting) = signal(false);
+
     // ── Reset form ───────────────────────────────────────────────────────
     let reset_form = move || {
         set_name.set(String::new());
@@ -997,6 +1014,10 @@ pub fn DatasourceModal(
         set_create_catalog_selected.set(vec![]);
         set_create_catalog_text.set(String::new());
         set_create_include_public_datasets.set(false);
+        set_modal_oauth_connected.set(false);
+        set_modal_oauth_email.set(None);
+        set_modal_oauth_expired.set(false);
+        set_modal_oauth_connecting.set(false);
     };
 
     // ── Load settings when switching to edit mode ─────────────────────────
@@ -1114,6 +1135,94 @@ pub fn DatasourceModal(
                             set_cred_billing_project.try_set(user_str("billing_project"));
                             set_cred_default_project.try_set(user_str("default_project"));
                             // Note: passwords are not pre-filled (security)
+
+                            // Seed OAuth status from settings as initial state
+                            // while the dedicated status fetch runs.
+                            let is_oauth_connected = settings.has_oauth;
+                            let oauth_email_seed = settings.oauth_email.clone();
+                            let is_expired = settings.credential_status == "expired";
+                            set_modal_oauth_connected.try_set(is_oauth_connected);
+                            set_modal_oauth_email.try_set(oauth_email_seed);
+                            set_modal_oauth_expired.try_set(is_expired && is_oauth_connected);
+
+                            // Now fetch fresh OAuth status from the server.
+                            // auth_mode and slug are already loaded above so
+                            // we capture their seeded values directly.
+                            let ds_type_for_fetch = settings.datasource_type.clone();
+                            let slug_for_fetch = settings.slug.clone();
+                            let auth_mode_for_fetch = settings.auth_mode.clone();
+
+                            leptos::task::spawn_local(async move {
+                                // Determine which status function to call.
+                                let (new_connected, new_email, new_expired) =
+                                    match ds_type_for_fetch.as_str() {
+                                        "bigquery" => {
+                                            let mode = auth_mode_for_fetch
+                                                .as_deref()
+                                                .unwrap_or("kyomi_oauth");
+                                            if mode == "enterprise_oauth" {
+                                                match get_datasource_oauth_status(
+                                                    "bigquery-enterprise".to_string(),
+                                                    slug_for_fetch,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(s) => (
+                                                        s.connected,
+                                                        s.provider_email,
+                                                        s.token_expired,
+                                                    ),
+                                                    Err(_) => return,
+                                                }
+                                            } else {
+                                                match get_google_oauth_status().await {
+                                                    Ok(s) => (
+                                                        s.connected,
+                                                        s.google_email,
+                                                        s.token_expired,
+                                                    ),
+                                                    Err(_) => return,
+                                                }
+                                            }
+                                        }
+                                        "snowflake" => {
+                                            match get_datasource_oauth_status(
+                                                "snowflake".to_string(),
+                                                slug_for_fetch,
+                                            )
+                                            .await
+                                            {
+                                                Ok(s) => (
+                                                    s.connected,
+                                                    s.provider_email,
+                                                    s.token_expired,
+                                                ),
+                                                Err(_) => return,
+                                            }
+                                        }
+                                        "databricks" => {
+                                            match get_datasource_oauth_status(
+                                                "databricks".to_string(),
+                                                slug_for_fetch,
+                                            )
+                                            .await
+                                            {
+                                                Ok(s) => (
+                                                    s.connected,
+                                                    s.provider_email,
+                                                    s.token_expired,
+                                                ),
+                                                Err(_) => return,
+                                            }
+                                        }
+                                        // Not an OAuth datasource — skip fetch.
+                                        _ => return,
+                                    };
+
+                                set_modal_oauth_connected.try_set(new_connected);
+                                set_modal_oauth_email.try_set(new_email);
+                                set_modal_oauth_expired.try_set(new_expired);
+                            });
                         }
                         Err(e) => {
                             set_error_msg.try_set(Some(format!("Failed to load settings: {e}")));
@@ -1459,6 +1568,58 @@ pub fn DatasourceModal(
         test_action.dispatch((ds_type_val, conn_cfg, creds, ds_id, slug_val));
     };
 
+    // ── OAuth disconnect actions ─────────────────────────────────────────
+    // Two separate Actions — one for Google OAuth (BigQuery kyomi_oauth mode),
+    // one for per-datasource OAuth (BigQuery enterprise, Snowflake, Databricks).
+    // Per CODING_STANDARDS: user-triggered async mutations → Action.
+
+    // Input: unused `()` because there are no dispatch-time parameters.
+    let google_disconnect_action = Action::new(move |_: &()| async move {
+        disconnect_google_oauth().await
+    });
+
+    Effect::new(move |_| {
+        if let Some(result) = google_disconnect_action.value().get() {
+            match result {
+                Ok(_) => {
+                    set_modal_oauth_connected.set(false);
+                    set_modal_oauth_email.set(None);
+                    set_modal_oauth_expired.set(false);
+                    #[cfg(target_arch = "wasm32")]
+                    toast_success("Google account disconnected");
+                }
+                Err(e) => {
+                    toast_error(format!("Failed to disconnect: {e}"));
+                }
+            }
+        }
+    });
+
+    // Input: (provider, datasource_slug).
+    let datasource_disconnect_action =
+        Action::new(move |(provider, slug_val): &(String, String)| {
+            let provider = provider.clone();
+            let slug_val = slug_val.clone();
+            async move { disconnect_datasource_oauth(provider, slug_val).await }
+        });
+
+    Effect::new(move |_| {
+        if let Some(result) = datasource_disconnect_action.value().get() {
+            match result {
+                Ok(_) => {
+                    set_modal_oauth_connected.set(false);
+                    set_modal_oauth_email.set(None);
+                    set_modal_oauth_expired.set(false);
+                    #[cfg(target_arch = "wasm32")]
+                    toast_success("Account disconnected");
+                }
+                Err(e) => {
+                    toast_error(format!("Failed to disconnect: {e}"));
+                }
+            }
+        }
+    });
+
     // ── Save ─────────────────────────────────────────────────────────────
     // Input: (ds_id, name, slug, conn_cfg, creds, ds_type)
     type SaveInput = (Option<String>, String, String, serde_json::Value, serde_json::Value, String);
@@ -1582,6 +1743,61 @@ pub fn DatasourceModal(
             format!("{} Settings", name.get())
         }
     });
+
+    // ── Modal-level OAuth postMessage listener ───────────────────────────
+    // Installed when the modal is mounted so the modal's own OAuth state
+    // (connected/email) is updated when a popup closes.  The list-level
+    // listener (in DatasourcesContent) handles the datasource-list refresh;
+    // this listener handles the modal's internal status display.
+    //
+    // Also auto-triggers Test & Discover for Snowflake / Databricks after a
+    // successful connection so the warehouse/catalog dropdowns populate.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
+        let cleanup = install_oauth_listener(move |msg| {
+            match msg {
+                OAuthMessage::GoogleSuccess { email }
+                | OAuthMessage::BigqueryEnterpriseSuccess { email } => {
+                    set_modal_oauth_connected.try_set(true);
+                    set_modal_oauth_email.try_set(email);
+                    set_modal_oauth_expired.try_set(false);
+                    set_modal_oauth_connecting.try_set(false);
+                }
+                OAuthMessage::SnowflakeSuccess { email }
+                | OAuthMessage::DatabricksSuccess { email } => {
+                    set_modal_oauth_connected.try_set(true);
+                    set_modal_oauth_email.try_set(email);
+                    set_modal_oauth_expired.try_set(false);
+                    set_modal_oauth_connecting.try_set(false);
+                    // Auto-run Test & Discover so warehouse/catalog dropdowns
+                    // populate immediately after OAuth completes.
+                    do_test_and_discover();
+                }
+                OAuthMessage::GoogleError { error }
+                | OAuthMessage::SnowflakeError { error }
+                | OAuthMessage::DatabricksError { error }
+                | OAuthMessage::MicrosoftError { error }
+                | OAuthMessage::MicrosoftEnterpriseError { error }
+                | OAuthMessage::BigqueryEnterpriseError { error } => {
+                    set_modal_oauth_connecting.try_set(false);
+                    toast_error(error);
+                }
+                OAuthMessage::MicrosoftSuccess { .. }
+                | OAuthMessage::MicrosoftEnterpriseSuccess { .. } => {
+                    set_modal_oauth_connecting.try_set(false);
+                }
+            }
+        });
+        let cleanup_cell =
+            std::cell::Cell::new(Some(Box::new(cleanup) as Box<dyn FnOnce()>));
+        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
+        on_cleanup(move || {
+            if let Some(f) = cleanup_wrapper.take().take() {
+                f();
+            }
+        });
+    }
 
     // ── Discovery section: show post-test fields ──────────────────────────
     let discovery_succeeded = Signal::derive(move || {
@@ -2159,6 +2375,17 @@ pub fn DatasourceModal(
                                             set_cred_billing_project=set_cred_billing_project
                                             cred_default_project=cred_default_project
                                             set_cred_default_project=set_cred_default_project
+                                            oauth_connected=modal_oauth_connected
+                                            set_oauth_connected=set_modal_oauth_connected
+                                            oauth_email=modal_oauth_email
+                                            set_oauth_email=set_modal_oauth_email
+                                            oauth_expired=modal_oauth_expired
+                                            set_oauth_expired=set_modal_oauth_expired
+                                            oauth_connecting=modal_oauth_connecting
+                                            set_oauth_connecting=set_modal_oauth_connecting
+                                            google_disconnect_action=google_disconnect_action
+                                            datasource_disconnect_action=datasource_disconnect_action
+                                            is_create_mode=is_create_mode
                                         />
                                     </Show>
 
@@ -2167,6 +2394,14 @@ pub fn DatasourceModal(
                                         <SnowflakeAuthModeSection
                                             sf_auth_mode=sf_auth_mode
                                             set_sf_auth_mode=set_sf_auth_mode
+                                            slug=slug
+                                            oauth_connected=modal_oauth_connected
+                                            oauth_email=modal_oauth_email
+                                            oauth_expired=modal_oauth_expired
+                                            oauth_connecting=modal_oauth_connecting
+                                            set_oauth_connecting=set_modal_oauth_connecting
+                                            datasource_disconnect_action=datasource_disconnect_action
+                                            is_create_mode=is_create_mode
                                         />
                                     </Show>
 
@@ -2566,6 +2801,204 @@ fn ConnectCreateSuccessView(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Modal OAuth Status Panel (shared 4-state UI)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The four OAuth states rendered as a reactive panel inside the edit modal.
+///
+/// | State          | Condition                                      |
+/// |----------------|------------------------------------------------|
+/// | Not configured | `cfg_missing` is true (admin has not set up OAuth) |
+/// | Connected      | `oauth_connected` is true                       |
+/// | Expired        | `oauth_expired` is true                         |
+/// | Not connected  | none of the above                               |
+#[component]
+fn ModalOAuthStatusPanel(
+    /// Whether the OAuth credential is currently connected.
+    oauth_connected: ReadSignal<bool>,
+    /// Authenticated account email, if connected.
+    oauth_email: ReadSignal<Option<String>>,
+    /// Whether the token has expired (connected but needs re-auth).
+    oauth_expired: ReadSignal<bool>,
+    /// Whether a popup window is currently open (connecting…).
+    oauth_connecting: ReadSignal<bool>,
+    /// Setter for the connecting state (popup opener writes this).
+    set_oauth_connecting: WriteSignal<bool>,
+    /// Human-readable provider name (e.g. "Google", "Snowflake").
+    provider_name: &'static str,
+    /// URL to open as an OAuth popup window.
+    connect_url: Signal<String>,
+    /// Whether OAuth credentials are missing at the admin level.
+    /// When true, shows the "not configured" warning instead of the
+    /// connect button. Always false for `kyomi_oauth` (global OAuth,
+    /// not per-datasource).
+    cfg_missing: Signal<bool>,
+    /// Called when the user clicks "Disconnect".  Callers use an
+    /// `Action` and pass a typed callback — this is a simple `Fn`
+    /// because `Action` dispatch is synchronous and non-blocking.
+    on_disconnect: Callback<()>,
+    /// Whether the disconnect action is currently pending.
+    disconnect_pending: Signal<bool>,
+) -> impl IntoView {
+    let provider = provider_name;
+
+    // On native (non-WASM) targets, connect_url is only referenced inside
+    // #[cfg(target_arch = "wasm32")] blocks so the compiler considers it
+    // unused. Consume it here to suppress the warning without a lint annotation.
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = connect_url;
+
+    view! {
+        {move || {
+            if cfg_missing.get() {
+                // Not configured: admin has not set up OAuth credentials.
+                return view! {
+                    <div class="flex items-start gap-2 p-3 rounded-lg border border-warning-border bg-warning">
+                        <span class="shrink-0 mt-0.5 text-warning-foreground">
+                            <Icon icon=phosphor_leptos::WARNING size="16px"/>
+                        </span>
+                        <p class="text-sm text-warning-foreground">
+                            "OAuth credentials not configured. Ask your admin to configure OAuth Client ID and Secret."
+                        </p>
+                    </div>
+                }.into_any();
+            }
+
+            if oauth_connected.get() && !oauth_expired.get() {
+                // Connected state.
+                let email_text = oauth_email.get()
+                    .unwrap_or_else(|| format!("{} account", provider));
+                return view! {
+                    <div class="flex items-center justify-between p-3 bg-success border border-success-border rounded-lg">
+                        <div class="flex items-center gap-2">
+                            <span class="shrink-0 text-success-foreground">
+                                <Icon icon=phosphor_leptos::CHECK_CIRCLE size="16px"/>
+                            </span>
+                            <span class="text-sm text-success-foreground">{email_text}</span>
+                        </div>
+                        <Button
+                            variant=ButtonVariant::Outline
+                            size=ButtonSize::Sm
+                            disabled=Signal::derive(move || disconnect_pending.get())
+                            on:click=move |_| {
+                                if !disconnect_pending.get_untracked() {
+                                    on_disconnect.run(());
+                                }
+                            }
+                        >
+                            {move || if disconnect_pending.get() {
+                                view! {
+                                    <span class="flex items-center gap-1.5">
+                                        <Spinner size="h-3 w-3"/>
+                                        "Disconnecting..."
+                                    </span>
+                                }.into_any()
+                            } else {
+                                view! { <span>"Disconnect"</span> }.into_any()
+                            }}
+                        </Button>
+                    </div>
+                }.into_any();
+            }
+
+            if oauth_expired.get() {
+                // Expired state.
+                let provider_name = provider;
+                return view! {
+                    <div class="space-y-2">
+                        <div class="flex items-start gap-2 p-3 rounded-lg border border-warning-border bg-warning">
+                            <span class="shrink-0 mt-0.5 text-warning-foreground">
+                                <Icon icon=phosphor_leptos::WARNING size="16px"/>
+                            </span>
+                            <p class="text-sm text-warning-foreground">
+                                {format!("Your {} connection has expired. Please reconnect.", provider_name)}
+                            </p>
+                        </div>
+                        <Button
+                            variant=ButtonVariant::Outline
+                            size=ButtonSize::Sm
+                            on:click=move |_| {
+                                if oauth_connecting.get_untracked() { return; }
+                                set_oauth_connecting.set(true);
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    let connect_url_val = connect_url.get_untracked();
+                                    use crate::utils::oauth_popup::open_oauth_popup;
+                                    if open_oauth_popup(&connect_url_val, provider_name).is_none() {
+                                        set_oauth_connecting.set(false);
+                                        toast_error(
+                                            "Popup was blocked. Please allow popups for this site.",
+                                        );
+                                    }
+                                }
+                            }
+                        >
+                            {move || if oauth_connecting.get() {
+                                view! {
+                                    <span class="flex items-center gap-1.5">
+                                        <Spinner size="h-3 w-3"/>
+                                        "Connecting..."
+                                    </span>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <span class="flex items-center gap-1.5">
+                                        <Icon icon=phosphor_leptos::PLUG size="14px"/>
+                                        {format!("Reconnect {}", provider_name)}
+                                    </span>
+                                }.into_any()
+                            }}
+                        </Button>
+                    </div>
+                }.into_any();
+            }
+
+            // Not connected state.
+            let provider_name = provider;
+            view! {
+                <div class="space-y-2">
+                    <Button
+                        variant=ButtonVariant::Outline
+                        size=ButtonSize::Sm
+                        on:click=move |_| {
+                            if oauth_connecting.get_untracked() { return; }
+                            set_oauth_connecting.set(true);
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let connect_url_val = connect_url.get_untracked();
+                                use crate::utils::oauth_popup::open_oauth_popup;
+                                if open_oauth_popup(&connect_url_val, provider_name).is_none() {
+                                    set_oauth_connecting.set(false);
+                                    toast_error(
+                                        "Popup was blocked. Please allow popups for this site.",
+                                    );
+                                }
+                            }
+                        }
+                    >
+                        {move || if oauth_connecting.get() {
+                            view! {
+                                <span class="flex items-center gap-1.5">
+                                    <Spinner size="h-3 w-3"/>
+                                    "Connecting..."
+                                </span>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <span class="flex items-center gap-1.5">
+                                    <Icon icon=phosphor_leptos::PLUG size="14px"/>
+                                    {format!("Connect {}", provider_name)}
+                                </span>
+                            }.into_any()
+                        }}
+                    </Button>
+                </div>
+            }.into_any()
+        }}
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // BigQuery Auth Mode Section
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2586,6 +3019,28 @@ fn BigQueryAuthModeSection(
     set_cred_billing_project: WriteSignal<String>,
     cred_default_project: ReadSignal<String>,
     set_cred_default_project: WriteSignal<String>,
+    /// Whether the OAuth account is currently connected.
+    oauth_connected: ReadSignal<bool>,
+    /// Setter for the connected state (used by re-fetch Effect on mode change).
+    set_oauth_connected: WriteSignal<bool>,
+    /// The connected account email, if any.
+    oauth_email: ReadSignal<Option<String>>,
+    /// Setter for the email state (used by re-fetch Effect on mode change).
+    set_oauth_email: WriteSignal<Option<String>>,
+    /// Whether the OAuth token has expired.
+    oauth_expired: ReadSignal<bool>,
+    /// Setter for the expired state (used by re-fetch Effect on mode change).
+    set_oauth_expired: WriteSignal<bool>,
+    /// Whether an OAuth popup is currently in progress.
+    oauth_connecting: ReadSignal<bool>,
+    /// Setter for the connecting state.
+    set_oauth_connecting: WriteSignal<bool>,
+    /// Action to disconnect the Kyomi/Google OAuth account.
+    google_disconnect_action: Action<(), Result<crate::server_fns::datasource_oauth::GoogleOAuthDisconnectResult, ServerFnError>>,
+    /// Action to disconnect a per-datasource OAuth account.
+    datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
+    /// True in create mode — OAuth status panel is hidden in create mode.
+    is_create_mode: Signal<bool>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -2601,7 +3056,78 @@ fn BigQueryAuthModeSection(
         }
     };
 
-    let slug_for_oauth = slug;
+    // ── Kyomi OAuth: connect URL is fixed (no slug).
+    let kyomi_oauth_url = Signal::stored("/api/v1/auth/google-oauth/connect".to_string());
+
+    // ── Enterprise OAuth: connect URL is slug-scoped.
+    let enterprise_oauth_url = Signal::derive(move || {
+        let s = slug.get();
+        format!("/api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug={s}")
+    });
+
+    // ── Enterprise OAuth: "not configured" when client ID/secret are empty.
+    let enterprise_cfg_missing = Signal::derive(move || {
+        cfg_oauth_client_id.get().is_empty() && cfg_oauth_client_secret.get().is_empty()
+    });
+
+    // ── Disconnect callbacks — wraps the Action dispatch in a Callback<()>.
+    let on_google_disconnect = Callback::new(move |()| {
+        if !google_disconnect_action.pending().get_untracked() {
+            google_disconnect_action.dispatch(());
+        }
+    });
+
+    let slug_for_disconnect = slug;
+    let on_enterprise_disconnect = Callback::new(move |()| {
+        if !datasource_disconnect_action.pending().get_untracked() {
+            let slug_val = slug_for_disconnect.get_untracked();
+            datasource_disconnect_action
+                .dispatch(("bigquery-enterprise".to_string(), slug_val));
+        }
+    });
+
+    let google_disconnect_pending =
+        Signal::derive(move || google_disconnect_action.pending().get());
+    let enterprise_disconnect_pending =
+        Signal::derive(move || datasource_disconnect_action.pending().get());
+
+    // Re-fetch OAuth status whenever bq_auth_mode changes so the status panel
+    // reflects the correct account for the newly selected mode.
+    Effect::new(move |_| {
+        let current_mode = bq_auth_mode.get(); // subscribe to mode changes
+        let slug_val = slug.get();
+        // Skip create mode (no slug) and non-OAuth modes.
+        if slug_val.is_empty() || current_mode == "service_account" {
+            return;
+        }
+        // Reset to disconnected state while the fetch is in flight.
+        set_oauth_connected.set(false);
+        set_oauth_email.set(None);
+        set_oauth_expired.set(false);
+
+        leptos::task::spawn_local(async move {
+            match current_mode.as_str() {
+                "kyomi_oauth" => {
+                    if let Ok(status) = get_google_oauth_status().await {
+                        set_oauth_connected.try_set(status.connected);
+                        set_oauth_email.try_set(status.google_email);
+                        set_oauth_expired.try_set(status.token_expired);
+                    }
+                }
+                "enterprise_oauth" => {
+                    if let Ok(status) =
+                        get_datasource_oauth_status("bigquery-enterprise".to_string(), slug_val)
+                            .await
+                    {
+                        set_oauth_connected.try_set(status.connected);
+                        set_oauth_email.try_set(status.provider_email);
+                        set_oauth_expired.try_set(status.token_expired);
+                    }
+                }
+                _ => {}
+            }
+        });
+    });
 
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
@@ -2635,15 +3161,27 @@ fn BigQueryAuthModeSection(
                     <p class="text-sm text-muted-foreground">
                         "Connect your Google account to access BigQuery projects."
                     </p>
-                    <a
-                        href="/api/v1/auth/google-oauth/connect"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
-                    >
-                        <Icon icon=phosphor_leptos::LINK attr:class="h-4 w-4"/>
-                        "Connect Google Account"
-                    </a>
+                    // 4-state OAuth status panel — hidden in create mode since
+                    // we don't know the datasource slug yet.
+                    <Show when=move || !is_create_mode.get()>
+                        <ModalOAuthStatusPanel
+                            oauth_connected=oauth_connected
+                            oauth_email=oauth_email
+                            oauth_expired=oauth_expired
+                            oauth_connecting=oauth_connecting
+                            set_oauth_connecting=set_oauth_connecting
+                            provider_name="Google"
+                            connect_url=kyomi_oauth_url
+                            cfg_missing=Signal::stored(false)
+                            on_disconnect=on_google_disconnect
+                            disconnect_pending=google_disconnect_pending
+                        />
+                    </Show>
+                    <Show when=move || is_create_mode.get()>
+                        <p class="text-xs text-muted-foreground">
+                            "After saving, connect your Google account from this settings panel."
+                        </p>
+                    </Show>
                     <p class="text-xs text-muted-foreground">
                         "After connecting, you can set the billing and default project."
                     </p>
@@ -2709,25 +3247,30 @@ fn BigQueryAuthModeSection(
                             </div>
                         </div>
                     </div>
-                    // User connection
-                    <div class="space-y-3">
-                        <h4 class="text-sm font-medium">"Your Connection"</h4>
-                        {move || {
-                            let slug_val = slug_for_oauth.get();
-                            let oauth_url = format!("/api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug={}", slug_val);
-                            view! {
-                                <a
-                                    href=oauth_url
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring h-9 px-4 py-2 border border-input bg-background text-foreground shadow-sm hover:bg-secondary hover:text-accent-foreground"
-                                >
-                                    <Icon icon=phosphor_leptos::LINK attr:class="h-4 w-4"/>
-                                    "Connect BigQuery"
-                                </a>
-                            }
-                        }}
-                    </div>
+                    // User connection — 4-state status panel.
+                    // Hidden in create mode (no slug yet for the enterprise endpoint).
+                    <Show when=move || !is_create_mode.get()>
+                        <div class="space-y-3">
+                            <h4 class="text-sm font-medium">"Your Connection"</h4>
+                            <ModalOAuthStatusPanel
+                                oauth_connected=oauth_connected
+                                oauth_email=oauth_email
+                                oauth_expired=oauth_expired
+                                oauth_connecting=oauth_connecting
+                                set_oauth_connecting=set_oauth_connecting
+                                provider_name="BigQuery"
+                                connect_url=enterprise_oauth_url
+                                cfg_missing=enterprise_cfg_missing
+                                on_disconnect=on_enterprise_disconnect
+                                disconnect_pending=enterprise_disconnect_pending
+                            />
+                        </div>
+                    </Show>
+                    <Show when=move || is_create_mode.get()>
+                        <p class="text-xs text-muted-foreground">
+                            "After saving, connect your BigQuery account from this settings panel."
+                        </p>
+                    </Show>
                 </div>
             </Show>
 
@@ -2793,7 +3336,40 @@ fn BigQueryAuthModeSection(
 fn SnowflakeAuthModeSection(
     sf_auth_mode: ReadSignal<String>,
     set_sf_auth_mode: WriteSignal<String>,
+    /// Datasource slug — used to build the Snowflake OAuth connect URL.
+    slug: ReadSignal<String>,
+    /// Whether the OAuth account is currently connected.
+    oauth_connected: ReadSignal<bool>,
+    /// The connected account email, if any.
+    oauth_email: ReadSignal<Option<String>>,
+    /// Whether the OAuth token has expired.
+    oauth_expired: ReadSignal<bool>,
+    /// Whether an OAuth popup is currently in progress.
+    oauth_connecting: ReadSignal<bool>,
+    /// Setter for the connecting state.
+    set_oauth_connecting: WriteSignal<bool>,
+    /// Action to disconnect the per-datasource OAuth account.
+    datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
+    /// True in create mode — OAuth status panel is hidden in create mode.
+    is_create_mode: Signal<bool>,
 ) -> impl IntoView {
+    // Snowflake connect URL is slug-scoped.
+    let sf_connect_url = Signal::derive(move || {
+        let s = slug.get();
+        format!("/api/v1/auth/oauth/snowflake/connect?datasource_slug={s}")
+    });
+
+    let slug_for_disconnect = slug;
+    let on_sf_disconnect = Callback::new(move |()| {
+        if !datasource_disconnect_action.pending().get_untracked() {
+            let slug_val = slug_for_disconnect.get_untracked();
+            datasource_disconnect_action.dispatch(("snowflake".to_string(), slug_val));
+        }
+    });
+
+    let sf_disconnect_pending =
+        Signal::derive(move || datasource_disconnect_action.pending().get());
+
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
             <label class="block text-sm font-medium">"Authentication Mode"</label>
@@ -2815,6 +3391,33 @@ fn SnowflakeAuthModeSection(
                 }}
             </p>
         </div>
+
+        // OAuth connection status — shown only when OAuth mode is selected.
+        <Show when=move || sf_auth_mode.get() == "oauth">
+            <div class="space-y-3 border-t border-border pt-4 mt-4">
+                <h4 class="text-sm font-medium">"Your Snowflake Connection"</h4>
+                // 4-state status panel — hidden in create mode (no slug yet).
+                <Show when=move || !is_create_mode.get()>
+                    <ModalOAuthStatusPanel
+                        oauth_connected=oauth_connected
+                        oauth_email=oauth_email
+                        oauth_expired=oauth_expired
+                        oauth_connecting=oauth_connecting
+                        set_oauth_connecting=set_oauth_connecting
+                        provider_name="Snowflake"
+                        connect_url=sf_connect_url
+                        cfg_missing=Signal::stored(false)
+                        on_disconnect=on_sf_disconnect
+                        disconnect_pending=sf_disconnect_pending
+                    />
+                </Show>
+                <Show when=move || is_create_mode.get()>
+                    <p class="text-xs text-muted-foreground">
+                        "After saving, connect your Snowflake account from this settings panel."
+                    </p>
+                </Show>
+            </div>
+        </Show>
     }
 }
 
