@@ -1563,6 +1563,26 @@ pub fn DatasourceModal(
                     _ => {}
                 }
             }
+            "snowflake" => {
+                let sf_mode = sf_auth_mode.get_untracked();
+                match sf_mode.as_str() {
+                    "oauth" => {
+                        map.insert("auth_type".to_string(), serde_json::json!("oauth"));
+                    }
+                    _ => {
+                        // password or keypair — username + password/private_key
+                        if !cred_username.get_untracked().is_empty() {
+                            map.insert("username".to_string(), serde_json::json!(cred_username.get_untracked()));
+                        }
+                        if !cred_password.get_untracked().is_empty() {
+                            map.insert("password".to_string(), serde_json::json!(cred_password.get_untracked()));
+                        }
+                        if !cred_private_key.get_untracked().is_empty() {
+                            map.insert("private_key".to_string(), serde_json::json!(cred_private_key.get_untracked()));
+                        }
+                    }
+                }
+            }
             "synapse" => {
                 let syn_mode = synapse_auth_mode.get_untracked();
                 match syn_mode.as_str() {
@@ -2519,8 +2539,11 @@ pub fn DatasourceModal(
                                             set_sf_auth_mode=set_sf_auth_mode
                                             slug=slug
                                             oauth_connected=modal_oauth_connected
+                                            set_oauth_connected=set_modal_oauth_connected
                                             oauth_email=modal_oauth_email
+                                            set_oauth_email=set_modal_oauth_email
                                             oauth_expired=modal_oauth_expired
+                                            set_oauth_expired=set_modal_oauth_expired
                                             oauth_connecting=modal_oauth_connecting
                                             set_oauth_connecting=set_modal_oauth_connecting
                                             datasource_disconnect_action=datasource_disconnect_action
@@ -2618,7 +2641,7 @@ pub fn DatasourceModal(
                                             && syn == "enterprise_oauth"
                                             && !modal_oauth_connected.get();
                                         !(t == "bigquery"
-                                            || (t == "snowflake" && sf == "oauth")
+                                            || (t == "snowflake" && sf == "oauth" && !modal_oauth_connected.get())
                                             || synapse_eo_not_connected)
                                     }>
                                         <div class="border-t border-border pt-4 mt-4">
@@ -3498,10 +3521,16 @@ fn SnowflakeAuthModeSection(
     slug: ReadSignal<String>,
     /// Whether the OAuth account is currently connected.
     oauth_connected: ReadSignal<bool>,
+    /// Setter for the connected state (used by re-fetch Effect on mode change).
+    set_oauth_connected: WriteSignal<bool>,
     /// The connected account email, if any.
     oauth_email: ReadSignal<Option<String>>,
+    /// Setter for the email state (used by re-fetch Effect on mode change).
+    set_oauth_email: WriteSignal<Option<String>>,
     /// Whether the OAuth token has expired.
     oauth_expired: ReadSignal<bool>,
+    /// Setter for the expired state (used by re-fetch Effect on mode change).
+    set_oauth_expired: WriteSignal<bool>,
     /// Whether an OAuth popup is currently in progress.
     oauth_connecting: ReadSignal<bool>,
     /// Setter for the connecting state.
@@ -3515,6 +3544,45 @@ fn SnowflakeAuthModeSection(
     let sf_connect_url = Signal::derive(move || {
         let s = slug.get();
         format!("/api/v1/auth/oauth/snowflake/connect?datasource_slug={s}")
+    });
+
+    // Redirect URL for display in OAuth mode.
+    // On native (non-WASM) targets, we have no window.location.origin — use a placeholder.
+    #[cfg(target_arch = "wasm32")]
+    let redirect_url = {
+        let origin = web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_default();
+        format!("{origin}/auth/oauth/snowflake/callback")
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let redirect_url = "/auth/oauth/snowflake/callback".to_string();
+
+    let redirect_url_signal = Signal::stored(redirect_url);
+
+    // Re-fetch OAuth status whenever sf_auth_mode changes so the status panel
+    // reflects the correct account for the newly selected mode.
+    Effect::new(move |_| {
+        let current_mode = sf_auth_mode.get(); // subscribe to mode changes
+        let slug_val = slug.get();
+        // Skip create mode (no slug) and non-OAuth modes.
+        if slug_val.is_empty() || current_mode == "password" || current_mode == "keypair" {
+            return;
+        }
+        // Reset to disconnected state while the fetch is in flight.
+        set_oauth_connected.set(false);
+        set_oauth_email.set(None);
+        set_oauth_expired.set(false);
+
+        leptos::task::spawn_local(async move {
+            if let Ok(status) =
+                get_datasource_oauth_status("snowflake".to_string(), slug_val).await
+            {
+                set_oauth_connected.try_set(status.connected);
+                set_oauth_email.try_set(status.provider_email);
+                set_oauth_expired.try_set(status.token_expired);
+            }
+        });
     });
 
     let slug_for_disconnect = slug;
@@ -3554,6 +3622,18 @@ fn SnowflakeAuthModeSection(
         <Show when=move || sf_auth_mode.get() == "oauth">
             <div class="space-y-3 border-t border-border pt-4 mt-4">
                 <h4 class="text-sm font-medium">"Your Snowflake Connection"</h4>
+                // Redirect URL copy block — shown so admins can register the callback URI.
+                <div class="p-3 bg-muted/30 rounded-lg space-y-1">
+                    <label class="block text-xs font-medium text-muted-foreground">
+                        "Redirect URL (add as a redirect URI in your Snowflake OAuth app)"
+                    </label>
+                    <div class="flex items-center gap-2 mt-1">
+                        <code class="flex-1 text-xs font-mono text-foreground break-all">
+                            {move || redirect_url_signal.get()}
+                        </code>
+                        <CopyButton text=redirect_url_signal/>
+                    </div>
+                </div>
                 // 4-state status panel — hidden in create mode (no slug yet).
                 <Show when=move || !is_create_mode.get()>
                     <ModalOAuthStatusPanel
