@@ -1020,6 +1020,12 @@ pub async fn list_datasources_with_status(
 
         let needs_catalog_attention = ds_catalog_needs_attention(&catalog_statuses, &ds.id);
 
+        let auth_mode = ds
+            .connection_config
+            .get("auth_mode")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
         result.push(DatasourceInfo {
             id: ds.id.clone(),
             name: ds.name.clone(),
@@ -1035,6 +1041,7 @@ pub async fn list_datasources_with_status(
             is_sample,
             is_analytics,
             needs_catalog_attention,
+            auth_mode,
         });
     }
 
