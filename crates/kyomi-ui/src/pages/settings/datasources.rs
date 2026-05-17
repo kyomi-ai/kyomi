@@ -31,6 +31,7 @@ use crate::server_fns::onboarding::{
 use crate::server_fns::datasource_oauth::{
     get_google_oauth_status, get_datasource_oauth_status,
     disconnect_google_oauth, disconnect_datasource_oauth,
+    get_google_oauth_projects,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -969,6 +970,14 @@ pub fn DatasourceModal(
     let (modal_oauth_expired, set_modal_oauth_expired) = signal(false);
     let (modal_oauth_connecting, set_modal_oauth_connecting) = signal(false);
 
+    // ── BigQuery project list (fetched after OAuth connects) ─────────────
+    // Populated when modal_oauth_connected becomes true in kyomi_oauth or
+    // enterprise_oauth mode.  Used to drive DynSelect dropdowns for
+    // billing_project and default_project instead of free-text inputs.
+    let (bq_projects, set_bq_projects) = signal::<Vec<(String, String)>>(vec![]);
+    let (bq_projects_loading, set_bq_projects_loading) = signal(false);
+    let (bq_projects_error, set_bq_projects_error) = signal::<Option<String>>(None);
+
     // ── Reset form ───────────────────────────────────────────────────────
     let reset_form = move || {
         set_name.set(String::new());
@@ -1035,6 +1044,9 @@ pub fn DatasourceModal(
         set_modal_oauth_email.set(None);
         set_modal_oauth_expired.set(false);
         set_modal_oauth_connecting.set(false);
+        set_bq_projects.set(vec![]);
+        set_bq_projects_loading.set(false);
+        set_bq_projects_error.set(None);
     };
 
     // ── Load settings when switching to edit mode ─────────────────────────
@@ -1738,6 +1750,8 @@ pub fn DatasourceModal(
                     set_modal_oauth_connected.set(false);
                     set_modal_oauth_email.set(None);
                     set_modal_oauth_expired.set(false);
+                    // Clear project list so dropdowns revert to text inputs.
+                    set_bq_projects.set(vec![]);
                     #[cfg(target_arch = "wasm32")]
                     toast_success("Google account disconnected");
                 }
@@ -1763,6 +1777,8 @@ pub fn DatasourceModal(
                     set_modal_oauth_connected.set(false);
                     set_modal_oauth_email.set(None);
                     set_modal_oauth_expired.set(false);
+                    // Clear project list so dropdowns revert to text inputs.
+                    set_bq_projects.set(vec![]);
                     #[cfg(target_arch = "wasm32")]
                     toast_success("Account disconnected");
                 }
@@ -1959,6 +1975,48 @@ pub fn DatasourceModal(
             }
         });
     }
+
+    // ── Fetch BigQuery project list when OAuth connects ───────────────────
+    // Fires only in kyomi_oauth mode — that is the only mode where a personal
+    // Google OAuth token is present. Enterprise OAuth uses per-datasource
+    // organizational tokens that cannot list the user's personal GCP projects;
+    // enterprise admins enter project IDs manually via the text input fallback.
+    Effect::new(move |_| {
+        let connected = modal_oauth_connected.get();
+        let mode = bq_auth_mode.get();
+        if connected && mode == "kyomi_oauth" {
+            set_bq_projects_loading.set(true);
+            set_bq_projects_error.set(None);
+            leptos::task::spawn_local(async move {
+                match get_google_oauth_projects().await {
+                    Ok(result) => {
+                        let options: Vec<(String, String)> = result
+                            .projects
+                            .into_iter()
+                            .map(|p| {
+                                let label = if p.name.is_empty() || p.name == p.project_id {
+                                    p.project_id.clone()
+                                } else {
+                                    format!("{} ({})", p.name, p.project_id)
+                                };
+                                (p.project_id, label)
+                            })
+                            .collect();
+                        set_bq_projects.try_set(options);
+                        if let Some(msg) = result.message.filter(|m| !m.is_empty()) {
+                            set_bq_projects_error.try_set(Some(msg));
+                        }
+                    }
+                    Err(e) => {
+                        set_bq_projects_error.try_set(Some(
+                            format!("Failed to fetch BigQuery projects: {e}"),
+                        ));
+                    }
+                }
+                set_bq_projects_loading.try_set(false);
+            });
+        }
+    });
 
     // ── Discovery section: show post-test fields ──────────────────────────
     let discovery_succeeded = Signal::derive(move || {
@@ -2547,6 +2605,9 @@ pub fn DatasourceModal(
                                             google_disconnect_action=google_disconnect_action
                                             datasource_disconnect_action=datasource_disconnect_action
                                             is_create_mode=is_create_mode
+                                            bq_projects=bq_projects
+                                            bq_projects_loading=bq_projects_loading
+                                            bq_projects_error=bq_projects_error
                                         />
                                     </Show>
 
@@ -3229,6 +3290,48 @@ fn ModalOAuthStatusPanel(
 // BigQuery Auth Mode Section
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A single BigQuery project field that renders a [`DynSelect`] when projects
+/// are loading or available, and falls back to a plain text input otherwise.
+///
+/// Using `<Show>` here (instead of `{move || ...}` branching) keeps a stable
+/// component tree and avoids the disposal panic that occurs when an `Effect`
+/// inside `DynSelect` fires after the surrounding closure's reactive scope is
+/// torn down during a branch swap.
+#[component]
+fn BqProjectField(
+    label: &'static str,
+    value: ReadSignal<String>,
+    set_value: WriteSignal<String>,
+    bq_projects: ReadSignal<Vec<(String, String)>>,
+    bq_projects_loading: ReadSignal<bool>,
+) -> impl IntoView {
+    view! {
+        <div>
+            <label class="block text-sm font-medium mb-1">{label}</label>
+            <Show
+                when=move || bq_projects_loading.get() || !bq_projects.get().is_empty()
+                fallback=move || view! {
+                    <input
+                        type="text"
+                        class=MODAL_INPUT_CLASS
+                        placeholder="my-gcp-project"
+                        prop:value=move || value.get()
+                        on:input=move |ev| set_value.set(event_target_value(&ev))
+                    />
+                }
+            >
+                <DynSelect
+                    value=Signal::derive(move || value.get())
+                    options=Signal::derive(move || bq_projects.get())
+                    on_change=move |val| set_value.set(val)
+                    placeholder="Select a project".to_string()
+                    disabled=Signal::derive(move || bq_projects_loading.get())
+                />
+            </Show>
+        </div>
+    }
+}
+
 #[component]
 fn BigQueryAuthModeSection(
     bq_auth_mode: ReadSignal<String>,
@@ -3268,6 +3371,13 @@ fn BigQueryAuthModeSection(
     datasource_disconnect_action: Action<(String, String), Result<crate::server_fns::datasource_oauth::DatasourceOAuthDisconnectResult, ServerFnError>>,
     /// True in create mode — OAuth status panel is hidden in create mode.
     is_create_mode: Signal<bool>,
+    /// GCP project list fetched after OAuth connects.  Empty until OAuth is
+    /// connected; drives DynSelect dropdowns for billing/default project.
+    bq_projects: ReadSignal<Vec<(String, String)>>,
+    /// True while the project list is being fetched.
+    bq_projects_loading: ReadSignal<bool>,
+    /// Non-None when the project fetch returned an error or warning message.
+    bq_projects_error: ReadSignal<Option<String>>,
 ) -> impl IntoView {
     // Parse service account email from JSON
     let handle_service_account_json = move |json_text: String| {
@@ -3409,31 +3519,30 @@ fn BigQueryAuthModeSection(
                             "After saving, connect your Google account from this settings panel."
                         </p>
                     </Show>
-                    <p class="text-xs text-muted-foreground">
-                        "After connecting, you can set the billing and default project."
-                    </p>
+                    <Show when=move || !oauth_connected.get()>
+                        <p class="text-xs text-muted-foreground">
+                            "After connecting, you can set the billing and default project."
+                        </p>
+                    </Show>
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">"Billing Project"</label>
-                            <input
-                                type="text"
-                                class=MODAL_INPUT_CLASS
-                                placeholder="my-gcp-project"
-                                prop:value=move || cred_billing_project.get()
-                                on:input=move |ev| set_cred_billing_project.set(event_target_value(&ev))
-                            />
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">"Default Project"</label>
-                            <input
-                                type="text"
-                                class=MODAL_INPUT_CLASS
-                                placeholder="my-gcp-project"
-                                prop:value=move || cred_default_project.get()
-                                on:input=move |ev| set_cred_default_project.set(event_target_value(&ev))
-                            />
-                        </div>
+                        <BqProjectField
+                            label="Billing Project"
+                            value=cred_billing_project
+                            set_value=set_cred_billing_project
+                            bq_projects=bq_projects
+                            bq_projects_loading=bq_projects_loading
+                        />
+                        <BqProjectField
+                            label="Default Project"
+                            value=cred_default_project
+                            set_value=set_cred_default_project
+                            bq_projects=bq_projects
+                            bq_projects_loading=bq_projects_loading
+                        />
                     </div>
+                    {move || bq_projects_error.get().map(|err| view! {
+                        <p class="text-xs text-error-foreground mt-2">{err}</p>
+                    })}
                 </div>
             </Show>
 
@@ -3498,6 +3607,32 @@ fn BigQueryAuthModeSection(
                             "After saving, connect your BigQuery account from this settings panel."
                         </p>
                     </Show>
+                    // Billing / default project fields — same conditional
+                    // DynSelect pattern as kyomi_oauth mode.
+                    <Show when=move || !oauth_connected.get()>
+                        <p class="text-xs text-muted-foreground">
+                            "After connecting, you can set the billing and default project."
+                        </p>
+                    </Show>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <BqProjectField
+                            label="Billing Project"
+                            value=cred_billing_project
+                            set_value=set_cred_billing_project
+                            bq_projects=bq_projects
+                            bq_projects_loading=bq_projects_loading
+                        />
+                        <BqProjectField
+                            label="Default Project"
+                            value=cred_default_project
+                            set_value=set_cred_default_project
+                            bq_projects=bq_projects
+                            bq_projects_loading=bq_projects_loading
+                        />
+                    </div>
+                    {move || bq_projects_error.get().map(|err| view! {
+                        <p class="text-xs text-error-foreground mt-2">{err}</p>
+                    })}
                 </div>
             </Show>
 
