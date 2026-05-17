@@ -1957,19 +1957,14 @@ pub fn DatasourceModal(
     }
 
     // ── Fetch BigQuery project list when OAuth connects ───────────────────
-    // Watches modal_oauth_connected and bq_auth_mode.  When the user connects
-    // a Google OAuth account (kyomi_oauth or enterprise_oauth), we call
-    // get_google_oauth_projects() to populate the billing/default project
-    // dropdowns.  This fires both on live OAuth popup success and on modal
-    // open for an already-connected datasource (signal seeded from settings).
-    //
-    // Uses spawn_local (not Action) because this is a reactive-signal-triggered
-    // fetch, not a user-initiated mutation.  All signal writes inside the async
-    // block use try_set() to handle the navigation-away disposal case.
+    // Fires only in kyomi_oauth mode — that is the only mode where a personal
+    // Google OAuth token is present. Enterprise OAuth uses per-datasource
+    // organizational tokens that cannot list the user's personal GCP projects;
+    // enterprise admins enter project IDs manually via the text input fallback.
     Effect::new(move |_| {
         let connected = modal_oauth_connected.get();
         let mode = bq_auth_mode.get();
-        if connected && (mode == "kyomi_oauth" || mode == "enterprise_oauth") {
+        if connected && mode == "kyomi_oauth" {
             set_bq_projects_loading.set(true);
             set_bq_projects_error.set(None);
             leptos::task::spawn_local(async move {
