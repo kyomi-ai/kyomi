@@ -615,9 +615,7 @@ fn DatasourceRow(
                     ds_auth_mode_clone.as_deref(),
                 );
                 if url.is_empty() {
-                    toast_error(format!(
-                        "OAuth is not supported for this datasource type"
-                    ));
+                    toast_error("OAuth is not supported for this datasource type".to_string());
                     return;
                 }
                 set_oauth_connecting.set(Some(ds_id_clone.clone()));
