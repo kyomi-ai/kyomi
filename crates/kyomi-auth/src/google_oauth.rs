@@ -455,3 +455,215 @@ pub fn bigquery_access_level(scopes_str: &str) -> &'static str {
         "none"
     }
 }
+
+// ---------------------------------------------------------------------------
+// Service functions — business logic extracted for reuse by server_fns
+// ---------------------------------------------------------------------------
+
+/// Result of `google_oauth_status_service`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoogleOAuthStatusResult {
+    pub connected: bool,
+    pub google_email: Option<String>,
+    pub has_bigquery_scopes: bool,
+    pub needs_bigquery_connect: bool,
+    pub token_expired: bool,
+    pub has_refresh_token: bool,
+}
+
+/// Get the current Google OAuth connection status for a user.
+///
+/// Reads the user's encrypted `oauth_data` from the database and returns
+/// the connection status without making any external API calls.
+///
+/// Mirrors the logic from `apps/server/src/routes/auth_google_oauth.rs::google_oauth_status`.
+pub async fn google_oauth_status_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<GoogleOAuthStatusResult> {
+    let db_user = crate::user_service::get_user_by_id(db, user_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
+
+    let oauth_data = parse_oauth_data(db_user.oauth_data.as_deref(), encryption_key)?;
+    let tokens = oauth_data
+        .as_ref()
+        .and_then(|o| o.google_oauth_tokens.as_ref());
+
+    match tokens {
+        None => Ok(GoogleOAuthStatusResult {
+            connected: false,
+            google_email: None,
+            has_bigquery_scopes: false,
+            needs_bigquery_connect: true,
+            token_expired: false,
+            has_refresh_token: false,
+        }),
+        Some(t) => {
+            let has_bq_scopes = has_bigquery_scopes(&t.scope);
+            let has_refresh = t.refresh_token.is_some();
+            let token_expired = t
+                .expires_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|exp| exp.with_timezone(&chrono::Utc) < chrono::Utc::now())
+                .unwrap_or(false);
+            // Only report expired if no refresh token to auto-refresh
+            let effectively_expired = token_expired && !has_refresh;
+            let needs_connect = !has_bq_scopes || effectively_expired;
+
+            Ok(GoogleOAuthStatusResult {
+                connected: true,
+                google_email: t.email.clone(),
+                has_bigquery_scopes: has_bq_scopes,
+                needs_bigquery_connect: needs_connect,
+                token_expired: effectively_expired,
+                has_refresh_token: has_refresh,
+            })
+        }
+    }
+}
+
+/// Result of `google_oauth_disconnect_service`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoogleOAuthDisconnectResult {
+    pub success: bool,
+    pub already_disconnected: bool,
+    pub disconnected_email: Option<String>,
+}
+
+/// Disconnect Google OAuth from a user account.
+///
+/// Clears the stored tokens from the user's `oauth_data` and removes the
+/// `google_oauth` auth method entry.
+///
+/// Mirrors the logic from `apps/server/src/routes/auth_google_oauth.rs::google_oauth_disconnect`.
+pub async fn google_oauth_disconnect_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<GoogleOAuthDisconnectResult> {
+    let db_user = crate::user_service::get_user_by_id(db, user_id)
+        .await?
+        .ok_or_else(|| kyomi_core::Error::NotFound("User not found".into()))?;
+
+    let existing_oauth = parse_oauth_data(db_user.oauth_data.as_deref(), encryption_key)?;
+
+    let has_tokens = existing_oauth
+        .as_ref()
+        .and_then(|o| o.google_oauth_tokens.as_ref())
+        .is_some();
+
+    if !has_tokens {
+        return Ok(GoogleOAuthDisconnectResult {
+            success: true,
+            already_disconnected: true,
+            disconnected_email: None,
+        });
+    }
+
+    let disconnected_email = existing_oauth
+        .as_ref()
+        .and_then(|o| o.google_oauth_tokens.as_ref())
+        .and_then(|t| t.email.clone());
+
+    // Clear OAuth tokens but keep picture
+    let cleared_oauth = OAuthData {
+        picture: existing_oauth.and_then(|o| o.picture),
+        ..Default::default()
+    };
+
+    let encrypted = build_oauth_data(&cleared_oauth, encryption_key)?;
+    crate::user_service::update_user_oauth_data(db, user_id, Some(&encrypted)).await?;
+    crate::user_service::remove_auth_method(db, user_id, "google_oauth").await?;
+
+    Ok(GoogleOAuthDisconnectResult {
+        success: true,
+        already_disconnected: false,
+        disconnected_email,
+    })
+}
+
+/// A single Google Cloud project.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoogleProject {
+    pub project_id: String,
+    pub name: String,
+}
+
+/// Result of `google_oauth_projects_service`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GoogleOAuthProjectsResult {
+    pub projects: Vec<GoogleProject>,
+    pub message: Option<String>,
+}
+
+/// List Google Cloud projects accessible to the authenticated user.
+///
+/// Resolves the user's Google OAuth token (refreshing if needed), then
+/// calls the Google Cloud Resource Manager API to list active projects.
+///
+/// Mirrors the logic from `apps/server/src/routes/auth_google_oauth.rs::google_oauth_projects`.
+pub async fn google_oauth_projects_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    encryption_key: &[u8; 32],
+    client_id: &str,
+    client_secret: &str,
+) -> kyomi_core::Result<GoogleOAuthProjectsResult> {
+    let tokens = ensure_valid_google_token(db, user_id, encryption_key, client_id, client_secret)
+        .await?;
+
+    let client = crate::http_client()?;
+    let resp = client
+        .get(GOOGLE_PROJECTS_URI)
+        .bearer_auth(&tokens.access_token)
+        .query(&[("filter", "lifecycleState:ACTIVE")])
+        .send()
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!("Google projects request failed: {e}"))
+        })?;
+
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(kyomi_core::Error::Unauthorized(
+            "Google OAuth token expired or revoked".into(),
+        ));
+    }
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(kyomi_core::Error::Internal(format!(
+            "Google projects request failed ({status}): {body}"
+        )));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| {
+        kyomi_core::Error::Internal(format!("Failed to parse projects response: {e}"))
+    })?;
+
+    let mut projects: Vec<GoogleProject> = body["projects"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            let project_id = p["projectId"].as_str().unwrap_or("").to_string();
+            let name = p["name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&project_id)
+                .to_string();
+            GoogleProject { project_id, name }
+        })
+        .collect();
+
+    projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    Ok(GoogleOAuthProjectsResult {
+        projects,
+        message: None,
+    })
+}

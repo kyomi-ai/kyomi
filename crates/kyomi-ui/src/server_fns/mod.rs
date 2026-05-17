@@ -22,6 +22,7 @@ pub mod connect;
 pub mod copilot;
 pub mod context;
 pub mod dashboards;
+pub mod datasource_oauth;
 pub mod datasources;
 pub mod feedback;
 pub mod home;

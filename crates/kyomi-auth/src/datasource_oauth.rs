@@ -673,6 +673,182 @@ async fn get_microsoft_user_info(access_token: &str) -> kyomi_core::Result<Provi
 }
 
 // ---------------------------------------------------------------------------
+// Service functions — business logic extracted for reuse by server_fns
+// ---------------------------------------------------------------------------
+
+/// Resolve a datasource slug to its primary-key `id`.
+///
+/// Returns `NotFound` if no active datasource with the given slug exists in
+/// the workspace.
+async fn resolve_datasource_id(
+    db: &kyomi_core::DbPool,
+    slug: &str,
+    workspace_id: &str,
+) -> kyomi_core::Result<String> {
+    #[derive(sqlx::FromRow)]
+    struct IdRow {
+        id: String,
+    }
+
+    kyomi_core::db_fetch_optional!(
+        db,
+        IdRow,
+        "SELECT id FROM datasource_configs \
+         WHERE slug = $1 AND workspace_id = $2 AND active = true",
+        slug,
+        workspace_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("DB error: {e}")))?
+    .map(|r| r.id)
+    .ok_or_else(|| kyomi_core::Error::NotFound(format!("Datasource not found: {slug}")))
+}
+
+/// Result of `datasource_oauth_status_service`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DatasourceOAuthStatusResult {
+    pub connected: bool,
+    pub provider_email: Option<String>,
+    pub token_expired: bool,
+    pub needs_reconnect: bool,
+    pub connect_url: String,
+    pub disconnect_url: String,
+}
+
+/// Get the OAuth connection status for a specific datasource and user.
+///
+/// Looks up the user's credentials for the given datasource, decrypts them,
+/// and returns the connection status without making any external API calls.
+///
+/// Mirrors the logic from `apps/server/src/routes/auth_datasource_oauth.rs::status`.
+pub async fn datasource_oauth_status_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    workspace_id: &str,
+    provider: OAuthProvider,
+    datasource_slug: &str,
+    encryption_key: &[u8; 32],
+) -> kyomi_core::Result<DatasourceOAuthStatusResult> {
+    use kyomi_core::models::datasource::UserDatasourceCredential;
+
+    let provider_str = provider.as_str();
+    let connect_url = format!("/api/v1/auth/oauth/{provider_str}/connect");
+    let disconnect_url = format!("/api/v1/auth/oauth/{provider_str}/disconnect");
+
+    let ds_id = resolve_datasource_id(db, datasource_slug, workspace_id).await?;
+
+    // Look up user credentials
+    let cred = kyomi_core::db_fetch_optional!(
+        db,
+        UserDatasourceCredential,
+        "SELECT id, user_id, datasource_config_id, workspace_id, credentials, \
+         enabled, created_at, updated_at \
+         FROM user_datasource_credentials \
+         WHERE user_id = $1 AND datasource_config_id = $2",
+        user_id,
+        &ds_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("DB error: {e}")))?;
+
+    let Some(cred) = cred else {
+        return Ok(DatasourceOAuthStatusResult {
+            connected: false,
+            provider_email: None,
+            token_expired: false,
+            needs_reconnect: true,
+            connect_url,
+            disconnect_url,
+        });
+    };
+
+    let credentials = crate::encryption::decrypt_json(&cred.credentials, encryption_key)?;
+
+    let access_token = credentials
+        .get("oauth_access_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let refresh_token = credentials
+        .get("oauth_refresh_token")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let has_refresh = refresh_token.is_some();
+
+    let token_expired = credentials
+        .get("oauth_token_expiry")
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|exp| exp.with_timezone(&chrono::Utc) < chrono::Utc::now())
+        .unwrap_or(false);
+
+    let needs_reconnect = token_expired && !has_refresh;
+
+    let provider_email = credentials
+        .get("oauth_email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(DatasourceOAuthStatusResult {
+        connected: access_token.is_some(),
+        provider_email,
+        token_expired,
+        needs_reconnect,
+        connect_url,
+        disconnect_url,
+    })
+}
+
+/// Result of `datasource_oauth_disconnect_service`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DatasourceOAuthDisconnectResult {
+    pub success: bool,
+    pub already_disconnected: bool,
+}
+
+/// Disconnect OAuth credentials for a specific datasource and user.
+///
+/// Deletes the user's credential row from `user_datasource_credentials`.
+///
+/// Mirrors the logic from `apps/server/src/routes/auth_datasource_oauth.rs::disconnect`.
+pub async fn datasource_oauth_disconnect_service(
+    db: &kyomi_core::DbPool,
+    user_id: &str,
+    workspace_id: &str,
+    provider: OAuthProvider,
+    datasource_slug: &str,
+) -> kyomi_core::Result<DatasourceOAuthDisconnectResult> {
+    let ds_id = resolve_datasource_id(db, datasource_slug, workspace_id).await?;
+
+    let result = kyomi_core::db_execute!(
+        db,
+        "DELETE FROM user_datasource_credentials \
+         WHERE user_id = $1 AND datasource_config_id = $2",
+        user_id,
+        &ds_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("DB error: {e}")))?;
+
+    if result.rows_affected() == 0 {
+        return Ok(DatasourceOAuthDisconnectResult {
+            success: true,
+            already_disconnected: true,
+        });
+    }
+
+    tracing::info!(
+        provider = provider.as_str(),
+        datasource_slug = datasource_slug,
+        user_id = %user_id,
+        "Disconnected OAuth credentials via server_fn"
+    );
+
+    Ok(DatasourceOAuthDisconnectResult {
+        success: true,
+        already_disconnected: false,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
