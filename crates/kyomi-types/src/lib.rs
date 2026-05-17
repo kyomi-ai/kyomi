@@ -34,6 +34,9 @@ pub struct DatasourceInfo {
     pub is_analytics: bool,
     /// Whether the catalog needs attention (no tables, no index, or stale)
     pub needs_catalog_attention: bool,
+    /// The `auth_mode` from `connection_config` (e.g. `"kyomi_oauth"`, `"enterprise_oauth"`, `"oauth"`, `"token"`).
+    /// `None` when the field is absent from the stored config.
+    pub auth_mode: Option<String>,
 }
 
 /// Status of a single datasource's credentials for the current user.

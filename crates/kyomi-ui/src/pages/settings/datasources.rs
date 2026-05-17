@@ -9,8 +9,12 @@ use leptos::prelude::*;
 use phosphor_leptos::{Icon, IconWeight};
 use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonLink,
-    ButtonSize, ButtonVariant, Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, Switch,
+    ButtonSize, ButtonVariant, Card, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton,
+    Spinner, Switch,
 };
+use crate::components::toast::toast_error;
+#[cfg(target_arch = "wasm32")]
+use crate::components::toast::toast_success;
 use crate::components::DynSelect;
 use crate::pages::connect_setup::CONNECT_TYPES;
 use crate::pages::settings::connect_deployment::{
@@ -86,6 +90,53 @@ fn discovery_resource_key_for_type(ds_type: &str) -> &'static str {
         // bigquery: no discovery support (text input only — requires auth flow)
         // clickhouse / mysql / snowflake: catalog scope = databases
         _ => "databases",
+    }
+}
+
+/// Returns the human-readable provider label for a datasource type.
+///
+/// Used to build action button labels like "Connect BigQuery" or
+/// "Reconnect Snowflake".
+fn provider_label(ds_type: &str) -> &'static str {
+    match ds_type {
+        "bigquery" => "BigQuery",
+        "snowflake" => "Snowflake",
+        "synapse" => "Azure Synapse",
+        "databricks" => "Databricks",
+        _ => "Provider",
+    }
+}
+
+/// Builds the OAuth connect URL for a given datasource type, slug, and auth mode.
+///
+/// Returns an empty string for types that do not have a server-side OAuth
+/// connect endpoint (i.e. non-OAuth datasource types).
+///
+/// BigQuery has two OAuth flows depending on `auth_mode`:
+/// - `"enterprise_oauth"` → bigquery-enterprise endpoint (slug-scoped)
+/// - anything else (default: `"kyomi_oauth"`) → shared Google OAuth endpoint
+fn oauth_url_for_datasource(ds_type: &str, slug: &str, auth_mode: Option<&str>) -> String {
+    match ds_type {
+        "bigquery" => match auth_mode.unwrap_or("kyomi_oauth") {
+            "enterprise_oauth" => {
+                format!(
+                    "/api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug={slug}"
+                )
+            }
+            _ => "/api/v1/auth/google-oauth/connect".to_string(),
+        },
+        "snowflake" => {
+            format!("/api/v1/auth/oauth/snowflake/connect?datasource_slug={slug}")
+        }
+        "databricks" => {
+            format!("/api/v1/auth/oauth/databricks/connect?datasource_slug={slug}")
+        }
+        "synapse" => {
+            format!(
+                "/api/v1/auth/oauth/microsoft-enterprise/connect?datasource_slug={slug}"
+            )
+        }
+        _ => String::new(),
     }
 }
 
@@ -238,6 +289,58 @@ fn DatasourcesContent(
             .unwrap_or_default()
     };
 
+    // ── OAuth connecting state ───────────────────────────────────────────
+    // Tracks which datasource ID is currently awaiting OAuth completion.
+    // None = no OAuth in progress. Some(id) = popup open for that datasource.
+    let (oauth_connecting, set_oauth_connecting) = signal::<Option<String>>(None);
+
+    // ── OAuth postMessage listener ───────────────────────────────────────
+    // Installed once at the list level so all rows share a single listener.
+    // The JS Closure inside install_oauth_listener is !Send, so we use
+    // SendWrapper to satisfy on_cleanup's Send+Sync bound. The wrapper holds
+    // a box that stores the cleanup FnOnce so drop() can call it.
+    #[cfg(target_arch = "wasm32")]
+    {
+        use crate::utils::oauth_popup::{install_oauth_listener, OAuthMessage};
+        let query_cache_for_oauth = query_cache.clone();
+        let cleanup = install_oauth_listener(move |msg| {
+            match msg {
+                OAuthMessage::GoogleSuccess { .. }
+                | OAuthMessage::SnowflakeSuccess { .. }
+                | OAuthMessage::DatabricksSuccess { .. }
+                | OAuthMessage::MicrosoftSuccess { .. }
+                | OAuthMessage::MicrosoftEnterpriseSuccess { .. }
+                | OAuthMessage::BigqueryEnterpriseSuccess { .. } => {
+                    set_oauth_connecting.try_set(None);
+                    toast_success("Datasource connected successfully");
+                    query_cache_for_oauth.invalidate("datasources");
+                }
+                OAuthMessage::GoogleError { error }
+                | OAuthMessage::SnowflakeError { error }
+                | OAuthMessage::DatabricksError { error }
+                | OAuthMessage::MicrosoftError { error }
+                | OAuthMessage::MicrosoftEnterpriseError { error }
+                | OAuthMessage::BigqueryEnterpriseError { error } => {
+                    set_oauth_connecting.try_set(None);
+                    leptos::logging::warn!("OAuth error: {error}");
+                    toast_error(error);
+                }
+            }
+        });
+        // Box<dyn FnOnce()> is used so the inner cleanup can be called through
+        // Drop without requiring Send. SendWrapper makes the box Send+Sync for
+        // on_cleanup's bound while guaranteeing single-threaded access on WASM.
+        let cleanup_cell = std::cell::Cell::new(
+            Some(Box::new(cleanup) as Box<dyn FnOnce()>),
+        );
+        let cleanup_wrapper = send_wrapper::SendWrapper::new(cleanup_cell);
+        on_cleanup(move || {
+            if let Some(f) = cleanup_wrapper.take().take() {
+                f();
+            }
+        });
+    }
+
     view! {
         <div class="p-4 sm:p-6 space-y-6">
             // Header
@@ -298,6 +401,8 @@ fn DatasourcesContent(
                                     set_delete_dialog_open=set_delete_dialog_open
                                     set_datasource_to_delete=set_datasource_to_delete
                                     set_modal_datasource_id=set_modal_datasource_id
+                                    oauth_connecting=oauth_connecting
+                                    set_oauth_connecting=set_oauth_connecting
                                 />
                             </For>
                         </div>
@@ -342,12 +447,17 @@ fn DatasourceRow(
     set_delete_dialog_open: WriteSignal<bool>,
     set_datasource_to_delete: WriteSignal<Option<DatasourceInfo>>,
     set_modal_datasource_id: WriteSignal<Option<Option<String>>>,
+    /// Which datasource ID is currently awaiting OAuth completion (if any).
+    oauth_connecting: ReadSignal<Option<String>>,
+    /// Setter for the OAuth connecting state — passed to the popup monitor.
+    set_oauth_connecting: WriteSignal<Option<String>>,
 ) -> impl IntoView {
     // ── Toggle state ────────────────────────────────────────────────────
     let ds_for_toggle = ds.clone();
     let (local_enabled, set_local_enabled) = signal(ds.user_enabled);
 
     let can_enable = ds.can_enable;
+    let ds_credential_status = ds.credential_status.clone();
 
     let toggle_action = Action::new(|(ds_id, new_val): &(String, bool)| {
         let ds_id = ds_id.clone();
@@ -379,6 +489,13 @@ fn DatasourceRow(
 
     let on_toggle = Callback::new(move |new_val: bool| {
         if toggle_action.pending().get_untracked() {
+            return;
+        }
+        // Gate: cannot enable a datasource with missing credentials.
+        // The switch is already visually disabled (switch_disabled), but we
+        // add a toast so the user understands why clicking elsewhere doesn't work.
+        if new_val && ds_credential_status == "missing" {
+            toast_error("Connect your credentials first to enable this datasource");
             return;
         }
         let ds_id = ds_for_toggle.id.clone();
@@ -413,6 +530,142 @@ fn DatasourceRow(
             "Disabled"
         }
     };
+
+    // ── Credential action button ─────────────────────────────────────────
+    // Determine whether to show a connect/reconnect button based on the
+    // datasource's credential_status and auth_method.
+    //
+    // "missing" + "oauth"     → "Connect {Provider}"
+    // "expired"  + "oauth"    → "Reconnect {Provider}"
+    // "missing"  + "password" → "Enter Credentials" (opens the settings modal)
+    // anything else           → no button (credentials valid or shared)
+    let cred_action: Option<(&'static str, bool)> =
+        match (ds.credential_status.as_str(), ds.auth_method.as_str()) {
+            ("missing", "oauth") => Some(("Connect", false)),
+            ("expired", "oauth") => Some(("Reconnect", true)),
+            ("missing", "password") => Some(("enter_credentials", false)),
+            _ => None,
+        };
+
+    let ds_id_for_cred = ds.id.clone();
+    let ds_id_for_connecting = ds.id.clone();
+    let ds_type_for_cred = ds.datasource_type.clone();
+    let ds_slug_for_cred = ds.slug.clone();
+    let ds_auth_mode_for_cred = ds.auth_mode.clone();
+    let ds_id_for_modal = ds.id.clone();
+
+    let cred_action_view = cred_action.map(|(action_key, is_warning)| {
+        let ds_id = ds_id_for_cred.clone();
+        let ds_type = ds_type_for_cred.clone();
+        let ds_slug = ds_slug_for_cred.clone();
+        let ds_auth_mode = ds_auth_mode_for_cred.clone();
+
+        if action_key == "enter_credentials" {
+            // Password datasource: open the settings modal
+            let ds_id_modal = ds_id_for_modal.clone();
+            view! {
+                <Button
+                    variant=ButtonVariant::Outline
+                    size=ButtonSize::Sm
+                    on:click=move |_| {
+                        set_modal_datasource_id
+                            .set(Some(Some(ds_id_modal.clone())));
+                    }
+                >
+                    <span class="h-4 w-4 sm:mr-1 inline-flex items-center justify-center">
+                        <Icon icon=phosphor_leptos::KEY/>
+                    </span>
+                    <span class="hidden sm:inline">"Enter Credentials"</span>
+                </Button>
+            }
+            .into_any()
+        } else {
+            // OAuth datasource: open an OAuth popup window.
+            let provider = provider_label(&ds_type);
+            let button_label = format!("{action_key} {provider}");
+            let connect_label = button_label.clone();
+            let ds_id_clone = ds_id.clone();
+            let ds_type_clone = ds_type.clone();
+            let ds_slug_clone = ds_slug.clone();
+            let ds_auth_mode_clone = ds_auth_mode.clone();
+
+            let is_connecting = {
+                let ds_id_check = ds_id_for_connecting.clone();
+                Signal::derive(move || {
+                    oauth_connecting.get().as_deref() == Some(ds_id_check.as_str())
+                })
+            };
+
+            let connecting_label = if is_warning {
+                "Reconnecting..."
+            } else {
+                "Connecting..."
+            };
+
+            // Use an Action so any async browser popup work runs in a managed context.
+            // The actual popup open is WASM-only; Action::new body is Send so we
+            // do the WASM call outside the Action using a synchronous helper.
+            let on_oauth_click = move |_: leptos::ev::MouseEvent| {
+                if is_connecting.get_untracked() {
+                    return;
+                }
+                let url = oauth_url_for_datasource(
+                    &ds_type_clone,
+                    &ds_slug_clone,
+                    ds_auth_mode_clone.as_deref(),
+                );
+                if url.is_empty() {
+                    toast_error(format!(
+                        "OAuth is not supported for this datasource type"
+                    ));
+                    return;
+                }
+                set_oauth_connecting.set(Some(ds_id_clone.clone()));
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use crate::utils::oauth_popup::open_oauth_popup as open_popup;
+                    if open_popup(&url, &ds_id_clone).is_none() {
+                        set_oauth_connecting.set(None);
+                        toast_error(
+                            "Popup was blocked. Please allow popups for this site.",
+                        );
+                    }
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = url;
+                }
+            };
+
+            view! {
+                <Button
+                    variant=ButtonVariant::Outline
+                    size=ButtonSize::Sm
+                    on:click=on_oauth_click
+                >
+                    {move || if is_connecting.get() {
+                        view! {
+                            <span class="flex items-center gap-1.5">
+                                <Spinner size="h-3 w-3"/>
+                                <span class="hidden sm:inline">{connecting_label}</span>
+                            </span>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <span class="flex items-center gap-1.5">
+                                <span class="h-4 w-4 inline-flex items-center justify-center">
+                                    <Icon icon=phosphor_leptos::PLUG/>
+                                </span>
+                                <span class="hidden sm:inline">{connect_label.clone()}</span>
+                            </span>
+                        }.into_any()
+                    }}
+                </Button>
+            }
+            .into_any()
+        }
+    });
 
     view! {
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 gap-3 hover:bg-muted/50 transition-colors">
@@ -463,8 +716,13 @@ fn DatasourceRow(
                 </div>
             </div>
 
-            // Right side: toggle, settings, delete
+            // Right side: credential action, toggle, settings, delete
             <div class="flex items-center gap-2 sm:gap-3 flex-wrap sm:flex-nowrap">
+                // Credential action button — only rendered when credentials are
+                // missing or expired. Provides the primary call-to-action for
+                // datasources that cannot be enabled yet.
+                {cred_action_view}
+
                 // User enable/disable toggle
                 <div class="flex items-center gap-2">
                     <span class="text-xs text-muted-foreground hidden sm:inline">
