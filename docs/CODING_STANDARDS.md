@@ -275,6 +275,76 @@ let footer: Arc<dyn Fn() -> AnyView> = Arc::new(move || {
 1. Move the input outside the reactive closure (into static view structure)
 2. Use `Signal::derive` so the signal subscription is scoped to a leaf attribute, not the whole closure
 
+### Resolve derived signal values at click time, not render time
+
+When a `Signal::derive` or `Memo` produces a value used inside an `on:click` handler, the handler must call `.get_untracked()` at click time — not capture the value at render time via the outer reactive closure. If the outer closure re-runs (e.g. because `oauth_connected` or `cfg_missing` changes), it captures a new `connect_url` value — but if the underlying signal (e.g. `slug`) changes *without* triggering the outer closure, the handler holds a stale URL.
+
+**Rule:** For any `on:click` handler that uses a derived signal, call `.get_untracked()` inside the click handler itself, not in the enclosing reactive closure.
+
+```rust
+// WRONG — URL captured at render time, stale if slug changes
+let connect_url = Signal::derive(move || format!("/auth/oauth/{}/connect?slug={}", provider, slug.get()));
+view! {
+    {move || {
+        let url = connect_url.get();  // captured when this closure runs
+        view! {
+            <button on:click=move |_| open_oauth_popup(&url)>  // stale if slug changed
+                "Connect"
+            </button>
+        }
+    }}
+}
+
+// RIGHT — URL resolved at click time
+view! {
+    {move || {
+        view! {
+            <button on:click=move |_| {
+                let url = connect_url.get_untracked();  // fresh at click time
+                open_oauth_popup(&url);
+            }>
+                "Connect"
+            </button>
+        }
+    }}
+}
+```
+
+This is the sister rule to "Never snapshot a Signal prop into a local variable" — both prevent freezing reactive values at the wrong moment. Flagged in KYO-13 review (stale enterprise OAuth URL after slug edit).
+
+### Add `Effect::new` re-fetch when auth mode toggles in an open modal
+
+When a datasource modal supports multiple auth modes (e.g. `service_account` / `kyomi_oauth` / `enterprise_oauth`), the OAuth status panel must re-fetch status when the user switches modes. Without an `Effect::new` subscribing to the auth mode signal, the panel shows stale data from the previously-fetched mode.
+
+**Rule:** Any `AuthModeSection` component that displays OAuth status must include an `Effect::new` that subscribes to the auth mode signal, resets state to "disconnected" while in-flight, and fetches the correct status for the new mode. Skip the fetch for modes that don't use OAuth (e.g. `service_account`).
+
+```rust
+// WRONG — status fetched only on modal open, not on mode switch
+// User switches from kyomi_oauth (connected) to enterprise_oauth (not configured)
+// → panel still shows "Connected: user@example.com" from the kyomi_oauth fetch
+
+// RIGHT — Effect re-fetches on mode change
+Effect::new(move |_| {
+    let mode = bq_auth_mode.get();
+    let current_slug = slug.get();
+    if mode == "service_account" || current_slug.is_empty() { return; }
+    set_oauth_connected.set(false);
+    set_oauth_email.set(String::new());
+    set_oauth_expired.set(false);
+    spawn_local(async move {
+        // fetch status for the correct mode
+        let result = match mode.as_str() {
+            "kyomi_oauth" => get_google_oauth_status().await,
+            "enterprise_oauth" => get_datasource_oauth_status(/*...*/).await,
+            _ => return,
+        };
+        // update signals from result...
+    });
+});
+```
+
+This pattern was independently flagged in KYO-13 (BigQuery) and KYO-17 (Databricks) reviews. The BigQuery implementation is the canonical template.
+
 ## Email Templates
 
 *Standards for HTML email templates (alert.rs, email_service.rs, feedback_service.rs, analytics_notifications.rs).*
@@ -322,6 +392,29 @@ Per the CSS Cascading and Inheritance spec, `!important` author stylesheet decla
 ## API & Server Functions
 
 *Standards for server functions, REST endpoints, and the boundary between frontend and backend.*
+
+### Never reimplement server-owned URL/routing logic on the client
+
+OAuth connect URLs, callback URLs, and API endpoint paths are owned by the server. Client-side functions that reconstruct these URLs by pattern-matching on provider strings duplicate logic that `get_oauth_connect_url` (or equivalent server_fn) already handles correctly — and inevitably miss edge cases (e.g. BigQuery `enterprise_oauth` needing a different endpoint than `kyomi_oauth`).
+
+**Rule:** Call the server_fn that owns the URL logic. If no server_fn exists for the use case, create one. Never build API URLs client-side from provider/mode strings.
+
+```rust
+// WRONG — client reimplements URL routing, misses enterprise_oauth branch
+fn oauth_url_for_datasource(provider: &str, slug: &str) -> String {
+    match provider {
+        "bigquery" => "/api/v1/auth/google-oauth/connect".to_string(),
+        // missing: enterprise_oauth needs /api/v1/auth/oauth/bigquery-enterprise/connect?datasource_slug=...
+        "snowflake" => format!("/api/v1/auth/oauth/snowflake/connect?datasource_slug={slug}"),
+        _ => String::new(),
+    }
+}
+
+// RIGHT — server_fn owns the routing
+let url = get_oauth_connect_url(provider.clone(), slug.clone(), auth_mode).await?;
+```
+
+Flagged in KYO-12 review — `oauth_url_for_datasource` silently routed enterprise BigQuery users to the wrong OAuth endpoint.
 
 ### Server functions must call service-layer functions directly — never HTTP loopback
 
