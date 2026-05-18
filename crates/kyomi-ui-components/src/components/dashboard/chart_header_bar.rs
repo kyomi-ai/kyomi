@@ -110,6 +110,27 @@ fn format_relative_time(timestamp_ms: f64, now_ms: f64) -> String {
     format!("{days}d ago")
 }
 
+/// Format millisecond timestamp as a compact relative time string (clock icon companion).
+///
+/// Used by the compact timestamp tier (320–447px container width) alongside a
+/// `CLOCK` icon. Returns a short label with no trailing "ago":
+/// - `< 60s`  → "now"
+/// - `< 60m`  → "{N}m"
+/// - `< 24h`  → "{N}h"
+/// - `>= 24h` → "{N}d"
+fn format_relative_time_compact(timestamp_ms: f64, now_ms: f64) -> String {
+    let diff_ms = now_ms - timestamp_ms;
+    let diff_secs = (diff_ms / 1000.0) as i64;
+
+    if diff_secs < 60 { return "now".to_string(); }
+    let mins = diff_secs / 60;
+    if mins < 60 { return format!("{mins}m"); }
+    let hours = mins / 60;
+    if hours < 24 { return format!("{hours}h"); }
+    let days = hours / 24;
+    format!("{days}d")
+}
+
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
@@ -403,7 +424,9 @@ pub fn ChartHeaderBar(
                 {before.map(|children| children())}
 
                 // "Last refreshed ..." text — hidden below @md (< 448px container).
+                // A compact clock + short label is shown at the @xs–@md tier (320–447px).
                 {last_updated.map(|sig| view! {
+                    // Full text: shown at @md+ (448px+).
                     <span class="hidden @md:inline text-xs text-muted-foreground truncate">
                         {move || {
                             let now = now_ms.get();
@@ -415,6 +438,24 @@ pub fn ChartHeaderBar(
                             } else {
                                 format!("Last refreshed {text}")
                             }
+                        }}
+                    </span>
+                    // Compact clock + short label: shown at @xs–@md (320–447px).
+                    <span
+                        class="hidden @xs:flex @md:hidden items-center gap-1 text-xs text-muted-foreground"
+                        title={move || {
+                            let now = now_ms.get();
+                            sig.get()
+                                .map(|ts| format!("Last refreshed {}", format_relative_time(ts, now)))
+                                .unwrap_or_default()
+                        }}
+                    >
+                        <Icon icon=phosphor_leptos::CLOCK size="14px" />
+                        {move || {
+                            let now = now_ms.get();
+                            sig.get()
+                                .map(|ts| format_relative_time_compact(ts, now))
+                                .unwrap_or_default()
                         }}
                     </span>
                 })}
