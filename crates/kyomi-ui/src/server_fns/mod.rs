@@ -30,6 +30,7 @@ pub mod knowledge;
 pub mod onboarding;
 pub mod ownership;
 pub mod profile;
+pub(crate) mod provider_cache;
 pub mod security;
 pub mod setup;
 pub mod sidebar;

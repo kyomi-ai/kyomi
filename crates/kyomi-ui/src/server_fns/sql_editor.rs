@@ -42,6 +42,11 @@ pub struct DryRunResult {
 ///
 /// Uses database-native mechanisms (e.g., BigQuery `dryRun: true`, PostgreSQL
 /// `EXPLAIN`, SQL Server `SET NOEXEC ON`) to check syntax and estimate cost.
+///
+/// Providers are cached for 60 seconds keyed on `(user_id, workspace_id,
+/// datasource_slug)` to avoid the 300-500ms setup cost on every keystroke.
+/// The cache manages provider lifecycle — `close()` is intentionally not
+/// called here because the cached `Arc` must remain valid for future calls.
 #[server(prefix = "/leptos-api")]
 pub async fn dry_run_sql(
     datasource_slug: String,
@@ -49,8 +54,22 @@ pub async fn dry_run_sql(
 ) -> Result<DryRunResult, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
 
-    let (_ds, provider) =
-        super::datasources::create_query_provider(&ac.ctx, &ac.auth, &ac.ws_id, &datasource_slug).await?;
+    let provider = if let Some(cached) = super::provider_cache::get_cached(
+        &ac.auth.user_id,
+        &ac.ws_id,
+        &datasource_slug,
+    ) {
+        cached
+    } else {
+        let (_ds, boxed) = super::datasources::create_query_provider(
+            &ac.ctx,
+            &ac.auth,
+            &ac.ws_id,
+            &datasource_slug,
+        )
+        .await?;
+        super::provider_cache::insert(&ac.auth.user_id, &ac.ws_id, &datasource_slug, boxed)
+    };
 
     let result = match tokio::time::timeout(
         kyomi_datasource_server::DATASOURCE_TIMEOUT_DRY_RUN,
@@ -84,7 +103,7 @@ pub async fn dry_run_sql(
         },
     };
 
-    provider.close().await;
+    // No provider.close() — the cache manages provider lifecycle.
 
     Ok(result)
 }
