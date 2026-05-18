@@ -350,6 +350,13 @@ pub async fn resolve_credentials(
                     client_secret,
                 )
                 .await?;
+                if !kyomi_auth::google_oauth::has_bigquery_scopes(&tokens.scope) {
+                    return Err(kyomi_core::Error::BadRequest(
+                        "Your Google account is not connected with BigQuery permissions. \
+                         Please reconnect via Settings → Datasources → BigQuery."
+                            .into(),
+                    ));
+                }
                 let oauth_data = kyomi_auth::google_oauth::OAuthData {
                     google_oauth_tokens: Some(tokens),
                     ..Default::default()

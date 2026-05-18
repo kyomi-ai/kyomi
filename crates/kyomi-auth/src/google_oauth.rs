@@ -358,11 +358,20 @@ pub async fn build_datasource_user_context(
         })?;
         match ensure_valid_google_token(db, user_id, key, client_id, client_secret).await {
             Ok(tokens) => {
-                let data = OAuthData {
-                    google_oauth_tokens: Some(tokens),
-                    ..Default::default()
-                };
-                serde_json::to_value(data).ok()
+                if has_bigquery_scopes(&tokens.scope) {
+                    let data = OAuthData {
+                        google_oauth_tokens: Some(tokens),
+                        ..Default::default()
+                    };
+                    serde_json::to_value(data).ok()
+                } else {
+                    tracing::info!(
+                        user_id = %user_id,
+                        scope = %tokens.scope,
+                        "Google token lacks BigQuery scopes — user needs to complete BigQuery connect flow"
+                    );
+                    None
+                }
             }
             Err(_) => None,
         }
