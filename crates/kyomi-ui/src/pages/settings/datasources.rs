@@ -1163,7 +1163,7 @@ pub fn DatasourceModal(
                             set_catalog_selected.try_set(selected_items);
                             let include_public = cfg
                                 .get("include_public_datasets")
-                                .and_then(|v| v.as_bool())
+                                .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s.eq_ignore_ascii_case("true"))))
                                 .unwrap_or(false);
                             set_bq_include_public.try_set(include_public);
 
