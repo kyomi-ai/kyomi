@@ -343,7 +343,7 @@ pub async fn get_catalog_tree(
         let include_public = datasource
             .connection_config
             .get("include_public_datasets")
-            .and_then(|v| v.as_bool())
+            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s.eq_ignore_ascii_case("true"))))
             .unwrap_or(true);
 
         if include_public {
@@ -578,7 +578,7 @@ pub async fn search_catalog(
         let include_public = datasource
             .connection_config
             .get("include_public_datasets")
-            .and_then(|v| v.as_bool())
+            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s.eq_ignore_ascii_case("true"))))
             .unwrap_or(true);
 
         if include_public {
