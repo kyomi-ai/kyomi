@@ -18,19 +18,12 @@ use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
 };
 
-/// Kyomi logo PNG (light mode — dark text, transparent background), embedded at compile time.
+/// Kyomi logo PNG (brand orange text, transparent background), embedded at compile time.
 static LOGO_BYTES: &[u8] =
     include_bytes!("../../../assets/kyomi_email_logo.png");
 
-/// Kyomi logo PNG (dark mode — white text, transparent background), embedded at compile time.
-static LOGO_DARK_BYTES: &[u8] =
-    include_bytes!("../../../assets/kyomi_email_logo_dark.png");
-
-/// Content-ID used in `<img src="cid:kyomi_logo">` (light mode logo).
+/// Content-ID used in `<img src="cid:kyomi_logo">`.
 const LOGO_CID: &str = "kyomi_logo";
-
-/// Content-ID used in `<img src="cid:kyomi_logo_dark">` (dark mode logo).
-const LOGO_DARK_CID: &str = "kyomi_logo_dark";
 
 /// SMTP email service.
 ///
@@ -172,19 +165,14 @@ impl EmailService {
             )
         };
 
-        // Wrap in multipart/related so the inline logo CIDs resolve.
-        // Both light and dark logos are attached; the email template uses CSS
-        // media queries to show the correct one per the client's color scheme.
+        // Wrap in multipart/related so the inline logo CID resolves.
+        // A single all-orange logo works on both light and dark backgrounds.
         let png_ct: ContentType = "image/png".parse().expect("valid content type");
         let mut related = MultiPart::related()
             .multipart(alternative)
             .singlepart(
                 Attachment::new_inline(LOGO_CID.to_string())
                     .body(Body::new(LOGO_BYTES.to_vec()), png_ct.clone()),
-            )
-            .singlepart(
-                Attachment::new_inline(LOGO_DARK_CID.to_string())
-                    .body(Body::new(LOGO_DARK_BYTES.to_vec()), png_ct.clone()),
             );
 
         // Attach any additional inline CID images (e.g. rendered charts)
@@ -379,8 +367,6 @@ impl EmailService {
         .footer a:hover {{
             text-decoration: underline;
         }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3 {{ color: #F5F3EF !important; }}
@@ -390,16 +376,13 @@ impl EmailService {
             .feature {{ color: #A8A29E !important; }}
             .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
             .footer a {{ color: #A8A29E !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
     <div class="content">
@@ -635,8 +618,6 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
         .footer a:hover {{
             text-decoration: underline;
         }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3 {{ color: #F5F3EF !important; }}
@@ -646,16 +627,13 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             .feature {{ color: #A8A29E !important; }}
             .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
             .footer a {{ color: #A8A29E !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
     <div class="content">
@@ -802,8 +780,6 @@ You're receiving this email because you requested account recovery for Kyomi.
         .footer a:hover {{
             text-decoration: underline;
         }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3 {{ color: #F5F3EF !important; }}
@@ -813,16 +789,13 @@ You're receiving this email because you requested account recovery for Kyomi.
             .feature {{ color: #A8A29E !important; }}
             .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
             .footer a {{ color: #A8A29E !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
     <div class="content">
@@ -969,8 +942,6 @@ You're receiving this email because you requested account recovery for Kyomi.
         .footer a:hover {{
             text-decoration: underline;
         }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3 {{ color: #F5F3EF !important; }}
@@ -980,16 +951,13 @@ You're receiving this email because you requested account recovery for Kyomi.
             .feature {{ color: #A8A29E !important; }}
             .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
             .footer a {{ color: #A8A29E !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
     <div class="content">
@@ -1133,8 +1101,6 @@ You're receiving this because someone signed up for Kyomi with this email addres
         .footer a:hover {{
             text-decoration: underline;
         }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3 {{ color: #F5F3EF !important; }}
@@ -1144,16 +1110,13 @@ You're receiving this because someone signed up for Kyomi with this email addres
             .feature {{ color: #A8A29E !important; }}
             .footer {{ border-top-color: #2E2925 !important; color: #78716C !important; }}
             .footer a {{ color: #A8A29E !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body style="background-color: #FAFAF8; color: #1C1917;">
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
     <div class="content">
@@ -1278,8 +1241,6 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             color: #9C9790;
             font-size: 12px;
         }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h2 {{ color: #F5F3EF !important; }}
@@ -1288,16 +1249,13 @@ Unsubscribe: {frontend_url}/unsubscribe?email={email}
             .footer a {{ color: #A8A29E !important; }}
             td {{ color: #A8A29E !important; }}
             td:first-child {{ color: #F5F3EF !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body>
     <div class="header">
         <a href="{frontend_url}" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
     <h2 style="margin:0 0 16px 0;">{subject}</h2>
