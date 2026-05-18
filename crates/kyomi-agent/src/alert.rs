@@ -680,8 +680,6 @@ fn build_watch_alert_email(
         }}
         .attribution {{ color: #9C9790; }}
         .content-card {{ background: #ffffff; }}
-        .logo-light {{ display: block; }}
-        .logo-dark {{ display: none; }}
         @media (prefers-color-scheme: dark) {{
             body {{ background-color: #12100F !important; color: #F5F3EF !important; }}
             h1, h2, h3, h4 {{ color: #F5F3EF !important; }}
@@ -698,16 +696,13 @@ fn build_watch_alert_email(
             tbody tr {{ background-color: #1A1715 !important; }}
             .attribution {{ color: #78716C !important; }}
             .badge {{ background: #2E2925 !important; color: #F5F3EF !important; }}
-            .logo-light {{ display: none !important; }}
-            .logo-dark {{ display: block !important; }}
         }}
     </style>
 </head>
 <body style="background-color: #FAFAF8;">
     <div class="header">
         <a href="https://kyomi.ai" style="text-decoration: none;">
-            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img logo-light" style="height: 48px; width: auto; display: block;">
-            <img src="cid:kyomi_logo_dark" alt="Kyomi" class="logo-img logo-dark" style="height: 48px; width: auto; display: none;">
+            <img src="cid:kyomi_logo" alt="Kyomi" class="logo-img" style="height: 48px; width: auto;">
         </a>
     </div>
 
@@ -1484,9 +1479,7 @@ mod tests {
             WatchMode::Alert,
         );
         assert!(html.contains("cid:kyomi_logo\""));
-        assert!(html.contains("cid:kyomi_logo_dark\""));
-        assert!(html.contains("class=\"logo-img logo-light\""));
-        assert!(html.contains("class=\"logo-img logo-dark\""));
+        assert!(html.contains("class=\"logo-img\""));
         assert!(html.contains("alt=\"Kyomi\""));
         assert!(html.contains("https://kyomi.ai"));
         assert!(html.contains("class=\"header\""));
