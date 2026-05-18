@@ -354,7 +354,30 @@ pub async fn resolve_credentials(
                     google_oauth_tokens: Some(tokens),
                     ..Default::default()
                 };
-                return Ok(serde_json::json!({ "oauth_data": oauth_data }));
+
+                // Also load per-user credentials so that billing_project,
+                // default_project, and query_size_limit_gb are available to
+                // resolve_billing_project() downstream. Without this, the
+                // per-user billing project stored in user_datasource_credentials
+                // is invisible to the BigQuery factory and the query fails.
+                let mut result = if let Some(cred) =
+                    kyomi_auth::datasource_service::get_user_credential(
+                        &ctx.db,
+                        &ctx.user_id,
+                        &ds.id,
+                    )
+                    .await?
+                {
+                    kyomi_auth::encryption::decrypt_json(
+                        &cred.credentials,
+                        &ctx.encryption_key,
+                    )?
+                } else {
+                    serde_json::json!({})
+                };
+
+                result["oauth_data"] = serde_json::json!(oauth_data);
+                return Ok(result);
             }
 
         Ok(serde_json::json!({}))
