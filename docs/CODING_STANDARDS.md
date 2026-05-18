@@ -437,26 +437,6 @@ pub async fn link_google_account(code: String) -> Result<LinkResult, ServerFnErr
 }
 ```
 
-### Never reimplement server-owned URL/routing logic on the client
-
-When the server already owns logic for computing a URL or routing decision (e.g., which OAuth endpoint to use based on datasource type and auth_mode), the client must call a server_fn that delegates to that logic — not reimplement it with string matching. Client-side reimplementations drift silently when new cases are added server-side.
-
-**Rule:** If the server already has a function that computes the right URL/path/config, expose it as a server_fn and call it from the client. If you need the value at render time (not just on button click), fetch it in an Effect or Resource.
-
-```rust
-// WRONG — client reimplements server routing logic, will drift
-fn oauth_url_for_datasource(ds_type: &str) -> String {
-    match ds_type {
-        "bigquery" => "/api/v1/auth/google-oauth/connect".to_string(),
-        "snowflake" => "/api/v1/auth/oauth/snowflake/connect".to_string(),
-        // silently wrong for bigquery enterprise_oauth mode
-    }
-}
-
-// RIGHT — call existing server_fn that owns the logic
-let url = get_oauth_connect_url(slug.clone()).await?;
-```
-
 ## Data & State Management
 
 *Standards for database access, caching, state synchronization, and data flow.*
