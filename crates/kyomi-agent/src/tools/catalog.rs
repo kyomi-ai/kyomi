@@ -4,6 +4,9 @@
 
 use async_trait::async_trait;
 
+use kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID;
+use kyomi_core::enums::DatasourceType;
+
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
@@ -117,8 +120,43 @@ impl AgentTool for GetTableInfoTool {
         )?;
         let table_metadata = cached.map(|row| row.table_metadata);
 
+        // If not found in the user's datasource, try the BigQuery public dataset
+        // workspace when the datasource is BigQuery with include_public_datasets enabled.
         let table_metadata = if let Some(metadata) = table_metadata {
             metadata
+        } else if ds.datasource_type == DatasourceType::Bigquery
+            && ds
+                .connection_config
+                .get("include_public_datasets")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        {
+            let public_sql = format!(
+                "SELECT dtc.table_metadata \
+                 FROM datasource_table_cache dtc \
+                 WHERE dtc.workspace_id = $1 \
+                   AND dtc.is_archived = {bool_false} \
+                   AND {full_name_expr} = $2"
+            );
+            let public_cached: Option<TableMetadataRow> = kyomi_core::db_fetch_optional!(
+                ctx.db, TableMetadataRow,
+                &public_sql,
+                PUBLIC_DATA_WORKSPACE_ID,
+                table_name
+            )?;
+            match public_cached {
+                Some(row) => row.table_metadata,
+                None => {
+                    return Ok(serde_json::json!({
+                        "error": format!(
+                            "Table '{}' not found in catalog cache for datasource '{}'. \
+                             Try running a catalog refresh.",
+                            table_name, datasource_slug
+                        )
+                    })
+                    .to_string());
+                }
+            }
         } else {
             // Table not in cache — return informative error
             return Ok(serde_json::json!({
@@ -231,9 +269,29 @@ impl AgentTool for BrowseCatalogTool {
              WHERE datasource_config_id = $1 AND is_archived = {bool_false} \
              ORDER BY dataset_id, table_id"
         );
-        let rows: Vec<CatalogBrowseRow> =
+        let mut rows: Vec<CatalogBrowseRow> =
             kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &sql, &ds.id)
                 .unwrap_or_default();
+
+        // BigQuery public datasets: include if enabled (defaults to true).
+        if ds.datasource_type == DatasourceType::Bigquery
+            && ds
+                .connection_config
+                .get("include_public_datasets")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true)
+        {
+            let public_sql = format!(
+                "SELECT project_id, dataset_id, table_id, table_metadata \
+                 FROM datasource_table_cache \
+                 WHERE workspace_id = $1 AND is_archived = {bool_false} \
+                 ORDER BY dataset_id, table_id"
+            );
+            let public_rows: Vec<CatalogBrowseRow> =
+                kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &public_sql, PUBLIC_DATA_WORKSPACE_ID)
+                    .unwrap_or_default();
+            rows.extend(public_rows);
+        }
 
         let mut schemas: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();
