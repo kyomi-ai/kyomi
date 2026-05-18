@@ -18,6 +18,7 @@ use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{Button, ButtonSize, ButtonVariant};
 use crate::pages::sql_editor::types::{CatalogNode, CatalogNodeType};
+use crate::query_cache::use_query;
 use crate::server_fns::sql_editor::get_catalog_tree;
 
 // ─── Main component ────────────────────────────────────────────────────────
@@ -53,22 +54,18 @@ pub fn CatalogTree(
     let (expanded_nodes, set_expanded_nodes) = signal(HashSet::<String>::new());
 
     // Fetch catalog tree reactively when datasource or refresh trigger changes.
-    // Use try_get() so the resource source is safe during scope disposal.
-    let catalog_resource = Resource::new(
+    // Deps are (slug, trigger) — both Serialize. Empty slug is passed through
+    // to the server fn which will return an error; the view handles the
+    // "no datasource" case by checking for an empty slug before showing data.
+    let catalog_data = use_query(
+        "catalog",
         move || {
             (
-                datasource_slug.try_get().flatten(),
+                datasource_slug.try_get().flatten().unwrap_or_default(),
                 refresh_trigger.try_get().unwrap_or(0),
             )
         },
-        move |(slug, _trigger)| async move {
-            let Some(slug) = slug else {
-                return Err("no-datasource".to_string());
-            };
-            get_catalog_tree(slug, true)
-                .await
-                .map_err(|e| e.to_string())
-        },
+        |(slug, _trigger)| get_catalog_tree(slug, true),
     );
 
     // Reset expanded nodes when datasource changes.
@@ -86,66 +83,68 @@ pub fn CatalogTree(
     };
 
     view! {
-        <Transition fallback=move || view! {
-            <div class="flex items-center justify-center py-8">
-                <crate::components::Spinner />
-            </div>
-        }>
-            {move || Suspend::new(async move {
-                let result = catalog_resource.await;
-                match result {
-                    Err(ref e) if e == "no-datasource" => {
-                        // No datasource selected
-                        view! {
-                            <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                <Icon icon=phosphor_leptos::DATABASE attr:class="w-12 h-12 text-muted-foreground mb-2" />
-                                <p class="text-sm text-muted-foreground">"Select a datasource"</p>
-                                <p class="text-xs text-muted-foreground mt-1">"Choose a datasource to browse its catalog"</p>
-                            </div>
-                        }.into_any()
-                    }
-                    Err(e) => {
-                        // Error state
-                        view! {
-                            <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                <Icon icon=phosphor_leptos::WARNING attr:class="w-12 h-12 text-error-foreground mb-2" />
-                                <p class="text-sm text-error-foreground">"Failed to load catalog"</p>
-                                <p class="text-xs text-muted-foreground mt-1">{e}</p>
-                            </div>
-                        }.into_any()
-                    }
-                    Ok(catalog) => {
-                        if catalog.tree.is_empty() {
-                            // Empty catalog
-                            view! {
-                                <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
-                                    <Icon icon=phosphor_leptos::TRAY attr:class="w-12 h-12 text-muted-foreground mb-2" />
-                                    <p class="text-sm text-muted-foreground">"No tables indexed"</p>
-                                    <p class="text-xs text-muted-foreground mt-1">"Index the catalog in datasource settings"</p>
-                                </div>
-                            }.into_any()
-                        } else {
-                            // Regular tree view
-                            let table_count = catalog.table_count;
-                            let tree = catalog.tree;
+        {move || {
+            let slug = datasource_slug.get();
+            if slug.as_deref().unwrap_or("").is_empty() {
+                // No datasource selected
+                return view! {
+                    <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
+                        <Icon icon=phosphor_leptos::DATABASE attr:class="w-12 h-12 text-muted-foreground mb-2" />
+                        <p class="text-sm text-muted-foreground">"Select a datasource"</p>
+                        <p class="text-xs text-muted-foreground mt-1">"Choose a datasource to browse its catalog"</p>
+                    </div>
+                }.into_any();
+            }
 
-                            view! {
-                                <CatalogTreeView
-                                    tree=tree
-                                    table_count=table_count
-                                    search_query=search_query
-                                    expanded_nodes=expanded_nodes
-                                    on_toggle=Callback::new(toggle_node)
-                                    on_table_click=on_table_click
-                                    on_column_click=on_column_click
-                                    on_table_info=stored_table_info.get_value()
-                                />
-                            }.into_any()
-                        }
+            match catalog_data.get() {
+                None => {
+                    // Loading (first fetch or transition)
+                    view! {
+                        <div class="flex items-center justify-center py-8">
+                            <crate::components::Spinner />
+                        </div>
+                    }.into_any()
+                }
+                Some(Err(e)) => {
+                    // Error state
+                    view! {
+                        <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
+                            <Icon icon=phosphor_leptos::WARNING attr:class="w-12 h-12 text-error-foreground mb-2" />
+                            <p class="text-sm text-error-foreground">"Failed to load catalog"</p>
+                            <p class="text-xs text-muted-foreground mt-1">{e.to_string()}</p>
+                        </div>
+                    }.into_any()
+                }
+                Some(Ok(catalog)) => {
+                    if catalog.tree.is_empty() {
+                        // Empty catalog
+                        view! {
+                            <div class="flex flex-col items-center justify-center py-8 px-4 text-center">
+                                <Icon icon=phosphor_leptos::TRAY attr:class="w-12 h-12 text-muted-foreground mb-2" />
+                                <p class="text-sm text-muted-foreground">"No tables indexed"</p>
+                                <p class="text-xs text-muted-foreground mt-1">"Index the catalog in datasource settings"</p>
+                            </div>
+                        }.into_any()
+                    } else {
+                        // Regular tree view
+                        let table_count = catalog.table_count;
+                        let tree = catalog.tree;
+                        view! {
+                            <CatalogTreeView
+                                tree=tree
+                                table_count=table_count
+                                search_query=search_query
+                                expanded_nodes=expanded_nodes
+                                on_toggle=Callback::new(toggle_node)
+                                on_table_click=on_table_click
+                                on_column_click=on_column_click
+                                on_table_info=stored_table_info.get_value()
+                            />
+                        }.into_any()
                     }
                 }
-            })}
-        </Transition>
+            }
+        }}
     }
 }
 
