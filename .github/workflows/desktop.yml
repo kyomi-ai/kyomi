@@ -18,7 +18,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TRUNK_VERSION: 0.21.14
-  WASM_BINDGEN_VERSION: 0.2.114
+  WASM_BINDGEN_VERSION: 0.2.121
   TAILWIND_VERSION: v4.2.2
   BINARYEN_VERSION: version_128
 
@@ -125,7 +125,7 @@ jobs:
           fi
           $SUDO curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${{ matrix.trunk_arch }}-${{ matrix.trunk_os_suffix }}.tar.gz" \
             | $SUDO tar -xz -C /usr/local/bin trunk
-          $SUDO curl -fsSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
+          $SUDO curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN_VERSION}/wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}.tar.gz" \
             | $SUDO tar -xz --strip-components=1 -C /usr/local/bin \
                 "wasm-bindgen-${WASM_BINDGEN_VERSION}-${{ matrix.wasm_bindgen_arch }}/wasm-bindgen"
           $SUDO curl -fsSL -o /usr/local/bin/tailwindcss \
