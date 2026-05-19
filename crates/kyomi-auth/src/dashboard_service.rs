@@ -239,17 +239,33 @@ async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) -> Option<ser
         content_preview: Option<String>,
         updated_at: String,
         created_at: String,
+        view_count: i64,
+        recent_views: i64,
     }
+
+    let recent_cutoff = Utc::now() - Duration::days(30);
 
     let row = db_fetch_optional!(
         db,
         SnapshotRow,
-        r#"SELECT dashboard_id, user_id, workspace_id, title, doc_type,
-                  CAST(content_preview AS TEXT) AS content_preview,
-                  CAST(updated_at AS TEXT) AS updated_at,
-                  CAST(created_at AS TEXT) AS created_at
-           FROM dashboards WHERE dashboard_id = $1"#,
-        dashboard_id
+        r#"SELECT d.dashboard_id, d.user_id, d.workspace_id, d.title, d.doc_type,
+                  CAST(d.content_preview AS TEXT) AS content_preview,
+                  CAST(d.updated_at AS TEXT) AS updated_at,
+                  CAST(d.created_at AS TEXT) AS created_at,
+                  COALESCE(v.view_count, 0) AS view_count,
+                  COALESCE(v.recent_views, 0) AS recent_views
+           FROM dashboards d
+           LEFT JOIN (
+               SELECT dashboard_id,
+                      COUNT(*) AS view_count,
+                      SUM(CASE WHEN viewed_at >= $2 THEN 1 ELSE 0 END) AS recent_views
+               FROM dashboard_views
+               WHERE dashboard_id = $1
+               GROUP BY dashboard_id
+           ) v ON d.dashboard_id = v.dashboard_id
+           WHERE d.dashboard_id = $1"#,
+        dashboard_id,
+        recent_cutoff
     )
     .ok()?;
 
@@ -263,6 +279,8 @@ async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) -> Option<ser
         "content_preview": row.content_preview,
         "updated_at": row.updated_at,
         "created_at": row.created_at,
+        "view_count": row.view_count,
+        "recent_views": row.recent_views,
     }))
 }
 
