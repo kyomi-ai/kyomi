@@ -152,7 +152,7 @@ chartml-datafusion = "5"
 chartml-leptos = "5.0.4"
 
 # Code editor (kode) — same pattern as chartml above.
-kode-leptos = "0.2"
+kode-leptos = "0.4"
 
 # Syntax grammars for the kode editor. kode-leptos 0.2+ no longer bundles
 # grammars — consumers opt in to what they need via arborium's feature set.
