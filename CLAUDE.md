@@ -39,6 +39,28 @@ Lint suppressions (`#[allow(...)]` in .rs files, `= "allow"` in Cargo.toml) are 
 
 Workspace lints are enforced in `Cargo.toml [workspace.lints]` at `deny` level. The pre-commit hook and CI independently verify no new suppressions are added.
 
+## External Crate Dependencies (chartml, kyomi-connect)
+
+Kyomi depends on crates from sibling repos (`chartml`, `kyomi-connect`) via **crates.io**, not path dependencies. Production builds always resolve against the registry.
+
+**This means fixes in those repos don't reach kyomi until:**
+1. The fix is merged to the external repo's main branch
+2. A version tag is pushed on that repo to trigger its publish CI (e.g. `v5.0.4` for chartml, `v1.3.2` for kyomi-connect)
+3. The new version lands on crates.io
+4. Kyomi's `Cargo.lock` is updated: `cargo update <crate-name>`
+5. The lock file change is committed and a new kyomi release is cut
+
+Key crates and where they live:
+
+| Crate | Source repo | Kyomi Cargo.toml key |
+|-------|-----------|---------------------|
+| `chartml-*` | `~/repos/chartml` | `chartml-chart-table = "5.0.4"` etc. |
+| `kyomi-datasource` | `~/repos/kyomi-connect` | `kyomi-datasource-drivers = { version = "1.3", package = "kyomi-datasource" }` |
+| `kyomi-connect-protocol` | `~/repos/kyomi-connect` | `kyomi-connect-protocol = "1.2"` |
+| `kode-leptos` | `~/repos/kode` | `kode-leptos = "0.2"` |
+
+**Local dev** can use `[patch.crates-io]` overrides (see commented examples at the bottom of `Cargo.toml`) to point at local checkouts for faster iteration. These patches are dev-only and are not used in production builds.
+
 ## Design System
 
 Always read `DESIGN.md` before making any visual or UI decisions. All font choices, colors, spacing, icons, and aesthetic direction are defined there. Do not deviate without explicit user approval.
