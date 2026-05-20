@@ -16,6 +16,7 @@ use leptos_router::NavigateOptions;
 use crate::components::chat::WebSocketProvider;
 use crate::components::empty_state::EmptyStateVariant;
 use crate::components::feedback_modal::FeedbackModal;
+use crate::components::modal::{Modal, ModalSize};
 use crate::components::popover::{Placement, Popover};
 use crate::components::EmptyState;
 use crate::query_cache::{provide_query_cache, use_query};
@@ -659,6 +660,10 @@ fn Sidebar(
     });
     let (user_menu_open, set_user_menu_open) = signal(false);
     let (feedback_open, set_feedback_open) = signal(false);
+    let (about_open, set_about_open) = signal(false);
+    let (about_version, set_about_version) = signal(String::new());
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = set_about_version;
 
     // Active state for "New Chat" — exact match on /chat only (not /chats or /chat/xxx).
     let pathname = leptos_router::hooks::use_location().pathname;
@@ -1018,6 +1023,36 @@ fn Sidebar(
                                     } else {
                                         None
                                     }}
+                                    <button
+                                        on:click=move |_| {
+                                            set_user_menu_open.set(false);
+                                            set_about_open.set(true);
+                                            #[cfg(target_arch = "wasm32")]
+                                            {
+                                                use wasm_bindgen::JsCast;
+                                                let set_ver = set_about_version;
+                                                leptos::task::spawn_local(async move {
+                                                    let window = web_sys::window().expect("window");
+                                                    let Ok(resp_val) = wasm_bindgen_futures::JsFuture::from(
+                                                        window.fetch_with_str("/api/health"),
+                                                    ).await else { return };
+                                                    let Ok(resp): Result<web_sys::Response, _> = resp_val.dyn_into() else { return };
+                                                    let Ok(text_promise) = resp.text() else { return };
+                                                    let Ok(text_val) = wasm_bindgen_futures::JsFuture::from(text_promise).await else { return };
+                                                    let Some(text) = text_val.as_string() else { return };
+                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+                                                        && let Some(v) = json.get("version").and_then(|v| v.as_str())
+                                                    {
+                                                        let _ = set_ver.try_set(format!("v{v}"));
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        class="w-full text-left px-4 py-2 text-sm text-[var(--color-sidebar-foreground)] transition-colors hover:bg-[var(--color-sidebar-hover)] flex items-center space-x-3"
+                                    >
+                                        <Icon icon=phosphor_leptos::INFO weight=IconWeight::Light size="16px"/>
+                                        <span>"About Kyomi"</span>
+                                    </button>
                                     {if !is_personal {
                                         Some(view! {
                                             <button
@@ -1048,6 +1083,58 @@ fn Sidebar(
             open=feedback_open
             on_open_change=Callback::new(move |open: bool| { let _ = set_feedback_open.try_set(open); })
         />
+
+        // About modal
+        <Modal
+            show=Signal::derive(move || about_open.get())
+            on_close=Callback::new(move |()| set_about_open.set(false))
+            title="About Kyomi"
+            size=ModalSize::Sm
+        >
+            <div class="flex flex-col items-center text-center py-4 space-y-4">
+                <div>
+                    <h2 class="text-xl font-semibold text-foreground font-[family-name:var(--font-display)]">"Kyomi"</h2>
+                    <p class="text-sm text-muted-foreground mt-1">"Your data, your questions, your insights."</p>
+                </div>
+                <div class="text-sm text-muted-foreground">
+                    {move || {
+                        let v = about_version.get();
+                        if v.is_empty() {
+                            view! { <span class="text-muted-foreground/50">"Loading..."</span> }.into_any()
+                        } else {
+                            view! { <span class="font-mono text-foreground">{v}</span> }.into_any()
+                        }
+                    }}
+                </div>
+                <div class="flex flex-col space-y-2 text-sm">
+                    <a
+                        href="https://kyomi.ai/docs"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="text-primary hover:underline"
+                    >
+                        "Documentation"
+                    </a>
+                    <a
+                        href="https://github.com/kyomi-ai/kyomi"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="text-primary hover:underline"
+                    >
+                        "GitHub"
+                    </a>
+                    <a
+                        href="https://github.com/kyomi-ai/kyomi/blob/main/LICENSE"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="text-primary hover:underline"
+                    >
+                        "License (AGPL-3.0)"
+                    </a>
+                </div>
+                <p class="text-xs text-muted-foreground">{"\u{00A9} 2025-2026 Alytic Pty Ltd"}</p>
+            </div>
+        </Modal>
     }
 }
 

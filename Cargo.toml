@@ -66,8 +66,8 @@ memmap2 = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
 
 # WebAuthn (passkeys)
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
-webauthn-rs-proto = "0.5"
+webauthn-rs = { version = "=0.6.1-dev", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+webauthn-rs-proto = "=0.6.1-dev"
 
 # Web Push (VAPID/ECE content encoding)
 web-push-native = "0.4"

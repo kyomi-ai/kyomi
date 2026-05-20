@@ -112,6 +112,11 @@ fn apply_runtime_overrides(constants: &mut SharedConstants) {
     {
         constants.cors.allowed_origins.push(frontend_url);
     }
+
+    // Version: prefer build-time tag injected by CI over the TOML default
+    if let Some(v) = option_env!("KYOMI_VERSION") {
+        constants.api.version = v.to_string();
+    }
 }
 
 fn parse_file(path: &Path) -> crate::Result<SharedConstants> {
