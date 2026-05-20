@@ -1040,10 +1040,10 @@ fn Sidebar(
                                                     let Ok(text_promise) = resp.text() else { return };
                                                     let Ok(text_val) = wasm_bindgen_futures::JsFuture::from(text_promise).await else { return };
                                                     let Some(text) = text_val.as_string() else { return };
-                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                                                        if let Some(v) = json.get("version").and_then(|v| v.as_str()) {
-                                                            let _ = set_ver.try_set(format!("v{v}"));
-                                                        }
+                                                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text)
+                                                        && let Some(v) = json.get("version").and_then(|v| v.as_str())
+                                                    {
+                                                        let _ = set_ver.try_set(format!("v{v}"));
                                                     }
                                                 });
                                             }
