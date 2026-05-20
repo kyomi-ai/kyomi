@@ -127,6 +127,7 @@ jobs:
       - name: Build release binary
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+          KYOMI_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release -p kyomi-server
 
       - name: sccache stats
@@ -281,6 +282,7 @@ jobs:
       - name: Build release binary
         env:
           RUSTC_WRAPPER: ${{ env.SCCACHE_AVAILABLE == 'true' && 'sccache' || '' }}
+          KYOMI_VERSION: ${{ needs.prepare.outputs.version }}
         run: cargo build --release -p kyomi-server
 
       - name: sccache stats
