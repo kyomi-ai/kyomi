@@ -190,7 +190,7 @@ struct SessionSnapshotRow {
 ///
 /// Returns `(workspace_id, snapshot_json)`. Returns `None` if the session is
 /// not found or if the query fails.
-async fn fetch_session_snapshot(
+pub(crate) async fn fetch_session_snapshot(
     db: &DbPool,
     session_id: &str,
 ) -> Option<(String, serde_json::Value)> {

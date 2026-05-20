@@ -92,6 +92,13 @@ pub async fn create_knowledge_doc(
         content.clone(),
     );
 
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
+        kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
+            ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
+            kyomi_types::sync::SyncActionType::Insert,
+        ).await;
+    }
+
     Ok(dashboard_id)
 }
 
@@ -111,6 +118,13 @@ pub async fn delete_knowledge_doc(dashboard_id: String) -> Result<(), ServerFnEr
     )
     .await
     .into_sfn()?;
+
+    if let Some(ws_manager) = &ac.ctx.ws_manager {
+        kyomi_auth::websocket::helpers::broadcast_entity_delete(
+            ws_manager, kyomi_types::sync::entity_types::KNOWLEDGE,
+            &dashboard_id, &ac.ws_id,
+        ).await;
+    }
 
     Ok(())
 }

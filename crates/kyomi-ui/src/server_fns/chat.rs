@@ -414,24 +414,11 @@ pub async fn delete_chat_session(session_id: String) -> Result<(), ServerFnError
         "Deleted chat session"
     );
 
-    // Broadcast live sync action to workspace peers.
     if let Some(ws_manager) = &ac.ctx.ws_manager {
-        let sync_action = kyomi_types::sync::SyncAction {
-            sync_id: 0,
-            entity_type: kyomi_types::sync::entity_types::CHAT_SESSION.to_string(),
-            entity_id: session_id.clone(),
-            workspace_id: ac.ws_id.clone(),
-            action: kyomi_types::sync::SyncActionType::Delete,
-            data: None,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        kyomi_auth::websocket::helpers::send_sync_action(
-            ws_manager,
-            &ac.ws_id,
-            &sync_action,
-            Some(&ac.auth.user_id),
-        )
-        .await;
+        kyomi_auth::websocket::helpers::broadcast_entity_delete(
+            ws_manager, kyomi_types::sync::entity_types::CHAT_SESSION,
+            &session_id, &ac.ws_id,
+        ).await;
     }
 
     Ok(())
@@ -473,26 +460,12 @@ pub async fn bulk_delete_sessions(session_ids: Vec<String>) -> Result<(), Server
         "Bulk deleted chat sessions"
     );
 
-    // Broadcast live sync action for each deleted session.
     if let Some(ws_manager) = &ac.ctx.ws_manager {
-        let timestamp = chrono::Utc::now().to_rfc3339();
         for id in &session_ids {
-            let sync_action = kyomi_types::sync::SyncAction {
-                sync_id: 0,
-                entity_type: kyomi_types::sync::entity_types::CHAT_SESSION.to_string(),
-                entity_id: id.clone(),
-                workspace_id: ac.ws_id.clone(),
-                action: kyomi_types::sync::SyncActionType::Delete,
-                data: None,
-                timestamp: timestamp.clone(),
-            };
-            kyomi_auth::websocket::helpers::send_sync_action(
-                ws_manager,
-                &ac.ws_id,
-                &sync_action,
-                Some(&ac.auth.user_id),
-            )
-            .await;
+            kyomi_auth::websocket::helpers::broadcast_entity_delete(
+                ws_manager, kyomi_types::sync::entity_types::CHAT_SESSION,
+                id, &ac.ws_id,
+            ).await;
         }
     }
 
