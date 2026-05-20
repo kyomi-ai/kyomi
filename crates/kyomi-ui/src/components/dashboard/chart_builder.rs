@@ -558,11 +558,9 @@ pub fn ChartBuilderModal(
     let existing_yaml_stored = StoredValue::new(existing_yaml.clone());
 
     let theme_state = crate::components::theme::use_theme();
-    let is_dark = Memo::new(move |_| {
-        theme_state
-            .map(|s| s.effective.get() == "dark")
-            .unwrap_or(false)
-    });
+    let is_dark = theme_state
+        .map(|s| s.effective.get_untracked() == "dark")
+        .unwrap_or(false);
 
     // ── Canonical state: the chart-document AST ─────────────────────────
     // All three sub-tabs read from and write to this signal. There is NO
@@ -848,7 +846,7 @@ pub fn ChartBuilderModal(
     // mounts outside DashboardChartProviders, so ChartMLChart's context
     // fallback finds nothing. We register directly here.
     let inline_chartml: StoredValue<chartml_leptos::ChartMLRef, LocalStorage> = {
-        let chartml = configured_chartml("kyomi", is_dark.get());
+        let chartml = configured_chartml("kyomi", is_dark);
         if !workspace_id.is_empty() {
             let provider: chartml_leptos::ProviderRef = std::sync::Arc::new(
                 crate::chartml_provider::KyomiDatasourceProvider::new(workspace_id.clone()),
@@ -865,7 +863,7 @@ pub fn ChartBuilderModal(
         let initial_sql = ast_get_query(&initial_ast_val);
         if !initial_ds.is_empty() && !initial_sql.trim().is_empty() {
             set_preview_loading.set(true);
-            let dark = is_dark.get();
+            let dark = is_dark;
             leptos::task::spawn_local(async move {
                 match crate::arrow_fetch::fetch_arrow_stream(&initial_ds, &initial_sql).await {
                     Ok(data_table) => {
@@ -1581,7 +1579,7 @@ pub fn ChartBuilderModal(
 
                                             #[cfg(target_arch = "wasm32")]
                                             {
-                                            let dark = is_dark.get();
+                                            let dark = is_dark;
                                             leptos::task::spawn_local(async move {
                                                 match crate::arrow_fetch::fetch_arrow_stream(&ds_slug, &query_text).await {
                                                     Ok(data_table) => {
