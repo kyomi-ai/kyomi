@@ -228,7 +228,7 @@ pub fn generate_change_summary(old_content: &str, new_content: &str) -> String {
 /// Fetch a dashboard/knowledge row and build a JSON snapshot for the sync log.
 ///
 /// Returns `None` if the row no longer exists or if the query fails.
-async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) -> Option<serde_json::Value> {
+pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) -> Option<serde_json::Value> {
     #[derive(sqlx::FromRow)]
     struct SnapshotRow {
         dashboard_id: String,

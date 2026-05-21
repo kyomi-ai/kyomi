@@ -755,6 +755,103 @@ pub async fn send_sync_action(
         .await;
 }
 
+/// Broadcast a dashboard or knowledge doc mutation to all workspace members.
+///
+/// Fetches the full entity snapshot from the database and resolves the correct
+/// `entity_type` (dashboard vs knowledge) from the stored `doc_type`. For
+/// delete actions the snapshot is skipped (the entity is already gone).
+pub async fn broadcast_dashboard_sync(
+    db: &kyomi_core::DbPool,
+    manager: &WebSocketManager,
+    dashboard_id: &str,
+    workspace_id: &str,
+    action: kyomi_types::sync::SyncActionType,
+) {
+    use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
+
+    let (entity_type, data) = if matches!(action, SyncActionType::Delete) {
+        (entity_types::DASHBOARD.to_string(), None)
+    } else {
+        let snapshot = crate::dashboard_service::fetch_dashboard_snapshot(db, dashboard_id).await;
+        let et = snapshot
+            .as_ref()
+            .and_then(|s| s.get("doc_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(entity_types::DASHBOARD)
+            .to_string();
+        (et, snapshot)
+    };
+
+    let sync_action = SyncAction {
+        sync_id: 0,
+        entity_type,
+        entity_id: dashboard_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        action,
+        data,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    send_sync_action(manager, workspace_id, &sync_action, None).await;
+}
+
+/// Broadcast a watch mutation to all workspace members.
+///
+/// Fetches the watch from the database and serializes the full model so the
+/// client sync engine can deserialize it as `WatchListItem`. For delete
+/// actions the snapshot is skipped.
+pub async fn broadcast_watch_sync(
+    db: &kyomi_core::DbPool,
+    manager: &WebSocketManager,
+    watch_id: &str,
+    workspace_id: &str,
+    action: kyomi_types::sync::SyncActionType,
+) {
+    use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
+
+    let data = if matches!(action, SyncActionType::Delete) {
+        None
+    } else {
+        crate::watch_service::get_watch(db, watch_id, workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|w| serde_json::to_value(&w).ok())
+    };
+
+    let sync_action = SyncAction {
+        sync_id: 0,
+        entity_type: entity_types::WATCH.to_string(),
+        entity_id: watch_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        action,
+        data,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    send_sync_action(manager, workspace_id, &sync_action, None).await;
+}
+
+/// Broadcast an entity deletion to all workspace members.
+///
+/// Generic helper for any entity type — no snapshot needed since the entity
+/// is already gone from the database.
+pub async fn broadcast_entity_delete(
+    manager: &WebSocketManager,
+    entity_type: &str,
+    entity_id: &str,
+    workspace_id: &str,
+) {
+    let sync_action = kyomi_types::sync::SyncAction {
+        sync_id: 0,
+        entity_type: entity_type.to_string(),
+        entity_id: entity_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        action: kyomi_types::sync::SyncActionType::Delete,
+        data: None,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    send_sync_action(manager, workspace_id, &sync_action, None).await;
+}
+
 /// Send a dashboard_summary_ready notification.
 pub async fn send_dashboard_summary_ready(
     manager: &WebSocketManager,

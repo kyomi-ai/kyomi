@@ -272,27 +272,11 @@ pub async fn create_dashboard(
         content.clone(),
     );
 
-    // Broadcast live sync action to workspace peers.
     if let Some(ws_manager) = &ac.ctx.ws_manager {
-        let sync_action = kyomi_types::sync::SyncAction {
-            sync_id: 0,
-            entity_type: kyomi_types::sync::entity_types::DASHBOARD.to_string(),
-            entity_id: dashboard_id.clone(),
-            workspace_id: ac.ws_id.clone(),
-            action: kyomi_types::sync::SyncActionType::Insert,
-            data: Some(serde_json::json!({
-                "dashboard_id": dashboard_id,
-                "title": title,
-            })),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        kyomi_auth::websocket::helpers::send_sync_action(
-            ws_manager,
-            &ac.ws_id,
-            &sync_action,
-            Some(&ac.auth.user_id),
-        )
-        .await;
+        kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
+            ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
+            kyomi_types::sync::SyncActionType::Insert,
+        ).await;
     }
 
     Ok(dashboard_id)
@@ -353,24 +337,11 @@ pub async fn update_dashboard(
         }
     }
 
-    // Broadcast live sync action to workspace peers.
     if let Some(ws_manager) = &ac.ctx.ws_manager {
-        let sync_action = kyomi_types::sync::SyncAction {
-            sync_id: 0,
-            entity_type: kyomi_types::sync::entity_types::DASHBOARD.to_string(),
-            entity_id: dashboard_id.clone(),
-            workspace_id: ac.ws_id.clone(),
-            action: kyomi_types::sync::SyncActionType::Update,
-            data: None,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        kyomi_auth::websocket::helpers::send_sync_action(
-            ws_manager,
-            &ac.ws_id,
-            &sync_action,
-            Some(&ac.auth.user_id),
-        )
-        .await;
+        kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
+            ac.db(), ws_manager, &dashboard_id, &ac.ws_id,
+            kyomi_types::sync::SyncActionType::Update,
+        ).await;
     }
 
     Ok(())
@@ -392,24 +363,11 @@ pub async fn delete_dashboard(dashboard_id: String) -> Result<(), ServerFnError>
     .await
     .into_sfn()?;
 
-    // Broadcast live sync action to workspace peers.
     if let Some(ws_manager) = &ac.ctx.ws_manager {
-        let sync_action = kyomi_types::sync::SyncAction {
-            sync_id: 0,
-            entity_type: kyomi_types::sync::entity_types::DASHBOARD.to_string(),
-            entity_id: dashboard_id.clone(),
-            workspace_id: ac.ws_id.clone(),
-            action: kyomi_types::sync::SyncActionType::Delete,
-            data: None,
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-        kyomi_auth::websocket::helpers::send_sync_action(
-            ws_manager,
-            &ac.ws_id,
-            &sync_action,
-            Some(&ac.auth.user_id),
-        )
-        .await;
+        kyomi_auth::websocket::helpers::broadcast_entity_delete(
+            ws_manager, kyomi_types::sync::entity_types::DASHBOARD,
+            &dashboard_id, &ac.ws_id,
+        ).await;
     }
 
     Ok(())
