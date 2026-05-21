@@ -5,7 +5,7 @@
 //! Thin adapter over [`kyomi_auth::feedback_service::submit_feedback`] — the
 //! same shared service called by the REST handler at
 //! `apps/server/src/routes/feedback.rs`. Keeping the logic (validation,
-//! persistence, Linear/Slack/email notifications) in one place guarantees the
+//! persistence, Trakkt/Slack/email notifications) in one place guarantees the
 //! two surfaces cannot silently diverge.
 
 use leptos::prelude::*;
