@@ -4,13 +4,12 @@
 //!
 //! Creates Trakkt issues via the REST API with full context from
 //! in-app feedback submissions. Supports screenshot upload via Trakkt's
-//! base64 attachment endpoint.
+//! multipart attachment endpoint.
 
 use serde::Deserialize;
 
 // ── Hardcoded label IDs from the Kyomi workspace on Trakkt ────────────
 const LABEL_FEEDBACK: &str = "69a2be3c-4d6d-40a4-91ee-f50308b14cc8";
-const LABEL_NEEDS_JASON: &str = "bd3792fa-7f0a-47e1-847f-8eaaef183dd9";
 const LABEL_BUG: &str = "99a19b06-38c9-48c4-90d5-5b8697792566";
 const LABEL_FEATURE: &str = "9a552138-1d44-467d-9331-a4042603893b";
 const LABEL_IMPROVEMENT: &str = "08ba364f-b5d5-436c-ac96-0b4ac90efc9a";
@@ -125,23 +124,21 @@ async fn upload_screenshot(
     content_type: &str,
     issue_id: &str,
 ) -> Result<(), String> {
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(image_bytes);
+    let file_part = reqwest::multipart::Part::bytes(image_bytes.to_vec())
+        .file_name(filename.to_string())
+        .mime_str(content_type)
+        .map_err(|e| format!("Failed to build multipart part: {e}"))?;
 
-    let payload = serde_json::json!({
-        "content_base64": b64,
-        "filename": filename,
-        "content_type": content_type,
-        "issue_id": issue_id,
-    });
+    let form = reqwest::multipart::Form::new().part("file", file_part);
 
     let http = crate::http_client()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
+    let url = format!("{api_url}/api/v1/attachments?issue_id={issue_id}");
     let response = http
-        .post(format!("{api_url}/api/v1/attachments"))
+        .post(&url)
         .bearer_auth(api_token)
-        .json(&payload)
+        .multipart(form)
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
@@ -267,7 +264,6 @@ fn label_ids_for_type(feedback_type: &str) -> Vec<String> {
 
     vec![
         LABEL_FEEDBACK.to_string(),
-        LABEL_NEEDS_JASON.to_string(),
         type_label.to_string(),
     ]
 }
@@ -304,9 +300,8 @@ mod tests {
     #[test]
     fn label_ids_bug() {
         let labels = label_ids_for_type("bug");
-        assert_eq!(labels.len(), 3);
+        assert_eq!(labels.len(), 2);
         assert!(labels.contains(&LABEL_FEEDBACK.to_string()));
-        assert!(labels.contains(&LABEL_NEEDS_JASON.to_string()));
         assert!(labels.contains(&LABEL_BUG.to_string()));
     }
 

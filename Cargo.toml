@@ -63,7 +63,7 @@ memmap2 = "0.9"
 # HTTP client (for external APIs: Anthropic, Stripe, Slack, etc.)
 # Uses native-roots so reqwest trusts both public CAs and our internal CA
 # (distributed via trust-manager's SSL_CERT_FILE bundle).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 
 # WebAuthn (passkeys)
 webauthn-rs = { version = "=0.6.1-dev", features = ["danger-allow-state-serialisation", "conditional-ui"] }
