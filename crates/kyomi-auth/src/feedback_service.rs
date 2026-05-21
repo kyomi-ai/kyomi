@@ -5,7 +5,7 @@
 //! Owns the end-to-end "submit feedback" flow so that both the REST route
 //! (`POST /api/v1/feedback`) and the Leptos server function
 //! (`POST /leptos-api/feedback`) use the same validation, persistence, and
-//! notification pipeline (Linear issue creation, Slack webhook, support email).
+//! notification pipeline (Trakkt issue creation, Slack webhook, support email).
 //!
 //! Callers are thin adapters: they marshal wire-format into `FeedbackInput`,
 //! call [`submit_feedback`], and map `FeedbackResult` back onto their own
@@ -204,8 +204,8 @@ pub async fn submit_feedback(
         let fb_workspace_name = user.workspace.workspace_name.clone();
         let fb_context = context.clone();
         tokio::spawn(async move {
-            // 1. Create Linear issue (primary feedback destination)
-            let linear_result = create_linear_issue_from_feedback(
+            // 1. Create Trakkt issue (primary feedback destination)
+            let trakkt_result = create_trakkt_issue_from_feedback(
                 &notify_config,
                 &fb_id,
                 &fb_type,
@@ -216,8 +216,8 @@ pub async fn submit_feedback(
             )
             .await;
 
-            // 2. Slack notification — slim one-liner if Linear succeeded, full fallback otherwise
-            match &linear_result {
+            // 2. Slack notification — slim one-liner if Trakkt succeeded, full fallback otherwise
+            match &trakkt_result {
                 Some(result) => {
                     if let Err(e) = send_slim_slack_notification(
                         &notify_config,
@@ -315,15 +315,15 @@ fn extension_for_content_type(content_type: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Linear issue creation
+// Trakkt issue creation
 // ---------------------------------------------------------------------------
 
-/// Create a Linear issue from feedback, returning the result if successful.
+/// Create a Trakkt issue from feedback, returning the result if successful.
 ///
-/// Returns `None` if Linear is not configured or if the API call fails.
+/// Returns `None` if Trakkt is not configured or if the API call fails.
 /// Failures are logged but never propagate — feedback submission is not
-/// blocked by Linear outages.
-async fn create_linear_issue_from_feedback(
+/// blocked by Trakkt outages.
+async fn create_trakkt_issue_from_feedback(
     config: &Config,
     feedback_id: &str,
     feedback_type: &str,
@@ -331,32 +331,33 @@ async fn create_linear_issue_from_feedback(
     user_email: &str,
     workspace_name: Option<&str>,
     context: &serde_json::Value,
-) -> Option<crate::linear_service::LinearIssueResult> {
-    let (api_key, team_id) = match (
-        config.linear_api_key.as_deref(),
-        config.linear_feedback_team_id.as_deref(),
+) -> Option<crate::trakkt_service::TrakktIssueResult> {
+    let (api_token, team_key) = match (
+        config.trakkt_api_token.as_deref(),
+        config.trakkt_feedback_team_key.as_deref(),
     ) {
-        (Some(key), Some(team)) => (key, team),
-        _ => {
-            tracing::debug!("Linear not configured, skipping issue creation");
+        (Some(token), Some(key)) => (token, key),
+        (None, _) => {
+            tracing::debug!("Trakkt not configured, skipping issue creation");
+            return None;
+        }
+        (Some(_), None) => {
+            tracing::warn!("TRAKKT_API_TOKEN set but TRAKKT_FEEDBACK_TEAM_KEY missing, skipping issue creation");
             return None;
         }
     };
 
-    // Decode screenshot bytes if available, preserving the content type from
-    // the data URL prefix so Linear receives the correct MIME type and extension.
     let screenshot_with_type: Option<(Vec<u8>, String)> = context
         .as_object()
         .and_then(|obj| obj.get("screenshot_base64"))
         .and_then(|v| v.as_str())
         .and_then(|b64| {
             let content_type = detect_screenshot_content_type(b64).to_string();
-            // Strip data URL prefix if present
             let data = if let Some((_prefix, d)) = b64.split_once(',') { d } else { b64 };
             base64_decode(data).ok().map(|bytes| (bytes, content_type))
         });
 
-    let input = crate::linear_service::FeedbackIssueInput {
+    let input = crate::trakkt_service::FeedbackIssueInput {
         feedback_id: feedback_id.to_string(),
         feedback_type: feedback_type.to_string(),
         description: description.to_string(),
@@ -392,9 +393,10 @@ async fn create_linear_issue_from_feedback(
         timestamp: chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
     };
 
-    match crate::linear_service::create_feedback_issue(
-        api_key,
-        team_id,
+    match crate::trakkt_service::create_feedback_issue(
+        &config.trakkt_api_url,
+        api_token,
+        team_key,
         &input,
         screenshot_with_type
             .as_ref()
@@ -405,8 +407,8 @@ async fn create_linear_issue_from_feedback(
         Ok(result) => {
             tracing::info!(
                 feedback_id = %feedback_id,
-                linear_issue = %result.identifier,
-                "Linear issue created for feedback"
+                trakkt_issue = %result.identifier,
+                "Trakkt issue created for feedback"
             );
             Some(result)
         }
@@ -414,7 +416,7 @@ async fn create_linear_issue_from_feedback(
             tracing::error!(
                 feedback_id = %feedback_id,
                 error = %e,
-                "Failed to create Linear issue for feedback"
+                "Failed to create Trakkt issue for feedback"
             );
             None
         }
@@ -433,8 +435,8 @@ async fn send_slim_slack_notification(
     config: &Config,
     feedback_type: &str,
     user_email: &str,
-    linear_identifier: &str,
-    linear_url: &str,
+    issue_identifier: &str,
+    issue_url: &str,
 ) -> kyomi_core::Result<()> {
     let webhook_url = match config.slack_feedback_webhook_url.as_deref() {
         Some(url) if !url.is_empty() => url,
@@ -452,7 +454,7 @@ async fn send_slim_slack_notification(
     };
 
     let text = format!(
-        "{emoji} New {feedback_type} feedback from {user_email} \u{2014} <{linear_url}|{linear_identifier}>"
+        "{emoji} New {feedback_type} feedback from {user_email} \u{2014} <{issue_url}|{issue_identifier}>"
     );
     let payload = serde_json::json!({ "text": text });
 
@@ -473,7 +475,7 @@ async fn send_slim_slack_notification(
         )));
     }
 
-    tracing::info!("Slim Slack notification sent with Linear link {linear_identifier}");
+    tracing::info!("Slim Slack notification sent for {issue_identifier}");
     Ok(())
 }
 
