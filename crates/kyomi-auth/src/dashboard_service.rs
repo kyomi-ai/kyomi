@@ -235,8 +235,9 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) ->
         user_id: String,
         workspace_id: String,
         title: String,
+        content: String,
         doc_type: String,
-        content_preview: Option<String>,
+        last_change_summary: Option<String>,
         updated_at: String,
         created_at: String,
         view_count: i64,
@@ -248,8 +249,8 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) ->
     let row = db_fetch_optional!(
         db,
         SnapshotRow,
-        r#"SELECT d.dashboard_id, d.user_id, d.workspace_id, d.title, d.doc_type,
-                  CAST(d.content_preview AS TEXT) AS content_preview,
+        r#"SELECT d.dashboard_id, d.user_id, d.workspace_id, d.title, d.content,
+                  d.doc_type, d.last_change_summary,
                   CAST(d.updated_at AS TEXT) AS updated_at,
                   CAST(d.created_at AS TEXT) AS created_at,
                   COALESCE(v.view_count, 0) AS view_count,
@@ -270,13 +271,22 @@ pub(crate) async fn fetch_dashboard_snapshot(db: &DbPool, dashboard_id: &str) ->
     .ok()?;
 
     let row = row?;
+    let summary = extract_summary(&row.content);
+    let content_preview = if row.content.is_empty() {
+        None
+    } else {
+        Some(row.content.chars().take(200).collect::<String>())
+    };
     Some(serde_json::json!({
         "dashboard_id": row.dashboard_id,
         "user_id": row.user_id,
         "workspace_id": row.workspace_id,
         "title": row.title,
+        "content": row.content,
+        "content_preview": content_preview,
+        "summary": summary,
+        "last_change_summary": row.last_change_summary,
         "doc_type": row.doc_type,
-        "content_preview": row.content_preview,
         "updated_at": row.updated_at,
         "created_at": row.created_at,
         "view_count": row.view_count,
@@ -1637,12 +1647,10 @@ async fn list_docs_for_sync(
         .into_iter()
         .map(|row| {
             let summary = extract_summary(&row.content);
-            let content_preview = if row.content.len() > 200 {
-                Some(row.content[..200].to_string())
-            } else if row.content.is_empty() {
+            let content_preview = if row.content.is_empty() {
                 None
             } else {
-                Some(row.content.clone())
+                Some(row.content.chars().take(200).collect::<String>())
             };
             serde_json::json!({
                 "dashboard_id": row.dashboard_id,

@@ -63,7 +63,7 @@ const DB_VERSION: u8 = 3;
 ///
 /// Bump this when: fields added/removed from list item structs, server-side
 /// sync queries change shape, entity types added/removed from bootstrap.
-pub const SCHEMA_HASH: &str = "2026-04-29-v3-delta-session-type-filter";
+pub const SCHEMA_HASH: &str = "2026-05-21-v4-snapshot-data-fix";
 
 /// Handle to the open IndexedDB database.
 ///
