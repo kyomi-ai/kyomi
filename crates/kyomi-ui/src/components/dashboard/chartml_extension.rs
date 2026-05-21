@@ -15,8 +15,8 @@ use leptos::tachys::view::any_view::AnyView;
 use crate::chartml_provider::configured_chartml;
 use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
 use crate::components::dashboard::markdown_renderer::{
-    apply_spec_overrides, extract_chart_mode, extract_chart_orientation, extract_chart_type,
-    split_chartml_block,
+    apply_spec_overrides, chart_col_span_class, extract_chart_mode, extract_chart_orientation,
+    extract_chart_type, extract_col_span, split_chartml_block,
 };
 
 // Valid colSpan values for the 12-column grid — these snap points look correct
@@ -81,22 +81,26 @@ impl Extension for ChartMLExtension {
 
     fn block_col_span(&self, content: &str) -> Option<u8> {
         // Parse the YAML to extract layout.colSpan.
-        // For YAML sequences (Array), use the first item's colSpan.
-        // Returns None for blocks without an explicit colSpan — kode treats
-        // None as "break the grid group and render full-width".
+        // For YAML sequences (arrays), return Some(12) so the outer kode grid
+        // cell is full-width — the inner 12-column grid rendered in
+        // render_code_block handles per-item colspan layout independently.
+        // For single mappings, read the explicit colSpan from layout.
+        // Returns None for single-chart blocks without an explicit colSpan —
+        // kode treats None as "break the grid group and render full-width".
         let parsed: serde_json::Value = serde_yaml::from_str(content.trim()).ok()?;
-        let spec = match &parsed {
-            serde_json::Value::Array(items) => items.first()?,
-            other => other,
-        };
-        let col_span = spec
-            .get("layout")
-            .and_then(|l| l.get("colSpan").or_else(|| l.get("col_span")))
-            .and_then(|v| v.as_u64())?;
-        if (1..=12).contains(&col_span) {
-            Some(col_span as u8)
-        } else {
-            None
+        match &parsed {
+            serde_json::Value::Array(_) => Some(12),
+            spec => {
+                let col_span = spec
+                    .get("layout")
+                    .and_then(|l| l.get("colSpan").or_else(|| l.get("col_span")))
+                    .and_then(|v| v.as_u64())?;
+                if (1..=12).contains(&col_span) {
+                    Some(col_span as u8)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -129,10 +133,22 @@ impl Extension for ChartMLExtension {
         // (each block's content is used as a fingerprint to find its index).
         let full_block_content = content.to_string();
 
+        let is_array_block = yamls.len() > 1;
+
         let views: Vec<AnyView> = yamls
             .into_iter()
             .enumerate()
             .map(|(array_index, item_yaml)| {
+                let col_class = if is_array_block {
+                    let col_span = serde_yaml::from_str::<serde_json::Value>(&item_yaml)
+                        .ok()
+                        .as_ref()
+                        .map(extract_col_span)
+                        .unwrap_or(12);
+                    Some(chart_col_span_class(col_span))
+                } else {
+                    None
+                };
                 let palette_clone = palette.clone();
                 let block_content = full_block_content.clone();
                 let chart_view = move || {
@@ -144,21 +160,44 @@ impl Extension for ChartMLExtension {
                         chartml,
                     )
                 };
-                chart_view().into_any()
+                if let Some(cls) = col_class {
+                    view! {
+                        <div class=cls>
+                            {chart_view()}
+                        </div>
+                    }
+                    .into_any()
+                } else {
+                    chart_view().into_any()
+                }
             })
             .collect();
 
-        Some(
-            view! {
-                // not-prose prevents Tailwind typography styles from interfering
-                // with chart content. The grid layout is handled natively by kode
-                // via block_col_span — no inner grid wrapper needed here.
-                <div class="not-prose">
-                    {views}
-                </div>
-            }
-            .into_any(),
-        )
+        // For array blocks, wrap charts in an inner 12-column grid so each item
+        // renders at its own per-item colspan. For single-chart blocks, not-prose
+        // is sufficient — kode handles layout via block_col_span.
+        if is_array_block {
+            Some(
+                view! {
+                    <div class="not-prose grid grid-cols-12 gap-4 w-full">
+                        {views}
+                    </div>
+                }
+                .into_any(),
+            )
+        } else {
+            Some(
+                view! {
+                    // not-prose prevents Tailwind typography styles from interfering
+                    // with chart content. The grid layout for single-chart blocks is
+                    // handled natively by kode via block_col_span.
+                    <div class="not-prose">
+                        {views}
+                    </div>
+                }
+                .into_any(),
+            )
+        }
     }
 }
 
