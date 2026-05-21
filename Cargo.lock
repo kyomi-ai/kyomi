@@ -3236,7 +3236,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3276,7 +3276,7 @@ checksum = "9f5b01c17f85ee988d832c40e549a64bd89ab2c9f8d8a613bdf5122ae507e294"
 dependencies = [
  "cfg-if",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3644,7 +3644,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5033,7 +5033,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -5752,18 +5752,18 @@ dependencies = [
 
 [[package]]
 name = "kode-core"
-version = "0.4.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "255d86f15d5b4b256986c234db8bed1e0cdcd4a1b33d919f0c5cdbffdcc81995"
+checksum = "7884abbf4be3462ab7d883d46d63ff53be7ca196a976176f3aca954c1f1492b4"
 dependencies = [
  "ropey",
 ]
 
 [[package]]
 name = "kode-doc"
-version = "0.4.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c94d118c15d760c80283acca1c37fa2fec0d177d26aa100bd1c226f9479d623c"
+checksum = "a2f7883b35b68b85d6919f91752642fdcd928395e1f8ed8a169c311ae1cbb227"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -5772,9 +5772,9 @@ dependencies = [
 
 [[package]]
 name = "kode-leptos"
-version = "0.4.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09b8abf722968d90e487bfbd862fc1216569bcd0ab5508691e50f8e732088f5b"
+checksum = "2f81e6217277f5e7afee3555ee8a5d4f1765b81393dfc117d419c867e761d7b2"
 dependencies = [
  "arborium",
  "arborium-theme",
@@ -5794,9 +5794,9 @@ dependencies = [
 
 [[package]]
 name = "kode-markdown"
-version = "0.4.3"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1a156a067c16f800495e500a766c76f40199c6098d02c7ba0fa5eb961d6e569"
+checksum = "6b66a5937fe1708671650039d5f12a0303975584011ae5d537da87a4069b8c8c"
 dependencies = [
  "arborium-markdown",
  "arborium-tree-sitter",
@@ -7242,7 +7242,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -8413,7 +8413,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -8450,7 +8450,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -9186,7 +9186,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10956,7 +10956,7 @@ dependencies = [
  "serde_with",
  "swift-rs",
  "thiserror 2.0.18",
- "toml 1.1.2+spec-1.1.0",
+ "toml 0.9.12+spec-1.1.0",
  "url",
  "urlpattern",
  "uuid",
@@ -10984,7 +10984,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12984,7 +12984,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
