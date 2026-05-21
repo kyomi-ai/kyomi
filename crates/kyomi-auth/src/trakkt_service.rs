@@ -10,7 +10,6 @@ use serde::Deserialize;
 
 // ── Hardcoded label IDs from the Kyomi workspace on Trakkt ────────────
 const LABEL_FEEDBACK: &str = "69a2be3c-4d6d-40a4-91ee-f50308b14cc8";
-const LABEL_NEEDS_JASON: &str = "bd3792fa-7f0a-47e1-847f-8eaaef183dd9";
 const LABEL_BUG: &str = "99a19b06-38c9-48c4-90d5-5b8697792566";
 const LABEL_FEATURE: &str = "9a552138-1d44-467d-9331-a4042603893b";
 const LABEL_IMPROVEMENT: &str = "08ba364f-b5d5-436c-ac96-0b4ac90efc9a";
@@ -267,7 +266,6 @@ fn label_ids_for_type(feedback_type: &str) -> Vec<String> {
 
     vec![
         LABEL_FEEDBACK.to_string(),
-        LABEL_NEEDS_JASON.to_string(),
         type_label.to_string(),
     ]
 }
@@ -304,9 +302,8 @@ mod tests {
     #[test]
     fn label_ids_bug() {
         let labels = label_ids_for_type("bug");
-        assert_eq!(labels.len(), 3);
+        assert_eq!(labels.len(), 2);
         assert!(labels.contains(&LABEL_FEEDBACK.to_string()));
-        assert!(labels.contains(&LABEL_NEEDS_JASON.to_string()));
         assert!(labels.contains(&LABEL_BUG.to_string()));
     }
 
