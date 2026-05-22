@@ -26,7 +26,6 @@ const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 /// Default model for chat completions.
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 
-
 // ---------------------------------------------------------------------------
 // Model Pricing
 // ---------------------------------------------------------------------------
@@ -291,20 +290,15 @@ impl OpenAIProvider {
             "calling OpenAI-compatible API"
         );
 
-
         // Call with retry using shared exponential backoff utility.
-        let response_json =
-            kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
+        let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Parse response.
         Self::parse_response(&self.base.model, &response_json)
     }
 
     /// Send a single HTTP request to the OpenAI-compatible API.
-    async fn call_api(
-        &self,
-        body: &serde_json::Value,
-    ) -> kyomi_core::Result<serde_json::Value> {
+    async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
         crate::provider::maybe_log_llm("openai", "request", body);
 
         let response = self
@@ -323,19 +317,32 @@ impl OpenAIProvider {
         let status = response.status();
 
         if status.is_success() {
-            let json: serde_json::Value = response.json().await.map_err(|e| {
-                kyomi_core::Error::Internal(format!(
-                    "OpenAI API: failed to parse response: {e}"
+            let body_bytes = response.bytes().await.map_err(|e| {
+                kyomi_core::Error::ServiceUnavailable(format!(
+                    "OpenAI API: failed to read response body: {e}"
                 ))
             })?;
+
+            let json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+                let body_preview =
+                    String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(500)]);
+                tracing::error!(
+                    "OpenAI API: failed to parse JSON response. Preview: {}",
+                    body_preview
+                );
+                kyomi_core::Error::Internal(format!(
+                    "OpenAI API: failed to parse response: {e}. Body preview: {body_preview}"
+                ))
+            })?;
+
             crate::provider::maybe_log_llm("openai", "response", &json);
             return Ok(json);
         }
 
         // Error response — try to extract the error message from the body.
         let error_body = response.text().await.unwrap_or_default();
-        let error_msg =
-            crate::provider::extract_error_message(&error_body).unwrap_or_else(|| format!("HTTP {status}"));
+        let error_msg = crate::provider::extract_error_message(&error_body)
+            .unwrap_or_else(|| format!("HTTP {status}"));
 
         match status.as_u16() {
             401 => Err(kyomi_core::Error::Unauthorized(format!(
@@ -386,16 +393,19 @@ impl OpenAIProvider {
 
         // Extract content (may be null).
         // Some models (e.g. Qwen3) embed chain-of-thought inside
-        // `<think>...</think>` tags in the content field. Strip that so only
+        // `<thinking>...` tags in the content field. Strip that so only
         // the final answer is returned to the user.
+        // OpenRouter models may return content in `reasoning` field when content is null.
         let raw_content = message
             .get("content")
             .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| message.get("reasoning").and_then(|r| r.as_str()))
             .unwrap_or("");
-        let content = if let Some(pos) = raw_content.find("</think>") {
+        let content = if let Some(pos) = raw_content.find("</thinking>") {
             // Thinking block completed — take everything after it.
-            raw_content[pos + "</think>".len()..].trim().to_string()
-        } else if raw_content.starts_with("<think>") || raw_content.contains("\n<think>") {
+            raw_content[pos + "</thinking>".len()..].trim().to_string()
+        } else if raw_content.starts_with("<thinking>") || raw_content.contains("\n<thinking>") {
             // Truncated thinking (hit max_tokens mid-think) — discard all of it.
             String::new()
         } else {
@@ -498,7 +508,10 @@ pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
         model,
         usage,
         get_model_pricing,
-        crate::pricing::ModelPricing { input: 0.15, output: 0.60 },
+        crate::pricing::ModelPricing {
+            input: 0.15,
+            output: 0.60,
+        },
         "openai",
     )
 }
@@ -559,7 +572,10 @@ mod tests {
             name: "search_catalog".into(),
             arguments: json!({"query": "revenue"}),
         }];
-        let messages = vec![Message::assistant_with_tool_calls("Let me search.", tool_calls)];
+        let messages = vec![Message::assistant_with_tool_calls(
+            "Let me search.",
+            tool_calls,
+        )];
         let names = HashMap::new();
         let msgs = OpenAIProvider::convert_messages_to_openai(&messages, &names);
 
@@ -610,8 +626,10 @@ mod tests {
                 arguments: json!({"table_name": "sales.orders"}),
             },
         ];
-        let messages =
-            vec![Message::assistant_with_tool_calls("Searching multiple.", tool_calls)];
+        let messages = vec![Message::assistant_with_tool_calls(
+            "Searching multiple.",
+            tool_calls,
+        )];
         let names = HashMap::new();
         let msgs = OpenAIProvider::convert_messages_to_openai(&messages, &names);
 
