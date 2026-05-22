@@ -11,15 +11,15 @@
 //! write and decrypts on read using the functions from `crate::encryption`.
 
 use chrono::Utc;
-use kyomi_core::models::Chart;
-use kyomi_core::db::in_clause_placeholders;
 use kyomi_core::DbPool;
+use kyomi_core::db::in_clause_placeholders;
+use kyomi_core::models::Chart;
 use serde::{Deserialize, Serialize};
 
 use crate::encryption;
 use crate::sync_log_service;
-use kyomi_types::sync::{SyncActionType, entity_types};
 use kyomi_types::CreatedBy;
+use kyomi_types::sync::{SyncActionType, entity_types};
 
 // ---------------------------------------------------------------------------
 // Response structs
@@ -171,7 +171,6 @@ struct CreatedAtRow {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-
 // ─── Sync snapshot helpers ────────────────────────────────────────────────────
 
 /// Row for building a session metadata snapshot.
@@ -304,26 +303,41 @@ async fn fetch_message_timestamps(
 // Session management
 // ---------------------------------------------------------------------------
 
+/// Resolve the LLM model to use for a new session.
+///
+/// Fallback chain: explicit caller value → `LLM_MODEL` env var → built-in default.
+fn resolve_model(model: Option<&str>) -> String {
+    model
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("LLM_MODEL").ok())
+        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string())
+}
+
 /// Create a new chat session. Returns the generated session_id.
+///
+/// Pass `None` for `model` to use the `LLM_MODEL` env var (or the built-in default).
 pub async fn create_session(
     db: &DbPool,
     user_id: &str,
     workspace_id: &str,
+    model: Option<&str>,
 ) -> kyomi_core::Result<String> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
     let empty_config = serde_json::json!({});
+    let model = resolve_model(model);
 
     kyomi_core::db_execute!(
         db,
         "INSERT INTO chat_sessions \
          (session_id, user_id, workspace_id, title, model, session_type, \
           shared, created_at, updated_at, config) \
-         VALUES ($1, $2, $3, NULL, 'claude-haiku-4-5-20251001', 'chat', \
-                 false, $4, $5, $6)",
+         VALUES ($1, $2, $3, NULL, $4, 'chat', \
+                 false, $5, $6, $7)",
         &session_id,
         user_id,
         workspace_id,
+        &model,
         now,
         now,
         empty_config
@@ -358,6 +372,8 @@ pub async fn create_session(
 }
 
 /// Create a session with caller-provided ID, title, and session_type.
+///
+/// Pass `None` for `model` to use the `LLM_MODEL` env var (or the built-in default).
 pub async fn create_session_with_id(
     db: &DbPool,
     user_id: &str,
@@ -365,21 +381,24 @@ pub async fn create_session_with_id(
     session_id: &str,
     title: Option<&str>,
     session_type: &str,
+    model: Option<&str>,
 ) -> kyomi_core::Result<()> {
     let now = Utc::now();
     let empty_config = serde_json::json!({});
+    let model = resolve_model(model);
 
     kyomi_core::db_execute!(
         db,
         "INSERT INTO chat_sessions \
          (session_id, user_id, workspace_id, title, model, session_type, \
           shared, created_at, updated_at, config) \
-         VALUES ($1, $2, $3, $4, 'claude-haiku-4-5-20251001', $5, \
-                 false, $6, $7, $8)",
+         VALUES ($1, $2, $3, $4, $5, $6, \
+                 false, $7, $8, $9)",
         session_id,
         user_id,
         workspace_id,
         title,
+        &model,
         session_type,
         now,
         now,
@@ -462,12 +481,7 @@ pub async fn get_user_sessions(
 
     let read_status_map: std::collections::HashMap<&str, Option<&str>> = read_statuses
         .iter()
-        .map(|r| {
-            (
-                r.session_id.as_str(),
-                r.last_read_message_id.as_deref(),
-            )
-        })
+        .map(|r| (r.session_id.as_str(), r.last_read_message_id.as_deref()))
         .collect();
 
     // Step 4: Pre-compute last-read timestamps for unread count calculation.
@@ -486,12 +500,14 @@ pub async fn get_user_sessions(
 
     // Step 5: For shared sessions with a last_read timestamp, calculate unread counts.
     let mut unread_queries: Vec<(&str, chrono::DateTime<chrono::Utc>)> = Vec::new();
-    let mut never_read_sessions: std::collections::HashSet<&str> =
-        std::collections::HashSet::new();
+    let mut never_read_sessions: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for s in &sessions {
         if s.shared && s.user_id != user_id {
-            if let Some(last_read_msg_id) = read_status_map.get(s.session_id.as_str()).copied().flatten()
+            if let Some(last_read_msg_id) = read_status_map
+                .get(s.session_id.as_str())
+                .copied()
+                .flatten()
             {
                 if let Some(&ts) = timestamp_map.get(last_read_msg_id) {
                     unread_queries.push((s.session_id.as_str(), ts));
@@ -503,15 +519,17 @@ pub async fn get_user_sessions(
     }
 
     // Compute unread counts.
-    let mut unread_map: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
+    let mut unread_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     if !unread_queries.is_empty() {
         // For each (session_id, cutoff_ts), count messages created after the cutoff.
         // Postgres can use UNNEST for a single query; SQLite does individual queries.
         match db {
             kyomi_core::db::DbPool::Postgres(pg) => {
-                let sids: Vec<String> = unread_queries.iter().map(|(sid, _)| sid.to_string()).collect();
+                let sids: Vec<String> = unread_queries
+                    .iter()
+                    .map(|(sid, _)| sid.to_string())
+                    .collect();
                 let cutoffs: Vec<chrono::DateTime<chrono::Utc>> =
                     unread_queries.iter().map(|(_, ts)| *ts).collect();
 
@@ -555,8 +573,10 @@ pub async fn get_user_sessions(
     // Step 6: Build result.
     let mut result = Vec::with_capacity(sessions.len());
     for s in &sessions {
-        let (message_count, pinned_count) =
-            count_map.get(s.session_id.as_str()).copied().unwrap_or((0, 0));
+        let (message_count, pinned_count) = count_map
+            .get(s.session_id.as_str())
+            .copied()
+            .unwrap_or((0, 0));
 
         // Skip if pinned_only and no pinned messages.
         if pinned_only && pinned_count == 0 {
@@ -1159,7 +1179,8 @@ pub async fn bulk_delete_sessions(
             }
             query.execute(sq).await?;
 
-            let del_sessions_sql = format!("DELETE FROM chat_sessions WHERE session_id IN {in_clause}");
+            let del_sessions_sql =
+                format!("DELETE FROM chat_sessions WHERE session_id IN {in_clause}");
             let mut query = sqlx::query(&del_sessions_sql);
             for sid in &owned_ids {
                 query = query.bind(sid);
@@ -1207,14 +1228,7 @@ pub async fn toggle_message_pin(
              WHERE session_id = $1 \
                AND (user_id = $2 OR (shared = {bool_true_val} AND workspace_id = $3))"
         );
-        kyomi_core::db_fetch_optional!(
-            db,
-            SessionIdRow,
-            &sql,
-            session_id,
-            user_id,
-            wid
-        )?
+        kyomi_core::db_fetch_optional!(db, SessionIdRow, &sql, session_id, user_id, wid)?
     } else {
         kyomi_core::db_fetch_optional!(
             db,
@@ -1302,8 +1316,10 @@ pub async fn search_sessions(
     let result = sessions
         .iter()
         .map(|s| {
-            let (message_count, pinned_count) =
-                count_map.get(s.session_id.as_str()).copied().unwrap_or((0, 0));
+            let (message_count, pinned_count) = count_map
+                .get(s.session_id.as_str())
+                .copied()
+                .unwrap_or((0, 0));
 
             SessionListItem {
                 session_id: s.session_id.clone(),
@@ -1597,21 +1613,17 @@ pub async fn prepare_chat_dispatch(
             }
         }
     } else {
-        let new_sid = create_session(p.db, p.user_id, p.workspace_id).await?;
+        let new_sid = create_session(p.db, p.user_id, p.workspace_id, None).await?;
 
         // Notify the frontend so the sidebar updates immediately.
         if let Some(ws_manager) = p.ws_manager
             && let Ok(Some(session_info)) =
                 get_session_info(p.db, p.user_id, &new_sid, Some(p.workspace_id)).await
-                && let Ok(data) = serde_json::to_value(&session_info) {
-                    crate::websocket::helpers::send_session_created(
-                        ws_manager,
-                        p.user_id,
-                        &new_sid,
-                        data,
-                    )
-                    .await;
-                }
+            && let Ok(data) = serde_json::to_value(&session_info)
+        {
+            crate::websocket::helpers::send_session_created(ws_manager, p.user_id, &new_sid, data)
+                .await;
+        }
 
         (new_sid, false) // New sessions are always private
     };
@@ -1636,9 +1648,7 @@ pub async fn prepare_chat_dispatch(
             None,
         )
         .await
-        .map_err(|e| {
-            kyomi_core::Error::Internal(format!("Failed to store message: {e}"))
-        })?;
+        .map_err(|e| kyomi_core::Error::Internal(format!("Failed to store message: {e}")))?;
 
         tracing::info!(
             session_id = %session_id,
@@ -1656,22 +1666,21 @@ pub async fn prepare_chat_dispatch(
     let assistant_message_id = uuid::Uuid::new_v4().to_string();
 
     // ── Broadcast user message to shared-session observers ────────────────
-    if is_shared
-        && let Some(ws_manager) = p.ws_manager {
-            crate::websocket::helpers::send_shared_chat_message(
-                ws_manager,
-                p.workspace_id,
-                &session_id,
-                &user_message_id,
-                "user",
-                p.message,
-                &chrono::Utc::now().to_rfc3339(),
-                Some(p.user_display_name),
-                Some(p.user_id),
-                p.client_msg_id,
-            )
-            .await;
-        }
+    if is_shared && let Some(ws_manager) = p.ws_manager {
+        crate::websocket::helpers::send_shared_chat_message(
+            ws_manager,
+            p.workspace_id,
+            &session_id,
+            &user_message_id,
+            "user",
+            p.message,
+            &chrono::Utc::now().to_rfc3339(),
+            Some(p.user_display_name),
+            Some(p.user_id),
+            p.client_msg_id,
+        )
+        .await;
+    }
 
     Ok(ChatDispatchOutcome::Ready {
         session_id,
@@ -1709,7 +1718,14 @@ pub struct SaveAgentErrorParams<'a> {
 /// `send_chat_message` so the spawn closure remains a thin wrapper.
 pub async fn save_agent_error(params: SaveAgentErrorParams<'_>) {
     let SaveAgentErrorParams {
-        db, encryption_key, ws_manager, session_id, user_id, assistant_message_id, context_type, error,
+        db,
+        encryption_key,
+        ws_manager,
+        session_id,
+        user_id,
+        assistant_message_id,
+        context_type,
+        error,
     } = params;
     let error_text = format!("I encountered an error while processing your request: {error}");
     let error_metadata = serde_json::json!({
@@ -1806,17 +1822,13 @@ pub async fn update_message_content_owned(
     )?;
 
     if msg_exists.is_none() {
-        return Err(kyomi_core::Error::Internal(
-            "Message not found".to_string(),
-        ));
+        return Err(kyomi_core::Error::Internal("Message not found".to_string()));
     }
 
     // Update and re-encrypt.
     let updated = update_message(db, encryption_key, message_id, Some(content), None).await?;
     if !updated {
-        return Err(kyomi_core::Error::Internal(
-            "Message not found".to_string(),
-        ));
+        return Err(kyomi_core::Error::Internal("Message not found".to_string()));
     }
 
     Ok(())
@@ -1871,15 +1883,10 @@ pub async fn list_sessions_for_sync(
            ORDER BY cs.updated_at DESC"#
     );
 
-    let rows: Vec<SessionSyncRow> = kyomi_core::db_fetch_all!(
-        db,
-        SessionSyncRow,
-        &sql,
-        workspace_id
-    )
-    .map_err(|e| {
-        kyomi_core::Error::Internal(format!("failed to list sessions for sync: {e}"))
-    })?;
+    let rows: Vec<SessionSyncRow> =
+        kyomi_core::db_fetch_all!(db, SessionSyncRow, &sql, workspace_id).map_err(|e| {
+            kyomi_core::Error::Internal(format!("failed to list sessions for sync: {e}"))
+        })?;
 
     let values = rows
         .into_iter()

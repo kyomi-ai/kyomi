@@ -55,6 +55,7 @@ pub async fn create_copilot_session(
         &session_id,
         Some(title),
         context_type,
+        None,
     )
     .await
     .map_err(|e| ServerFnError::new(format!("Failed to create copilot session: {e}")))?;

@@ -1885,6 +1885,7 @@ pub async fn create_chat_session_from_alert(
         &session_id,
         Some(&title),
         "chat",
+        None,
     )
     .await?;
 
