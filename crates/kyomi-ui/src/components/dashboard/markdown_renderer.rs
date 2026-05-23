@@ -807,6 +807,7 @@ pub fn MarkdownRenderer(
                             // outer grid (no nested `grid grid-cols-12` wrapper) so
                             // siblings from different ChartML segments can share rows.
                             let palette_for_charts = palette_name.clone();
+                            let workspace_id_for_charts = workspace_id.clone();
                             yamls
                                 .into_iter()
                                 .enumerate()
@@ -818,7 +819,8 @@ pub fn MarkdownRenderer(
                                         .unwrap_or(12);
                                     let col_class = chart_col_span_class(col_span);
                                     let palette_clone = palette_for_charts.clone();
-                                    let chartml = configured_chartml(&palette_clone, is_dark);
+                                    let ws_id = workspace_id_for_charts.clone();
+                                    let chartml = configured_chartml(&palette_clone, is_dark, &ws_id);
                                     view! {
                                         <div class=col_class>
                                             <KyomiChart

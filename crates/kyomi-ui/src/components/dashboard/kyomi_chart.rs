@@ -19,8 +19,6 @@
 //!   `{{param}}` placeholders from the `parameters` signal (parity fix #9).
 //! - Per-chart [`RwSignal<u32>`] refresh trigger; folded with the optional
 //!   context [`RefreshAllSignal`] (parity fix #17).
-//! - Persistent IndexedDB cache hydration via context
-//!   [`CacheBackendSignal`] (parity fix #6).
 //! - `last_refreshed` timestamp driven by spec / refresh / parameter
 //!   input ticks, not by first render alone (parity fix #18).
 //! - [`ChartHeaderBar`] with `show_*` flags derived from `Option::is_some()`
@@ -38,7 +36,7 @@ use std::collections::HashMap;
 use chartml_leptos::ChartMLChart;
 use leptos::prelude::*;
 
-use crate::chartml_provider::{CacheBackendSignal, RefreshAllSignal};
+use crate::chartml_provider::RefreshAllSignal;
 use crate::components::dashboard::chart_header_bar::ChartHeaderBar;
 use crate::components::dashboard::markdown_renderer::{
     apply_spec_overrides, default_chart_height_for_type, extract_chart_height, extract_chart_mode,
@@ -65,7 +63,6 @@ use crate::components::dashboard::markdown_renderer::{
 ///
 /// | Audit item | Behaviour |
 /// | --- | --- |
-/// | #6  | `CacheBackendSignal` context read; resolver hydrated via `Effect::new` |
 /// | #9  | `parameters` signal substituted into effective YAML |
 /// | #11 | `min-height` wrapper derived from `chart_height_px` |
 /// | #13 | `show_*` flags reflect callback `Option::is_some()` |
@@ -213,30 +210,7 @@ pub fn KyomiChart(
     let spec_signal = Signal::derive(move || effective_yaml.get());
 
     // ------------------------------------------------------------------
-    // 6. Cache backend hydration from context (parity fix #6)
-    // ------------------------------------------------------------------
-    // Installs the IndexedDB tier-2 cache on the resolver as soon as the
-    // async `IndexedDbBackend::open` completes. Charts mounted before the
-    // open finishes still have the tier-1 in-memory cache; the persistent
-    // cache becomes active as soon as the signal flips to `Some`.
-    //
-    // The `ResolverRef` (`Rc<Resolver>` on WASM) is wrapped in `SendWrapper`
-    // because Leptos requires `Send + Sync` on reactive closures, but
-    // wasm32-unknown-unknown is single-threaded so the wrapper is sound.
-    {
-        let resolver = send_wrapper::SendWrapper::new(chartml.resolver());
-        let cache_signal = use_context::<CacheBackendSignal>();
-        if let Some(sig) = cache_signal {
-            Effect::new(move |_| {
-                if let Some(backend) = sig.get() {
-                    resolver.set_persistent_cache(backend);
-                }
-            });
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // 7. Last-refreshed timestamp (parity fix #18)
+    // 6. Last-refreshed timestamp (parity fix #18)
     // ------------------------------------------------------------------
     // Seeded with `now` at mount; updated whenever any input that drives a
     // resolver call changes (spec, refresh tick, parameters). This is one
@@ -252,7 +226,7 @@ pub fn KyomiChart(
     });
 
     // ------------------------------------------------------------------
-    // 8. Determine which header-bar features to show (parity fix #13)
+    // 7. Determine which header-bar features to show (parity fix #13)
     // ------------------------------------------------------------------
     let has_edit = on_edit_chart.is_some();
     let has_delete = on_delete_chart.is_some();
@@ -261,7 +235,7 @@ pub fn KyomiChart(
     let has_ask = on_ask_about_chart.is_some();
 
     // ------------------------------------------------------------------
-    // 9. Store callbacks for use inside reactive closures
+    // 8. Store callbacks for use inside reactive closures
     // ------------------------------------------------------------------
     let yaml_for_save = yaml.clone();
     let yaml_for_info = yaml.clone();
@@ -277,7 +251,7 @@ pub fn KyomiChart(
     let yaml_for_ask_stored = StoredValue::new(yaml_for_ask);
 
     // ------------------------------------------------------------------
-    // 10. Build header-bar callbacks
+    // 9. Build header-bar callbacks
     // ------------------------------------------------------------------
     let on_type_change_cb = Callback::new(move |t: String| {
         set_type_override.set(Some(t.clone()));
@@ -351,7 +325,7 @@ pub fn KyomiChart(
     let on_ask_stored = StoredValue::new(on_ask_cb);
 
     // ------------------------------------------------------------------
-    // 11. View — chart-card wrapper, header bar, chart (with height reserve)
+    // 10. View — chart-card wrapper, header bar, chart (with height reserve)
     // ------------------------------------------------------------------
     view! {
         <div class="chart-card">
