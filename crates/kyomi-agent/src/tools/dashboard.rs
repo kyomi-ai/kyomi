@@ -616,8 +616,10 @@ impl AgentTool for ModifyDashboardTool {
             "title": display_title,
             "message": format!("Updated dashboard '{display_title}'"),
         });
-        if let Some(warning) = empty_content_warning {
-            response.as_object_mut().unwrap().insert(
+        if let Some(warning) = empty_content_warning
+            && let Some(obj) = response.as_object_mut()
+        {
+            obj.insert(
                 "warning".to_string(),
                 serde_json::Value::String(warning.to_string()),
             );
