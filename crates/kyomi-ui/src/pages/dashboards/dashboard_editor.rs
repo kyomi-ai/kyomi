@@ -1579,6 +1579,7 @@ fn DashboardWysiwygEditor(
         let _ = on_change;
         let _ = palette_name;
         let _ = toolbar_items;
+        let _ = workspace_id;
         let _ = inject;
 
         view! {
