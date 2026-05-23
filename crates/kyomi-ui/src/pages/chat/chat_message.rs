@@ -190,6 +190,17 @@ pub fn ChatMessage(
             }
         };
 
+        // Capture the thinking start time once — when thinking first becomes active.
+        // This prevents the elapsed timer from resetting on each tool call or event
+        // update that causes the parent to re-render and re-mount AgentThinking.
+        let thinking_start_time_ms: RwSignal<Option<f64>> = RwSignal::new(None);
+        #[cfg(target_arch = "wasm32")]
+        Effect::new(move |_| {
+            if thinking_state.get().is_active && thinking_start_time_ms.get_untracked().is_none() {
+                thinking_start_time_ms.set(Some(js_sys::Date::now()));
+            }
+        });
+
         // Content signal for MarkdownRenderer.
         let content_signal = Signal::derive({
             let content = message_content.clone();
@@ -223,21 +234,36 @@ pub fn ChatMessage(
                             let events = thinking_events_for_component();
                             let is_active = thinking_is_active();
                             let maybe_tu = thinking_token_usage();
-                            if let Some(tu) = maybe_tu {
-                                view! {
+                            let maybe_start = thinking_start_time_ms.get_untracked();
+                            match (maybe_tu, maybe_start) {
+                                (Some(tu), Some(start)) => view! {
+                                    <AgentThinking
+                                        thinking_events=events
+                                        is_active=is_active
+                                        token_usage=tu
+                                        start_time_ms=start
+                                    />
+                                }.into_any(),
+                                (Some(tu), None) => view! {
                                     <AgentThinking
                                         thinking_events=events
                                         is_active=is_active
                                         token_usage=tu
                                     />
-                                }.into_any()
-                            } else {
-                                view! {
+                                }.into_any(),
+                                (None, Some(start)) => view! {
+                                    <AgentThinking
+                                        thinking_events=events
+                                        is_active=is_active
+                                        start_time_ms=start
+                                    />
+                                }.into_any(),
+                                (None, None) => view! {
                                     <AgentThinking
                                         thinking_events=events
                                         is_active=is_active
                                     />
-                                }.into_any()
+                                }.into_any(),
                             }
                         }
                     </Show>
