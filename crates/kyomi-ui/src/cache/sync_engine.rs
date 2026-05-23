@@ -200,6 +200,46 @@ pub fn start_sync_engine(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Extract `WorkspaceSettingsData` from the raw sync entity JSON.
+///
+/// Missing or null fields fall back to defaults — always returns a populated struct.
+/// Mirrors the extraction logic in `server_fns::workspace::get_workspace_settings`.
+fn parse_workspace_settings(data: &serde_json::Value) -> crate::types::WorkspaceSettingsData {
+    let settings = data.get("settings");
+    let custom = settings.and_then(|s| s.get("custom_settings"));
+
+    let workspace_name = data
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let default_model = custom
+        .and_then(|cs| cs.get("default_model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude-sonnet-4-5-20250929")
+        .to_string();
+
+    let chart_palette = custom
+        .and_then(|cs| cs.get("chartml_config"))
+        .and_then(|cfg| cfg.get("style"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("kyomi")
+        .to_string();
+
+    let show_token_usage = custom
+        .and_then(|cs| cs.get("show_token_usage"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    crate::types::WorkspaceSettingsData {
+        workspace_name,
+        default_model,
+        chart_palette,
+        show_token_usage,
+    }
+}
+
 /// Read all entity types from IndexedDB and populate the store.
 pub async fn hydrate_store_from_db(
     db: &crate::cache::db::CacheDb,
@@ -244,11 +284,11 @@ pub async fn hydrate_store_from_db(
     if let Ok(entries) = crate::cache::db::read_all(db, entity_types::WORKSPACE_SETTINGS, workspace_id).await
         && let Some((_id, json, _ts)) = entries.first()
     {
-        match serde_json::from_str::<crate::types::WorkspaceSettingsData>(json) {
-            Ok(settings) => store.set_workspace_settings(Some(settings)),
+        match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(v) => store.set_workspace_settings(Some(parse_workspace_settings(&v))),
             Err(e) => tracing::warn!(
                 entity_type = entity_types::WORKSPACE_SETTINGS,
-                "hydration deser failed: {e}"
+                "hydration: failed to parse workspace settings JSON: {e}"
             ),
         }
     }
@@ -270,7 +310,7 @@ fn apply_sync_action(
 ) {
     use crate::server_fns::chat::ChatSessionItem;
     use crate::server_fns::dashboards::DashboardListItem;
-    use crate::types::{WatchListItem, WorkspaceSettingsData};
+    use crate::types::WatchListItem;
 
     let action_str = data.get("action").and_then(|v| v.as_str()).unwrap_or("");
     let entity_type = data.get("entity_type").and_then(|v| v.as_str()).unwrap_or("");
@@ -450,14 +490,7 @@ fn apply_sync_action(
                     }
                 }
                 et if et == entity_types::WORKSPACE_SETTINGS => {
-                    match serde_json::from_value::<WorkspaceSettingsData>(entity_data.clone()) {
-                        Ok(item) => store.upsert_workspace_settings(item),
-                        Err(e) => tracing::warn!(
-                            entity_type,
-                            entity_id = %entity_id,
-                            "sync_action: failed to deserialize workspace settings: {e}"
-                        ),
-                    }
+                    store.upsert_workspace_settings(parse_workspace_settings(entity_data));
                 }
                 other => {
                     tracing::debug!(entity_type = other, "sync_action: unhandled entity type — ignoring");

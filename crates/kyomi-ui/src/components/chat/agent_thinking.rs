@@ -134,6 +134,34 @@ fn render_tool_schema(schema: serde_json::Value) -> impl IntoView {
     }
 }
 
+/// Format a token count with comma separators (e.g., 12345 → "12,345").
+fn format_token_count(n: u64) -> String {
+    if n == 0 {
+        return "0".to_string();
+    }
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+/// Format a cost value for display.
+///
+/// Sub-dollar amounts use 4 decimal places (`$0.0102`).
+/// Amounts >= $1.00 use 2 decimal places (`$1.23`).
+fn format_cost(cost: f64) -> String {
+    if cost >= 1.0 {
+        format!("${:.2}", cost)
+    } else {
+        format!("${:.4}", cost)
+    }
+}
+
 /// Agent Thinking UI component.
 ///
 /// Displays agent thinking events in an expandable/collapsible panel with a
@@ -152,8 +180,11 @@ pub fn AgentThinking(
     #[prop(default = "inset")]
     variant: &'static str,
     /// Token usage information (prompt + completion counts).
-    #[prop(optional)]
-    token_usage: Option<TokenUsage>,
+    #[prop(into, default = Signal::stored(None))]
+    token_usage: Signal<Option<TokenUsage>>,
+    /// Whether to show token count and cost in the metadata bar.
+    #[prop(into, default = false.into())]
+    show_token_usage: Signal<bool>,
     /// Optional start time in milliseconds (from `js_sys::Date::now()`).
     /// When provided, the live timer measures elapsed time from this value
     /// instead of from the moment the component mounts. This prevents the
@@ -258,6 +289,29 @@ pub fn AgentThinking(
     let current_title_for_view = current_title.clone();
     let events_for_list = thinking_events.clone();
 
+    // -- Token usage suffix for the metadata bar --
+    // Reactive: re-evaluates when show_token_usage or token_usage changes.
+    // This is the core fix for the reactivity bug: token_usage arrives via
+    // WebSocket after the component mounts, so the suffix must be a derived
+    // Signal rather than a static String computed at mount time.
+    let token_suffix = Signal::derive(move || {
+        if show_token_usage.get() {
+            token_usage
+                .get()
+                .filter(|tu| tu.total_tokens > 0)
+                .map(|tu| {
+                    format!(
+                        " \u{2022} {} tokens \u{2022} {}",
+                        format_token_count(tu.total_tokens),
+                        format_cost(tu.cost)
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    });
+
     // -- Content renderer (shared across variants) --
     let render_content = move || {
         let current_title = current_title_for_view.clone();
@@ -290,13 +344,13 @@ pub fn AgentThinking(
                         {if is_active {
                             let tool_count = tool_executions_count;
                             view! {
-                                <span>{move || format!("{} tools \u{2022} {}", tool_count, format_duration(elapsed_time.get()))}</span>
+                                <span>{move || format!("{} tools \u{2022} {}{}", tool_count, format_duration(elapsed_time.get()), token_suffix.get())}</span>
                             }.into_any()
                         } else {
                             let tool_count = tool_executions_count;
                             let duration = total_duration;
                             view! {
-                                <span>{format!("{} tools \u{2022} {}", tool_count, format_duration(duration))}</span>
+                                <span>{move || format!("{} tools \u{2022} {}{}", tool_count, format_duration(duration), token_suffix.get())}</span>
                             }.into_any()
                         }}
                     </span>
@@ -368,9 +422,6 @@ pub fn AgentThinking(
             </div>
         }
     };
-
-    // -- Token usage display (appended after thinking content if present) --
-    let _token_usage = token_usage;
 
     // -- Variant rendering --
     // All variants now use a clean, minimal container. The Inset variant

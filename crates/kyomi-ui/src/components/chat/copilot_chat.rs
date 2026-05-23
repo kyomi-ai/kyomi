@@ -17,6 +17,7 @@ use leptos::prelude::*;
 use super::chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
 use super::websocket_client::WebSocketContext;
 use super::{AgentThinking, ChatInput};
+use crate::cache::store::SyncStore;
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{EmptyState, Spinner};
 
@@ -99,6 +100,16 @@ pub fn CopilotChat(
     let empty_title_stored = StoredValue::new(empty_title);
     let empty_description_stored = StoredValue::new(empty_description);
     let placeholder_stored = StoredValue::new(placeholder);
+
+    // ── Workspace setting: show token usage ──────────────────────────
+    let sync_store = expect_context::<SyncStore>();
+    let show_token_usage = Signal::derive(move || {
+        sync_store
+            .workspace_settings()
+            .get()
+            .map(|ws| ws.show_token_usage)
+            .unwrap_or(false)
+    });
 
     // ── Set up scroll ─────────────────────────────────────────────────
     let message_list_ref = NodeRef::<leptos::html::Div>::new();
@@ -201,7 +212,12 @@ pub fn CopilotChat(
                         let has_thinking = ts.as_ref().is_some_and(|t| !t.events.is_empty());
                         let thinking_events = ts.as_ref().map(|t| t.events.clone()).unwrap_or_default();
                         let thinking_active = ts.as_ref().is_some_and(|t| t.is_active);
-                        let thinking_token_usage = ts.as_ref().and_then(|t| t.token_usage.clone());
+                        // Wrap in Signal::stored so AgentThinking receives Signal<Option<TokenUsage>>.
+                        // The outer closure re-runs when thinking state changes, so the stored
+                        // value is always current at the time the AgentThinking component mounts.
+                        let thinking_token_usage_signal = Signal::stored(
+                            ts.as_ref().and_then(|t| t.token_usage.clone())
+                        );
 
                         // Capture the start time for this message's thinking session.
                         // On WASM: record the timestamp the first time thinking becomes active
@@ -236,40 +252,25 @@ pub fn CopilotChat(
                                 }>
                                     // Agent thinking panel — shown for assistant messages with thinking events
                                     {has_thinking.then(move || {
-                                        match (thinking_token_usage.clone(), start_time_for_msg) {
-                                            (Some(tu), Some(start)) => view! {
+                                        match start_time_for_msg {
+                                            Some(start) => view! {
                                                 <div class="mb-2">
                                                     <AgentThinking
                                                         thinking_events=thinking_events.clone()
                                                         is_active=thinking_active
-                                                        token_usage=tu
+                                                        token_usage=thinking_token_usage_signal
                                                         start_time_ms=start
+                                                        show_token_usage=show_token_usage
                                                     />
                                                 </div>
                                             }.into_any(),
-                                            (Some(tu), None) => view! {
+                                            None => view! {
                                                 <div class="mb-2">
                                                     <AgentThinking
                                                         thinking_events=thinking_events.clone()
                                                         is_active=thinking_active
-                                                        token_usage=tu
-                                                    />
-                                                </div>
-                                            }.into_any(),
-                                            (None, Some(start)) => view! {
-                                                <div class="mb-2">
-                                                    <AgentThinking
-                                                        thinking_events=thinking_events.clone()
-                                                        is_active=thinking_active
-                                                        start_time_ms=start
-                                                    />
-                                                </div>
-                                            }.into_any(),
-                                            (None, None) => view! {
-                                                <div class="mb-2">
-                                                    <AgentThinking
-                                                        thinking_events=thinking_events.clone()
-                                                        is_active=thinking_active
+                                                        token_usage=thinking_token_usage_signal
+                                                        show_token_usage=show_token_usage
                                                     />
                                                 </div>
                                             }.into_any(),
