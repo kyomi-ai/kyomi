@@ -45,13 +45,21 @@ type DragCleanup = StoredValue<Option<send_wrapper::SendWrapper<Box<dyn FnOnce()
 /// pre-built `ChartMLRef`. Each rendered chart block creates its own
 /// `ChartMLRef` inside a reactive closure, so charts re-mount with the
 /// correct palette when the system theme changes.
+///
+/// `stable_owner` is the reactive [`Owner`] of the `DashboardWysiwygEditor`
+/// component. It outlives each kode node-view scope, so action callbacks
+/// (info, edit) that dispatch DOM events can be created inside it and will
+/// survive node-view re-mounts without triggering a "reactive value already
+/// disposed" WASM panic.
 pub struct ChartMLExtension {
     palette: String,
     is_dark: send_wrapper::SendWrapper<Memo<bool>>,
+    stable_owner: send_wrapper::SendWrapper<Owner>,
 }
 
 impl ChartMLExtension {
-    /// Create the extension with the named palette and a reactive dark-mode memo.
+    /// Create the extension with the named palette, a reactive dark-mode memo,
+    /// and the editor's stable reactive owner.
     ///
     /// Charts are rendered lazily inside reactive closures that call
     /// [`configured_chartml`] — the shared factory that registers all 9 Kyomi
@@ -62,10 +70,13 @@ impl ChartMLExtension {
     ///
     /// * `palette_name` — Kyomi palette name (e.g. `"kyomi"`).
     /// * `is_dark` — reactive memo that tracks whether the UI is in dark mode.
-    pub fn new(palette_name: &str, is_dark: Memo<bool>) -> Self {
+    /// * `stable_owner` — the editor component's [`Owner`], used to root
+    ///   action callbacks that must outlive kode's internal node-view scopes.
+    pub fn new(palette_name: &str, is_dark: Memo<bool>, stable_owner: Owner) -> Self {
         Self {
             palette: palette_name.to_string(),
             is_dark: send_wrapper::SendWrapper::new(is_dark),
+            stable_owner: send_wrapper::SendWrapper::new(stable_owner),
         }
     }
 }
@@ -127,6 +138,7 @@ impl Extension for ChartMLExtension {
 
         let palette = self.palette.clone();
         let is_dark = *self.is_dark;
+        let stable_owner = (*self.stable_owner).clone();
 
         // The full block content is used by the edit-request listener in the
         // dashboard editor to locate which fence in the source was clicked
@@ -151,6 +163,7 @@ impl Extension for ChartMLExtension {
                 };
                 let palette_clone = palette.clone();
                 let block_content = full_block_content.clone();
+                let stable_owner_clone = stable_owner.clone();
                 let chart_view = move || {
                     let chartml = configured_chartml(&palette_clone, is_dark.get());
                     render_one_chart(
@@ -158,6 +171,7 @@ impl Extension for ChartMLExtension {
                         array_index,
                         block_content.clone(),
                         chartml,
+                        stable_owner_clone.clone(),
                     )
                 };
                 if let Some(cls) = col_class {
@@ -213,11 +227,16 @@ impl Extension for ChartMLExtension {
 ///   listener to disambiguate which fence in the source was clicked.
 /// - `chartml` — the configured ChartML renderer passed down from the
 ///   extension instance.
+/// - `stable_owner` — the editor component's [`Owner`]. Action callbacks that
+///   only dispatch DOM events (`on_info`, `on_edit`) are created inside this
+///   owner so they survive kode node-view re-mounts. Callbacks that write
+///   local signals stay in the local scope to avoid writing to disposed signals.
 fn render_one_chart(
     item_yaml: String,
     array_index: usize,
     block_content: String,
     chartml: chartml_leptos::ChartMLRef,
+    stable_owner: Owner,
 ) -> AnyView {
     let yaml = item_yaml;
     // Parse initial chart metadata from YAML
@@ -283,9 +302,16 @@ fn render_one_chart(
         set_mode_override.set(Some(m));
     });
 
+    // `on_info` and `on_edit` only dispatch DOM CustomEvents — no local signal
+    // writes. They are created inside the editor's stable owner so they survive
+    // kode node-view re-mounts. Without this, clicking the info/edit buttons
+    // after a ProseMirror transaction triggers a "reactive value already
+    // disposed" WASM panic because the node-view scope was recreated.
     let yaml_for_info = yaml.clone();
-    let on_info = Callback::new(move |()| {
-        dispatch_chart_info_event(&yaml_for_info);
+    let on_info = stable_owner.with(|| {
+        Callback::new(move |()| {
+            dispatch_chart_info_event(&yaml_for_info);
+        })
     });
 
     // Edit dispatch carries enough info for the listener to locate this
@@ -296,8 +322,10 @@ fn render_one_chart(
     //   - `array_index` — which item within the block was clicked
     let yaml_for_edit = yaml.clone();
     let block_content_for_edit = block_content.clone();
-    let on_edit = Callback::new(move |()| {
-        dispatch_chart_edit_event(&yaml_for_edit, &block_content_for_edit, array_index);
+    let on_edit = stable_owner.with(|| {
+        Callback::new(move |()| {
+            dispatch_chart_edit_event(&yaml_for_edit, &block_content_for_edit, array_index);
+        })
     });
 
     // Resize callbacks — stored values to avoid clone-into-closure issues
@@ -351,12 +379,13 @@ fn render_one_chart(
         ));
     });
 
-    // Store callbacks for use inside the reactive header closure
+    // Store callbacks for use inside the reactive header closure.
+    // on_info and on_edit are already in the stable owner scope (their
+    // internal StoredValue survives node-view re-mounts), so they don't
+    // need an extra StoredValue wrapper — Callback is Copy.
     let on_type_stored = StoredValue::new(on_type_change);
     let on_orient_stored = StoredValue::new(on_orientation_change);
     let on_mode_stored = StoredValue::new(on_mode_change);
-    let on_info_stored = StoredValue::new(on_info);
-    let on_edit_stored = StoredValue::new(on_edit);
     let on_refresh_stored = StoredValue::new(on_refresh);
 
     view! {
@@ -372,8 +401,6 @@ fn render_one_chart(
                     let type_cb = on_type_stored.get_value();
                     let orient_cb = on_orient_stored.get_value();
                     let mode_cb = on_mode_stored.get_value();
-                    let info_cb = on_info_stored.get_value();
-                    let edit_cb = on_edit_stored.get_value();
                     let refresh_cb = on_refresh_stored.get_value();
                     let last_sig = Signal::derive(move || last_refreshed.get());
                     let refreshing_sig = Signal::derive(move || is_refreshing.get());
@@ -389,8 +416,8 @@ fn render_one_chart(
                             on_type_change=type_cb
                             on_orientation_change=orient_cb
                             on_mode_change=mode_cb
-                            on_info=info_cb
-                            on_edit=edit_cb
+                            on_info=on_info
+                            on_edit=on_edit
                             on_refresh=refresh_cb
                             last_updated=last_sig
                             is_refreshing=refreshing_sig
