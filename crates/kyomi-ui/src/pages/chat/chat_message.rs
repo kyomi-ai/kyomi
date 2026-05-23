@@ -12,6 +12,7 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
+use crate::cache::store::SyncStore;
 use crate::components::chat::{AgentThinking, ThinkingState};
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::Tooltip;
@@ -61,6 +62,16 @@ pub fn ChatMessage(
 ) -> impl IntoView {
     // These props are part of the API but will be wired in later phases.
     let _ = (&current_session_id, &session_metadata, &on_message_update);
+
+    let sync_store = expect_context::<SyncStore>();
+    let show_token_usage = Signal::derive(move || {
+        sync_store
+            .workspace_settings()
+            .get()
+            .map(|ws| ws.show_token_usage)
+            .unwrap_or(false)
+    });
+
     // ── Determine alignment and sender ──────────────────────────────────
 
     // In shared conversations, check sent_by.user_id.
@@ -235,6 +246,7 @@ pub fn ChatMessage(
                             let is_active = thinking_is_active();
                             let maybe_tu = thinking_token_usage();
                             let maybe_start = thinking_start_time_ms.get_untracked();
+                            let show_tu = show_token_usage.get();
                             match (maybe_tu, maybe_start) {
                                 (Some(tu), Some(start)) => view! {
                                     <AgentThinking
@@ -242,6 +254,7 @@ pub fn ChatMessage(
                                         is_active=is_active
                                         token_usage=tu
                                         start_time_ms=start
+                                        show_token_usage=show_tu
                                     />
                                 }.into_any(),
                                 (Some(tu), None) => view! {
@@ -249,6 +262,7 @@ pub fn ChatMessage(
                                         thinking_events=events
                                         is_active=is_active
                                         token_usage=tu
+                                        show_token_usage=show_tu
                                     />
                                 }.into_any(),
                                 (None, Some(start)) => view! {
@@ -256,12 +270,14 @@ pub fn ChatMessage(
                                         thinking_events=events
                                         is_active=is_active
                                         start_time_ms=start
+                                        show_token_usage=show_tu
                                     />
                                 }.into_any(),
                                 (None, None) => view! {
                                     <AgentThinking
                                         thinking_events=events
                                         is_active=is_active
+                                        show_token_usage=show_tu
                                     />
                                 }.into_any(),
                             }

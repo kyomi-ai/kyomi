@@ -8,11 +8,13 @@
 use leptos::prelude::*;
 
 use crate::components::{
-    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Skeleton, INPUT_CLASS,
+    ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Checkbox, Skeleton,
+    INPUT_CLASS,
 };
 use crate::components::{Alert, AlertDescription, AlertVariant, Button, ButtonVariant};
 use crate::server_fns::workspace::*;
 use crate::types::WorkspaceSettingsData;
+use crate::cache::store::SyncStore;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main page
@@ -56,7 +58,8 @@ pub fn WorkspacePage() -> impl IntoView {
                         Ok(data) => {
                             view! {
                                 <div class="space-y-6">
-                                    <WorkspaceNameCard data=data/>
+                                    <WorkspaceNameCard data=data.clone()/>
+                                    <TokenUsageCard data=data/>
                                     <WorkspaceSlackSection/>
                                 </div>
                             }.into_any()
@@ -119,6 +122,54 @@ fn WorkspaceNameCard(data: WorkspaceSettingsData) -> impl IntoView {
                     on:input=move |ev| set_name.set(event_target_value(&ev))
                     on:blur=on_blur
                 />
+            </CardContent>
+        </Card>
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Token Usage Card
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[component]
+fn TokenUsageCard(data: WorkspaceSettingsData) -> impl IntoView {
+    let sync_store = expect_context::<SyncStore>();
+    let save_action = Action::new(|show: &bool| {
+        let show = *show;
+        async move { update_workspace_show_token_usage(show).await }
+    });
+
+    // Derive the current value reactively from the SyncStore so changes
+    // made in another tab are reflected without a page reload.
+    let show_token_usage = Signal::derive(move || {
+        sync_store
+            .workspace_settings()
+            .get()
+            .map(|ws| ws.show_token_usage)
+            .unwrap_or(data.show_token_usage)
+    });
+
+    view! {
+        <Card>
+            <CardHeader>
+                <div class="flex items-center justify-between">
+                    <div>
+                        <CardTitle>"Token Usage"</CardTitle>
+                        <CardDescription>
+                            "Show token counts and estimated cost in chat message thinking headers."
+                        </CardDescription>
+                    </div>
+                    <ActionStatus action=save_action/>
+                </div>
+            </CardHeader>
+            <CardContent>
+                <label class="flex items-center gap-3 cursor-pointer">
+                    <Checkbox
+                        checked=show_token_usage
+                        on_change=Callback::new(move |val: bool| { let _ = save_action.dispatch(val); })
+                    />
+                    <span class="text-sm text-foreground">"Display token usage in thinking headers"</span>
+                </label>
             </CardContent>
         </Card>
     }
