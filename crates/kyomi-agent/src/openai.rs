@@ -10,6 +10,7 @@
 //! token usage tracking, and cost estimation.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde_json::json;
 use tracing::{debug, info};
@@ -25,6 +26,51 @@ const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 
 /// Default model for chat completions.
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
+
+// ---------------------------------------------------------------------------
+// OpenRouter Generation Cost Lookup
+// ---------------------------------------------------------------------------
+
+/// Extract the actual USD cost from an OpenRouter generation response.
+fn parse_openrouter_cost(json: &serde_json::Value) -> Option<f64> {
+    json.get("data")?.get("total_cost")?.as_f64()
+}
+
+/// Fetch the actual USD cost of a generation from the OpenRouter generation endpoint.
+///
+/// Called after a successful chat completion when the base URL is OpenRouter.
+/// Uses a 5-second timeout and returns `None` on any error so that the estimate-based
+/// cost fallback in the caller is always safe.
+async fn fetch_openrouter_cost(
+    client: &reqwest::Client,
+    api_key: &str,
+    generation_id: &str,
+) -> Option<f64> {
+    // Generation IDs use the format `gen-<alphanum>` — safe to interpolate directly.
+    let url = format!(
+        "https://openrouter.ai/api/v1/generation?id={}",
+        generation_id
+    );
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| debug!(generation_id, error = %e, "OpenRouter cost fetch: request failed"))
+        .ok()?;
+
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = response.json().await.ok()?;
+    let cost = parse_openrouter_cost(&json)?;
+
+    debug!(generation_id, cost, "fetched actual cost from OpenRouter");
+    Some(cost)
+}
 
 // ---------------------------------------------------------------------------
 // Model Pricing
@@ -294,7 +340,28 @@ impl OpenAIProvider {
         let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Parse response.
-        Self::parse_response(&self.base.model, &response_json)
+        let (mut response, generation_id) =
+            Self::parse_response(&self.base.model, &response_json)?;
+
+        // For OpenRouter requests, fetch the actual cost from the generation endpoint
+        // and override the estimate-based cost. Fall back to estimate on any error.
+        if self.base.base_url.contains("openrouter.ai")
+            && let Some(gen_id) = generation_id
+        {
+            match fetch_openrouter_cost(&self.base.client, &self.base.api_key, &gen_id).await {
+                Some(actual_cost) => {
+                    response.cost = Some(actual_cost);
+                }
+                None => {
+                    debug!(
+                        generation_id = %gen_id,
+                        "OpenRouter cost fetch failed, using estimate-based cost"
+                    );
+                }
+            }
+        }
+
+        Ok(response)
     }
 
     /// Send a single HTTP request to the OpenAI-compatible API.
@@ -371,14 +438,25 @@ impl OpenAIProvider {
     // Response Parsing
     // -----------------------------------------------------------------------
 
-    /// Parse the OpenAI API JSON response into an [`LLMResponse`].
+    /// Parse the OpenAI API JSON response into an [`LLMResponse`] and optional generation ID.
     ///
     /// Extracts content and tool calls from `choices[0].message`, maps
     /// `finish_reason` to internal format, and calculates cost.
+    ///
+    /// The second element of the returned tuple is the top-level `"id"` field from the
+    /// response (e.g. `"gen-..."` for OpenRouter). The caller uses it to fetch actual
+    /// costs from the OpenRouter generation endpoint when applicable.
     fn parse_response(
         model: &str,
         response: &serde_json::Value,
-    ) -> kyomi_core::Result<LLMResponse> {
+    ) -> kyomi_core::Result<(LLMResponse, Option<String>)> {
+        // Extract the top-level response ID (e.g. "gen-..." for OpenRouter).
+        let generation_id = response
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         // Extract the first choice's message.
         let message = response
             .get("choices")
@@ -468,13 +546,16 @@ impl OpenAIProvider {
             "OpenAI API call complete"
         );
 
-        Ok(LLMResponse {
-            content,
-            finish_reason,
-            usage,
-            tool_calls,
-            cost: Some(cost),
-        })
+        Ok((
+            LLMResponse {
+                content,
+                finish_reason,
+                usage,
+                tool_calls,
+                cost: Some(cost),
+            },
+            generation_id,
+        ))
     }
 
     /// Parse the `usage` object from the OpenAI response.
@@ -779,14 +860,14 @@ mod tests {
                 "completion_tokens": 20
             }
         });
-        let result = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
 
-        assert_eq!(result.content, "Hello, how can I help?");
-        assert_eq!(result.finish_reason, "end_turn");
-        assert_eq!(result.usage.input_tokens, 100);
-        assert_eq!(result.usage.output_tokens, 20);
-        assert!(result.tool_calls.is_none());
-        assert!(result.cost.is_some());
+        assert_eq!(response.content, "Hello, how can I help?");
+        assert_eq!(response.finish_reason, "end_turn");
+        assert_eq!(response.usage.input_tokens, 100);
+        assert_eq!(response.usage.output_tokens, 20);
+        assert!(response.tool_calls.is_none());
+        assert!(response.cost.is_some());
     }
 
     #[test]
@@ -812,12 +893,12 @@ mod tests {
                 "completion_tokens": 50
             }
         });
-        let result = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
 
-        assert_eq!(result.content, "Let me search.");
-        assert_eq!(result.finish_reason, "tool_use");
+        assert_eq!(response.content, "Let me search.");
+        assert_eq!(response.finish_reason, "tool_use");
 
-        let tool_calls = result.tool_calls.unwrap();
+        let tool_calls = response.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "call_123");
         assert_eq!(tool_calls[0].name, "search_catalog");
@@ -847,11 +928,11 @@ mod tests {
                 "completion_tokens": 30
             }
         });
-        let result = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
 
-        assert_eq!(result.content, "");
-        assert!(result.tool_calls.is_some());
-        assert_eq!(result.tool_calls.as_ref().unwrap().len(), 1);
+        assert_eq!(response.content, "");
+        assert!(response.tool_calls.is_some());
+        assert_eq!(response.tool_calls.as_ref().unwrap().len(), 1);
     }
 
     #[test]
@@ -887,9 +968,9 @@ mod tests {
                 "completion_tokens": 100
             }
         });
-        let result = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
 
-        let tool_calls = result.tool_calls.unwrap();
+        let tool_calls = response.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0].id, "call_1");
         assert_eq!(tool_calls[0].name, "search_catalog");
@@ -905,8 +986,8 @@ mod tests {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
-        assert_eq!(result.finish_reason, "end_turn");
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        assert_eq!(response.finish_reason, "end_turn");
     }
 
     #[test]
@@ -924,8 +1005,8 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
-        assert_eq!(result.finish_reason, "tool_use");
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        assert_eq!(response.finish_reason, "tool_use");
     }
 
     #[test]
@@ -934,8 +1015,8 @@ mod tests {
             "choices": [{"message": {"content": "truncated..."}, "finish_reason": "length"}],
             "usage": {"prompt_tokens": 50000, "completion_tokens": 4096}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
-        assert_eq!(result.finish_reason, "max_tokens");
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        assert_eq!(response.finish_reason, "max_tokens");
     }
 
     #[test]
@@ -944,8 +1025,8 @@ mod tests {
             "choices": [{"message": {"content": "Hello"}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
-        assert_eq!(result.finish_reason, "unknown");
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        assert_eq!(response.finish_reason, "unknown");
     }
 
     // -- Usage parsing tests ------------------------------------------------
@@ -955,12 +1036,12 @@ mod tests {
         let response = json!({
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]
         });
-        let result = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
 
-        assert_eq!(result.usage.input_tokens, 0);
-        assert_eq!(result.usage.output_tokens, 0);
-        assert_eq!(result.usage.cache_creation_input_tokens, 0);
-        assert_eq!(result.usage.cache_read_input_tokens, 0);
+        assert_eq!(response.usage.input_tokens, 0);
+        assert_eq!(response.usage.output_tokens, 0);
+        assert_eq!(response.usage.cache_creation_input_tokens, 0);
+        assert_eq!(response.usage.cache_read_input_tokens, 0);
     }
 
     #[test]
@@ -969,11 +1050,11 @@ mod tests {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1000, "completion_tokens": 500}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
 
         // OpenAI doesn't expose cache tokens the way Anthropic does.
-        assert_eq!(result.usage.cache_creation_input_tokens, 0);
-        assert_eq!(result.usage.cache_read_input_tokens, 0);
+        assert_eq!(response.usage.cache_creation_input_tokens, 0);
+        assert_eq!(response.usage.cache_read_input_tokens, 0);
     }
 
     // -- Missing/malformed response tests -----------------------------------
@@ -995,6 +1076,61 @@ mod tests {
         });
         let result = OpenAIProvider::parse_response("gpt-4o-mini", &response);
         assert!(result.is_err());
+    }
+
+    // -- Generation ID extraction tests -------------------------------------
+
+    #[test]
+    fn parse_response_extracts_generation_id() {
+        let response = json!({
+            "id": "gen-abc123xyz",
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let (_response, gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        assert_eq!(gen_id, Some("gen-abc123xyz".to_string()));
+    }
+
+    #[test]
+    fn parse_response_missing_id_returns_none() {
+        let response = json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let (_response, gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        assert_eq!(gen_id, None);
+    }
+
+    #[test]
+    fn parse_openrouter_cost_valid_response() {
+        let json = json!({
+            "data": {
+                "id": "gen-abc123",
+                "total_cost": 0.000123,
+                "model": "openai/gpt-4o-mini",
+                "tokens_prompt": 100,
+                "tokens_completion": 20
+            }
+        });
+        assert_eq!(parse_openrouter_cost(&json), Some(0.000123));
+    }
+
+    #[test]
+    fn parse_openrouter_cost_missing_data() {
+        let json = json!({"error": "not found"});
+        assert_eq!(parse_openrouter_cost(&json), None);
+    }
+
+    #[test]
+    fn parse_openrouter_cost_missing_total_cost() {
+        let json = json!({"data": {"id": "gen-abc123", "model": "openai/gpt-4o-mini"}});
+        assert_eq!(parse_openrouter_cost(&json), None);
+    }
+
+    #[test]
+    fn parse_openrouter_cost_non_numeric_total_cost() {
+        let json = json!({"data": {"total_cost": "not a number"}});
+        assert_eq!(parse_openrouter_cost(&json), None);
     }
 
     // -- Cost calculation tests ---------------------------------------------
@@ -1263,9 +1399,9 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 100, "completion_tokens": 30}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
 
-        let tc = &result.tool_calls.unwrap()[0];
+        let tc = &response.tool_calls.unwrap()[0];
         assert_eq!(tc.arguments["sql_query"], "SELECT * FROM orders");
         assert_eq!(tc.arguments["datasource"], "prod-pg");
     }
@@ -1290,9 +1426,9 @@ mod tests {
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5}
         });
-        let result = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o-mini", &response).unwrap();
 
-        let tc = &result.tool_calls.unwrap()[0];
+        let tc = &response.tool_calls.unwrap()[0];
         assert!(tc.arguments.is_object());
         assert!(tc.arguments.as_object().unwrap().is_empty());
     }
