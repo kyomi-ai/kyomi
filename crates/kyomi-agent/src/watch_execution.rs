@@ -1131,6 +1131,7 @@ async fn execute_watch_inner(
         &session_id,
         Some(&format!("Watch: {}", watch.name)),
         "watch_execution",
+        None,
     )
     .await?;
 
