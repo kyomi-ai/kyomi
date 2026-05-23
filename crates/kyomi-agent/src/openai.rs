@@ -301,12 +301,20 @@ impl OpenAIProvider {
     async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
         crate::provider::maybe_log_llm("openai", "request", body);
 
-        let response = self
+        let mut request = self
             .base
             .client
             .post(&self.base.base_url)
             .header("Authorization", format!("Bearer {}", self.base.api_key))
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+
+        if self.base.base_url.contains("openrouter.ai") {
+            request = request
+                .header("HTTP-Referer", "https://kyomi.ai")
+                .header("X-OpenRouter-Title", "Kyomi");
+        }
+
+        let response = request
             .json(body)
             .send()
             .await
