@@ -931,6 +931,33 @@ fn DashboardEditorInner(
     // the previous per-branch behaviour at a cleaner scope.
     crate::chartml_provider::provide_chart_context(&workspace_id.get());
 
+    // Callbacks hoisted out of the mode-switching reactive closure so their
+    // captures remain in the stable component scope even when mode.get() or
+    // chart_palette.get() re-evaluates the closure, which would otherwise
+    // dispose StoredValue-backed signal captures and cause WASM panics.
+    let on_chart_info = Callback::new(move |yaml: String| {
+        set_chart_info_yaml.set(yaml);
+        set_chart_info_open.set(true);
+    });
+    let on_edit_chart = Callback::new(move |(block_index, array_index): (usize, usize)| {
+        // Extract the YAML for the clicked chart. For a sequence block
+        // (```chartml` containing `- type: chart` items), `array_index`
+        // selects which item within the block was clicked. For a mapping
+        // block it's always 0.
+        let content = editor_content.get_untracked();
+        let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
+        let Some(cap) = re.captures_iter(&content).nth(block_index) else { return; };
+        let block_content = cap.get(1).map_or("", |m| m.as_str());
+        let items = split_chartml_block(block_content.trim());
+        let item_yaml = items
+            .get(array_index)
+            .cloned()
+            .unwrap_or_else(|| block_content.trim().to_string());
+        set_edit_chart_yaml.set(Some(item_yaml));
+        set_edit_chart_target.set(Some((block_index, array_index)));
+        set_chart_builder_open.set(true);
+    });
+
     view! {
         <div class="flex flex-col h-full bg-background overflow-hidden @container">
             // ── Header bar — matches viewer: page-header pattern ────────
@@ -1123,29 +1150,9 @@ fn DashboardEditorInner(
                                         <div class="dashboard-content p-6 flex-1">
                                             <MarkdownRenderer
                                                 content=effective_preview
-                                                chart_palette=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
-                                                on_chart_info=Callback::new(move |yaml: String| {
-                                                    set_chart_info_yaml.set(yaml);
-                                                    set_chart_info_open.set(true);
-                                                })
-                                                on_edit_chart=Callback::new(move |(block_index, array_index): (usize, usize)| {
-                                                    // Extract the YAML for the clicked chart. For a sequence block
-                                                    // (```chartml` containing `- type: chart` items), `array_index`
-                                                    // selects which item within the block was clicked. For a mapping
-                                                    // block it's always 0.
-                                                    let content = editor_content.get_untracked();
-                                                    let Ok(re) = regex::Regex::new(r"(?s)```chartml\s*\n(.*?)```") else { return; };
-                                                    let Some(cap) = re.captures_iter(&content).nth(block_index) else { return; };
-                                                    let block_content = cap.get(1).map_or("", |m| m.as_str());
-                                                    let items = split_chartml_block(block_content.trim());
-                                                    let item_yaml = items
-                                                        .get(array_index)
-                                                        .cloned()
-                                                        .unwrap_or_else(|| block_content.trim().to_string());
-                                                    set_edit_chart_yaml.set(Some(item_yaml));
-                                                    set_edit_chart_target.set(Some((block_index, array_index)));
-                                                    set_chart_builder_open.set(true);
-                                                })
+                                                chart_palette=chart_palette.get_untracked().unwrap_or_else(|| "kyomi".to_string())
+                                                on_chart_info=on_chart_info
+                                                on_edit_chart=on_edit_chart
                                             />
                                         </div>
                                     </div>
@@ -1242,7 +1249,7 @@ fn DashboardEditorInner(
                                     <DashboardWysiwygEditor
                                         content=effective_editor_content
                                         on_change=on_editor_change.clone()
-                                        palette_name=chart_palette.get().unwrap_or_else(|| "kyomi".to_string())
+                                        palette_name=chart_palette.get_untracked().unwrap_or_else(|| "kyomi".to_string())
                                         toolbar_items=items
                                         inject=inject
                                     />

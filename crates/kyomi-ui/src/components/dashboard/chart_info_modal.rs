@@ -97,10 +97,10 @@ pub fn ChartInfoModal(
                 // SQL Query section — only shown when present
                 // Matches React: `{query && <CopyableCodeBlock label="SQL Query" />}`
                 {move || query.get().map(|sql| {
-                    let sql = StoredValue::new(sql);
+                    let sql_for_copy = sql.clone();
                     let (sql_copied, set_sql_copied) = signal(false);
                     let on_sql_copy = move |_: leptos::ev::MouseEvent| {
-                        let text = sql.get_value();
+                        let text = sql_for_copy.clone();
                         leptos::task::spawn_local(async move {
                             if let Some(window) = web_sys::window() {
                                 let clipboard = window.navigator().clipboard();
@@ -112,7 +112,7 @@ pub fn ChartInfoModal(
                             }
                         });
                     };
-                    let sql_text = sql.get_value();
+                    let sql_text = sql;
                     view! {
                         <div class="space-y-2">
                             <span class="text-sm font-medium text-foreground">"SQL Query"</span>
