@@ -435,9 +435,12 @@ impl AgentTool for ModifyDashboardTool {
 
     fn description(&self) -> &str {
         "Update an existing dashboard's title and/or content. You must be the \
-         owner to update. Use get_chartml_spec to verify ChartML syntax before \
-         updating. ChartML blocks are validated before saving - invalid syntax \
-         will return detailed errors."
+         owner to update. Important: to add or change dashboard content (charts, \
+         text, markdown), you MUST include the 'content' parameter with the \
+         complete markdown. Omitting 'content' only updates the title — it does \
+         not add any content. Use get_chartml_spec to verify ChartML syntax \
+         before updating. ChartML blocks are validated before saving — invalid \
+         syntax will return detailed errors."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -549,6 +552,28 @@ impl AgentTool for ModifyDashboardTool {
             Err(e) => return Err(e),
         }
 
+        // Check if this was a title-only update on an empty dashboard.
+        // This warning helps the LLM self-correct when it forgets to include content.
+        let empty_content_warning = if content.is_none() {
+            match kyomi_auth::dashboard_service::get_dashboard(
+                &ctx.db, dashboard_id, &ctx.workspace_id,
+            )
+            .await
+            {
+                Ok(Some(dash)) => {
+                    let is_empty = dash.content.trim().is_empty();
+                    if is_empty {
+                        Some("No content was provided and the dashboard is currently empty. To add charts or text, include the 'content' parameter with the full dashboard markdown.")
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // Spawn background embedding if content changed and is substantial
         if let Some(c) = content
             && c.len() >= 50
@@ -584,14 +609,20 @@ impl AgentTool for ModifyDashboardTool {
         let frontend_url = &ctx.config.frontend_url;
         let display_title = title.map(|t| t.trim()).unwrap_or("(unchanged)");
 
-        Ok(serde_json::json!({
+        let mut response = serde_json::json!({
             "success": true,
             "dashboard_id": dashboard_id,
             "url": format!("{frontend_url}/dashboard/{dashboard_id}"),
             "title": display_title,
             "message": format!("Updated dashboard '{display_title}'"),
-        })
-        .to_string())
+        });
+        if let Some(warning) = empty_content_warning {
+            response.as_object_mut().unwrap().insert(
+                "warning".to_string(),
+                serde_json::Value::String(warning.to_string()),
+            );
+        }
+        Ok(response.to_string())
     }
 }
 
@@ -826,6 +857,15 @@ mod tests {
         let ann = ModifyDashboardTool.annotations().expect("has annotations");
         assert_eq!(ann.read_only_hint, Some(false));
         assert!(ann.destructive_hint.is_none());
+    }
+
+    #[test]
+    fn modify_dashboard_description_mentions_content_requirement() {
+        let desc = ModifyDashboardTool.description();
+        assert!(
+            desc.contains("MUST include the 'content' parameter"),
+            "Description should mention content requirement"
+        );
     }
 
     // -- DeleteDashboardTool -------------------------------------------------
