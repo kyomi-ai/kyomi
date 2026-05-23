@@ -193,13 +193,13 @@ pub fn ChatMessage(
 
         let thinking_is_active = move || thinking_state.get().is_active;
 
-        let thinking_token_usage = {
+        let thinking_token_usage = Signal::derive({
             let stored = stored_token_usage.clone();
             move || {
                 let live = thinking_state.get();
                 live.token_usage.clone().or_else(|| stored.clone())
             }
-        };
+        });
 
         // Capture the thinking start time once — when thinking first becomes active.
         // This prevents the elapsed timer from resetting on each tool call or event
@@ -244,40 +244,23 @@ pub fn ChatMessage(
                         {
                             let events = thinking_events_for_component();
                             let is_active = thinking_is_active();
-                            let maybe_tu = thinking_token_usage();
                             let maybe_start = thinking_start_time_ms.get_untracked();
-                            let show_tu = show_token_usage.get();
-                            match (maybe_tu, maybe_start) {
-                                (Some(tu), Some(start)) => view! {
+                            match maybe_start {
+                                Some(start) => view! {
                                     <AgentThinking
                                         thinking_events=events
                                         is_active=is_active
-                                        token_usage=tu
+                                        token_usage=thinking_token_usage
                                         start_time_ms=start
-                                        show_token_usage=show_tu
+                                        show_token_usage=show_token_usage
                                     />
                                 }.into_any(),
-                                (Some(tu), None) => view! {
+                                None => view! {
                                     <AgentThinking
                                         thinking_events=events
                                         is_active=is_active
-                                        token_usage=tu
-                                        show_token_usage=show_tu
-                                    />
-                                }.into_any(),
-                                (None, Some(start)) => view! {
-                                    <AgentThinking
-                                        thinking_events=events
-                                        is_active=is_active
-                                        start_time_ms=start
-                                        show_token_usage=show_tu
-                                    />
-                                }.into_any(),
-                                (None, None) => view! {
-                                    <AgentThinking
-                                        thinking_events=events
-                                        is_active=is_active
-                                        show_token_usage=show_tu
+                                        token_usage=thinking_token_usage
+                                        show_token_usage=show_token_usage
                                     />
                                 }.into_any(),
                             }
