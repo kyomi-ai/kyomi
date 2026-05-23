@@ -685,10 +685,7 @@ pub async fn send_chat_message(
                     &spawn_session_id,
                     &exec_result.assistant_message_id,
                     &exec_result.response_text,
-                    exec_result
-                        .model
-                        .as_deref()
-                        .unwrap_or(kyomi_agent::DEFAULT_MODEL),
+                    exec_result.model.as_deref().unwrap_or("unknown"),
                     exec_result.token_usage,
                     &context_type,
                     None,

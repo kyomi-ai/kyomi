@@ -162,7 +162,7 @@ pub async fn send_copilot_message(
         user_id: ac.auth.user_id.clone(),
         workspace_id: ac.ws_id.clone(),
         message: prep.user_message,
-        model_name: Some("claude-haiku-4-5-20251001".to_string()),
+        model_name: None,
         temperature: 0.1,
         is_shared_conversation: false,
         context_type: context_type.to_string(),
@@ -217,10 +217,7 @@ pub async fn send_copilot_message(
                     &spawn_session_id,
                     &exec_result.assistant_message_id,
                     &exec_result.response_text,
-                    exec_result
-                        .model
-                        .as_deref()
-                        .unwrap_or(kyomi_agent::DEFAULT_MODEL),
+                    exec_result.model.as_deref().unwrap_or("unknown"),
                     exec_result.token_usage,
                     &spawn_context_type,
                     None,

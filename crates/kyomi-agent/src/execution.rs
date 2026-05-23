@@ -47,7 +47,6 @@ pub(crate) const API_USAGE_LOG_INSERT_SQL: &str = "INSERT INTO api_usage_log \
       cost_estimate, component, provider_cost_usd) \
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11, $12)";
 use crate::agent::{AgentConfig, CustomAgent};
-use crate::anthropic::DEFAULT_MODEL;
 use crate::prompt;
 use crate::provider::{
     create_provider_from_workspace, resolve_provider_config, ProviderKind,
@@ -209,12 +208,6 @@ pub async fn execute_agent_chat(
             // wins over the workspace default.
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
-        } else if ws_config.model.is_none()
-            && ws_config.provider == kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-        {
-            // Preserve legacy behaviour for Anthropic Kyomi workspaces that
-            // had no explicit default model configured.
-            ws_config.model = Some(DEFAULT_MODEL.to_string());
         }
         let is_byok = ws_config.is_byok();
         let client = create_provider_from_workspace(&ws_config, app_config)?;
@@ -712,12 +705,11 @@ async fn generate_title_inner(
             WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
         };
 
-        let is_kyomi_managed = ws_config.provider == WorkspaceAiProvider::Kyomi;
-        let has_custom_base_url = ws_config.base_url.is_some();
+        let has_custom_base_url = ws_config.base_url.is_some()
+            || (ws_config.provider == WorkspaceAiProvider::Kyomi
+                && app_config.llm_base_url.is_some());
 
-        if let Some(kind) = provider_kind
-            && (is_kyomi_managed || !has_custom_base_url)
-        {
+        if let Some(kind) = provider_kind && !has_custom_base_url {
             ws_config.model = Some(kind.cheapest_model().to_string());
         }
     }
