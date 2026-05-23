@@ -69,6 +69,8 @@ pub struct WorkspaceSettingsData {
     pub workspace_name: String,
     pub default_model: String,
     pub chart_palette: String,
+    #[serde(default)]
+    pub show_token_usage: bool,
 }
 
 /// Workspace-level Slack integration status.

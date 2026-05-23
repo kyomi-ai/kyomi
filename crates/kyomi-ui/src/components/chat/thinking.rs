@@ -47,10 +47,17 @@ pub struct ThinkingEvent {
 }
 
 /// Token usage information from the agent.
+///
+/// Field names match the WebSocket `token_usage_update` event JSON shape:
+/// `{"input_tokens": N, "output_tokens": N, "total_tokens": N, "cost": X.XX}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TokenUsage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub cost: f64,
 }
 
 /// Thinking state for a single message.

@@ -104,10 +104,15 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
         .unwrap_or("kyomi")
         .to_string();
 
+    let show_token_usage = custom_settings_get(&workspace.settings, "show_token_usage")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     Ok(WorkspaceSettingsData {
         workspace_name: workspace.name.unwrap_or_default(),
         default_model,
         chart_palette,
+        show_token_usage,
     })
 }
 
@@ -182,6 +187,34 @@ pub async fn update_workspace_chartml_config(palette: String) -> Result<(), Serv
         &workspace.settings,
         "chartml_config",
         config_value,
+    );
+
+    kyomi_auth::workspace_service::update_workspace_settings(
+        ac.db(),
+        &ac.ws_id,
+        &updated_settings,
+    )
+    .await
+    .into_sfn()?;
+
+    Ok(())
+}
+
+/// Update whether token usage is shown in chat message headers. Requires admin role.
+#[server(prefix = "/leptos-api")]
+pub async fn update_workspace_show_token_usage(show: bool) -> Result<(), ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
+
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let updated_settings = merge_custom_settings(
+        &workspace.settings,
+        "show_token_usage",
+        serde_json::json!(show),
     );
 
     kyomi_auth::workspace_service::update_workspace_settings(
