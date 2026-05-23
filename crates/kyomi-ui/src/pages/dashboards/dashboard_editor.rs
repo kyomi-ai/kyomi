@@ -1507,7 +1507,15 @@ fn DashboardWysiwygEditor(
                 .map(|s| s.effective.get() == "dark")
                 .unwrap_or(false)
         });
-        let extension = ChartMLExtension::new(palette, is_dark_memo);
+        // Capture the current component's reactive owner. This owner lives for
+        // the lifetime of `DashboardWysiwygEditor` (destroyed only when the user
+        // switches away from Visual mode). Passing it into ChartMLExtension lets
+        // `on_info` / `on_edit` callbacks be rooted here rather than in kode's
+        // internal node-view scopes, preventing "reactive value already disposed"
+        // panics when ProseMirror re-mounts a node view mid-session.
+        let editor_owner = Owner::current()
+            .expect("DashboardWysiwygEditor must be rendered inside a reactive owner");
+        let extension = ChartMLExtension::new(palette, is_dark_memo, editor_owner);
         let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![
             Arc::new(extension),
         ];
