@@ -846,7 +846,7 @@ pub fn ChartBuilderModal(
     // mounts outside DashboardChartProviders, so ChartMLChart's context
     // fallback finds nothing. We register directly here.
     let inline_chartml: StoredValue<chartml_leptos::ChartMLRef, LocalStorage> = {
-        let chartml = configured_chartml("kyomi", is_dark);
+        let chartml = configured_chartml("kyomi", is_dark, &workspace_id);
         if !workspace_id.is_empty() {
             let provider: chartml_leptos::ProviderRef = std::sync::Arc::new(
                 crate::chartml_provider::KyomiDatasourceProvider::new(workspace_id.clone()),

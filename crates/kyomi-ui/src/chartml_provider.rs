@@ -122,9 +122,7 @@ pub struct KyomiDatasourceProvider {
     /// Workspace UUID for the current user. Used to namespace cache entries
     /// across workspaces sharing one browser. Empty string is allowed (the
     /// resolver doesn't fold an empty namespace into anything sensitive),
-    /// but downstream `IndexedDbBackend` rejects empty + colon-bearing
-    /// namespaces — keep this aligned with whatever the dashboard root
-    /// passes to `IndexedDbBackend::new(...)`.
+    /// but `enable_indexeddb_cache` rejects empty + colon-bearing namespaces.
     workspace_id: String,
     /// Indirection over the server-fn call. Production callers get
     /// [`ServerFnDatasourceQuerier`] via [`Self::new`]; tests inject a mock
@@ -240,13 +238,14 @@ pub struct TracingHooks;
 
 /// Create a fully configured [`ChartMLRef`] with all Kyomi chart renderers
 /// registered, the named palette applied, the Kyomi editorial theme wired in,
-/// and tracing-based resolver hooks installed.
+/// tracing-based resolver hooks installed, and (on WASM) the IndexedDB
+/// persistent cache enabled for the given workspace.
 ///
 /// This is the **single shared factory** used by both the markdown-renderer
 /// path (`ChartBlock` in `markdown_renderer.rs`) and the WYSIWYG extension
 /// path (`ChartMLExtension` in `chartml_extension.rs`). All renderer
-/// registrations, palette choices, and hook installation happen here so the
-/// two render paths are guaranteed to be in sync.
+/// registrations, palette choices, hook installation, and cache setup happen
+/// here so the two render paths are guaranteed to be in sync.
 ///
 /// # Arguments
 ///
@@ -255,6 +254,8 @@ pub struct TracingHooks;
 ///   when no user preference exists.
 /// * `is_dark` — selects dark-mode palette slots and chrome colors. Read
 ///   from `use_theme()` at the construction site.
+/// * `workspace_id` — workspace UUID used to namespace the IndexedDB cache
+///   entries per workspace. Pass an empty string to skip cache setup.
 ///
 /// # What is configured here
 ///
@@ -265,17 +266,21 @@ pub struct TracingHooks;
 /// 4. **Theme**: [`kyomi_chart_theme::kyomi_theme`] — Kyomi editorial chrome.
 /// 5. **Hooks**: [`tracing_hooks_ref`] installed on the resolver so every
 ///    fetch/transform phase is observable via `tracing::`.
+/// 6. **Persistent cache** (WASM only, when `workspace_id` is non-empty):
+///    [`chartml_core::ChartML::enable_indexeddb_cache`] opens the
+///    [`KYOMI_CHARTML_CACHE_DB`] IndexedDB store namespaced by workspace.
 ///
 /// # What is NOT configured here
 ///
-/// Provider (`ProviderRef`) and persistent cache backend (`CacheBackendRef`)
-/// are pulled from Leptos context inside `chartml_leptos::ChartMLChart`, so
-/// they are not part of this factory. Hooks are installed here (point 5)
-/// because `HooksRef` is `Rc<dyn ResolverHooks>` on wasm32 — it is
-/// `!Send + !Sync` and cannot travel through Leptos context.
+/// Provider (`ProviderRef`) is pulled from Leptos context inside
+/// `chartml_leptos::ChartMLChart`, so it is not part of this factory.
+/// Hooks are installed here (point 5) because `HooksRef` is
+/// `Rc<dyn ResolverHooks>` on wasm32 — it is `!Send + !Sync` and cannot
+/// travel through Leptos context.
 pub(crate) fn configured_chartml(
     palette_name: &str,
     is_dark: bool,
+    workspace_id: &str,
 ) -> ChartMLRef {
     let colors = kyomi_chart_theme::kyomi_palette(palette_name, is_dark);
     let theme = kyomi_chart_theme::kyomi_theme(is_dark);
@@ -298,6 +303,16 @@ pub(crate) fn configured_chartml(
     // travel through `provide_context`. Allocating a fresh unit-struct
     // `Rc` here is cheap (one allocation per chart construction).
     chartml.resolver().set_hooks(tracing_hooks_ref());
+    // Enable the IndexedDB tier-2 cache when a workspace id is provided.
+    // The `#[cfg]` gate matches the method's own gate so we don't attempt to
+    // call a browser-only API in SSR builds. Non-WASM builds suppress the
+    // unused-variable warning via the else branch below.
+    #[cfg(target_arch = "wasm32")]
+    if !workspace_id.is_empty() {
+        chartml.enable_indexeddb_cache(KYOMI_CHARTML_CACHE_DB, workspace_id);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = workspace_id;
     chartml
 }
 
@@ -333,39 +348,6 @@ impl chartml_core::ResolverHooks for TracingHooks {
     }
 }
 
-/// Reactive handle to the per-workspace IndexedDB cache backend. `None`
-/// while the backend is opening (async `Factory::open`) or after the open
-/// failed; `Some` once the database is ready and every chart mounted
-/// thereafter picks it up via Leptos context.
-///
-/// Wrapped in a [`Signal`] (rather than [`Memo`]) because
-/// `Arc<dyn CacheBackend>` doesn't implement `PartialEq` — Memo's value
-/// caching depends on equality. `Signal::derive_local` reads the underlying
-/// `RwSignal` on every access without comparing.
-///
-/// # Why `LocalStorage`?
-///
-/// `chartml_leptos::CacheBackendRef` aliases to `Arc<dyn CacheBackend>` on
-/// native and `Rc<dyn CacheBackend>` on wasm32. `Rc<T>` is *unconditionally*
-/// `!Send + !Sync` regardless of `T`, so the default `SyncStorage` (which
-/// requires `T: Send + Sync` for the contained value's accessors) refuses
-/// to wrap it on browser builds — every `RwSignal::set` / `Signal::get`
-/// site fails to compile with `Rc<(dyn CacheBackend + 'static)> cannot be
-/// sent between threads safely`.
-///
-/// `LocalStorage` lifts that restriction by storing the value inside a
-/// [`send_wrapper::SendWrapper`] that pretends to be `Send + Sync` but
-/// panics if accessed from any thread other than the one that created it.
-/// Sound for our use case because wasm32-unknown-unknown is single-threaded
-/// (browser charts never cross workers), and we lose nothing — the
-/// `Signal::get()` API is identical regardless of storage.
-///
-/// On native targets (server-side render) this is always `None` —
-/// `IndexedDbBackend` is browser-only — but we still pay the `LocalStorage`
-/// machinery there for one reactive type alias across both targets.
-pub type CacheBackendSignal =
-    Signal<Option<chartml_leptos::CacheBackendRef>, LocalStorage>;
-
 /// Dashboard-wide "refresh all charts" signal. The dashboard viewer's
 /// "Refresh All" toolbar button increments this; every descendant
 /// `ChartMLChart` (via the `ChartBlock` wrapper in `markdown_renderer`)
@@ -382,33 +364,28 @@ pub type CacheBackendSignal =
 /// in those contexts via the chart's own header-bar refresh button.
 pub type RefreshAllSignal = RwSignal<u32>;
 
-/// Wrapper component that wires the chartml 5.0 provider, persistent cache
-/// backend, and observability hooks into Leptos context for every descendant
-/// `chartml_leptos::ChartMLChart`.
+/// Wrapper component that wires the chartml 5.0 provider into Leptos context
+/// for every descendant `chartml_leptos::ChartMLChart`.
 ///
 /// Mounted around `MarkdownRenderer` in both the dashboard viewer and editor.
 /// Construction is deferred until the workspace id is known (loaded from
-/// the user-context resource) so the IndexedDB backend can namespace cache
-/// entries per workspace and `KyomiDatasourceProvider` can fold the id
+/// the user-context resource) so `KyomiDatasourceProvider` can fold the id
 /// into resolver cache keys for cross-workspace isolation.
 ///
 /// # Why a wrapper component?
 ///
 /// `provide_context` resolves at the component-construction site and
 /// affects every descendant. Doing it here (a child of the dashboard's
-/// async user-context resolution) means the provider and cache are only
-/// installed once we have a real `workspace_id` — never with a placeholder
-/// that would either fail (`IndexedDbBackend::new` rejects empty namespaces)
-/// or leak data across workspaces.
+/// async user-context resolution) means the provider is only installed once
+/// we have a real `workspace_id` — never with a placeholder that would
+/// leak data across workspaces.
 ///
 /// # Cache backend
 ///
-/// The IndexedDB tier-2 cache opens asynchronously via `IndexedDbBackend::new`.
-/// While it opens, the resolver still has the in-memory tier-1 cache
-/// (`MemoryBackend`) so charts render immediately; the persistent cache
-/// hydrates as soon as `Factory::open` resolves. If the open fails (private
-/// browsing disabled IDB, namespace constraint violated), we log a warning
-/// and proceed without a tier-2 cache — degraded but not broken.
+/// The IndexedDB tier-2 cache is now set up directly on each `ChartMLRef`
+/// via [`configured_chartml`]'s `workspace_id` parameter, which calls
+/// `chartml.enable_indexeddb_cache`. This component provides only the
+/// `ProviderRef` (datasource provider) via context.
 #[component]
 pub fn DashboardChartProviders(
     /// Workspace UUID — folded into every cache key for cross-workspace
@@ -429,86 +406,20 @@ pub fn DashboardChartProviders(
     children()
 }
 
-/// Provide the chartml provider + cache backend context entries that
+/// Provide the `ProviderRef` (datasource provider) context entry that
 /// [`DashboardChartProviders`] would set up — useful when wrapping in the
 /// component itself would force a `ChildrenFn` constraint that breaks
 /// surrounding `FnOnce` reactive closures (e.g. the visual editor mode in
 /// `dashboard_editor.rs` which moves a `Vec<ToolbarItem>` into its children).
-/// Call this at the top of a component body to make `ProviderRef` and
-/// `CacheBackendSignal` available to descendant `ChartMLChart`s via
-/// `use_context`.
+/// Call this at the top of a component body to make `ProviderRef` available
+/// to descendant `ChartMLChart`s via `use_context`.
+///
+/// The IndexedDB persistent cache is set up per-chart inside
+/// [`configured_chartml`] via `chartml.enable_indexeddb_cache`, not here.
 pub fn provide_chart_context(workspace_id: &str) {
     // Provider — synchronous, cheap, ready immediately.
     let provider: ProviderRef = Arc::new(KyomiDatasourceProvider::new(workspace_id.to_string()));
     provide_context(provider);
-
-    // IndexedDB cache backend — opens asynchronously, hydrates a reactive
-    // signal that descendants can read via Leptos context. The signal is
-    // provided immediately (so the context entry exists at child mount) and
-    // populated when the open completes. `ChartMLChart` re-resolves its
-    // cache_backend prop on every mount, so the persistent cache becomes
-    // active as soon as charts re-mount after open completion.
-    //
-    // Hooks (`HooksRef`) are NOT plumbed through context — they're
-    // `Rc<dyn ResolverHooks>` on WASM which is `!Send + !Sync` and
-    // incompatible with `provide_context`. Per-chart `set_hooks` wiring
-    // happens inside `ChartBlock::new`.
-    let backend_signal = open_indexeddb_backend(workspace_id);
-    provide_context(backend_signal);
-}
-
-/// Spawn the IndexedDB open and return a [`CacheBackendSignal`] that flips
-/// to `Some` when the open succeeds, or stays `None` if it fails.
-/// Browser-only — native targets immediately return `None`.
-///
-/// Returns a `Signal` rather than a `Memo` because `Arc<dyn CacheBackend>`
-/// doesn't implement `PartialEq` (Memo's diff-and-skip optimization needs
-/// equality). `Signal::derive_local` reads the underlying `RwSignal`
-/// unconditionally, which is fine here — the signal flips at most once
-/// per workspace.
-///
-/// # `LocalStorage` everywhere
-///
-/// Both the inner [`RwSignal`] and the returned [`Signal`] use
-/// [`LocalStorage`]. The reason: `chartml_leptos::CacheBackendRef` is
-/// `Rc<dyn CacheBackend>` on wasm32 (`Rc` is unconditionally `!Send +
-/// !Sync` regardless of `T`), so the default `SyncStorage` rejects it at
-/// compile time. `LocalStorage` wraps the value in a [`send_wrapper`] that
-/// makes it nominally `Send + Sync` but panics on cross-thread access —
-/// which can't happen because wasm32-unknown-unknown is single-threaded.
-/// See the [`CacheBackendSignal`] doc comment for the long form.
-fn open_indexeddb_backend(workspace_id: &str) -> CacheBackendSignal {
-    let backend_state: RwSignal<Option<chartml_leptos::CacheBackendRef>, LocalStorage> =
-        RwSignal::new_local(None);
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        let id = workspace_id.to_string();
-        leptos::task::spawn_local(async move {
-            use chartml_core::resolver::backends::indexeddb::IndexedDbBackend;
-            match IndexedDbBackend::new(KYOMI_CHARTML_CACHE_DB, &id).await {
-                Ok(backend) => {
-                    let backend: chartml_leptos::CacheBackendRef =
-                        std::rc::Rc::new(backend);
-                    backend_state.try_set(Some(backend));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        workspace = %id,
-                        "IndexedDB cache backend unavailable, falling back to in-memory tier-1 only",
-                    );
-                }
-            }
-        });
-    }
-
-    // Suppress unused-variable warning on native targets where we don't
-    // actually consume `workspace_id`.
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = workspace_id;
-
-    Signal::derive_local(move || backend_state.get())
 }
 
 #[cfg(test)]

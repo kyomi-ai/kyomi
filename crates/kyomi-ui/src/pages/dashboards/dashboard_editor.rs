@@ -919,16 +919,17 @@ fn DashboardEditorInner(
         history_preview_content.get().is_some()
     });
 
-    // ── Chartml 5.0 provider + IndexedDB cache context ───────────────────
+    // ── Chartml 5.0 provider context ────────────────────────────────────
     // Install on this component's owner so BOTH the Source-mode
     // `MarkdownRenderer` preview and the Visual-mode inline
-    // `ChartMLChart` renders inherit a single `KyomiDatasourceProvider`
-    // + `CacheBackendSignal`. Calling at component-body scope (not inside
-    // the Source/Visual `move ||` closure) means one IndexedDB-open
-    // spawn per mount instead of one per mode toggle. `workspace_id` is
-    // a `Memo`, so `.get()` here subscribes this owner to it — if it
-    // ever changes, the reactive graph replaces the context, matching
-    // the previous per-branch behaviour at a cleaner scope.
+    // `ChartMLChart` renders inherit a single `KyomiDatasourceProvider`.
+    // Calling at component-body scope (not inside the Source/Visual
+    // `move ||` closure) means one provider per mount instead of one per
+    // mode toggle. `workspace_id` is a `Memo`, so `.get()` here subscribes
+    // this owner to it — if it ever changes, the reactive graph replaces
+    // the context, matching the previous per-branch behaviour at a cleaner
+    // scope. The IndexedDB cache is set up per-chart inside
+    // `configured_chartml` via `enable_indexeddb_cache`.
     crate::chartml_provider::provide_chart_context(&workspace_id.get());
 
     // Callbacks hoisted out of the mode-switching reactive closure so their
@@ -1250,6 +1251,7 @@ fn DashboardEditorInner(
                                         content=effective_editor_content
                                         on_change=on_editor_change.clone()
                                         palette_name=chart_palette.get_untracked().unwrap_or_else(|| "kyomi".to_string())
+                                        workspace_id=workspace_id.get()
                                         toolbar_items=items
                                         inject=inject
                                     />
@@ -1488,6 +1490,10 @@ fn DashboardWysiwygEditor(
     palette_name: Option<String>,
     #[prop(optional)]
     toolbar_items: Option<Vec<kode_leptos::ToolbarItem>>,
+    /// Workspace UUID forwarded to [`ChartMLExtension::new`] for IndexedDB
+    /// cache namespacing.
+    #[prop(into, optional)]
+    workspace_id: Option<String>,
     /// Signal for injecting text at the cursor position from outside the editor.
     #[prop(optional)]
     inject: Option<RwSignal<Option<kode_leptos::InjectCommand>>>,
@@ -1515,7 +1521,7 @@ fn DashboardWysiwygEditor(
         // panics when ProseMirror re-mounts a node view mid-session.
         let editor_owner = Owner::current()
             .expect("DashboardWysiwygEditor must be rendered inside a reactive owner");
-        let extension = ChartMLExtension::new(palette, is_dark_memo, editor_owner);
+        let extension = ChartMLExtension::new(palette, is_dark_memo, editor_owner, workspace_id.unwrap_or_default());
         let extensions: Vec<Arc<dyn kode_leptos::extension::Extension>> = vec![
             Arc::new(extension),
         ];

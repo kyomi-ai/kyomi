@@ -55,16 +55,19 @@ pub struct ChartMLExtension {
     palette: String,
     is_dark: send_wrapper::SendWrapper<Memo<bool>>,
     stable_owner: send_wrapper::SendWrapper<Owner>,
+    workspace_id: String,
 }
 
 impl ChartMLExtension {
     /// Create the extension with the named palette, a reactive dark-mode memo,
-    /// and the editor's stable reactive owner.
+    /// the editor's stable reactive owner, and the workspace UUID for the
+    /// IndexedDB persistent cache.
     ///
     /// Charts are rendered lazily inside reactive closures that call
     /// [`configured_chartml`] — the shared factory that registers all 9 Kyomi
     /// renderers, the DataFusion transform, the palette, the Kyomi editorial
-    /// theme, and tracing-based resolver hooks.
+    /// theme, tracing-based resolver hooks, and (on WASM) the IndexedDB
+    /// cache namespaced by workspace.
     ///
     /// # Arguments
     ///
@@ -72,11 +75,19 @@ impl ChartMLExtension {
     /// * `is_dark` — reactive memo that tracks whether the UI is in dark mode.
     /// * `stable_owner` — the editor component's [`Owner`], used to root
     ///   action callbacks that must outlive kode's internal node-view scopes.
-    pub fn new(palette_name: &str, is_dark: Memo<bool>, stable_owner: Owner) -> Self {
+    /// * `workspace_id` — workspace UUID forwarded to [`configured_chartml`]
+    ///   to enable the IndexedDB tier-2 cache namespaced by workspace.
+    pub fn new(
+        palette_name: &str,
+        is_dark: Memo<bool>,
+        stable_owner: Owner,
+        workspace_id: String,
+    ) -> Self {
         Self {
             palette: palette_name.to_string(),
             is_dark: send_wrapper::SendWrapper::new(is_dark),
             stable_owner: send_wrapper::SendWrapper::new(stable_owner),
+            workspace_id,
         }
     }
 }
@@ -139,6 +150,7 @@ impl Extension for ChartMLExtension {
         let palette = self.palette.clone();
         let is_dark = *self.is_dark;
         let stable_owner = (*self.stable_owner).clone();
+        let workspace_id = self.workspace_id.clone();
 
         // The full block content is used by the edit-request listener in the
         // dashboard editor to locate which fence in the source was clicked
@@ -164,8 +176,9 @@ impl Extension for ChartMLExtension {
                 let palette_clone = palette.clone();
                 let block_content = full_block_content.clone();
                 let stable_owner_clone = stable_owner.clone();
+                let ws_id = workspace_id.clone();
                 let chart_view = move || {
-                    let chartml = configured_chartml(&palette_clone, is_dark.get());
+                    let chartml = configured_chartml(&palette_clone, is_dark.get(), &ws_id);
                     render_one_chart(
                         item_yaml.clone(),
                         array_index,

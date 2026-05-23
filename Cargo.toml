@@ -141,7 +141,7 @@ kyomi-datasource-drivers = { version = "1.3", package = "kyomi-datasource" }
 # the bottom of this file (between BEGIN_LOCAL_DEV_PATCHES /
 # END_LOCAL_DEV_PATCHES). The Dockerfile strips that block before
 # `cargo build`, so production always resolves against the registry.
-chartml-core = { version = "5", features = ["wasm-indexeddb"] }
+chartml-core = { version = "5.1", features = ["wasm-indexeddb"] }
 chartml-render = "5"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
@@ -149,7 +149,7 @@ chartml-chart-scatter = "5"
 chartml-chart-metric = "5.0.3"
 chartml-chart-table = "5.0.4"
 chartml-datafusion = "5"
-chartml-leptos = "5.0.4"
+chartml-leptos = "5.1"
 
 # Code editor (kode) — same pattern as chartml above.
 kode-leptos = "0.5"
