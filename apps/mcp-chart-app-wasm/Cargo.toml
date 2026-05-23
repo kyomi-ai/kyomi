@@ -9,16 +9,14 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-# ChartML — pinned to <5.1 because chartml-core 5.1 added stroke_dashoffset
-# to ChartElement::Path but the chart renderer crates haven't been published
-# with the updated field yet. Lift the pin after chartml publishes all renderer
-# crates at >=5.1.
-chartml-core = ">=5, <5.1"
+# ChartML — version "5" pulls from crates.io for CI/CD builds. Local dev
+# redirects via [patch.crates-io] below (stripped by CI sed, same as root).
+chartml-core = "5"
 chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
 chartml-chart-scatter = "5"
 chartml-chart-metric = "5"
-chartml-leptos = "5"
+chartml-leptos = "5.0.3"
 
 kyomi-ui-components = { path = "../../crates/kyomi-ui-components" }
 kyomi-chart-theme = { path = "../../crates/kyomi-chart-theme" }
