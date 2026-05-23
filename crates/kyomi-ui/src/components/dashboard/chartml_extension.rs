@@ -379,12 +379,13 @@ fn render_one_chart(
         ));
     });
 
-    // Store callbacks for use inside the reactive header closure
+    // Store callbacks for use inside the reactive header closure.
+    // on_info and on_edit are already in the stable owner scope (their
+    // internal StoredValue survives node-view re-mounts), so they don't
+    // need an extra StoredValue wrapper — Callback is Copy.
     let on_type_stored = StoredValue::new(on_type_change);
     let on_orient_stored = StoredValue::new(on_orientation_change);
     let on_mode_stored = StoredValue::new(on_mode_change);
-    let on_info_stored = StoredValue::new(on_info);
-    let on_edit_stored = StoredValue::new(on_edit);
     let on_refresh_stored = StoredValue::new(on_refresh);
 
     view! {
@@ -400,8 +401,6 @@ fn render_one_chart(
                     let type_cb = on_type_stored.get_value();
                     let orient_cb = on_orient_stored.get_value();
                     let mode_cb = on_mode_stored.get_value();
-                    let info_cb = on_info_stored.get_value();
-                    let edit_cb = on_edit_stored.get_value();
                     let refresh_cb = on_refresh_stored.get_value();
                     let last_sig = Signal::derive(move || last_refreshed.get());
                     let refreshing_sig = Signal::derive(move || is_refreshing.get());
@@ -417,8 +416,8 @@ fn render_one_chart(
                             on_type_change=type_cb
                             on_orientation_change=orient_cb
                             on_mode_change=mode_cb
-                            on_info=info_cb
-                            on_edit=edit_cb
+                            on_info=on_info
+                            on_edit=on_edit
                             on_refresh=refresh_cb
                             last_updated=last_sig
                             is_refreshing=refreshing_sig
