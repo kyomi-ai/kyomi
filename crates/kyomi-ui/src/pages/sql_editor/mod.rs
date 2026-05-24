@@ -104,7 +104,7 @@ pub fn SqlEditorPage() -> impl IntoView {
         let run_action = build_run_action();
         let rerun_action = build_rerun_action();
 
-        provide_context(RunQueryContext { run_action, rerun_action });
+        RunQueryContext { run_action, rerun_action }.provide();
 
         // Effect: consume run_action results and update tab state.
         Effect::new(move |_| {

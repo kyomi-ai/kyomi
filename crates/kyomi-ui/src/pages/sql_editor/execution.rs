@@ -100,16 +100,39 @@ pub struct RunQueryContext {
     pub rerun_action: Action<RerunQueryInput, QueryOutcome>,
 }
 
+// Thread-local fallback — DOM keydown listener fires outside any Leptos reactive
+// owner, so `use_context` returns None. This provides the fallback path.
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static GLOBAL_RUN_QUERY_CTX: std::cell::Cell<Option<RunQueryContext>> =
+        const { std::cell::Cell::new(None) };
+}
+
 #[cfg(target_arch = "wasm32")]
 impl RunQueryContext {
+    /// Provide this context to the Leptos reactive tree AND store it in the
+    /// thread-local fallback so callbacks that fire outside a reactive owner
+    /// (e.g. raw DOM `keydown` listeners) can still retrieve it via
+    /// [`RunQueryContext::use_context`].
+    pub fn provide(self) {
+        provide_context(self);
+        GLOBAL_RUN_QUERY_CTX.set(Some(self));
+    }
+
     /// Retrieve the context provided by [`SqlEditorPage`].
+    ///
+    /// First tries Leptos `use_context` (works inside reactive owners such as
+    /// component render functions and Effects).  Falls back to the thread-local
+    /// copy for call sites outside a reactive owner (e.g. raw DOM event
+    /// listeners set up by `use_run_shortcut`).
     ///
     /// # Panics
     ///
-    /// Panics if called outside a component tree that called
-    /// `RunQueryContext::provide(...)` first.
+    /// Panics if neither Leptos context nor the thread-local fallback has been
+    /// set — i.e. `SqlEditorPage` has not yet called `RunQueryContext::provide()`.
     pub fn use_context() -> Self {
-        use_context::<Self>()
+        leptos::prelude::use_context::<Self>()
+            .or_else(|| GLOBAL_RUN_QUERY_CTX.get())
             .expect("RunQueryContext not provided — call RunQueryContext::provide() from SqlEditorPage first")
     }
 }
