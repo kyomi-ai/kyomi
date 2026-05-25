@@ -232,11 +232,17 @@ fn parse_workspace_settings(data: &serde_json::Value) -> crate::types::Workspace
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let title_model = custom
+        .and_then(|cs| cs.get("title_model"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     crate::types::WorkspaceSettingsData {
         workspace_name,
         default_model,
         chart_palette,
         show_token_usage,
+        title_model,
     }
 }
 

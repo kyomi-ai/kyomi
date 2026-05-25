@@ -71,6 +71,12 @@ pub struct WorkspaceSettingsData {
     pub chart_palette: String,
     #[serde(default)]
     pub show_token_usage: bool,
+    /// Optional model used specifically for session title generation.
+    ///
+    /// When `None`, title generation falls back to the cheapest model for the
+    /// configured provider. When `Some`, that model is used verbatim.
+    #[serde(default)]
+    pub title_model: Option<String>,
 }
 
 /// Workspace-level Slack integration status.
