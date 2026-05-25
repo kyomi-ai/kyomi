@@ -854,10 +854,10 @@ async fn fetch_openrouter_models_cached(
     // Check whether we can serve from cache.
     if !force_refresh {
         let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(entry) = guard.get(&key) {
-            if entry.fetched_at.elapsed() < TTL {
-                return Ok(entry.models.clone());
-            }
+        if let Some(entry) = guard.get(&key)
+            && entry.fetched_at.elapsed() < TTL
+        {
+            return Ok(entry.models.clone());
         }
     }
 
