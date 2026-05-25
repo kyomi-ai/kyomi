@@ -93,6 +93,12 @@ pub struct WorkspaceAiConfig {
     pub api_key: Option<String>,
     /// Optional base URL override (for proxies / compatible endpoints).
     pub base_url: Option<String>,
+    /// Optional model used specifically for session title generation
+    /// (from `settings.custom_settings.title_model`).
+    ///
+    /// When `None`, title generation falls back to the cheapest model for the
+    /// configured provider.
+    pub title_model: Option<String>,
 }
 
 impl WorkspaceAiConfig {
@@ -205,6 +211,7 @@ pub async fn load(
 
     let provider = WorkspaceAiProvider::from_str(&row.ai_provider)?;
     let model = read_default_model(&row.settings);
+    let title_model = read_title_model(&row.settings);
 
     let (api_key, base_url) = match provider {
         WorkspaceAiProvider::Kyomi => {
@@ -228,6 +235,7 @@ pub async fn load(
         model,
         api_key,
         base_url,
+        title_model,
     })
 }
 
@@ -534,6 +542,7 @@ mod tests {
             model: None,
             api_key: None,
             base_url: None,
+            title_model: None,
         };
         assert!(!cfg.is_byok());
     }
@@ -550,6 +559,7 @@ mod tests {
                 model: None,
                 api_key: Some("sk-...".into()),
                 base_url: None,
+                title_model: None,
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

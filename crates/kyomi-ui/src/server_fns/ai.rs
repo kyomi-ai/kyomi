@@ -54,6 +54,13 @@ pub struct WorkspaceAiConfigView {
     /// workspace member may see this value — same visibility as the billing
     /// page's balance display.
     pub ai_bundle_balance_usd: Option<f64>,
+    /// Optional model used specifically for session title generation
+    /// (from `settings.custom_settings.title_model`).
+    ///
+    /// When `None`, title generation falls back to the cheapest model for the
+    /// configured provider. When `Some`, that model is used verbatim.
+    #[serde(default)]
+    pub title_model: Option<String>,
 }
 
 /// One model entry returned by [`list_workspace_ai_models`].
@@ -113,6 +120,7 @@ fn require_saas(ctx: &super::ServerContext) -> Result<(), ServerFnError> {
 fn view_from_config(
     cfg: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     ai_bundle_balance_usd: Option<f64>,
+    title_model: Option<String>,
 ) -> WorkspaceAiConfigView {
     WorkspaceAiConfigView {
         provider: cfg.provider.as_str().to_string(),
@@ -120,6 +128,7 @@ fn view_from_config(
         has_api_key: cfg.is_byok() && cfg.api_key.is_some(),
         base_url: cfg.base_url.clone(),
         ai_bundle_balance_usd,
+        title_model,
     }
 }
 
@@ -156,7 +165,7 @@ pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFn
         .into_sfn()?;
     let balance = load_ai_bundle_remaining_usd(ac.db(), &ac.ws_id).await?;
 
-    Ok(view_from_config(&cfg, balance))
+    Ok(view_from_config(&cfg, balance, cfg.title_model.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +214,7 @@ pub async fn update_workspace_ai_config(
         .into_sfn()?;
     let balance = load_ai_bundle_remaining_usd(ac.db(), &ac.ws_id).await?;
 
-    Ok(view_from_config(&cfg, balance))
+    Ok(view_from_config(&cfg, balance, cfg.title_model.clone()))
 }
 
 // ---------------------------------------------------------------------------
