@@ -99,7 +99,9 @@ pub fn ResultsContainer(
                 let offset = page.saturating_sub(1) * page_size;
 
                 // Preserve metadata from the original execution.
-                let prev_total_rows = result.total_rows;
+                // Read from the tab-level field first (always reliable), falling
+                // back to result.total_rows in case the tab field is not yet set.
+                let prev_total_rows = tab.total_rows.or(result.total_rows);
                 let prev_execution_time = result.execution_time;
                 let prev_bytes_processed = result.bytes_processed;
                 let prev_query_handle = result.query_handle.clone();
@@ -229,6 +231,9 @@ pub fn ResultsContainer(
                             state.try_update_tab(&tab_id, |tab| {
                                 tab.status = QueryStatus::Success;
                                 tab.error = None;
+                                if let Some(tr) = result.total_rows {
+                                    tab.total_rows = Some(tr);
+                                }
                                 tab.result = Some(result);
                             });
                             state.try_set_table_ui_state(&tab_id, |ui| {
@@ -557,9 +562,12 @@ fn render_tab_content(props: TabContentProps) -> AnyView {
     }
 
     // Success with result → table
-    if let Some(result) = tab.result
+    if let Some(mut result) = tab.result
         && tab.status == QueryStatus::Success
     {
+        if result.total_rows.is_none() {
+            result.total_rows = tab.total_rows;
+        }
         return view! {
             <div class="flex-1 flex flex-col min-h-0 relative">
                 <div class="flex-1 min-h-0">
