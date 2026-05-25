@@ -693,24 +693,42 @@ async fn generate_title_inner(
     {
         use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
-        let provider_kind = match ws_config.provider {
-            WorkspaceAiProvider::Kyomi => {
-                // Resolve the actual provider kind from server env config.
-                resolve_provider_config(app_config)
-                    .map(|c| c.provider)
-                    .ok()
+        // Check for an explicit title_model configured in workspace settings.
+        // When set, it takes priority over the cheapest-model override below.
+        let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    workspace_id,
+                    error = %e,
+                    "failed to load title_model setting; falling back to cheapest model"
+                );
+            })
+            .ok()
+            .flatten();
+
+        if let Some(tm) = title_model {
+            ws_config.model = Some(tm);
+        } else {
+            let provider_kind = match ws_config.provider {
+                WorkspaceAiProvider::Kyomi => {
+                    // Resolve the actual provider kind from server env config.
+                    resolve_provider_config(app_config)
+                        .map(|c| c.provider)
+                        .ok()
+                }
+                WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
+                WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
+                WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
+            };
+
+            let has_custom_base_url = ws_config.base_url.is_some()
+                || (ws_config.provider == WorkspaceAiProvider::Kyomi
+                    && app_config.llm_base_url.is_some());
+
+            if let Some(kind) = provider_kind && !has_custom_base_url {
+                ws_config.model = Some(kind.cheapest_model().to_string());
             }
-            WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
-            WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
-            WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
-        };
-
-        let has_custom_base_url = ws_config.base_url.is_some()
-            || (ws_config.provider == WorkspaceAiProvider::Kyomi
-                && app_config.llm_base_url.is_some());
-
-        if let Some(kind) = provider_kind && !has_custom_base_url {
-            ws_config.model = Some(kind.cheapest_model().to_string());
         }
     }
 

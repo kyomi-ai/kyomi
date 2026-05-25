@@ -46,6 +46,27 @@ fn custom_settings_get<'a>(
         .and_then(|cs| cs.get(key))
 }
 
+/// Remove a single key from `settings.custom_settings`, leaving all other
+/// keys intact. Returns the modified settings JSON.
+///
+/// If the key is absent, or `custom_settings` does not exist, the settings
+/// are returned unchanged (so callers need not pre-check).
+#[cfg(feature = "ssr")]
+fn clear_custom_settings_key(
+    settings: &Option<serde_json::Value>,
+    key: &str,
+) -> serde_json::Value {
+    let mut s = settings
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
+        cs.remove(key);
+    }
+
+    s
+}
+
 /// Merge a key-value pair into `settings.custom_settings`.
 ///
 /// Mirrors `merge_custom_settings()` in `apps/server/src/routes/workspaces.rs`.
@@ -108,11 +129,16 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let title_model = custom_settings_get(&workspace.settings, "title_model")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     Ok(WorkspaceSettingsData {
         workspace_name: workspace.name.unwrap_or_default(),
         default_model,
         chart_palette,
         show_token_usage,
+        title_model,
     })
 }
 
@@ -154,6 +180,43 @@ pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> 
         "default_model",
         serde_json::json!(model),
     );
+
+    kyomi_auth::workspace_service::update_workspace_settings(
+        ac.db(),
+        &ac.ws_id,
+        &updated_settings,
+    )
+    .await
+    .into_sfn()?;
+
+    Ok(())
+}
+
+/// Update the model used specifically for session title generation. Requires admin role.
+///
+/// Stores the value in `settings.custom_settings.title_model`. When set, the
+/// title generation logic uses this model instead of overriding to the cheapest
+/// model for the provider. Pass an empty string to clear the override and
+/// restore the cheapest-model fallback.
+#[server(prefix = "/leptos-api")]
+pub async fn update_workspace_title_model(model: String) -> Result<(), ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
+
+    let workspace = kyomi_auth::workspace_service::get_workspace_full(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?
+        .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
+
+    let trimmed = model.trim();
+
+    // An empty value clears the override — remove the key from custom_settings
+    // so the fallback (cheapest model) kicks in again.
+    let updated_settings = if trimmed.is_empty() {
+        clear_custom_settings_key(&workspace.settings, "title_model")
+    } else {
+        merge_custom_settings(&workspace.settings, "title_model", serde_json::json!(trimmed))
+    };
 
     kyomi_auth::workspace_service::update_workspace_settings(
         ac.db(),

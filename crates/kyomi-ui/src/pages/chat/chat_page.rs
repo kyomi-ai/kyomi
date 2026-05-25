@@ -59,6 +59,7 @@ use crate::server_fns::chat::{
 };
 use crate::server_fns::context::UserContext;
 use crate::chartml_provider::provide_chart_context;
+use crate::cache::store::SyncStore;
 
 // ─── Greetings ──────────────────────────────────────────────────────────────
 
@@ -307,6 +308,17 @@ pub fn ChatPage() -> impl IntoView {
             .as_ref()
             .map(|ctx| ctx.connection_state.get().to_string())
             .unwrap_or_else(|| "disconnected".to_string())
+    });
+
+    // ── Workspace settings (default model, token usage, etc.) ──────────
+    // Provided by the layout-level SyncStore. Used to pass the workspace
+    // default model to send_chat_message and to display the active model name.
+    let sync_store = expect_context::<SyncStore>();
+    let workspace_default_model = Signal::derive(move || {
+        sync_store
+            .workspace_settings()
+            .get()
+            .map(|ws| ws.default_model)
     });
 
     // ── Refs for smart scroll ───────────────────────────────────────────
@@ -1275,6 +1287,11 @@ pub fn ChatPage() -> impl IntoView {
         let optimistic_id = user_message_id.clone();
         // M9 — Pass client_msg_id for shared conversation deduplication
         let client_msg_id = Some(user_message_id);
+        // Capture the workspace default model at dispatch time so the value
+        // reflects the model configured when the user clicked Send, not a
+        // potentially-stale async read. Passing None falls back to the server's
+        // own resolution chain (LLM_MODEL env var → built-in default).
+        let dispatch_model = workspace_default_model.get_untracked();
         // All signal writes inside this async block use try_ variants: the user
         // may navigate away (or the copilot sidebar may close) while send_chat_message
         // is awaiting a server response, disposing the page-scoped signals.
@@ -1290,7 +1307,7 @@ pub fn ChatPage() -> impl IntoView {
                 session_id.clone(),
                 time_ctx,
                 skip_ai,
-                None, // model (use default)
+                dispatch_model,
                 client_msg_id,
             )
             .await
@@ -1849,6 +1866,19 @@ pub fn ChatPage() -> impl IntoView {
                         // When messages are empty (new chat), the input is rendered inline
                         // with the greeting above, not at the bottom.
                         <Show when=move || !messages.get().is_empty()>
+                            // Model indicator — subtle metadata line above the input.
+                            // Displays the workspace-configured model so users know which
+                            // model will handle their next message.
+                            {move || {
+                                workspace_default_model.get().map(|model| view! {
+                                    <div class="flex-shrink-0 px-4 md:px-6 pt-2 pb-0">
+                                        <p class="text-xs text-muted-foreground flex items-center gap-1">
+                                            <Icon icon=phosphor_leptos::BRAIN size="12px" />
+                                            {model}
+                                        </p>
+                                    </div>
+                                })
+                            }}
                             // Chat input area — wired to send_message and cancel handlers.
                             // Skip AI checkbox is built into ChatInput (show_skip_ai + skip_ai props).
                             <ChatInput

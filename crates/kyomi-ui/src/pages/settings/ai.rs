@@ -29,6 +29,7 @@ use crate::server_fns::ai::{
     get_workspace_ai_config, list_workspace_ai_models, test_workspace_ai_config,
     update_workspace_ai_config, AiModelInfo, WorkspaceAiConfigView,
 };
+use crate::server_fns::workspace::{update_workspace_model, update_workspace_title_model};
 use crate::server_fns::context::UserContext;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,6 +39,9 @@ use crate::server_fns::context::UserContext;
 const KYOMI_PROVIDER: &str = "kyomi";
 const DEFAULT_KYOMI_MODEL: &str = "claude-sonnet-4-6";
 const CUSTOM_MODEL_SENTINEL: &str = "__custom__";
+/// Sentinel value for the title model selector meaning "use automatic cheapest-model logic".
+/// Sent as an empty string to the server, which clears the override.
+const TITLE_MODEL_AUTO: &str = "";
 
 const PROVIDER_OPTIONS: &[(&str, &str)] = &[
     ("anthropic", "Anthropic"),
@@ -400,22 +404,31 @@ fn KyomiModelPanel(
         .filter(|m| KYOMI_CREDITS_MODELS.iter().any(|opt| opt.id == m))
         .unwrap_or_else(|| DEFAULT_KYOMI_MODEL.to_string());
 
+    let initial_title_model = cfg.title_model.clone().unwrap_or_default();
+
     let (selected_model, set_selected_model) = signal(initial_model);
+    let (selected_title_model, set_selected_title_model) = signal(initial_title_model);
 
     let save_action = Action::new(move |model: &String| {
         let model = model.clone();
         async move {
-            match update_workspace_ai_config(
-                KYOMI_PROVIDER.to_string(),
-                None,
-                None,
-                Some(model),
-            )
-            .await
-            {
-                Ok(_) => {
-                    toast_success("AI configuration saved.");
-                    refresh.run(());
+            match update_workspace_model(model).await {
+                Ok(()) => {
+                    toast_success("Default chat model saved.");
+                    refresh.try_run(());
+                }
+                Err(e) => toast_error(format!("Failed to save: {e}")),
+            }
+        }
+    });
+
+    let save_title_action = Action::new(move |model: &String| {
+        let model = model.clone();
+        async move {
+            match update_workspace_title_model(model).await {
+                Ok(()) => {
+                    toast_success("Title generation model saved.");
+                    refresh.try_run(());
                 }
                 Err(e) => toast_error(format!("Failed to save: {e}")),
             }
@@ -427,21 +440,52 @@ fn KyomiModelPanel(
         .map(|m| (m.id.to_string(), m.label.to_string()))
         .collect();
 
+    // Title model options: "Auto" entry at the top, then all chat models.
+    let title_model_options: Vec<(String, String)> = {
+        let mut opts = vec![(
+            TITLE_MODEL_AUTO.to_string(),
+            "Auto (cheapest model)".to_string(),
+        )];
+        for m in KYOMI_CREDITS_MODELS {
+            opts.push((m.id.to_string(), m.label.to_string()));
+        }
+        opts
+    };
+
     view! {
         <div class="space-y-4">
             <div class="space-y-2">
-                <Label>"Model"</Label>
+                <Label>"Default Chat Model"</Label>
                 <DynSelect
                     value=Signal::derive(move || selected_model.get())
                     options=Signal::derive(move || kyomi_model_options.clone())
                     disabled=Signal::derive(move || !is_admin)
                     on_change=move |new_val| {
-                        set_selected_model.set(new_val.clone());
-                        save_action.dispatch(new_val);
+                        if !save_action.pending().get_untracked() {
+                            set_selected_model.set(new_val.clone());
+                            save_action.dispatch(new_val);
+                        }
                     }
                 />
                 <p class="text-xs text-muted-foreground">
                     "Kyomi provides the LLM infrastructure. Your admin picks the model; all workspace members use it."
+                </p>
+            </div>
+            <div class="space-y-2">
+                <Label>"Title Generation Model"</Label>
+                <DynSelect
+                    value=Signal::derive(move || selected_title_model.get())
+                    options=Signal::derive(move || title_model_options.clone())
+                    disabled=Signal::derive(move || !is_admin)
+                    on_change=move |new_val| {
+                        if !save_title_action.pending().get_untracked() {
+                            set_selected_title_model.set(new_val.clone());
+                            save_title_action.dispatch(new_val);
+                        }
+                    }
+                />
+                <p class="text-xs text-muted-foreground">
+                    "Model used to generate conversation titles. Auto uses the cheapest available model."
                 </p>
             </div>
         </div>
@@ -467,12 +511,14 @@ fn ByokPanel(
 
     let initial_model = cfg.model.clone().unwrap_or_default();
     let initial_base_url = cfg.base_url.clone().unwrap_or_default();
+    let initial_title_model = cfg.title_model.clone().unwrap_or_default();
     let had_api_key = cfg.has_api_key;
 
     let (provider, set_provider) = signal(initial_provider);
     let (api_key, set_api_key) = signal(String::new());
     let (model_choice, set_model_choice) = signal(initial_model.clone());
     let (custom_model, set_custom_model) = signal(initial_model);
+    let (selected_title_model, set_selected_title_model) = signal(initial_title_model);
     let (base_url, set_base_url) = signal(initial_base_url);
     let (show_advanced, set_show_advanced) = signal(false);
     let (test_result, set_test_result) = signal::<Option<Result<String, String>>>(None);
@@ -512,8 +558,8 @@ fn ByokPanel(
         },
     );
 
-    // Reset model_choice + custom_model + last_tested_key when the provider
-    // changes.
+    // Reset model_choice + custom_model + last_tested_key + title model when
+    // the provider changes.
     Effect::new(move |prev_provider: Option<String>| {
         let current = provider.get();
         if let Some(prev) = prev_provider.as_ref()
@@ -524,6 +570,7 @@ fn ByokPanel(
             set_test_result.set(None);
             set_last_tested_key.set(None);
             set_initial_apply_done.set(false);
+            set_selected_title_model.set(TITLE_MODEL_AUTO.to_string());
         }
         current
     });
@@ -556,6 +603,19 @@ fn ByokPanel(
             custom_model.get().trim().to_string()
         } else {
             choice.trim().to_string()
+        }
+    });
+
+    let save_title_model_action = Action::new(move |model: &String| {
+        let model = model.clone();
+        async move {
+            match update_workspace_title_model(model).await {
+                Ok(()) => {
+                    toast_success("Title generation model saved.");
+                    refresh.try_run(());
+                }
+                Err(e) => toast_error(format!("Failed to save: {e}")),
+            }
         }
     });
 
@@ -625,7 +685,7 @@ fn ByokPanel(
                 // and refetch models against the persisted credentials.
                 set_last_tested_key.set(None);
                 set_refetch_models_version.update(|v| *v += 1);
-                refresh.run(());
+                refresh.try_run(());
             }
             Err(e) => toast_error(format!("Failed to save: {e}")),
         }
@@ -715,9 +775,9 @@ fn ByokPanel(
                         }}
                     </div>
 
-                    // ── Model ────────────────────────────────────────────
+                    // ── Default Chat Model ───────────────────────────────
                     <div class="space-y-2">
-                        <Label>"Model"</Label>
+                        <Label>"Default Chat Model"</Label>
                         <Suspense fallback=move || view! {
                             <DynSelect
                                 value=Signal::derive(String::new)
@@ -788,6 +848,55 @@ fn ByokPanel(
                                 on:input=move |ev| set_custom_model.set(event_target_value(&ev))
                             />
                         </Show>
+                    </div>
+
+                    // ── Title Generation Model ───────────────────────────
+                    <div class="space-y-2">
+                        <Label>"Title Generation Model"</Label>
+                        <Suspense fallback=move || view! {
+                            <DynSelect
+                                value=Signal::derive(String::new)
+                                options=Signal::derive(|| vec![
+                                    (String::new(), "Loading models\u{2026}".to_string()),
+                                ])
+                                disabled=Signal::derive(|| true)
+                                on_change=|_| {}
+                            />
+                        }>
+                            {move || {
+                                let resource_value = models_resource.get();
+                                let models: Vec<AiModelInfo> = match resource_value {
+                                    Some(Ok(list)) => list,
+                                    _ => Vec::new(),
+                                };
+
+                                // Build options: Auto at top, then all fetched models.
+                                let mut title_opts: Vec<(String, String)> = vec![(
+                                    TITLE_MODEL_AUTO.to_string(),
+                                    "Auto (cheapest model)".to_string(),
+                                )];
+                                for m in models {
+                                    title_opts.push((m.id, m.label));
+                                }
+
+                                view! {
+                                    <DynSelect
+                                        value=Signal::derive(move || selected_title_model.get())
+                                        options=Signal::derive(move || title_opts.clone())
+                                        disabled=Signal::derive(move || !is_admin)
+                                        on_change=move |val| {
+                                            if !save_title_model_action.pending().get_untracked() {
+                                                set_selected_title_model.set(val.clone());
+                                                save_title_model_action.dispatch(val);
+                                            }
+                                        }
+                                    />
+                                }
+                            }}
+                        </Suspense>
+                        <p class="text-xs text-muted-foreground">
+                            "Model used to generate conversation titles. Auto uses the cheapest available model."
+                        </p>
                     </div>
 
                     // ── Advanced disclosure ──────────────────────────────

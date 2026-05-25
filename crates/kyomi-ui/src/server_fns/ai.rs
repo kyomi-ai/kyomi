@@ -54,6 +54,13 @@ pub struct WorkspaceAiConfigView {
     /// workspace member may see this value — same visibility as the billing
     /// page's balance display.
     pub ai_bundle_balance_usd: Option<f64>,
+    /// Optional model used specifically for session title generation
+    /// (from `settings.custom_settings.title_model`).
+    ///
+    /// When `None`, title generation falls back to the cheapest model for the
+    /// configured provider. When `Some`, that model is used verbatim.
+    #[serde(default)]
+    pub title_model: Option<String>,
 }
 
 /// One model entry returned by [`list_workspace_ai_models`].
@@ -113,6 +120,7 @@ fn require_saas(ctx: &super::ServerContext) -> Result<(), ServerFnError> {
 fn view_from_config(
     cfg: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     ai_bundle_balance_usd: Option<f64>,
+    title_model: Option<String>,
 ) -> WorkspaceAiConfigView {
     WorkspaceAiConfigView {
         provider: cfg.provider.as_str().to_string(),
@@ -120,6 +128,7 @@ fn view_from_config(
         has_api_key: cfg.is_byok() && cfg.api_key.is_some(),
         base_url: cfg.base_url.clone(),
         ai_bundle_balance_usd,
+        title_model,
     }
 }
 
@@ -156,7 +165,7 @@ pub async fn get_workspace_ai_config() -> Result<WorkspaceAiConfigView, ServerFn
         .into_sfn()?;
     let balance = load_ai_bundle_remaining_usd(ac.db(), &ac.ws_id).await?;
 
-    Ok(view_from_config(&cfg, balance))
+    Ok(view_from_config(&cfg, balance, cfg.title_model.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +214,7 @@ pub async fn update_workspace_ai_config(
         .into_sfn()?;
     let balance = load_ai_bundle_remaining_usd(ac.db(), &ac.ws_id).await?;
 
-    Ok(view_from_config(&cfg, balance))
+    Ok(view_from_config(&cfg, balance, cfg.title_model.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +753,251 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
 }
 
 // ---------------------------------------------------------------------------
+// list_openrouter_models
+// ---------------------------------------------------------------------------
+
+/// One model entry returned by [`list_openrouter_models`].
+///
+/// Extends [`AiModelInfo`] with pricing information so the frontend can show
+/// cost-per-million-token estimates next to each model name.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OpenRouterModelInfo {
+    /// OpenRouter model identifier, e.g. `"openai/gpt-4o"`.
+    pub id: String,
+    /// Human-readable display name, e.g. `"GPT-4o"`.
+    pub name: String,
+    /// Input (prompt) cost in USD per token.  May be 0.0 for free models.
+    pub prompt_cost_per_token: f64,
+    /// Output (completion) cost in USD per token.  May be 0.0 for free models.
+    pub completion_cost_per_token: f64,
+    /// Context window size in tokens.
+    pub context_length: u64,
+}
+
+/// List models available from OpenRouter.
+///
+/// Requires the workspace to be configured with an OpenRouter base URL
+/// (`base_url` containing `"openrouter.ai"`) and a stored API key. Returns an
+/// empty list when neither condition is met so the caller can degrade
+/// gracefully (e.g. show a plain text input instead of a dropdown).
+///
+/// Results are cached per-process for one hour to avoid hammering the
+/// OpenRouter API on every settings page load. The cache is invalidated
+/// whenever `force_refresh = true` is passed (e.g. after the user changes
+/// their API key).
+///
+/// Unlike [`list_workspace_ai_models`] this function is not restricted to
+/// SaaS mode — OpenRouter works in self-hosted deployments too.
+#[server(prefix = "/leptos-api")]
+pub async fn list_openrouter_models(
+    force_refresh: bool,
+) -> Result<Vec<OpenRouterModelInfo>, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    require_workspace_admin(&ac.auth)?;
+
+    let cfg = kyomi_auth::workspace_ai_config::load(ac.db(), &ac.ws_id)
+        .await
+        .into_sfn()?;
+
+    // Only proceed when the workspace is configured to use an OpenRouter endpoint.
+    let base_url = cfg.base_url.as_deref().unwrap_or("");
+    if !base_url.contains("openrouter.ai") {
+        return Ok(Vec::new());
+    }
+
+    let api_key = match cfg.api_key {
+        Some(k) if !k.trim().is_empty() => k,
+        _ => return Ok(Vec::new()),
+    };
+
+    fetch_openrouter_models_cached(&api_key, force_refresh).await
+}
+
+/// Compute a short fingerprint for an API key used as the per-workspace cache
+/// key.  Uses [`std::collections::hash_map::DefaultHasher`] so no external
+/// crate is required.  The full key is never stored — only the 16-hex-digit
+/// hash.
+#[cfg(feature = "ssr")]
+fn cache_key_for_api_key(api_key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    api_key.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Fetch OpenRouter models, serving from cache when the cached value is fresh.
+///
+/// Cache TTL: 1 hour.  The cache is a `HashMap` keyed by a fingerprint of the
+/// workspace's API key so that distinct workspaces (each with their own
+/// OpenRouter key) never receive another workspace's cached model list.
+#[cfg(feature = "ssr")]
+async fn fetch_openrouter_models_cached(
+    api_key: &str,
+    force_refresh: bool,
+) -> Result<Vec<OpenRouterModelInfo>, ServerFnError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    struct CacheEntry {
+        models: Vec<OpenRouterModelInfo>,
+        fetched_at: Instant,
+    }
+
+    static CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    const TTL: Duration = Duration::from_secs(3600);
+
+    let key = cache_key_for_api_key(api_key);
+
+    // Check whether we can serve from cache.
+    if !force_refresh {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = guard.get(&key)
+            && entry.fetched_at.elapsed() < TTL
+        {
+            return Ok(entry.models.clone());
+        }
+    }
+
+    // Cache miss or forced refresh — fetch from upstream.
+    let models = fetch_openrouter_models_live(api_key).await?;
+
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(
+        key,
+        CacheEntry {
+            models: models.clone(),
+            fetched_at: Instant::now(),
+        },
+    );
+
+    Ok(models)
+}
+
+/// Perform the live HTTP fetch from `GET https://openrouter.ai/api/v1/models`.
+#[cfg(feature = "ssr")]
+async fn fetch_openrouter_models_live(
+    api_key: &str,
+) -> Result<Vec<OpenRouterModelInfo>, ServerFnError> {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| ServerFnError::new(format!("Failed to create HTTP client: {e}")))?;
+
+    let resp = client
+        .get("https://openrouter.ai/api/v1/models")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let detail = extract_error_message(&body).unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(ServerFnError::new(sanitise_error(&detail, api_key)));
+    }
+
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))?;
+
+    parse_openrouter_models(&body)
+        .map_err(|e| ServerFnError::new(format!("Failed to parse OpenRouter response: {e}")))
+}
+
+/// Parse `GET https://openrouter.ai/api/v1/models` response.
+///
+/// Shape:
+/// ```json
+/// {
+///   "data": [
+///     {
+///       "id": "openai/gpt-4o",
+///       "name": "GPT-4o",
+///       "pricing": { "prompt": "0.0000025", "completion": "0.00001" },
+///       "context_length": 128000
+///     }
+///   ]
+/// }
+/// ```
+///
+/// Pricing strings are per-token USD amounts. We parse them as `f64` and
+/// default to `0.0` on parse failure so a single malformed entry does not
+/// discard the whole list.
+#[cfg(feature = "ssr")]
+fn parse_openrouter_models(body: &str) -> Result<Vec<OpenRouterModelInfo>, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Resp {
+        data: Vec<Entry>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        pricing: Option<Pricing>,
+        #[serde(default)]
+        context_length: Option<u64>,
+    }
+    #[derive(Deserialize)]
+    struct Pricing {
+        #[serde(default)]
+        prompt: Option<serde_json::Value>,
+        #[serde(default)]
+        completion: Option<serde_json::Value>,
+    }
+
+    let parsed: Resp = serde_json::from_str(body)?;
+
+    let mut models: Vec<OpenRouterModelInfo> = parsed
+        .data
+        .into_iter()
+        .map(|e| {
+            let name = e.name.unwrap_or_else(|| e.id.clone());
+            let (prompt_cost, completion_cost) = e
+                .pricing
+                .map(|p| {
+                    (
+                        parse_cost_value(p.prompt.as_ref()),
+                        parse_cost_value(p.completion.as_ref()),
+                    )
+                })
+                .unwrap_or((0.0, 0.0));
+            OpenRouterModelInfo {
+                id: e.id,
+                name,
+                prompt_cost_per_token: prompt_cost,
+                completion_cost_per_token: completion_cost,
+                context_length: e.context_length.unwrap_or(0),
+            }
+        })
+        .collect();
+
+    // Sort alphabetically by id so the list is stable and easy to scan.
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+
+    Ok(models)
+}
+
+/// Parse an OpenRouter pricing value, which may be a JSON string (`"0.0000025"`)
+/// or a JSON number (`0.0000025`).  Returns `0.0` on any parse failure.
+#[cfg(feature = "ssr")]
+fn parse_cost_value(v: Option<&serde_json::Value>) -> f64 {
+    match v {
+        Some(serde_json::Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Extractor re-exports
 // ---------------------------------------------------------------------------
 
@@ -1006,5 +1260,80 @@ mod tests {
             parsed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"],
         );
+    }
+
+    // ---- parse_openrouter_models ----------------------------------------
+
+    #[test]
+    fn parse_openrouter_models_extracts_id_name_pricing() {
+        let body = r#"{
+            "data": [
+                {
+                    "id": "openai/gpt-4o",
+                    "name": "GPT-4o",
+                    "pricing": { "prompt": "0.0000025", "completion": "0.00001" },
+                    "context_length": 128000
+                },
+                {
+                    "id": "anthropic/claude-sonnet-4-5",
+                    "name": "Claude Sonnet 4.5",
+                    "pricing": { "prompt": "0.000003", "completion": "0.000015" },
+                    "context_length": 200000
+                }
+            ]
+        }"#;
+        let parsed = parse_openrouter_models(body).unwrap();
+        assert_eq!(parsed.len(), 2);
+        // Sorted alphabetically by id.
+        assert_eq!(parsed[0].id, "anthropic/claude-sonnet-4-5");
+        assert_eq!(parsed[0].name, "Claude Sonnet 4.5");
+        assert!((parsed[0].prompt_cost_per_token - 0.000003).abs() < 1e-10);
+        assert!((parsed[0].completion_cost_per_token - 0.000015).abs() < 1e-10);
+        assert_eq!(parsed[0].context_length, 200000);
+        assert_eq!(parsed[1].id, "openai/gpt-4o");
+    }
+
+    #[test]
+    fn parse_openrouter_models_handles_missing_name() {
+        let body = r#"{
+            "data": [
+                {
+                    "id": "some/model",
+                    "context_length": 4096
+                }
+            ]
+        }"#;
+        let parsed = parse_openrouter_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        // Name falls back to id when absent.
+        assert_eq!(parsed[0].name, "some/model");
+        assert_eq!(parsed[0].prompt_cost_per_token, 0.0);
+        assert_eq!(parsed[0].completion_cost_per_token, 0.0);
+    }
+
+    #[test]
+    fn parse_openrouter_models_handles_numeric_pricing() {
+        // Some OpenRouter entries return pricing as JSON numbers, not strings.
+        let body = r#"{
+            "data": [
+                {
+                    "id": "free/model",
+                    "name": "Free Model",
+                    "pricing": { "prompt": 0.0, "completion": 0.0 },
+                    "context_length": 8192
+                }
+            ]
+        }"#;
+        let parsed = parse_openrouter_models(body).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].prompt_cost_per_token, 0.0);
+    }
+
+    #[test]
+    fn parse_cost_value_handles_string_and_number() {
+        assert!((parse_cost_value(Some(&serde_json::json!("0.0000025"))) - 0.0000025).abs() < 1e-15);
+        assert!((parse_cost_value(Some(&serde_json::json!(0.0000025))) - 0.0000025).abs() < 1e-15);
+        assert_eq!(parse_cost_value(None), 0.0);
+        assert_eq!(parse_cost_value(Some(&serde_json::json!("not-a-number"))), 0.0);
     }
 }

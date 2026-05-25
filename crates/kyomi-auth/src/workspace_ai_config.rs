@@ -93,6 +93,12 @@ pub struct WorkspaceAiConfig {
     pub api_key: Option<String>,
     /// Optional base URL override (for proxies / compatible endpoints).
     pub base_url: Option<String>,
+    /// Optional model used specifically for session title generation
+    /// (from `settings.custom_settings.title_model`).
+    ///
+    /// When `None`, title generation falls back to the cheapest model for the
+    /// configured provider.
+    pub title_model: Option<String>,
 }
 
 impl WorkspaceAiConfig {
@@ -205,6 +211,7 @@ pub async fn load(
 
     let provider = WorkspaceAiProvider::from_str(&row.ai_provider)?;
     let model = read_default_model(&row.settings);
+    let title_model = read_title_model(&row.settings);
 
     let (api_key, base_url) = match provider {
         WorkspaceAiProvider::Kyomi => {
@@ -228,6 +235,7 @@ pub async fn load(
         model,
         api_key,
         base_url,
+        title_model,
     })
 }
 
@@ -380,10 +388,49 @@ pub async fn update(
 /// Read `settings.custom_settings.default_model` as a string, matching the
 /// layout written by `apps/server/src/routes/workspaces.rs::update_model_settings`.
 fn read_default_model(settings: &Option<serde_json::Value>) -> Option<String> {
+    read_custom_settings_string(settings, "default_model")
+}
+
+/// Read `settings.custom_settings.title_model` as a string.
+///
+/// When set, the title generation logic uses this model instead of overriding
+/// to the cheapest model per provider. `None` means "use the cheapest model"
+/// (existing fallback behaviour).
+pub fn read_title_model(settings: &Option<serde_json::Value>) -> Option<String> {
+    read_custom_settings_string(settings, "title_model")
+}
+
+/// Load the `title_model` setting for a workspace directly from the database.
+///
+/// Fetches only the `settings` JSON column — cheaper than a full [`load`]
+/// call. Returns `Ok(None)` both when no title model is configured and when
+/// the workspace row cannot be found; callers treat either case as "use the
+/// cheapest-model fallback".
+pub async fn load_title_model(
+    db: &DbPool,
+    workspace_id: &str,
+) -> Result<Option<String>, WorkspaceAiConfigError> {
+    #[derive(sqlx::FromRow)]
+    struct SettingsRow {
+        settings: Option<serde_json::Value>,
+    }
+
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        SettingsRow,
+        "SELECT settings FROM workspaces WHERE workspace_id = $1",
+        workspace_id
+    )?;
+
+    Ok(row.and_then(|r| read_title_model(&r.settings)))
+}
+
+/// Internal helper: read a single string value from `settings.custom_settings[key]`.
+fn read_custom_settings_string(settings: &Option<serde_json::Value>, key: &str) -> Option<String> {
     settings
         .as_ref()
         .and_then(|s| s.get("custom_settings"))
-        .and_then(|cs| cs.get("default_model"))
+        .and_then(|cs| cs.get(key))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -396,6 +443,16 @@ fn read_default_model(settings: &Option<serde_json::Value>) -> Option<String> {
 /// same contract.
 fn merge_default_model(
     settings: &Option<serde_json::Value>,
+    model: &str,
+) -> serde_json::Value {
+    merge_custom_settings_key(settings, "default_model", model)
+}
+
+
+/// Internal helper: non-destructively write `settings.custom_settings[key] = model`.
+fn merge_custom_settings_key(
+    settings: &Option<serde_json::Value>,
+    key: &str,
     model: &str,
 ) -> serde_json::Value {
     let mut s = settings
@@ -414,7 +471,7 @@ fn merge_default_model(
     }
 
     if let Some(cs) = s.get_mut("custom_settings").and_then(|v| v.as_object_mut()) {
-        cs.insert("default_model".to_string(), serde_json::json!(model));
+        cs.insert(key.to_string(), serde_json::json!(model));
     }
 
     s
@@ -485,6 +542,7 @@ mod tests {
             model: None,
             api_key: None,
             base_url: None,
+            title_model: None,
         };
         assert!(!cfg.is_byok());
     }
@@ -501,6 +559,7 @@ mod tests {
                 model: None,
                 api_key: Some("sk-...".into()),
                 base_url: None,
+                title_model: None,
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }
@@ -568,6 +627,78 @@ mod tests {
         assert_eq!(
             merged,
             serde_json::json!({ "custom_settings": { "default_model": "m" } })
+        );
+    }
+
+    // ---- title_model settings helpers -----------------------------------
+
+    #[test]
+    fn read_title_model_returns_none_for_missing_settings() {
+        assert_eq!(read_title_model(&None), None);
+        assert_eq!(read_title_model(&Some(serde_json::json!({}))), None);
+        assert_eq!(
+            read_title_model(&Some(serde_json::json!({ "custom_settings": {} }))),
+            None
+        );
+    }
+
+    #[test]
+    fn read_title_model_extracts_string() {
+        let s = Some(serde_json::json!({
+            "custom_settings": { "title_model": "claude-haiku-4-20250514" }
+        }));
+        assert_eq!(
+            read_title_model(&s).as_deref(),
+            Some("claude-haiku-4-20250514")
+        );
+    }
+
+    #[test]
+    fn read_title_model_independent_of_default_model() {
+        // Both keys can coexist under custom_settings.
+        let s = Some(serde_json::json!({
+            "custom_settings": {
+                "default_model": "gpt-4o",
+                "title_model": "gpt-4o-mini"
+            }
+        }));
+        assert_eq!(read_default_model(&s).as_deref(), Some("gpt-4o"));
+        assert_eq!(read_title_model(&s).as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn merge_custom_settings_key_creates_nested_structure() {
+        let merged = merge_custom_settings_key(&None, "title_model", "gpt-4o-mini");
+        assert_eq!(
+            merged,
+            serde_json::json!({ "custom_settings": { "title_model": "gpt-4o-mini" } })
+        );
+    }
+
+    #[test]
+    fn merge_custom_settings_key_preserves_other_keys() {
+        let existing = Some(serde_json::json!({
+            "custom_settings": {
+                "default_model": "gpt-4o",
+                "title_model": "old-title-model",
+                "chartml_config": { "palette": "default" }
+            },
+            "other_top_level": 99
+        }));
+        let merged = merge_custom_settings_key(&existing, "title_model", "gpt-4o-mini");
+        assert_eq!(merged["other_top_level"], serde_json::json!(99));
+        assert_eq!(
+            merged["custom_settings"]["default_model"],
+            serde_json::json!("gpt-4o"),
+            "default_model must not be disturbed"
+        );
+        assert_eq!(
+            merged["custom_settings"]["chartml_config"]["palette"],
+            serde_json::json!("default")
+        );
+        assert_eq!(
+            merged["custom_settings"]["title_model"],
+            serde_json::json!("gpt-4o-mini")
         );
     }
 
