@@ -116,6 +116,9 @@ pub fn SqlEditorPage() -> impl IntoView {
                 Ok(success) => {
                     state.try_update_tab(&tab_id, move |tab| {
                         tab.status = QueryStatus::Success;
+                        if let Some(tr) = success.query_result.total_rows {
+                            tab.total_rows = Some(tr);
+                        }
                         tab.result = Some(success.query_result);
                     });
                     set_query_running.try_set(false);
@@ -152,6 +155,9 @@ pub fn SqlEditorPage() -> impl IntoView {
                         tab.status = QueryStatus::Success;
                         tab.error = None;
                         tab.needs_refresh = false;
+                        if let Some(tr) = success.query_result.total_rows {
+                            tab.total_rows = Some(tr);
+                        }
                         tab.result = Some(success.query_result);
                     });
                     execution::save_to_history(state, history_record);

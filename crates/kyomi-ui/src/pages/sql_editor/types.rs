@@ -325,6 +325,11 @@ pub struct ResultTab {
     /// Datasource type (e.g. "bigquery", "postgres").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datasource_type: Option<String>,
+    /// Total rows for this query (set on first execution, persists across pages).
+    /// Stored independently from `QueryResult.total_rows` because page fetches
+    /// replace the entire QueryResult and the preservation can fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_rows: Option<usize>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

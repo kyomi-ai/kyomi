@@ -160,6 +160,7 @@ impl SqlEditorState {
             needs_refresh: data.needs_refresh,
             datasource_slug: data.datasource_slug,
             datasource_type: data.datasource_type,
+            total_rows: None,
         };
 
         let default_page_size = self.default_page_size.get_untracked();
