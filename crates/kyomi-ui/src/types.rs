@@ -67,7 +67,8 @@ pub struct WatchChannel {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkspaceSettingsData {
     pub workspace_name: String,
-    pub default_model: String,
+    #[serde(default)]
+    pub default_model: Option<String>,
     pub chart_palette: String,
     #[serde(default)]
     pub show_token_usage: bool,

@@ -433,8 +433,8 @@ fn extract_error_message(body: &str) -> Option<String> {
 /// * Otherwise returns `Ok(vec![])` — the UI degrades to the custom-model
 ///   input. This is a normal pre-save state, not an error.
 ///
-/// `kyomi` is rejected: the curated `KYOMI_CREDITS_MODELS` list is the source
-/// of truth for that mode and is not fetched live.
+/// `kyomi` is rejected: Kyomi-credits mode uses the OpenRouter model list
+/// (via [`list_openrouter_models`]) rather than a per-provider live fetch.
 #[server(prefix = "/leptos-api")]
 pub async fn list_workspace_ai_models(
     provider: String,
@@ -776,10 +776,16 @@ pub struct OpenRouterModelInfo {
 
 /// List models available from OpenRouter.
 ///
-/// Requires the workspace to be configured with an OpenRouter base URL
-/// (`base_url` containing `"openrouter.ai"`) and a stored API key. Returns an
-/// empty list when neither condition is met so the caller can degrade
-/// gracefully (e.g. show a plain text input instead of a dropdown).
+/// Resolves credentials in priority order:
+/// 1. Workspace BYOK config — used when the workspace has its own OpenRouter
+///    base URL (`base_url` containing `"openrouter.ai"`) and stored API key.
+/// 2. Server-level env config — used for Kyomi-credits mode workspaces where
+///    the LLM key is supplied via the `LLM_API_KEY` / `LLM_BASE_URL` env
+///    variables.
+///
+/// Returns an empty list when neither source provides a valid OpenRouter
+/// configuration so the caller can degrade gracefully (e.g. show a plain
+/// text input instead of a dropdown).
 ///
 /// Results are cached per-process for one hour to avoid hammering the
 /// OpenRouter API on every settings page load. The cache is invalidated
@@ -799,18 +805,35 @@ pub async fn list_openrouter_models(
         .await
         .into_sfn()?;
 
-    // Only proceed when the workspace is configured to use an OpenRouter endpoint.
-    let base_url = cfg.base_url.as_deref().unwrap_or("");
-    if !base_url.contains("openrouter.ai") {
-        return Ok(Vec::new());
+    // Resolution order:
+    // 1. Workspace BYOK config — used when the workspace has its own OpenRouter key.
+    // 2. Server-level env config — used for Kyomi-mode workspaces where the LLM
+    //    key lives in `LLM_API_KEY` / `LLM_BASE_URL` env vars.
+    //
+    // Neither path proceeds unless the resolved base URL points at openrouter.ai,
+    // ensuring we don't call the OpenRouter model list against non-OpenRouter keys.
+
+    // Check workspace BYOK config first.
+    let workspace_base_url = cfg.base_url.as_deref().unwrap_or("");
+    if workspace_base_url.contains("openrouter.ai") {
+        let api_key = match cfg.api_key {
+            Some(k) if !k.trim().is_empty() => k,
+            _ => return Ok(Vec::new()),
+        };
+        return fetch_openrouter_models_cached(&api_key, force_refresh).await;
     }
 
-    let api_key = match cfg.api_key {
-        Some(k) if !k.trim().is_empty() => k,
-        _ => return Ok(Vec::new()),
-    };
+    // Fall back to server-level env config for Kyomi-mode workspaces.
+    let server_base_url = ac.ctx.config.llm_base_url.as_deref().unwrap_or("");
+    if server_base_url.contains("openrouter.ai") {
+        let api_key = match ac.ctx.config.llm_api_key.as_deref() {
+            Some(k) if !k.trim().is_empty() => k.to_string(),
+            _ => return Ok(Vec::new()),
+        };
+        return fetch_openrouter_models_cached(&api_key, force_refresh).await;
+    }
 
-    fetch_openrouter_models_cached(&api_key, force_refresh).await
+    Ok(Vec::new())
 }
 
 /// Compute a short fingerprint for an API key used as the per-workspace cache

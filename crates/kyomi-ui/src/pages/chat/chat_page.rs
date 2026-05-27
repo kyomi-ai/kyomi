@@ -318,7 +318,7 @@ pub fn ChatPage() -> impl IntoView {
         sync_store
             .workspace_settings()
             .get()
-            .map(|ws| ws.default_model)
+            .and_then(|ws| ws.default_model)
     });
 
     // ── Refs for smart scroll ───────────────────────────────────────────

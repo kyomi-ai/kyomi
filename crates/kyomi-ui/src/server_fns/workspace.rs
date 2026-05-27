@@ -117,8 +117,8 @@ pub async fn get_workspace_settings() -> Result<WorkspaceSettingsData, ServerFnE
 
     let default_model = custom_settings_get(&workspace.settings, "default_model")
         .and_then(|v| v.as_str())
-        .unwrap_or("claude-sonnet-4-5-20250929")
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| ac.ctx.config.llm_model.clone());
 
     let chart_palette = custom_settings_get(&workspace.settings, "chartml_config")
         .and_then(kyomi_auth::user_service::extract_palette_style)
