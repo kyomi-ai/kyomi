@@ -33,6 +33,7 @@ use crate::server_fns::datasource_oauth::{
     disconnect_google_oauth, disconnect_datasource_oauth,
     get_google_oauth_projects,
 };
+use crate::utils::json::config_bool;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -1161,10 +1162,10 @@ pub fn DatasourceModal(
                                 })
                                 .unwrap_or_default();
                             set_catalog_selected.try_set(selected_items);
-                            let include_public = cfg
-                                .get("include_public_datasets")
-                                .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s.eq_ignore_ascii_case("true"))))
-                                .unwrap_or(false);
+                            let include_public = config_bool(
+                                cfg.get("include_public_datasets"),
+                                false,
+                            );
                             set_bq_include_public.try_set(include_public);
 
                             // Load user settings (masked credentials)

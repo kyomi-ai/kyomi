@@ -17,6 +17,7 @@ pub mod datasource_registry;
 pub mod db;
 pub mod enums;
 pub mod error;
+pub mod json_utils;
 pub mod kv_store;
 pub mod kv_store_memory;
 pub mod kv_store_redis;
