@@ -433,8 +433,8 @@ fn extract_error_message(body: &str) -> Option<String> {
 /// * Otherwise returns `Ok(vec![])` — the UI degrades to the custom-model
 ///   input. This is a normal pre-save state, not an error.
 ///
-/// `kyomi` is rejected: the curated `KYOMI_CREDITS_MODELS` list is the source
-/// of truth for that mode and is not fetched live.
+/// `kyomi` is rejected: Kyomi-credits mode uses the OpenRouter model list
+/// (via [`list_openrouter_models`]) rather than a per-provider live fetch.
 #[server(prefix = "/leptos-api")]
 pub async fn list_workspace_ai_models(
     provider: String,
@@ -776,10 +776,16 @@ pub struct OpenRouterModelInfo {
 
 /// List models available from OpenRouter.
 ///
-/// Requires the workspace to be configured with an OpenRouter base URL
-/// (`base_url` containing `"openrouter.ai"`) and a stored API key. Returns an
-/// empty list when neither condition is met so the caller can degrade
-/// gracefully (e.g. show a plain text input instead of a dropdown).
+/// Resolves credentials in priority order:
+/// 1. Workspace BYOK config — used when the workspace has its own OpenRouter
+///    base URL (`base_url` containing `"openrouter.ai"`) and stored API key.
+/// 2. Server-level env config — used for Kyomi-credits mode workspaces where
+///    the LLM key is supplied via the `LLM_API_KEY` / `LLM_BASE_URL` env
+///    variables.
+///
+/// Returns an empty list when neither source provides a valid OpenRouter
+/// configuration so the caller can degrade gracefully (e.g. show a plain
+/// text input instead of a dropdown).
 ///
 /// Results are cached per-process for one hour to avoid hammering the
 /// OpenRouter API on every settings page load. The cache is invalidated
