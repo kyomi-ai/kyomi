@@ -181,12 +181,18 @@ impl AgentTool for GetTableInfoTool {
 // BrowseCatalogTool
 // ---------------------------------------------------------------------------
 
+/// Maximum number of tables returned by `browse_catalog` in a single call.
+/// Queries fetch one extra row (LIMIT + 1) to detect truncation.
+const BROWSE_CATALOG_LIMIT: usize = 500;
+
 #[derive(sqlx::FromRow)]
-struct CatalogBrowseRow {
+struct CatalogBrowseLiteRow {
     project_id: String,
     dataset_id: String,
     table_id: String,
-    table_metadata: serde_json::Value,
+    description: Option<String>,
+    row_count: Option<i64>,
+    columns_json: Option<String>,
 }
 
 /// Browse all tables in a datasource, grouped by schema/dataset.
@@ -261,16 +267,52 @@ impl AgentTool for BrowseCatalogTool {
         )
         .await?;
 
+        // Build projected SQL expressions — only fetch the fields we need to
+        // avoid deserializing the full table_metadata JSON blob (~57 MB for
+        // BigQuery with public datasets).
+        let desc_expr = format!(
+            "COALESCE({}, {})",
+            kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "table_description"),
+            kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "description"),
+        );
+
+        let row_count_text =
+            kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "row_count");
+        let row_count_expr = if is_pg {
+            format!("({row_count_text})::bigint")
+        } else {
+            format!("CAST({row_count_text} AS INTEGER)")
+        };
+
+        let columns_select = if include_columns {
+            format!(
+                ", {} as columns_json",
+                kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "columns")
+            )
+        } else if is_pg {
+            ", NULL::text as columns_json".to_string()
+        } else {
+            ", NULL as columns_json".to_string()
+        };
+
+        let limit = BROWSE_CATALOG_LIMIT + 1;
+
         // Query by `datasource_config_id` uniformly — sample datasources now
         // index into the user's workspace like any other datasource.
+        // Schema filter is applied in SQL to avoid fetching rows we'll discard.
         let sql = format!(
-            "SELECT project_id, dataset_id, table_id, table_metadata \
+            "SELECT project_id, dataset_id, table_id, \
+                    {desc_expr} as description, \
+                    {row_count_expr} as row_count \
+                    {columns_select} \
              FROM datasource_table_cache \
              WHERE datasource_config_id = $1 AND is_archived = {bool_false} \
-             ORDER BY dataset_id, table_id"
+               AND ($2 IS NULL OR dataset_id = $2) \
+             ORDER BY dataset_id, table_id \
+             LIMIT {limit}"
         );
-        let mut rows: Vec<CatalogBrowseRow> =
-            kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &sql, &ds.id)
+        let mut rows: Vec<CatalogBrowseLiteRow> =
+            kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseLiteRow, &sql, &ds.id, &schema_filter)
                 .unwrap_or_default();
 
         // BigQuery public datasets: include if enabled (defaults to true).
@@ -282,25 +324,36 @@ impl AgentTool for BrowseCatalogTool {
                 .unwrap_or(true)
         {
             let public_sql = format!(
-                "SELECT project_id, dataset_id, table_id, table_metadata \
+                "SELECT project_id, dataset_id, table_id, \
+                        {desc_expr} as description, \
+                        {row_count_expr} as row_count \
+                        {columns_select} \
                  FROM datasource_table_cache \
                  WHERE workspace_id = $1 AND is_archived = {bool_false} \
-                 ORDER BY dataset_id, table_id"
+                   AND ($2 IS NULL OR dataset_id = $2) \
+                 ORDER BY dataset_id, table_id \
+                 LIMIT {limit}"
             );
-            let public_rows: Vec<CatalogBrowseRow> =
-                kyomi_core::db_fetch_all!(ctx.db, CatalogBrowseRow, &public_sql, PUBLIC_DATA_WORKSPACE_ID)
-                    .unwrap_or_default();
+            let public_rows: Vec<CatalogBrowseLiteRow> = kyomi_core::db_fetch_all!(
+                ctx.db,
+                CatalogBrowseLiteRow,
+                &public_sql,
+                PUBLIC_DATA_WORKSPACE_ID,
+                &schema_filter
+            )
+            .unwrap_or_default();
             rows.extend(public_rows);
+        }
+
+        // Detect truncation: we fetched up to LIMIT+1 rows per query.
+        let truncated = rows.len() > BROWSE_CATALOG_LIMIT;
+        if truncated {
+            rows.truncate(BROWSE_CATALOG_LIMIT);
         }
 
         let mut schemas: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
             std::collections::BTreeMap::new();
         for row in &rows {
-            if let Some(filter) = schema_filter
-                && row.dataset_id != filter
-            {
-                continue;
-            }
             let full_name = if row.project_id.is_empty() {
                 if row.dataset_id.is_empty() {
                     row.table_id.clone()
@@ -311,26 +364,21 @@ impl AgentTool for BrowseCatalogTool {
                 format!("{}.{}.{}", row.project_id, row.dataset_id, row.table_id)
             };
 
-            let description = row
-                .table_metadata
-                .get("table_description")
-                .or_else(|| row.table_metadata.get("description"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let row_count = row.table_metadata.get("row_count").and_then(|v| v.as_u64());
+            let description = row.description.as_deref().unwrap_or("");
 
             let mut table_obj = serde_json::json!({
                 "name": full_name,
                 "description": description,
             });
-            if let Some(rows) = row_count {
-                table_obj["row_count"] = serde_json::json!(rows);
+            if let Some(rc) = row.row_count {
+                table_obj["row_count"] = serde_json::json!(rc);
             }
-            if include_columns {
-                let cols: Vec<serde_json::Value> = row
-                    .table_metadata
-                    .get("columns")
-                    .and_then(|v| v.as_array())
+            if include_columns
+                && let Some(ref json_str) = row.columns_json
+                && let Ok(cols_value) = serde_json::from_str::<serde_json::Value>(json_str)
+            {
+                let cols: Vec<serde_json::Value> = cols_value
+                    .as_array()
                     .map(|arr| {
                         arr.iter()
                             .map(|col| {
@@ -368,13 +416,20 @@ impl AgentTool for BrowseCatalogTool {
             .map(|s| s["table_count"].as_u64().unwrap_or(0) as usize)
             .sum();
 
-        Ok(serde_json::json!({
+        let mut response = serde_json::json!({
             "datasource": datasource_slug,
             "type": ds.datasource_type,
             "total_tables": total_tables,
             "schemas": schema_list,
-        })
-        .to_string())
+        });
+        if truncated {
+            response["truncated"] = serde_json::json!(true);
+            response["note"] = serde_json::json!(
+                "Showing first 500 tables. Use the 'schema' parameter to filter to a specific dataset."
+            );
+        }
+
+        Ok(response.to_string())
     }
 }
 
