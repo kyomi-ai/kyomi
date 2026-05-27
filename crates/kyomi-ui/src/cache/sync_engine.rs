@@ -217,8 +217,7 @@ fn parse_workspace_settings(data: &serde_json::Value) -> crate::types::Workspace
     let default_model = custom
         .and_then(|cs| cs.get("default_model"))
         .and_then(|v| v.as_str())
-        .unwrap_or("claude-sonnet-4-5-20250929")
-        .to_string();
+        .map(str::to_string);
 
     let chart_palette = custom
         .and_then(|cs| cs.get("chartml_config"))

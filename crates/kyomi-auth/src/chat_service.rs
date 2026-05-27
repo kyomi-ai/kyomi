@@ -305,12 +305,12 @@ async fn fetch_message_timestamps(
 
 /// Resolve the LLM model to use for a new session.
 ///
-/// Fallback chain: explicit caller value → `LLM_MODEL` env var → built-in default.
+/// Fallback chain: explicit caller value → `LLM_MODEL` env var → `"unknown"`.
 fn resolve_model(model: Option<&str>) -> String {
     model
         .map(|s| s.to_string())
         .or_else(|| std::env::var("LLM_MODEL").ok())
-        .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Create a new chat session. Returns the generated session_id.
