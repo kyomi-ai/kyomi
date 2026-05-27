@@ -11,6 +11,22 @@ use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Read a boolean from a `connection_config` JSON value that may be stored as
+/// a JSON bool (`true`) or a JSON string (`"true"`).  The UI and some
+/// migration paths write the string form, so `.as_bool()` alone always returns
+/// `None` for those entries.
+fn config_bool(val: Option<&serde_json::Value>, default: bool) -> bool {
+    match val {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),
+        _ => default,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
 
@@ -125,11 +141,7 @@ impl AgentTool for GetTableInfoTool {
         let table_metadata = if let Some(metadata) = table_metadata {
             metadata
         } else if ds.datasource_type == DatasourceType::Bigquery
-            && ds
-                .connection_config
-                .get("include_public_datasets")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true)
+            && config_bool(ds.connection_config.get("include_public_datasets"), true)
         {
             let public_sql = format!(
                 "SELECT dtc.table_metadata \
@@ -317,11 +329,7 @@ impl AgentTool for BrowseCatalogTool {
 
         // BigQuery public datasets: include if enabled (defaults to true).
         if ds.datasource_type == DatasourceType::Bigquery
-            && ds
-                .connection_config
-                .get("include_public_datasets")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true)
+            && config_bool(ds.connection_config.get("include_public_datasets"), true)
         {
             let public_sql = format!(
                 "SELECT project_id, dataset_id, table_id, \
