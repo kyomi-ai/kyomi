@@ -6,25 +6,10 @@ use async_trait::async_trait;
 
 use kyomi_auth::catalog::indexers::bigquery_public::PUBLIC_DATA_WORKSPACE_ID;
 use kyomi_core::enums::DatasourceType;
+use kyomi_core::json_utils::config_bool;
 
 use crate::tools::{AgentTool, ToolContext};
 use crate::types::ToolAnnotations;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Read a boolean from a `connection_config` JSON value that may be stored as
-/// a JSON bool (`true`) or a JSON string (`"true"`).  The UI and some
-/// migration paths write the string form, so `.as_bool()` alone always returns
-/// `None` for those entries.
-fn config_bool(val: Option<&serde_json::Value>, default: bool) -> bool {
-    match val {
-        Some(serde_json::Value::Bool(b)) => *b,
-        Some(serde_json::Value::String(s)) => s.eq_ignore_ascii_case("true"),
-        _ => default,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Row types

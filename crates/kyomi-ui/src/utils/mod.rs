@@ -5,6 +5,7 @@
 pub mod auth_refresh;
 pub mod cron;
 pub mod feedback_context;
+pub mod json;
 pub mod oauth_popup;
 pub mod stripe;
 pub mod time;
