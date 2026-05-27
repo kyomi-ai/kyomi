@@ -34,11 +34,15 @@ pub fn bool_false(is_pg: bool) -> &'static str {
 
 /// Interval subtraction: column < NOW() - N days.
 /// The `param` argument is a SQL bind parameter placeholder (e.g. `$1`).
-/// Postgres: `column < NOW() - make_interval(days => $1)`
+/// Postgres: `column < NOW() - make_interval(days => $1::int4)`
 /// SQLite: `column < datetime('now', '-' || $1 || ' days')`
+///
+/// The `::int4` cast is required because `make_interval(days => ...)` expects
+/// `int4`, but the retention_days parameter is bound as `i64` (bigint). Without
+/// the explicit cast, Postgres 15 raises a type mismatch error at runtime.
 pub fn ago_days(is_pg: bool, column: &str, param: &str) -> String {
     if is_pg {
-        format!("{column} < NOW() - make_interval(days => {param})")
+        format!("{column} < NOW() - make_interval(days => {param}::int4)")
     } else {
         format!("{column} < datetime('now', '-' || {param} || ' days')")
     }
@@ -220,7 +224,7 @@ mod tests {
     fn test_ago_days_postgres() {
         assert_eq!(
             ago_days(true, "created_at", "$1"),
-            "created_at < NOW() - make_interval(days => $1)"
+            "created_at < NOW() - make_interval(days => $1::int4)"
         );
     }
 
