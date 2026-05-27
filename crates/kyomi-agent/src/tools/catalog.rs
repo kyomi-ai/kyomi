@@ -373,25 +373,24 @@ impl AgentTool for BrowseCatalogTool {
             if let Some(rc) = row.row_count {
                 table_obj["row_count"] = serde_json::json!(rc);
             }
-            if include_columns {
-                if let Some(ref json_str) = row.columns_json {
-                    if let Ok(cols_value) = serde_json::from_str::<serde_json::Value>(json_str) {
-                        let cols: Vec<serde_json::Value> = cols_value
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .map(|col| {
-                                        serde_json::json!({
-                                            "name": col.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                                            "type": col.get("type").and_then(|v| v.as_str()).unwrap_or(""),
-                                        })
-                                    })
-                                    .collect()
+            if include_columns
+                && let Some(ref json_str) = row.columns_json
+                && let Ok(cols_value) = serde_json::from_str::<serde_json::Value>(json_str)
+            {
+                let cols: Vec<serde_json::Value> = cols_value
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|col| {
+                                serde_json::json!({
+                                    "name": col.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                                    "type": col.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+                                })
                             })
-                            .unwrap_or_default();
-                        table_obj["columns"] = serde_json::json!(cols);
-                    }
-                }
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                table_obj["columns"] = serde_json::json!(cols);
             }
 
             let schema_key = if row.dataset_id.is_empty() {
