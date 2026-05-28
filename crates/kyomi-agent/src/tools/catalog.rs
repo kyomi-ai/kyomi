@@ -180,7 +180,7 @@ impl AgentTool for GetTableInfoTool {
 
 /// Maximum number of tables returned by `browse_catalog` in a single call.
 /// Queries fetch one extra row (LIMIT + 1) to detect truncation.
-const BROWSE_CATALOG_LIMIT: usize = 500;
+const BROWSE_CATALOG_LIMIT: usize = 100;
 
 #[derive(sqlx::FromRow)]
 struct CatalogBrowseLiteRow {
@@ -202,9 +202,10 @@ impl AgentTool for BrowseCatalogTool {
     }
 
     fn description(&self) -> &str {
-        "Browse all tables in a datasource, grouped by schema/dataset. Returns the \
-         same hierarchical view the user sees in the catalog UI. Use this to explore \
-         what tables exist before querying."
+        "Browse tables in a datasource, grouped by schema/dataset. Without a schema \
+         filter, returns a compact listing of table names. With a schema filter, returns \
+         descriptions and row counts. Use get_table_info for detailed column info on \
+         specific tables."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -221,7 +222,7 @@ impl AgentTool for BrowseCatalogTool {
                 },
                 "include_columns": {
                     "type": "boolean",
-                    "description": "Include column names and types (default: false). Use get_table_info for detailed column info on specific tables.",
+                    "description": "Include column names and types (requires 'schema' parameter to be set). Use get_table_info for detailed column info on specific tables.",
                     "default": false
                 }
             },
@@ -281,7 +282,7 @@ impl AgentTool for BrowseCatalogTool {
             format!("CAST({row_count_text} AS INTEGER)")
         };
 
-        let columns_select = if include_columns {
+        let columns_select = if schema_filter.is_some() && include_columns {
             format!(
                 ", {} as columns_json",
                 kyomi_core::sql_compat::json_extract_text(is_pg, "table_metadata", "columns")
@@ -357,16 +358,25 @@ impl AgentTool for BrowseCatalogTool {
                 format!("{}.{}.{}", row.project_id, row.dataset_id, row.table_id)
             };
 
-            let description = row.description.as_deref().unwrap_or("");
-
-            let mut table_obj = serde_json::json!({
-                "name": full_name,
-                "description": description,
-            });
+            let mut table_obj = if schema_filter.is_some() {
+                // Schema filter applied — include description for targeted browsing
+                let description = row.description.as_deref().unwrap_or("");
+                serde_json::json!({
+                    "name": full_name,
+                    "description": description,
+                })
+            } else {
+                // No schema filter — compact listing, just names
+                serde_json::json!({
+                    "name": full_name,
+                })
+            };
             if let Some(rc) = row.row_count {
                 table_obj["row_count"] = serde_json::json!(rc);
             }
-            if include_columns
+            // Only include columns when a schema filter narrows the scope
+            if schema_filter.is_some()
+                && include_columns
                 && let Some(ref json_str) = row.columns_json
                 && let Ok(cols_value) = serde_json::from_str::<serde_json::Value>(json_str)
             {
@@ -418,7 +428,8 @@ impl AgentTool for BrowseCatalogTool {
         if truncated {
             response["truncated"] = serde_json::json!(true);
             response["note"] = serde_json::json!(
-                "Showing first 500 tables. Use the 'schema' parameter to filter to a specific dataset."
+                "Results truncated to 100 tables. Use the 'schema' parameter to filter \
+                 to a specific dataset/schema for complete results with descriptions."
             );
         }
 
