@@ -30,6 +30,7 @@ pub mod websocket;
 
 pub mod doc_resources;
 pub mod embedding_compat;
+pub mod error_sanitizer;
 pub mod retry;
 pub mod sql_compat;
 
@@ -42,6 +43,7 @@ pub use enums::{
     WorkspaceStatus,
 };
 pub use error::{Error, Result};
+pub use error_sanitizer::sanitize_error;
 pub use kv_store::{KVPool, KVStore, create_kv_store, kv_consume_json, kv_peek_json, kv_store_json};
 pub use redis::RedisPool;
 pub use stream::{ColumnInfo, SimpleType};

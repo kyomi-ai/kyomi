@@ -216,7 +216,7 @@ impl<T, E: std::fmt::Display> IntoServerFnError<T> for Result<T, E> {
     fn into_sfn(self) -> Result<T, leptos::prelude::ServerFnError> {
         self.map_err(|e| {
             tracing::error!(error = %e, "server function error");
-            leptos::prelude::ServerFnError::new(e.to_string())
+            leptos::prelude::ServerFnError::new(kyomi_core::sanitize_error(&e.to_string()))
         })
     }
 }
