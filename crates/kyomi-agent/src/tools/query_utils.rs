@@ -214,14 +214,18 @@ pub async fn execute_datasource_query(
     let result = provider
         .execute_query(sql, Some(limit), None, false, None)
         .await
-        .map_err(|e| format!("Query execution failed: {e}"))?;
+        .map_err(|e| {
+            tracing::warn!(raw_error = %e, "datasource query error (sanitized for caller)");
+            format!("Query execution failed: {}", kyomi_core::sanitize_error(&e.to_string()))
+        })?;
     provider.close().await;
 
     // 4. Check status
     match result.status {
         kyomi_datasource_server::provider::QueryStatus::Error => {
             let msg = result.error.unwrap_or_else(|| "Unknown error".into());
-            return Err(format!("Query failed: {msg}"));
+            tracing::warn!(raw_error = %msg, "datasource query status error (sanitized for caller)");
+            return Err(format!("Query failed: {}", kyomi_core::sanitize_error(&msg)));
         }
         kyomi_datasource_server::provider::QueryStatus::Success => {}
     }

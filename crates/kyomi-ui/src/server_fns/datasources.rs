@@ -410,9 +410,10 @@ pub async fn test_datasource_standalone(
     {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
+            tracing::warn!(raw_error = %e, "datasource connection error (sanitized for client)");
             return Ok(TestConnectionResult {
                 success: false,
-                message: format!("Failed to connect: {e}"),
+                message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
             });
         }
         Err(_) => {
@@ -437,10 +438,13 @@ pub async fn test_datasource_standalone(
             success: false,
             message: "Connection test returned false".to_string(),
         },
-        Ok(Err(e)) => TestConnectionResult {
-            success: false,
-            message: format!("Connection failed: {e}"),
-        },
+        Ok(Err(e)) => {
+            tracing::warn!(raw_error = %e, "datasource test_connection error (sanitized for client)");
+            TestConnectionResult {
+                success: false,
+                message: format!("Connection failed: {}", kyomi_core::sanitize_error(&e.to_string())),
+            }
+        }
         Err(_) => TestConnectionResult {
             success: false,
             message: "Connection test timed out".to_string(),
@@ -498,9 +502,10 @@ pub async fn test_existing_datasource(
     {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
+            tracing::warn!(raw_error = %e, "datasource connection error (sanitized for client)");
             return Ok(TestConnectionResult {
                 success: false,
-                message: format!("Failed to connect: {e}"),
+                message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
             });
         }
         Err(_) => {
@@ -525,10 +530,13 @@ pub async fn test_existing_datasource(
             success: false,
             message: "Connection test returned false".to_string(),
         },
-        Ok(Err(e)) => TestConnectionResult {
-            success: false,
-            message: format!("Connection failed: {e}"),
-        },
+        Ok(Err(e)) => {
+            tracing::warn!(raw_error = %e, "datasource test_connection error (sanitized for client)");
+            TestConnectionResult {
+                success: false,
+                message: format!("Connection failed: {}", kyomi_core::sanitize_error(&e.to_string())),
+            }
+        }
         Err(_) => TestConnectionResult {
             success: false,
             message: "Connection test timed out".to_string(),
@@ -601,10 +609,11 @@ pub async fn discover_datasource_resources(
     {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
+            tracing::warn!(raw_error = %e, "datasource connection error (sanitized for client)");
             return Ok(DiscoverResourcesResult {
                 success: false,
                 resources: std::collections::HashMap::new(),
-                message: format!("Failed to connect: {e}"),
+                message: format!("Failed to connect: {}", kyomi_core::sanitize_error(&e.to_string())),
             });
         }
         Err(_) => {

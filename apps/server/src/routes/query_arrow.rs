@@ -59,8 +59,14 @@ struct QueryArrowRequest {
 }
 
 /// Serialise an error message as `{"error": "..."}` with the given status code.
+///
+/// The raw message is logged at `warn` level before sanitization so that
+/// internal details (credentials, hostnames) are preserved server-side for
+/// debugging while the client receives only safe text.
 fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
-    let body = serde_json::json!({ "error": message.into() });
+    let raw = message.into();
+    tracing::warn!(raw_error = %raw, "query error (sanitized for client)");
+    let body = serde_json::json!({ "error": kyomi_core::sanitize_error(&raw) });
     (status, axum::Json(body)).into_response()
 }
 

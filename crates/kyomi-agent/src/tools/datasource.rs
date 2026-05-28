@@ -198,8 +198,10 @@ impl AgentTool for QueryDatasourceTool {
                 .to_string())
             }
             kyomi_datasource_server::provider::QueryStatus::Error => {
+                let raw_err = result.error.unwrap_or_else(|| "Unknown query error".to_string());
+                tracing::warn!(raw_error = %raw_err, datasource = %ds.slug, "datasource query error (sanitized for agent)");
                 Ok(serde_json::json!({
-                    "error": result.error.unwrap_or_else(|| "Unknown query error".to_string()),
+                    "error": kyomi_core::sanitize_error(&raw_err),
                     "datasource": ds.slug,
                 })
                 .to_string())
