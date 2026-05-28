@@ -168,14 +168,18 @@ fn format_cost(cost: f64) -> String {
 /// live timer while active, auto-scroll on new events, and variant-based styling.
 ///
 /// Matches React's `AgentThinking` component exactly (layout, classes, behavior).
+///
+/// Props accept either `Signal<T>` directly or plain `T` values — Leptos's
+/// `#[prop(into)]` converts plain values via `Signal::stored(value)`, so
+/// callers that pass static data (e.g. `execution_log_viewer`) need no changes.
 #[component]
 pub fn AgentThinking(
     /// List of thinking events to display.
-    #[prop(default = vec![])]
-    thinking_events: Vec<ThinkingEvent>,
+    #[prop(into, default = Signal::stored(vec![]))]
+    thinking_events: Signal<Vec<ThinkingEvent>>,
     /// Whether the agent is currently actively thinking.
-    #[prop(default = false)]
-    is_active: bool,
+    #[prop(into, default = Signal::stored(false))]
+    is_active: Signal<bool>,
     /// Visual variant: "inset", "header-bar", "tab", or "default".
     #[prop(default = "inset")]
     variant: &'static str,
@@ -203,29 +207,36 @@ pub fn AgentThinking(
     let thinking_end_ref = NodeRef::<leptos::html::Div>::new();
     let scroll_container_ref = NodeRef::<leptos::html::Div>::new();
 
-    // -- Live timer: counts up while processing --
+    // -- Live timer: reactive, starts/stops based on is_active signal --
     // Uses gloo_timers::callback::Interval on WASM, no-op on SSR.
     #[cfg(target_arch = "wasm32")]
     {
         use send_wrapper::SendWrapper;
 
-        // `is_active` and `set_elapsed_time` are captured by the closure below.
-
-        // Store interval handle in a signal so we can clean up
         let interval_handle: StoredValue<Option<SendWrapper<gloo_timers::callback::Interval>>> =
             StoredValue::new(None);
+        let timer_start: StoredValue<Option<f64>> = StoredValue::new(start_time_ms);
 
-        // Start/stop interval based on is_active
-        if is_active {
-            let start_time = start_time_ms.unwrap_or_else(js_sys::Date::now);
-            let interval = gloo_timers::callback::Interval::new(100, move || {
-                let now = js_sys::Date::now();
-                set_elapsed_time.set((now - start_time) as u64);
-            });
-            interval_handle.set_value(Some(SendWrapper::new(interval)));
-        }
+        Effect::new(move |_| {
+            if is_active.get() {
+                let already_running = interval_handle.with_value(|h| h.is_some());
+                if !already_running {
+                    let start = timer_start.get_value().unwrap_or_else(|| {
+                        let now = js_sys::Date::now();
+                        timer_start.set_value(Some(now));
+                        now
+                    });
+                    let interval = gloo_timers::callback::Interval::new(100, move || {
+                        let now = js_sys::Date::now();
+                        set_elapsed_time.try_set((now - start) as u64);
+                    });
+                    interval_handle.set_value(Some(SendWrapper::new(interval)));
+                }
+            } else {
+                interval_handle.set_value(None);
+            }
+        });
 
-        // Clean up interval on unmount
         on_cleanup(move || {
             interval_handle.set_value(None);
         });
@@ -237,18 +248,12 @@ pub fn AgentThinking(
         let _ = (set_elapsed_time, start_time_ms);
     }
 
-    // -- Auto-scroll: scroll to bottom on mount when expanded --
-    // NOTE: `thinking_events` is a non-reactive `Vec`, so `events_len` is a plain
-    // `usize` captured at construction time. This effect re-runs only when
-    // `is_expanded` changes, not when new events arrive. This is intentional —
-    // the parent re-mounts the component each time it passes a new Vec of events,
-    // so the scroll-on-mount behavior is sufficient in practice.
+    // -- Auto-scroll: scroll to bottom when events change or panel expands --
     #[cfg(target_arch = "wasm32")]
     {
-        let events_len = thinking_events.len();
-
         Effect::new(move |_| {
-            if is_expanded.get() && events_len > 0 {
+            let events = thinking_events.get();
+            if is_expanded.get() && !events.is_empty() {
                 // Scroll the inner container to the bottom — NOT the page.
                 // Using scrollIntoView on the sentinel would scroll the entire
                 // page, which is jarring. Instead, set scrollTop on the
@@ -262,32 +267,31 @@ pub fn AgentThinking(
     }
 
     // -- Derived data --
-    let latest_event = thinking_events.last().cloned();
-    let tool_executions_count = thinking_events
-        .iter()
-        .filter(|e| {
+    let latest_event = Signal::derive(move || thinking_events.get().last().cloned());
+
+    let tool_executions_count = Signal::derive(move || {
+        thinking_events.get().iter().filter(|e| {
             e.event_type == "tool_execution_start"
                 || e.event_type == "tool_execution_end"
                 || e.event_type == "tool_start"
                 || e.event_type == "tool_end"
-        })
-        .count();
+        }).count()
+    });
 
-    let total_duration = latest_event
-        .as_ref()
-        .and_then(|e| e.duration_ms)
-        .unwrap_or(0);
+    let total_duration = Signal::derive(move || {
+        latest_event.get()
+            .and_then(|e| e.duration_ms)
+            .unwrap_or(0)
+    });
 
     // Current title: only show while actively processing, strip emojis
-    let current_title = if is_active {
-        latest_event.as_ref().map(|e| strip_emojis(&e.title))
-    } else {
-        None
-    };
-
-    // Clone data for closures
-    let current_title_for_view = current_title.clone();
-    let events_for_list = thinking_events.clone();
+    let current_title = Signal::derive(move || {
+        if is_active.get() {
+            latest_event.get().map(|e| strip_emojis(&e.title))
+        } else {
+            None
+        }
+    });
 
     // -- Token usage suffix for the metadata bar --
     // Reactive: re-evaluates when show_token_usage or token_usage changes.
@@ -312,11 +316,13 @@ pub fn AgentThinking(
         }
     });
 
+    // Unified display duration — elapsed when active, total when complete.
+    let display_duration = Signal::derive(move || {
+        if is_active.get() { elapsed_time.get() } else { total_duration.get() }
+    });
+
     // -- Content renderer (shared across variants) --
     let render_content = move || {
-        let current_title = current_title_for_view.clone();
-        let events = events_for_list.clone();
-
         view! {
             // Header — always visible, clickable to expand/collapse
             <div
@@ -324,16 +330,12 @@ pub fn AgentThinking(
                 on:click=move |_| set_is_expanded.update(|v| *v = !*v)
             >
                 <div class="flex items-center gap-2 min-w-0 flex-1">
-                    {if is_active {
-                        view! {
-                            <img src="/kyomi_animated_logo.svg" alt="Processing" class="w-4 h-4 flex-shrink-0" />
-                        }.into_any()
-                    } else {
-                        view! {
-                            <img src="/kyomi_small_logo.svg" alt="Thinking" class="w-4 h-4 flex-shrink-0" />
-                        }.into_any()
-                    }}
-                    {current_title.map(|title| {
+                    <img
+                        src=move || if is_active.get() { "/kyomi_animated_logo.svg" } else { "/kyomi_small_logo.svg" }
+                        alt=move || if is_active.get() { "Processing" } else { "Thinking" }
+                        class="w-4 h-4 flex-shrink-0"
+                    />
+                    {move || current_title.get().map(|title| {
                         view! {
                             <span class="text-xs text-muted-foreground truncate">{title}</span>
                         }
@@ -341,18 +343,7 @@ pub fn AgentThinking(
                 </div>
                 <div class="flex items-center gap-2 flex-shrink-0">
                     <span class="text-xs text-muted-foreground font-mono whitespace-nowrap">
-                        {if is_active {
-                            let tool_count = tool_executions_count;
-                            view! {
-                                <span>{move || format!("{} tools \u{2022} {}{}", tool_count, format_duration(elapsed_time.get()), token_suffix.get())}</span>
-                            }.into_any()
-                        } else {
-                            let tool_count = tool_executions_count;
-                            let duration = total_duration;
-                            view! {
-                                <span>{move || format!("{} tools \u{2022} {}{}", tool_count, format_duration(duration), token_suffix.get())}</span>
-                            }.into_any()
-                        }}
+                        <span>{move || format!("{} tools \u{2022} {}{}", tool_executions_count.get(), format_duration(display_duration.get()), token_suffix.get())}</span>
                     </span>
                     <Icon
                         icon=phosphor_leptos::CARET_DOWN
@@ -376,7 +367,7 @@ pub fn AgentThinking(
                 )
             >
                 <div class="border-t border-border mt-1 pt-1">
-                    {events.iter().map(|event| {
+                    {move || thinking_events.get().iter().map(|event| {
                         let icon = get_event_icon(&event.event_type);
                         let title = event.title.clone();
                         let description = event.description.clone();
