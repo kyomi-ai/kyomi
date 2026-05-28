@@ -142,6 +142,44 @@ fn InlineEditableTitle(
     }
 }
 
+// ─── Not-found redirect ─────────────────────────────────────────────────────
+
+/// Immediately redirect to the given `href`, replacing the current history entry.
+///
+/// Used in the dashboard viewer's `Err` branch when the server returns a
+/// "not found" error: instead of showing a dead-end error page, we navigate
+/// the user to the list view so they can pick a valid dashboard. The redirect
+/// uses `replace: true` so the deleted-dashboard URL doesn't persist in
+/// browser history and the user can still press Back.
+///
+/// Navigation is performed inside `Effect::new` rather than directly in the
+/// component body, because this component is rendered inside a reactive view
+/// closure (`{move || ...}`) — calling `navigate()` during that closure's
+/// execution would be in the render phase. `Effect::new` runs after the
+/// current render completes, which is the correct hook for side effects that
+/// trigger navigation.
+#[component]
+fn NotFoundRedirect(href: String) -> impl IntoView {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let navigate = leptos_router::hooks::use_navigate();
+        Effect::new(move |_| {
+            navigate(
+                &href,
+                leptos_router::NavigateOptions {
+                    replace: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = href;
+    // Minimal placeholder — the Effect fires immediately after mount, so the
+    // user sees this for at most one frame before being redirected.
+    view! { <div></div> }
+}
+
 // ─── Main component ─────────────────────────────────────────────────────────
 
 /// Read-only dashboard viewer page.
@@ -553,21 +591,29 @@ pub fn DashboardViewerPage() -> impl IntoView {
 
                 Some(match dashboard_result {
                     Err(e) => {
-                        view! {
-                            <div class="flex h-full items-center justify-center bg-background">
-                                <div class="text-center">
-                                    <h2 class="text-lg font-semibold text-foreground mb-4">
-                                        {not_found_label()}
-                                    </h2>
-                                    <p class="text-muted-foreground mb-6">
-                                        {e.to_string()}
-                                    </p>
-                                    <ButtonLink href=list_href().to_string()>
-                                        {back_label()}
-                                    </ButtonLink>
+                        let err_msg = e.to_string();
+                        if err_msg.to_lowercase().contains("not found") {
+                            // Dashboard was deleted — redirect to the list so
+                            // the user can pick a valid one. replace:true keeps
+                            // the deleted URL out of browser history.
+                            view! { <NotFoundRedirect href=list_href().to_string() /> }.into_any()
+                        } else {
+                            view! {
+                                <div class="flex h-full items-center justify-center bg-background">
+                                    <div class="text-center">
+                                        <h2 class="text-lg font-semibold text-foreground mb-4">
+                                            {not_found_label()}
+                                        </h2>
+                                        <p class="text-muted-foreground mb-6">
+                                            {err_msg}
+                                        </p>
+                                        <ButtonLink href=list_href().to_string()>
+                                            {back_label()}
+                                        </ButtonLink>
+                                    </div>
                                 </div>
-                            </div>
-                        }.into_any()
+                            }.into_any()
+                        }
                     }
                     Ok(dashboard) => {
                         let did = dashboard.dashboard_id.clone();

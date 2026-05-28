@@ -73,6 +73,16 @@ pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
         None
     };
 
+    // ── Validate default dashboard IDs ─────────────────────────────────
+    let (user_default_dashboard_id, workspace_default_dashboard_id) =
+        validate_default_dashboard_ids(
+            &ctx.db,
+            user_default_dashboard_id,
+            workspace_default_dashboard_id,
+            auth.workspace.workspace_id.as_deref(),
+        )
+        .await;
+
     // ── System config flags ─────────────────────────────────────────────
     let is_personal_mode = ctx.config.is_personal();
     let llm_configured = ctx.config.llm_configured();
@@ -89,3 +99,51 @@ pub async fn get_landing_config() -> Result<LandingConfig, ServerFnError> {
 // Helpers — delegate to shared extractors in parent module
 #[cfg(feature = "ssr")]
 use super::{extract_auth, extract_context, IntoServerFnError};
+
+/// Check that default dashboard IDs still refer to existing dashboards.
+/// Returns `None` for any stale ID so the redirect logic falls through.
+#[cfg(feature = "ssr")]
+async fn validate_default_dashboard_ids(
+    db: &kyomi_core::DbPool,
+    user_id: Option<String>,
+    workspace_id_val: Option<String>,
+    ws_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let user_id = match (&user_id, ws_id) {
+        (Some(id), Some(ws)) => {
+            match kyomi_auth::dashboard_service::get_dashboard(db, id, ws).await {
+                Ok(Some(_)) => user_id,
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        dashboard_id = %id,
+                        error = %e,
+                        "failed to validate user default dashboard — treating as unset"
+                    );
+                    None
+                }
+            }
+        }
+        _ => user_id,
+    };
+
+    let workspace_id_val = match (&workspace_id_val, ws_id) {
+        (Some(id), Some(ws)) => {
+            match kyomi_auth::dashboard_service::get_dashboard(db, id, ws).await {
+                Ok(Some(_)) => workspace_id_val,
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        dashboard_id = %id,
+                        error = %e,
+                        "failed to validate workspace default dashboard — treating as unset"
+                    );
+                    None
+                }
+            }
+        }
+        _ => workspace_id_val,
+    };
+
+    (user_id, workspace_id_val)
+}
