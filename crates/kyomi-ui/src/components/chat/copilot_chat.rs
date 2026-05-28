@@ -9,9 +9,6 @@
 //! Consumers wrap this component with their own sidebar chrome (header, resize
 //! handle, mobile layout).
 
-#[cfg(target_arch = "wasm32")]
-use std::collections::HashMap;
-
 use leptos::prelude::*;
 
 use super::chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
@@ -142,17 +139,6 @@ pub fn CopilotChat(
     let thinking = engine.thinking().clone();
     let chat_state_for_error = chat_state.clone();
 
-    // Per-message thinking start times — keyed by message ID.
-    // Set once when thinking first becomes active for a message, so the
-    // elapsed timer in AgentThinking does not reset on each tool call or
-    // event update that causes the parent closure to re-run.
-    // Must be declared before view! so the HashMap generic syntax does not
-    // confuse the Leptos RSX parser (which sees `<` as an HTML tag opener).
-    // WASM-only: on SSR the signal is never read (start times are always None).
-    #[cfg(target_arch = "wasm32")]
-    let thinking_start_times: RwSignal<HashMap<String, f64>> =
-        RwSignal::new(HashMap::new());
-
     // ── Render ────────────────────────────────────────────────────────
     view! {
         <div class="flex flex-col flex-1 min-w-0 min-h-0">
@@ -196,52 +182,33 @@ pub fn CopilotChat(
                 // Messages
                 {move || {
                     let msgs = messages.get();
-                    let thinking_state_map = thinking.state().get();
 
                     msgs.iter().map(|msg| {
                         let is_user = msg.message_type == "user";
                         let content = msg.content.clone();
                         let msg_id = msg.message_id.clone();
 
-                        // Get thinking state for this message (assistant only).
-                        let ts = if !is_user {
-                            thinking_state_map.get(&msg_id).cloned()
-                        } else {
-                            None
-                        };
-                        let has_thinking = ts.as_ref().is_some_and(|t| !t.events.is_empty());
-                        let thinking_events = ts.as_ref().map(|t| t.events.clone()).unwrap_or_default();
-                        let thinking_active = ts.as_ref().is_some_and(|t| t.is_active);
-                        // Wrap in Signal::stored so AgentThinking receives Signal<Option<TokenUsage>>.
-                        // The outer closure re-runs when thinking state changes, so the stored
-                        // value is always current at the time the AgentThinking component mounts.
-                        let thinking_token_usage_signal = Signal::stored(
-                            ts.as_ref().and_then(|t| t.token_usage.clone())
-                        );
-
-                        // Capture the start time for this message's thinking session.
-                        // On WASM: record the timestamp the first time thinking becomes active
-                        // for this message_id; return None when not active.
-                        // On SSR (non-wasm32): always None — no timer runs server-side.
-                        #[cfg(target_arch = "wasm32")]
-                        let start_time_for_msg = if thinking_active {
-                            let mut captured: Option<f64> = None;
-                            thinking_start_times.update_untracked(|times| {
-                                captured = Some(*times.entry(msg_id.clone()).or_insert_with(js_sys::Date::now));
-                            });
-                            captured
-                        } else {
-                            None
-                        };
-                        #[cfg(not(target_arch = "wasm32"))]
-                        let start_time_for_msg: Option<f64> = None;
+                        // Per-message thinking derived signals — created outside any
+                        // conditional or <Show> block so no .get() calls happen inside
+                        // children closures, preventing parent scope re-subscription.
+                        // Clone `thinking` for this iteration so the outer map closure
+                        // remains FnMut (each iteration needs its own owned copy).
+                        let thinking_for_msg = thinking.clone();
+                        let msg_thinking = Signal::derive({
+                            let mid = msg_id.clone();
+                            move || thinking_for_msg.state().get().get(&mid).cloned().unwrap_or_default()
+                        });
+                        let has_thinking = Signal::derive(move || !msg_thinking.get().events.is_empty());
+                        let thinking_events_sig = Signal::derive(move || msg_thinking.get().events.clone());
+                        let thinking_active_sig = Signal::derive(move || msg_thinking.get().is_active);
+                        let thinking_token_usage_signal = Signal::derive(move || msg_thinking.get().token_usage.clone());
 
                         // Clone content for the action slot and markdown renderer.
                         let content_for_action = content.clone();
                         let content_for_render = content.clone();
 
                         // Derive streaming signal from thinking state for MarkdownRenderer.
-                        let is_streaming_for_md = ts.as_ref().is_some_and(|t| t.is_active);
+                        let is_streaming_for_md = Signal::derive(move || msg_thinking.get().is_active);
 
                         view! {
                             <div class=if is_user { "flex justify-end" } else { "flex justify-start" }>
@@ -250,32 +217,19 @@ pub fn CopilotChat(
                                 } else {
                                     "bg-card border border-border rounded-2xl shadow-sm p-4 max-w-[85%] overflow-hidden"
                                 }>
-                                    // Agent thinking panel — shown for assistant messages with thinking events
-                                    {has_thinking.then(move || {
-                                        match start_time_for_msg {
-                                            Some(start) => view! {
-                                                <div class="mb-2">
-                                                    <AgentThinking
-                                                        thinking_events=thinking_events.clone()
-                                                        is_active=thinking_active
-                                                        token_usage=thinking_token_usage_signal
-                                                        start_time_ms=start
-                                                        show_token_usage=show_token_usage
-                                                    />
-                                                </div>
-                                            }.into_any(),
-                                            None => view! {
-                                                <div class="mb-2">
-                                                    <AgentThinking
-                                                        thinking_events=thinking_events.clone()
-                                                        is_active=thinking_active
-                                                        token_usage=thinking_token_usage_signal
-                                                        show_token_usage=show_token_usage
-                                                    />
-                                                </div>
-                                            }.into_any(),
-                                        }
-                                    })}
+                                    // Agent thinking panel — shown for assistant messages with thinking events.
+                                    // AgentThinking is created once and reactively updates via Signal props —
+                                    // no component destruction/recreation on each thinking state change.
+                                    <Show when=move || has_thinking.get()>
+                                        <div class="mb-2">
+                                            <AgentThinking
+                                                thinking_events=thinking_events_sig
+                                                is_active=thinking_active_sig
+                                                token_usage=thinking_token_usage_signal
+                                                show_token_usage=show_token_usage
+                                            />
+                                        </div>
+                                    </Show>
 
                                     // Message content
                                     {if is_user {
@@ -289,10 +243,9 @@ pub fn CopilotChat(
                                             let c = content_for_render.clone();
                                             move || c.clone()
                                         });
-                                        let is_streaming_signal = Signal::derive(move || is_streaming_for_md);
 
                                         view! {
-                                            <MarkdownRenderer content=content_signal is_streaming=is_streaming_signal class="prose-kyomi-chat" />
+                                            <MarkdownRenderer content=content_signal is_streaming=is_streaming_for_md class="prose-kyomi-chat" />
                                         }.into_any()
                                     } else {
                                         // Empty assistant message (thinking in progress)

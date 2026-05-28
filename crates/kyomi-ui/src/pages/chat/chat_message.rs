@@ -177,9 +177,10 @@ pub fn ChatMessage(
             has_thinking_data || is_active_message
         };
 
-        // Build thinking events: merge stored events with live state.
-        // Live state takes priority (it may have more recent events).
-        let thinking_events_for_component = {
+        // Build thinking events as a reactive Signal — live state takes priority
+        // (it may have more recent events). Created outside <Show> so no .get()
+        // calls happen inside the Show children block.
+        let thinking_events_signal = Signal::derive({
             let stored = stored_thinking_events.clone();
             move || {
                 let live = thinking_state.get();
@@ -189,26 +190,15 @@ pub fn ChatMessage(
                     stored.clone()
                 }
             }
-        };
+        });
 
-        let thinking_is_active = move || thinking_state.get().is_active;
+        let thinking_is_active_signal = Signal::derive(move || thinking_state.get().is_active);
 
         let thinking_token_usage = Signal::derive({
             let stored = stored_token_usage.clone();
             move || {
                 let live = thinking_state.get();
                 live.token_usage.clone().or_else(|| stored.clone())
-            }
-        });
-
-        // Capture the thinking start time once — when thinking first becomes active.
-        // This prevents the elapsed timer from resetting on each tool call or event
-        // update that causes the parent to re-render and re-mount AgentThinking.
-        let thinking_start_time_ms: RwSignal<Option<f64>> = RwSignal::new(None);
-        #[cfg(target_arch = "wasm32")]
-        Effect::new(move |_| {
-            if thinking_state.get().is_active && thinking_start_time_ms.get_untracked().is_none() {
-                thinking_start_time_ms.set(Some(js_sys::Date::now()));
             }
         });
 
@@ -241,30 +231,12 @@ pub fn ChatMessage(
                     class="w-full px-6 py-4 bg-card border border-border rounded-2xl shadow-sm overflow-hidden"
                 >
                     <Show when=should_show_thinking>
-                        {
-                            let events = thinking_events_for_component();
-                            let is_active = thinking_is_active();
-                            let maybe_start = thinking_start_time_ms.get_untracked();
-                            match maybe_start {
-                                Some(start) => view! {
-                                    <AgentThinking
-                                        thinking_events=events
-                                        is_active=is_active
-                                        token_usage=thinking_token_usage
-                                        start_time_ms=start
-                                        show_token_usage=show_token_usage
-                                    />
-                                }.into_any(),
-                                None => view! {
-                                    <AgentThinking
-                                        thinking_events=events
-                                        is_active=is_active
-                                        token_usage=thinking_token_usage
-                                        show_token_usage=show_token_usage
-                                    />
-                                }.into_any(),
-                            }
-                        }
+                        <AgentThinking
+                            thinking_events=thinking_events_signal
+                            is_active=thinking_is_active_signal
+                            token_usage=thinking_token_usage
+                            show_token_usage=show_token_usage
+                        />
                     </Show>
 
                     <Show when=move || !message_content_for_show.is_empty()>
