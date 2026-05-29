@@ -171,7 +171,7 @@ async fn scheduler_can_be_started() {
 // ===========================================================================
 
 #[test]
-fn all_9_datasource_types_still_registered_in_registry() {
+fn all_10_datasource_types_still_registered_in_registry() {
     // Ensure Phase 7G additions did not break existing datasource type registration
     use kyomi_core::datasource_registry::DatasourceType;
 
@@ -185,6 +185,7 @@ fn all_9_datasource_types_still_registered_in_registry() {
         DatasourceType::SqlServer,
         DatasourceType::Synapse,
         DatasourceType::BigQuery,
+        DatasourceType::FlareDb,
     ];
 
     for ds_type in &types {
@@ -195,8 +196,8 @@ fn all_9_datasource_types_still_registered_in_registry() {
         );
     }
 
-    // Verify all 9 types are in the registry
-    assert_eq!(types.len(), 9, "should verify all 9 datasource types");
+    // Verify all 10 types are in the registry
+    assert_eq!(types.len(), 10, "should verify all 10 datasource types");
 }
 
 #[tokio::test]

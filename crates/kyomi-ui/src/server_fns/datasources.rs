@@ -674,6 +674,10 @@ pub async fn discover_datasource_resources(
             let schemas = provider.list_schemas().await;
             vec![("databases", dbs), ("schemas", schemas)]
         }
+        "flaredb" => {
+            let schemas = provider.list_schemas().await;
+            vec![("schemas", schemas)]
+        }
         _ => vec![],
     };
 

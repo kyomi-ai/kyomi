@@ -89,8 +89,8 @@ fn catalog_item_label_for_type(ds_type: &str) -> &'static str {
 /// `server_fns/datasources.rs`.
 fn discovery_resource_key_for_type(ds_type: &str) -> &'static str {
     match ds_type {
-        // postgres / redshift / sqlserver / synapse: catalog scope = schemas
-        "postgres" | "redshift" | "sqlserver" | "synapse" => "schemas",
+        // postgres / redshift / sqlserver / synapse / flaredb: catalog scope = schemas
+        "postgres" | "redshift" | "sqlserver" | "synapse" | "flaredb" => "schemas",
         // databricks: catalog scope = catalogs
         "databricks" => "catalogs",
         // bigquery: no discovery support (text input only — requires auth flow)
@@ -109,6 +109,7 @@ fn provider_label(ds_type: &str) -> &'static str {
         "snowflake" => "Snowflake",
         "synapse" => "Azure Synapse",
         "databricks" => "Databricks",
+        "flaredb" => "FlareDB",
         _ => "Provider",
     }
 }
@@ -814,6 +815,7 @@ const PROVIDER_TYPES: &[(&str, &str)] = &[
     ("snowflake", "Snowflake"),
     ("databricks", "Databricks"),
     ("sqlserver", "SQL Server"),
+    ("flaredb", "FlareDB"),
 ];
 
 /// Modal state for create/edit mode.
@@ -5208,7 +5210,7 @@ fn catalog_items_for_type<'a>(
     catalogs: &'a [String],
 ) -> &'a [String] {
     match ds_type {
-        "postgres" | "redshift" | "sqlserver" | "synapse" => schemas,
+        "postgres" | "redshift" | "sqlserver" | "synapse" | "flaredb" => schemas,
         "databricks" => catalogs,
         _ => databases,
     }
