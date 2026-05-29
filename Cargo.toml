@@ -251,6 +251,9 @@ lto = false
 codegen-units = 16
 opt-level = "s"
 
-# Uncomment to use a local checkout of kyomi-connect for development:
-# kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
-# kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
+# Local checkout of kyomi-connect for development.
+# The Dockerfile strips this block before `cargo build`, so production
+# always resolves against the registry.
+[patch.crates-io]
+kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
+kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }

@@ -41,7 +41,7 @@ use kyomi_auth::catalog::types::CatalogIndexResult;
 
 /// Create the appropriate catalog indexer for a datasource type.
 ///
-/// Returns `Some` with a concrete indexer for all 9 supported datasource types.
+/// Returns `Some` with a concrete indexer for supported datasource types.
 pub fn get_indexer(ds_type: &DatasourceType) -> Option<Box<dyn CatalogIndexer>> {
     match ds_type {
         DatasourceType::Postgres => Some(Box::new(indexers::PostgresIndexer)),
@@ -53,6 +53,7 @@ pub fn get_indexer(ds_type: &DatasourceType) -> Option<Box<dyn CatalogIndexer>> 
         DatasourceType::SqlServer => Some(Box::new(indexers::SqlServerIndexer)),
         DatasourceType::Synapse => Some(Box::new(indexers::SynapseIndexer)),
         DatasourceType::BigQuery => Some(Box::new(indexers::BigQueryIndexer)),
+        DatasourceType::FlareDb => None,
     }
 }
 
