@@ -26,17 +26,36 @@ use tracing::debug;
 
 /// Maps tool names to human-readable labels for UI display.
 pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
-    ("search_catalog", "Searching for tables"), // legacy: may still appear in old conversations
+    // Data & queries
+    ("browse_catalog", "Browsing catalog"),
+    ("search_catalog", "Searching for tables"),
     ("list_datasources", "Listing datasources"),
     ("get_table_info", "Getting table information"),
     ("sample_table", "Sampling table data"),
-    ("estimate_query_cost", "Estimating query costs"),
-    ("validate_chartml", "Validating ChartML"),
     ("query_datasource", "Querying your data"),
-    ("search_knowledge", "Searching knowledge base"),
+    ("validate_sql", "Validating SQL"),
+    ("estimate_query_cost", "Estimating query costs"),
+    ("forecast_data", "Generating forecast"),
+    ("get_workspace_info", "Getting workspace info"),
+    // Dashboards
+    ("search_dashboards", "Searching dashboards"),
+    ("get_dashboard_info", "Getting dashboard details"),
+    ("create_dashboard", "Creating dashboard"),
+    ("modify_dashboard", "Updating dashboard"),
+    ("delete_dashboard", "Deleting dashboard"),
     ("update_dashboard", "Updating dashboard"),
+    // Charts
     ("get_chartml_spec", "Looking up ChartML spec"),
+    ("validate_chartml", "Validating ChartML"),
     ("update_chart", "Updating chart"),
+    ("render_chart", "Rendering chart"),
+    // Knowledge
+    ("search_knowledge", "Searching knowledge base"),
+    ("write_knowledge_file", "Writing knowledge file"),
+    ("read_knowledge_file", "Reading knowledge file"),
+    ("list_knowledge_files", "Browsing knowledge files"),
+    ("edit_knowledge_file", "Editing knowledge file"),
+    // Watches
     ("create_watch", "Creating watch"),
     ("preview_watch", "Previewing watch"),
     ("update_watch", "Updating watch"),
@@ -45,15 +64,14 @@ pub const TOOL_FRIENDLY_NAMES: &[(&str, &str)] = &[
     ("delete_watch", "Deleting watch"),
     ("get_watch_info", "Getting watch details"),
     ("trigger_watch", "Triggering watch"),
-    ("forecast_data", "Generating forecast"),
-    ("validate_sql", "Validating SQL"),
+    // Documentation
     ("browse_resources", "Browsing documentation"),
     ("read_resource", "Reading documentation"),
-    ("browse_catalog", "Browsing catalog"),
-    ("write_knowledge_file", "Writing knowledge file"),
-    ("read_knowledge_file", "Reading knowledge file"),
-    ("list_knowledge_files", "Browsing knowledge files"),
-    ("edit_knowledge_file", "Editing knowledge file"),
+    // Analytics
+    ("create_analytics_site", "Creating analytics site"),
+    ("list_analytics_sites", "Listing analytics sites"),
+    ("update_analytics_site", "Updating analytics site"),
+    ("delete_analytics_site", "Deleting analytics site"),
 ];
 
 /// Look up the friendly display name for a tool.

@@ -512,6 +512,30 @@ impl AgentTool for ModifyDashboardTool {
             .to_string());
         }
 
+        // Reject title-only updates on empty dashboards before writing.
+        // Returning success:true with a soft warning caused a 21-call loop —
+        // models read "success" and repeat the same call. A hard failure breaks
+        // the reinforcement cycle. Title-only renames on dashboards that already
+        // have content still proceed normally below.
+        if content.is_none()
+            && let Ok(Some(dash)) = kyomi_auth::dashboard_service::get_dashboard(
+                &ctx.db, dashboard_id, &ctx.workspace_id,
+            )
+            .await
+            && dash.content.trim().is_empty()
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "The dashboard is empty and no content was provided. \
+                          You MUST include the 'content' parameter with the \
+                          full dashboard markdown (text and ChartML blocks). \
+                          Omitting 'content' only updates the title — it does \
+                          not add any charts or text.",
+                "dashboard_id": dashboard_id,
+            })
+            .to_string());
+        }
+
         match kyomi_auth::dashboard_service::update_dashboard(
             kyomi_auth::dashboard_service::UpdateDashboardParams {
                 db: &ctx.db,
@@ -552,28 +576,6 @@ impl AgentTool for ModifyDashboardTool {
             Err(e) => return Err(e),
         }
 
-        // Check if this was a title-only update on an empty dashboard.
-        // This warning helps the LLM self-correct when it forgets to include content.
-        let empty_content_warning = if content.is_none() {
-            match kyomi_auth::dashboard_service::get_dashboard(
-                &ctx.db, dashboard_id, &ctx.workspace_id,
-            )
-            .await
-            {
-                Ok(Some(dash)) => {
-                    let is_empty = dash.content.trim().is_empty();
-                    if is_empty {
-                        Some("No content was provided and the dashboard is currently empty. To add charts or text, include the 'content' parameter with the full dashboard markdown.")
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-
         // Spawn background embedding if content changed and is substantial
         if let Some(c) = content
             && c.len() >= 50
@@ -609,22 +611,14 @@ impl AgentTool for ModifyDashboardTool {
         let frontend_url = &ctx.config.frontend_url;
         let display_title = title.map(|t| t.trim()).unwrap_or("(unchanged)");
 
-        let mut response = serde_json::json!({
+        Ok(serde_json::json!({
             "success": true,
             "dashboard_id": dashboard_id,
             "url": format!("{frontend_url}/dashboard/{dashboard_id}"),
             "title": display_title,
             "message": format!("Updated dashboard '{display_title}'"),
-        });
-        if let Some(warning) = empty_content_warning
-            && let Some(obj) = response.as_object_mut()
-        {
-            obj.insert(
-                "warning".to_string(),
-                serde_json::Value::String(warning.to_string()),
-            );
-        }
-        Ok(response.to_string())
+        })
+        .to_string())
     }
 }
 
