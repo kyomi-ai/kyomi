@@ -53,7 +53,7 @@ pub fn get_indexer(ds_type: &DatasourceType) -> Option<Box<dyn CatalogIndexer>> 
         DatasourceType::SqlServer => Some(Box::new(indexers::SqlServerIndexer)),
         DatasourceType::Synapse => Some(Box::new(indexers::SynapseIndexer)),
         DatasourceType::BigQuery => Some(Box::new(indexers::BigQueryIndexer)),
-        DatasourceType::FlareDb => None,
+        DatasourceType::FlareDb => Some(Box::new(indexers::FlareDbIndexer)),
     }
 }
 
@@ -504,7 +504,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_indexer_returns_some_for_all_9_types() {
+    fn get_indexer_returns_some_for_all_10_types() {
         assert!(get_indexer(&DatasourceType::Postgres).is_some());
         assert!(get_indexer(&DatasourceType::MySQL).is_some());
         assert!(get_indexer(&DatasourceType::ClickHouse).is_some());
@@ -514,5 +514,6 @@ mod tests {
         assert!(get_indexer(&DatasourceType::SqlServer).is_some());
         assert!(get_indexer(&DatasourceType::Synapse).is_some());
         assert!(get_indexer(&DatasourceType::BigQuery).is_some());
+        assert!(get_indexer(&DatasourceType::FlareDb).is_some());
     }
 }
