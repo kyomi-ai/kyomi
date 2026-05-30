@@ -1263,7 +1263,7 @@ pub fn ChartBuilderModal(
                                         class=move || if config_tab.get() == "yaml" { SUB_TAB_ACTIVE } else { SUB_TAB_INACTIVE }
                                         on:click=move |_| set_config_tab.set("yaml".to_string())
                                     >
-                                        "YAML"
+                                        "ChartML"
                                     </button>
                                 </div>
 
@@ -1538,13 +1538,13 @@ pub fn ChartBuilderModal(
                                     // ── YAML sub-tab ────────────────────
                                     // Always rendered — hidden class toggled so the YAML
                                     // editor input keeps focus across tab switches.
-                                    <div class="flex flex-col flex-1 min-h-[400px]" class:hidden=move || config_tab.get() != "yaml">
+                                    <div class="flex flex-col flex-1 min-h-0" class:hidden=move || config_tab.get() != "yaml">
                                             // Inline parse error banner — shown only while the buffer
                                             // fails to parse. The AST keeps showing the last-known-good
                                             // state to the Visual tab in the meantime.
                                             {move || yaml_parse_error.get().map(|msg| view! {
                                                 <div class="mx-4 mt-3 border border-error-border rounded-md bg-error p-3">
-                                                    <p class="text-sm text-error-foreground font-medium">"YAML Parse Error"</p>
+                                                    <p class="text-sm text-error-foreground font-medium">"ChartML Parse Error"</p>
                                                     <p class="text-xs text-error-foreground mt-1 font-mono whitespace-pre-wrap">{msg}</p>
                                                 </div>
                                             })}
@@ -1833,7 +1833,7 @@ fn YamlEditorSection(
         let theme = crate::pages::sql_editor::code_editor::use_editor_theme();
 
         view! {
-            <div class="h-full min-h-[400px] border-t border-border overflow-hidden">
+            <div class="min-h-[200px] border-t border-border overflow-hidden" style="height: calc(100vh - 280px);">
                 <CodeEditor
                     language=Signal::stored(Language::new_static("yaml"))
                     content=content
@@ -1852,7 +1852,7 @@ fn YamlEditorSection(
 
         view! {
             <div class="h-full min-h-[400px] bg-muted rounded-md p-4 flex items-center justify-center text-muted-foreground text-sm">
-                "Loading YAML editor..."
+                "Loading ChartML editor..."
             </div>
         }
         .into_any()
