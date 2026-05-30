@@ -517,25 +517,23 @@ impl AgentTool for ModifyDashboardTool {
         // models read "success" and repeat the same call. A hard failure breaks
         // the reinforcement cycle. Title-only renames on dashboards that already
         // have content still proceed normally below.
-        if content.is_none() {
-            if let Ok(Some(dash)) = kyomi_auth::dashboard_service::get_dashboard(
+        if content.is_none()
+            && let Ok(Some(dash)) = kyomi_auth::dashboard_service::get_dashboard(
                 &ctx.db, dashboard_id, &ctx.workspace_id,
             )
             .await
-            {
-                if dash.content.trim().is_empty() {
-                    return Ok(serde_json::json!({
-                        "success": false,
-                        "error": "The dashboard is empty and no content was provided. \
-                                  You MUST include the 'content' parameter with the \
-                                  full dashboard markdown (text and ChartML blocks). \
-                                  Omitting 'content' only updates the title — it does \
-                                  not add any charts or text.",
-                        "dashboard_id": dashboard_id,
-                    })
-                    .to_string());
-                }
-            }
+            && dash.content.trim().is_empty()
+        {
+            return Ok(serde_json::json!({
+                "success": false,
+                "error": "The dashboard is empty and no content was provided. \
+                          You MUST include the 'content' parameter with the \
+                          full dashboard markdown (text and ChartML blocks). \
+                          Omitting 'content' only updates the title — it does \
+                          not add any charts or text.",
+                "dashboard_id": dashboard_id,
+            })
+            .to_string());
         }
 
         match kyomi_auth::dashboard_service::update_dashboard(
