@@ -49,7 +49,8 @@ pub struct ThinkingEvent {
 /// Token usage information from the agent.
 ///
 /// Field names match the WebSocket `token_usage_update` event JSON shape:
-/// `{"input_tokens": N, "output_tokens": N, "total_tokens": N, "cost": X.XX}`.
+/// `{"input_tokens": N, "output_tokens": N, "total_tokens": N, "cost": X.XX,
+///   "context_tokens": N, "context_window": N}`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -58,6 +59,13 @@ pub struct TokenUsage {
     pub total_tokens: u64,
     #[serde(default)]
     pub cost: f64,
+    /// Token count from the most recent LLM request (not cumulative).
+    /// Used to compute context window utilisation percentage.
+    #[serde(default)]
+    pub context_tokens: u64,
+    /// Context window size for the model in use (0 = unknown).
+    #[serde(default)]
+    pub context_window: u64,
 }
 
 /// Thinking state for a single message.

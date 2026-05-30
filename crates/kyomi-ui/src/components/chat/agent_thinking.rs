@@ -293,27 +293,30 @@ pub fn AgentThinking(
         }
     });
 
-    // -- Token usage suffix for the metadata bar --
+    // -- Left metadata group (stable): context % + cost --
     // Reactive: re-evaluates when show_token_usage or token_usage changes.
     // This is the core fix for the reactivity bug: token_usage arrives via
-    // WebSocket after the component mounts, so the suffix must be a derived
+    // WebSocket after the component mounts, so this must be a derived
     // Signal rather than a static String computed at mount time.
-    let token_suffix = Signal::derive(move || {
-        if show_token_usage.get() {
-            token_usage
-                .get()
-                .filter(|tu| tu.total_tokens > 0)
-                .map(|tu| {
-                    format!(
-                        " \u{2022} {} tokens \u{2022} {}",
-                        format_token_count(tu.total_tokens),
-                        format_cost(tu.cost)
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            String::new()
+    //
+    // Format: "67% • $0.0554" (or raw token count when context_window = 0).
+    // Only rendered when show_token_usage is true and context_tokens > 0.
+    let left_meta = Signal::derive(move || {
+        if !show_token_usage.get() {
+            return String::new();
         }
+        let Some(tu) = token_usage.get().filter(|tu| tu.context_tokens > 0) else {
+            return String::new();
+        };
+        let context_part = if tu.context_window > 0 {
+            format!(
+                "{:.0}%",
+                (tu.context_tokens as f64 / tu.context_window as f64 * 100.0).min(100.0)
+            )
+        } else {
+            format_token_count(tu.context_tokens)
+        };
+        format!("{} \u{2022} {}", context_part, format_cost(tu.cost))
     });
 
     // Unified display duration — elapsed when active, total when complete.
@@ -342,8 +345,32 @@ pub fn AgentThinking(
                     })}
                 </div>
                 <div class="flex items-center gap-2 flex-shrink-0">
-                    <span class="text-xs text-muted-foreground font-mono whitespace-nowrap">
-                        <span>{move || format!("{} tools \u{2022} {}{}", tool_executions_count.get(), format_duration(display_duration.get()), token_suffix.get())}</span>
+                    <span
+                        class="text-xs text-muted-foreground font-mono whitespace-nowrap"
+                        title=move || {
+                            token_usage.get()
+                                .filter(|tu| tu.context_tokens > 0 && tu.context_window > 0)
+                                .map(|tu| format!(
+                                    "Context window usage \u{2014} {} of {} tokens",
+                                    format_token_count(tu.context_tokens),
+                                    format_token_count(tu.context_window)
+                                ))
+                                .unwrap_or_default()
+                        }
+                    >
+                        {move || {
+                            let left = left_meta.get();
+                            let right = format!(
+                                "{} tools \u{2022} {}",
+                                tool_executions_count.get(),
+                                format_duration(display_duration.get())
+                            );
+                            if left.is_empty() {
+                                right
+                            } else {
+                                format!("{} | {}", left, right)
+                            }
+                        }}
                     </span>
                     <Icon
                         icon=phosphor_leptos::CARET_DOWN
