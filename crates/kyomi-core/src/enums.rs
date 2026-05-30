@@ -484,6 +484,7 @@ pub enum DatasourceType {
     Snowflake,
     Sqlserver,
     Synapse,
+    Flaredb,
 }
 
 impl_sqlx_varchar_enum!(DatasourceType);
@@ -506,6 +507,7 @@ impl AsRef<str> for DatasourceType {
             Self::Snowflake => "snowflake",
             Self::Sqlserver => "sqlserver",
             Self::Synapse => "synapse",
+            Self::Flaredb => "flaredb",
         }
     }
 }
@@ -523,6 +525,7 @@ impl FromStr for DatasourceType {
             "snowflake" => Ok(Self::Snowflake),
             "sqlserver" => Ok(Self::Sqlserver),
             "synapse" => Ok(Self::Synapse),
+            "flaredb" => Ok(Self::Flaredb),
             _ => Err(format!("unknown DatasourceType: {s}")),
         }
     }
@@ -542,6 +545,7 @@ impl From<DatasourceType> for crate::datasource_registry::DatasourceType {
             DatasourceType::Snowflake => Self::Snowflake,
             DatasourceType::Sqlserver => Self::SqlServer,
             DatasourceType::Synapse => Self::Synapse,
+            DatasourceType::Flaredb => Self::FlareDb,
         }
     }
 }
@@ -558,6 +562,7 @@ impl From<crate::datasource_registry::DatasourceType> for DatasourceType {
             crate::datasource_registry::DatasourceType::Snowflake => Self::Snowflake,
             crate::datasource_registry::DatasourceType::SqlServer => Self::Sqlserver,
             crate::datasource_registry::DatasourceType::Synapse => Self::Synapse,
+            crate::datasource_registry::DatasourceType::FlareDb => Self::Flaredb,
         }
     }
 }
@@ -895,6 +900,7 @@ mod tests {
             (DatasourceType::Snowflake, "snowflake"),
             (DatasourceType::Sqlserver, "sqlserver"),
             (DatasourceType::Synapse, "synapse"),
+            (DatasourceType::Flaredb, "flaredb"),
         ];
         for (variant, expected) in types {
             assert_eq!(variant.as_ref(), expected);

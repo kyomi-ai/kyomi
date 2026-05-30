@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 pub use kyomi_connect_protocol::types::DatasourceType;
 
 /// All variants in the canonical order (matches Python's list).
-const ALL_TYPES: [DatasourceType; 9] = [
+const ALL_TYPES: [DatasourceType; 10] = [
     DatasourceType::BigQuery,
     DatasourceType::ClickHouse,
     DatasourceType::Snowflake,
@@ -30,6 +30,7 @@ const ALL_TYPES: [DatasourceType; 9] = [
     DatasourceType::MySQL,
     DatasourceType::SqlServer,
     DatasourceType::Synapse,
+    DatasourceType::FlareDb,
 ];
 
 // ---------------------------------------------------------------------------
@@ -444,11 +445,11 @@ use std::sync::LazyLock;
 
 /// Leak a `Vec<AuthModeConfig>` to get a `&'static [AuthModeConfig]`.
 ///
-/// This is called exactly once per datasource type (9 calls total) during
+/// This is called exactly once per datasource type (10 calls total) during
 /// `LazyLock` initialization. The leaked memory is program-lifetime data
 /// that is never freed — this is intentional and safe because:
 ///
-/// - There are exactly 9 datasource types, each with 1-4 auth modes.
+/// - There are exactly 10 datasource types, each with 1-4 auth modes.
 /// - Total leaked memory is under 5 KB for all types combined.
 /// - The data lives for the entire program lifetime (same as `&'static`).
 /// - `LazyLock` ensures each call happens exactly once.
@@ -760,6 +761,43 @@ static SYNAPSE_META: LazyLock<DatasourceTypeMetadata> =
         skip_single_project_wrapper: false,
     });
 
+// --- FlareDB ---
+static FLAREDB_META: LazyLock<DatasourceTypeMetadata> =
+    LazyLock::new(|| DatasourceTypeMetadata {
+        type_id: "flaredb",
+        display_name: "FlareDB",
+        description: "FlareDB analytics database (Arrow Flight SQL)",
+        default_port: Some(8815),
+        credential_fields: &[],
+        sensitive_credential_fields: &[],
+        sensitive_connection_config_fields: &[],
+        requires_user_credentials: false,
+        accepts_user_context: false,
+        auth_modes: leak_auth_modes(vec![
+            AuthModeConfig {
+                mode_id: "none".into(),
+                display_name: "No Authentication".into(),
+                description: "FlareDB does not require authentication".into(),
+                credential_type: "none".into(),
+                oauth_provider: None,
+                oauth_global: false,
+                credential_scope: "workspace".into(),
+                preference_tracking: "preference".into(),
+                credential_fields: vec![],
+                sensitive_fields: vec![],
+                is_default: true,
+                supports_shared_credentials: false,
+            },
+        ]),
+        catalog_container_label: "schema",
+        catalog_config_keys: &["catalog_schemas"],
+        supports_catalog_discovery: true,
+        tree_level1_type: "schema",
+        tree_level2_type: "",
+        skip_empty_project_wrapper: true,
+        skip_single_project_wrapper: true,
+    });
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -778,6 +816,7 @@ pub fn get_metadata(ds_type: &DatasourceType) -> &'static DatasourceTypeMetadata
         DatasourceType::MySQL => &MYSQL_META,
         DatasourceType::SqlServer => &SQLSERVER_META,
         DatasourceType::Synapse => &SYNAPSE_META,
+        DatasourceType::FlareDb => &FLAREDB_META,
     }
 }
 
@@ -833,9 +872,9 @@ mod tests {
     }
 
     #[test]
-    fn all_metadata_returns_9_types() {
+    fn all_metadata_returns_10_types() {
         let all = all_metadata();
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
     }
 
     #[test]
