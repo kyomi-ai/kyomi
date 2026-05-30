@@ -148,15 +148,24 @@ def seed():
     cur.execute("SELECT workspace_id FROM workspaces WHERE workspace_id = %s", (WORKSPACE_ID,))
     if cur.fetchone():
         print(f"  ✓ Workspace already exists: {WORKSPACE_NAME}")
+        settings = json.dumps({"custom_settings": {"default_model": "claude-haiku-4-5"}})
+        cur.execute("""
+            UPDATE workspaces
+               SET name = %s,
+                   settings = %s,
+                   updated_at = %s
+             WHERE workspace_id = %s
+        """, (WORKSPACE_NAME, settings, now, WORKSPACE_ID))
     else:
         trial_ends_at = now + timedelta(days=30)
+        settings = json.dumps({"custom_settings": {"default_model": "claude-haiku-4-5"}})
         cur.execute("""
             INSERT INTO workspaces (
                 workspace_id, name, admin_email, owner_user_id, status,
                 subscription_tier, subscription_status, trial_ends_at,
-                user_limit, ai_bundle_balance_usd, created_at, updated_at
-            ) VALUES (%s, NULL, %s, %s, 'trial', 'cloud', 'trialing', %s, NULL, %s, %s, %s)
-        """, (WORKSPACE_ID, owner_user["email"], owner_user_id, trial_ends_at, 5.0, now, now))
+                user_limit, ai_bundle_balance_usd, settings, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, 'trial', 'cloud', 'trialing', %s, NULL, %s, %s, %s, %s)
+        """, (WORKSPACE_ID, WORKSPACE_NAME, owner_user["email"], owner_user_id, trial_ends_at, 5.0, settings, now, now))
         print(f"  ✓ Created workspace: {WORKSPACE_NAME} ({WORKSPACE_ID})")
 
     # Set last_workspace_id on users
