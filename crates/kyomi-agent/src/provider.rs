@@ -644,6 +644,7 @@ mod tests {
             model: None,
             api_key: None,
             base_url: None,
+            title_model: None,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -665,6 +666,7 @@ mod tests {
             model: Some("claude-haiku-4-5-20251001".into()),
             api_key: None,
             base_url: None,
+            title_model: None,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -686,6 +688,7 @@ mod tests {
             model: Some("gpt-4o".into()),
             api_key: Some("sk-ws-byok".into()),
             base_url: None,
+            title_model: None,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -703,6 +706,7 @@ mod tests {
             model: None,
             api_key: Some("AIza-test".into()),
             base_url: None,
+            title_model: None,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -719,6 +723,7 @@ mod tests {
             model: None,
             api_key: None,
             base_url: None,
+            title_model: None,
         };
 
         let err = match create_provider_from_workspace(&ws, &fallback) {
