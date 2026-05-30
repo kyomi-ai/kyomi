@@ -288,7 +288,7 @@ pub async fn create_dashboard(
 /// Re-embeds the dashboard if title or content changed.
 ///
 /// Mirrors `PATCH /dashboards/{dashboard_id}` in `apps/server/src/routes/dashboards.rs`.
-#[server(prefix = "/leptos-api")]
+#[server(prefix = "/leptos-api", input = server_fn::codec::Json)]
 pub async fn update_dashboard(
     dashboard_id: String,
     title: Option<String>,
