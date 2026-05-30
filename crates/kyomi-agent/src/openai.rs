@@ -79,6 +79,26 @@ async fn fetch_openrouter_cost(
 }
 
 // ---------------------------------------------------------------------------
+// Context Window
+// ---------------------------------------------------------------------------
+
+/// Context window size in tokens for OpenAI models.
+///
+/// Uses substring matching (same order as `get_model_pricing`).
+/// Returns 0 for unknown models.
+pub fn get_context_window(model: &str) -> u32 {
+    if model.contains("gpt-4.1") {
+        1_048_576
+    } else if model.contains("gpt-4o") {
+        128_000
+    } else if model.contains("o4-mini") || model.contains("o3-mini") || model.contains("o3") {
+        200_000
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Model Pricing
 // ---------------------------------------------------------------------------
 

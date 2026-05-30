@@ -148,6 +148,11 @@ pub struct AgentThinkingTracker {
     total_input_tokens: u32,
     total_output_tokens: u32,
     total_cost: f64,
+    /// Token count from the most recent LLM request (not cumulative).
+    /// Used to display context window utilisation in the UI.
+    last_input_tokens: u32,
+    /// Context window size for the model in use (0 = unknown).
+    context_window: u32,
     /// WebSocket manager for delivering thinking events.
     /// Handles both standalone (direct local) and multi-replica (Redis pub/sub)
     /// delivery automatically.
@@ -166,6 +171,7 @@ impl AgentThinkingTracker {
         ws_manager: WebSocketManager,
         workspace_user_ids: Option<Vec<String>>,
         context_type: Option<String>,
+        context_window: u32,
     ) -> Self {
         let ws_users = workspace_user_ids.unwrap_or_else(|| vec![user_id]);
         Self {
@@ -181,6 +187,8 @@ impl AgentThinkingTracker {
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cost: 0.0,
+            last_input_tokens: 0,
+            context_window,
             ws_manager,
         }
     }
@@ -466,6 +474,7 @@ impl AgentThinkingTracker {
     ) {
         self.total_input_tokens += input_tokens;
         self.total_output_tokens += output_tokens;
+        self.last_input_tokens = input_tokens;
         if let Some(c) = cost {
             self.total_cost += c;
         }
@@ -477,6 +486,8 @@ impl AgentThinkingTracker {
                 "output_tokens": self.total_output_tokens,
                 "total_tokens": self.total_input_tokens + self.total_output_tokens,
                 "cost": self.total_cost,
+                "context_tokens": self.last_input_tokens,
+                "context_window": self.context_window,
             }
         });
 

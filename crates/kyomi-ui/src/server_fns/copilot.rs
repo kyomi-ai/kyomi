@@ -178,6 +178,7 @@ pub async fn send_copilot_message(
         assistant_message_id: Some(prep.assistant_message_id.clone()),
         conversation_history: None,
         user_display_name: ac.auth.name.clone().unwrap_or_else(|| ac.auth.email.clone()),
+        context_window: 0,
     };
 
     cancel_registry.register(&ac.auth.user_id, &session_id, cancel_token.clone());

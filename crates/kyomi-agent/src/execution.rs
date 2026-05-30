@@ -85,6 +85,9 @@ pub struct AgentExecutionConfig {
     /// Display name for event attribution (e.g., WebSocket dashboard updates).
     /// Populated by the caller from the authenticated user record.
     pub user_display_name: String,
+    /// Context window size for the configured model (0 = unknown).
+    /// Used to display context utilisation percentage in the thinking tracker UI.
+    pub context_window: u32,
 }
 
 impl Default for AgentExecutionConfig {
@@ -110,6 +113,7 @@ impl Default for AgentExecutionConfig {
             assistant_message_id: None,
             conversation_history: None,
             user_display_name: "Unknown".to_string(),
+            context_window: 0,
         }
     }
 }
@@ -345,6 +349,14 @@ pub async fn execute_agent_chat(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // 10. Create thinking tracker.
+    // When context_window is 0 (caller did not set it), fall back to the
+    // provider-level lookup so the UI can still show utilisation for
+    // known hardcoded models (Anthropic, Gemini, common OpenAI models).
+    let resolved_context_window = if config.context_window > 0 {
+        config.context_window
+    } else {
+        crate::provider::get_context_window(&model_name, provider_kind, 0)
+    };
     let tracker = AgentThinkingTracker::new(
         config.session_id.clone(),
         config.user_id.clone(),
@@ -352,6 +364,7 @@ pub async fn execute_agent_chat(
         ws_manager.clone(),
         config.workspace_user_ids.clone(),
         Some(config.context_type.clone()),
+        resolved_context_window,
     );
     let tracker = Arc::new(tokio::sync::Mutex::new(tracker));
 
@@ -826,6 +839,7 @@ mod tests {
         assert!(config.system_prompt.is_none());
         assert!(config.tools_subset.is_none());
         assert!(!config.is_shared_conversation);
+        assert_eq!(config.context_window, 0);
     }
 
     #[test]
@@ -885,6 +899,7 @@ mod tests {
         assert_eq!(config.max_iterations, 25);
         assert_eq!(config.component, "custom_agent");
         assert!(config.assistant_message_id.is_none());
+        assert_eq!(config.context_window, 0);
     }
 
     // -- Contract: AgentExecutionConfig with all fields set -----------------
@@ -915,6 +930,7 @@ mod tests {
                 ("assistant".into(), "Let me look that up.".into()),
             ]),
             user_display_name: "Test User".to_string(),
+            context_window: 200_000,
         };
 
         assert_eq!(config.session_id, "sess-123");

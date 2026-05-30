@@ -38,6 +38,18 @@ pub const AUDIT_MODEL: &str = "claude-haiku-4-5-20251001";
 
 
 // ---------------------------------------------------------------------------
+// Context Window
+// ---------------------------------------------------------------------------
+
+/// Context window size in tokens for all Claude models.
+///
+/// All current Claude models share the same 200,000-token context window.
+/// Returns 0 for unknown models.
+pub fn get_context_window(_model: &str) -> u32 {
+    200_000
+}
+
+// ---------------------------------------------------------------------------
 // Model Pricing
 // ---------------------------------------------------------------------------
 
