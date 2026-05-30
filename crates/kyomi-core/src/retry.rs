@@ -20,7 +20,7 @@ use crate::Result;
 
 /// Maximum number of retry attempts for transient errors (not counting the
 /// initial attempt). Total call count = 1 + MAX_RETRIES.
-pub const MAX_RETRIES: u32 = 3;
+pub const MAX_RETRIES: u32 = 10;
 
 /// Initial wait interval before the first retry (seconds).
 const INITIAL_INTERVAL_SECS: f64 = 1.0;

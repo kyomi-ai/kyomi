@@ -32,8 +32,14 @@ pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 // ---------------------------------------------------------------------------
 
 /// Extract the actual USD cost from an OpenRouter generation response.
+///
+/// Returns `Some(cost)` when the generation endpoint returned a valid `data`
+/// object — even if `total_cost` is null/missing (free models), which maps
+/// to `0.0`. Returns `None` only when the `data` object itself is absent,
+/// indicating the response was not a valid generation record.
 fn parse_openrouter_cost(json: &serde_json::Value) -> Option<f64> {
-    json.get("data")?.get("total_cost")?.as_f64()
+    let data = json.get("data")?;
+    Some(data.get("total_cost").and_then(|v| v.as_f64()).unwrap_or(0.0))
 }
 
 /// Fetch the actual USD cost of a generation from the OpenRouter generation endpoint.
@@ -1124,13 +1130,19 @@ mod tests {
     #[test]
     fn parse_openrouter_cost_missing_total_cost() {
         let json = json!({"data": {"id": "gen-abc123", "model": "openai/gpt-4o-mini"}});
-        assert_eq!(parse_openrouter_cost(&json), None);
+        assert_eq!(parse_openrouter_cost(&json), Some(0.0));
     }
 
     #[test]
     fn parse_openrouter_cost_non_numeric_total_cost() {
         let json = json!({"data": {"total_cost": "not a number"}});
-        assert_eq!(parse_openrouter_cost(&json), None);
+        assert_eq!(parse_openrouter_cost(&json), Some(0.0));
+    }
+
+    #[test]
+    fn parse_openrouter_cost_null_total_cost() {
+        let json = json!({"data": {"total_cost": null}});
+        assert_eq!(parse_openrouter_cost(&json), Some(0.0));
     }
 
     // -- Cost calculation tests ---------------------------------------------
