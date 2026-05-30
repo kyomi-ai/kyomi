@@ -65,6 +65,14 @@ impl SampleClickHouseConfig {
             return None;
         }
 
+        let password = match std::env::var("SAMPLE_CLICKHOUSE_PASSWORD").ok() {
+            Some(p) => p,
+            None => {
+                warn!("SAMPLE_CLICKHOUSE_HOST is set but SAMPLE_CLICKHOUSE_PASSWORD is not — sample data will be disabled");
+                return None;
+            }
+        };
+
         Some(Self {
             host,
             port: std::env::var("SAMPLE_CLICKHOUSE_PORT")
@@ -75,8 +83,7 @@ impl SampleClickHouseConfig {
                 .unwrap_or_else(|_| "acme_analytics".into()),
             username: std::env::var("SAMPLE_CLICKHOUSE_USER")
                 .unwrap_or_else(|_| "sample_readonly".into()),
-            password: std::env::var("SAMPLE_CLICKHOUSE_PASSWORD")
-                .expect("SAMPLE_CLICKHOUSE_PASSWORD must be set"),
+            password,
             secure: std::env::var("SAMPLE_CLICKHOUSE_SECURE")
                 .unwrap_or_else(|_| "false".into())
                 .to_lowercase()
@@ -436,6 +443,35 @@ mod tests {
         if std::env::var("SAMPLE_CLICKHOUSE_HOST").is_err() {
             assert!(config.is_none());
         }
+    }
+
+    #[test]
+    fn config_from_env_returns_none_when_host_set_but_password_missing() {
+        // SAFETY: env var mutation is inherently thread-unsafe. This test is
+        // safe in practice because no other test sets SAMPLE_CLICKHOUSE_HOST.
+        // If flakiness is ever observed, add the `serial_test` crate.
+        let original_host = std::env::var("SAMPLE_CLICKHOUSE_HOST").ok();
+        let original_password = std::env::var("SAMPLE_CLICKHOUSE_PASSWORD").ok();
+
+        unsafe {
+            std::env::set_var("SAMPLE_CLICKHOUSE_HOST", "test-host");
+            std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD");
+        }
+
+        let result = SampleClickHouseConfig::from_env();
+
+        unsafe {
+            match original_host {
+                Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_HOST", v),
+                None => std::env::remove_var("SAMPLE_CLICKHOUSE_HOST"),
+            }
+            match original_password {
+                Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_PASSWORD", v),
+                None => std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD"),
+            }
+        }
+
+        assert!(result.is_none());
     }
 
     #[test]
