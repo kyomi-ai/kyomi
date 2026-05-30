@@ -447,31 +447,30 @@ mod tests {
 
     #[test]
     fn config_from_env_returns_none_when_host_set_but_password_missing() {
-        // NOTE: std::env mutation is not thread-safe across tests. This test is
-        // safe in practice because the other env-reading tests do not set
-        // SAMPLE_CLICKHOUSE_HOST, but it is not guaranteed by the test runner.
+        // SAFETY: env var mutation is inherently thread-unsafe. This test is
+        // safe in practice because no other test sets SAMPLE_CLICKHOUSE_HOST.
         // If flakiness is ever observed, add the `serial_test` crate.
         let original_host = std::env::var("SAMPLE_CLICKHOUSE_HOST").ok();
         let original_password = std::env::var("SAMPLE_CLICKHOUSE_PASSWORD").ok();
 
-        // Arrange: HOST set, PASSWORD absent
-        std::env::set_var("SAMPLE_CLICKHOUSE_HOST", "test-host");
-        std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD");
+        unsafe {
+            std::env::set_var("SAMPLE_CLICKHOUSE_HOST", "test-host");
+            std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD");
+        }
 
-        // Act
         let result = SampleClickHouseConfig::from_env();
 
-        // Restore
-        match original_host {
-            Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_HOST", v),
-            None => std::env::remove_var("SAMPLE_CLICKHOUSE_HOST"),
-        }
-        match original_password {
-            Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_PASSWORD", v),
-            None => std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD"),
+        unsafe {
+            match original_host {
+                Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_HOST", v),
+                None => std::env::remove_var("SAMPLE_CLICKHOUSE_HOST"),
+            }
+            match original_password {
+                Some(v) => std::env::set_var("SAMPLE_CLICKHOUSE_PASSWORD", v),
+                None => std::env::remove_var("SAMPLE_CLICKHOUSE_PASSWORD"),
+            }
         }
 
-        // Assert: must return None rather than panic
         assert!(result.is_none());
     }
 
