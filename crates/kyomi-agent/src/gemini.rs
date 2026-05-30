@@ -36,9 +36,10 @@ pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
 ///
 /// Uses substring matching. Returns 0 for unknown models.
 pub fn get_context_window(model: &str) -> u32 {
-    if model.contains("gemini-2.5-pro") || model.contains("gemini-2.5-flash") {
-        1_048_576
-    } else if model.contains("gemini-2.0-flash") {
+    if model.contains("gemini-2.5-pro")
+        || model.contains("gemini-2.5-flash")
+        || model.contains("gemini-2.0-flash")
+    {
         1_048_576
     } else {
         0
