@@ -8,9 +8,9 @@
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use crate::components::{
-    Button, ButtonLink, ButtonSize, ButtonVariant, Card, CardContent, CardFooter, CardHeader,
-    CardTitle, Skeleton,
+    Button, ButtonSize, ButtonVariant, Card, CardContent, Skeleton,
 };
+use crate::components::popover::{Placement, Popover};
 use crate::server_fns::collections::CollectionItem;
 use crate::server_fns::dashboards::DashboardListItem;
 
@@ -18,7 +18,11 @@ use crate::server_fns::dashboards::DashboardListItem;
 // Relative time helper
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Converts an RFC 3339 timestamp string into a compact relative time string.
+/// Converts a timestamp string into a compact relative time string.
+///
+/// Accepts RFC 3339 (`2026-06-05T09:40:53Z`) and Postgres format
+/// (`2026-06-05 09:40:53.348324+00`). Returns `"Updated recently"` if the
+/// timestamp cannot be parsed.
 ///
 /// Matches the React frontend's display format:
 /// - "just now" (< 60s)
@@ -27,9 +31,9 @@ use crate::server_fns::dashboards::DashboardListItem;
 /// - "3d ago" (< 30d)
 /// - "Mar 15" (>= 30d, same year)
 /// - "Mar 15, 2025" (different year)
-pub fn format_relative_time(rfc3339: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
-        return rfc3339.to_string();
+pub fn format_relative_time(timestamp: &str) -> String {
+    let Some(parsed) = crate::utils::time::parse_timestamp(timestamp) else {
+        return "Updated recently".to_string();
     };
 
     let now = chrono::Utc::now();
@@ -75,20 +79,12 @@ pub fn DocumentCardGridSkeleton() -> impl IntoView {
         <div class="w-full grid gap-6 grid-cols-1 @xl:grid-cols-2 @4xl:grid-cols-3">
             {(0..6).map(|_| view! {
                 <Card class="bg-muted">
-                    <CardHeader>
-                        <Skeleton class="h-5 w-3/4" />
-                    </CardHeader>
-                    <CardContent>
-                        <Skeleton class="h-4 w-full mb-2" />
+                    <CardContent class="pt-6">
+                        <Skeleton class="h-5 w-3/4 mb-3" />
+                        <Skeleton class="h-4 w-full mb-1" />
                         <Skeleton class="h-4 w-2/3 mb-4" />
                         <Skeleton class="h-3 w-1/3" />
                     </CardContent>
-                    <CardFooter>
-                        <div class="flex gap-2 w-full">
-                            <Skeleton class="h-10 flex-1" />
-                            <Skeleton class="h-10 flex-1" />
-                        </div>
-                    </CardFooter>
                 </Card>
             }).collect_view()}
         </div>
@@ -189,7 +185,6 @@ fn DocumentCard(
     base_path: &'static str,
 ) -> impl IntoView {
     let view_href = format!("{}/{}", base_path, dashboard.dashboard_id);
-    let view_href_footer = view_href.clone();
     let edit_href = format!("{}/{}/edit", base_path, dashboard.dashboard_id);
     let title = dashboard.title.clone();
     let delete_id = dashboard.dashboard_id.clone();
@@ -199,156 +194,200 @@ fn DocumentCard(
     let summary = dashboard.summary.clone();
 
     let dashboard_id_for_badges = dashboard.dashboard_id.clone();
-    let dashboard_for_add = dashboard.clone();
+
+    // Kebab menu state — must be set up before entering view! macro
+    let kebab_trigger_ref = NodeRef::<leptos::html::Div>::new();
+    let (kebab_open, set_kebab_open) = signal(false);
+
+    // Store values that are used inside Popover's ChildrenFn closure.
+    // ChildrenFn requires Fn (not FnOnce), so non-Copy values must be accessed
+    // via StoredValue (which is Copy) rather than moved directly into the closure.
+    let edit_href_stored = StoredValue::new(edit_href);
+    let delete_id_stored = StoredValue::new(delete_id);
+    let delete_title_stored = StoredValue::new(delete_title);
+    let dashboard_for_add_stored = StoredValue::new(dashboard);
 
     view! {
-        <Card class="hover:border-primary/30 transition-colors duration-200 flex flex-col">
-            <CardHeader>
-                <div class="flex items-center justify-between">
-                    <CardTitle class="text-xl flex-1 pr-2 line-clamp-2">
-                        <a href=view_href.clone() class="hover:text-primary transition-colors">
-                            {title}
-                        </a>
-                    </CardTitle>
-                    <div class="flex gap-1">
-                        // Add to Collection — only when collections are available and callback provided
-                        {if has_available_collections {
-                            on_add_to_collection.map(|cb| {
-                                let dashboard_for_add = dashboard_for_add.clone();
-                                view! {
-                                    <Button
-                                        variant=ButtonVariant::Ghost
-                                        size=ButtonSize::Icon
-                                        aria_label="Add to collection"
-                                        class="flex-shrink-0"
-                                        on:click=move |_| cb.run(dashboard_for_add.clone())
-                                    >
-                                        <Icon icon=phosphor_leptos::PLUS size="14px" />
-                                    </Button>
-                                }
-                            })
-                        } else {
-                            None
-                        }}
-                        // Delete
-                        {
-                            let delete_id = delete_id.clone();
-                            let delete_title = delete_title.clone();
+        <a
+            href=view_href
+            class="block group"
+        >
+            <Card class="relative hover:border-primary/30 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 flex flex-col h-full">
+                <CardContent class="flex-1 flex flex-col pt-6">
+                    // Title
+                    <h3 class="font-display text-xl line-clamp-2 group-hover:text-primary transition-colors mb-2">
+                        {title}
+                    </h3>
+
+                    // Summary or empty-state placeholder
+                    {match summary {
+                        Some(text) => view! {
+                            <p class="text-sm text-muted-foreground line-clamp-3 mb-3">
+                                {text}
+                            </p>
+                        }.into_any(),
+                        None => view! {
+                            <p class="text-sm text-muted-foreground italic line-clamp-3 mb-3">
+                                "No content yet"
+                            </p>
+                        }.into_any(),
+                    }}
+
+                    // Collection Badges
+                    {if !collections.is_empty() {
+                        let badges = collections.iter().map(|collection| {
+                            let color = collection.color.clone().unwrap_or_else(|| "#d97706".to_string());
+                            let bg_color = format!("background-color: {color}20; color: {color};");
+                            let dot_color = format!("background-color: {color};");
+                            let name = collection.name.clone();
+                            let coll_id = collection.collection_id.clone();
+                            let coll_id_for_click = coll_id.clone();
+                            let coll_id_for_remove = coll_id.clone();
+                            let coll_name_for_remove = collection.name.clone();
+                            let dash_id_for_remove = dashboard_id_for_badges.clone();
+
+                            let on_badge_click = on_collection_click;
+                            let on_badge_remove = on_remove_from_collection;
+
                             view! {
-                                <Button
-                                    variant=ButtonVariant::Ghost
-                                    size=ButtonSize::Icon
-                                    aria_label="Delete"
-                                    class="flex-shrink-0"
-                                    on:click=move |_| on_delete.run((delete_id.clone(), delete_title.clone()))
-                                >
-                                    <Icon icon=phosphor_leptos::TRASH size="14px" attr:class="text-destructive" />
-                                </Button>
-                            }
-                        }
-                    </div>
-                </div>
-            </CardHeader>
-
-            <CardContent class="flex-1 flex flex-col">
-                // AI-generated summary / content preview
-                {summary.map(|text| {
-                    view! {
-                        <p class="text-sm text-muted-foreground mb-3 line-clamp-4">
-                            {text}
-                        </p>
-                    }
-                })}
-
-                // Collection Badges
-                {if !collections.is_empty() {
-                    let badges = collections.iter().map(|collection| {
-                        let color = collection.color.clone().unwrap_or_else(|| "#d97706".to_string());
-                        let bg_color = format!("background-color: {color}20; color: {color};");
-                        let dot_color = format!("background-color: {color};");
-                        let name = collection.name.clone();
-                        let coll_id = collection.collection_id.clone();
-                        let coll_id_for_click = coll_id.clone();
-                        let coll_id_for_remove = coll_id.clone();
-                        let coll_name_for_remove = collection.name.clone();
-                        let dash_id_for_remove = dashboard_id_for_badges.clone();
-
-                        let on_badge_click = on_collection_click;
-                        let on_badge_remove = on_remove_from_collection;
-
-                        view! {
-                            <div
-                                class="group relative inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium cursor-pointer hover:opacity-80 transition-opacity"
-                                style=bg_color
-                                on:click=move |_| {
-                                    if let Some(cb) = on_badge_click {
-                                        cb.run(coll_id_for_click.clone());
+                                <div
+                                    class="group relative inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium cursor-pointer hover:opacity-80 transition-opacity"
+                                    style=bg_color
+                                    on:click=move |ev: leptos::ev::MouseEvent| {
+                                        ev.prevent_default();
+                                        ev.stop_propagation();
+                                        if let Some(cb) = on_badge_click {
+                                            cb.run(coll_id_for_click.clone());
+                                        }
                                     }
-                                }
-                            >
-                                <div class="w-2 h-2 rounded-full" style=dot_color.clone() />
-                                {name}
-                                {if let Some(cb) = on_badge_remove {
-                                    let coll_id_for_remove = coll_id_for_remove.clone();
-                                    let dash_id_for_remove = dash_id_for_remove.clone();
-                                    let coll_name_for_remove = coll_name_for_remove.clone();
-                                    Some(view! {
-                                        <button
-                                            class="ml-1 hover:bg-foreground/10 rounded-full p-0.5"
-                                            aria-label="Remove from collection"
-                                            on:click=move |ev: leptos::ev::MouseEvent| {
-                                                ev.stop_propagation();
-                                                cb.run((
-                                                    coll_id_for_remove.clone(),
-                                                    dash_id_for_remove.clone(),
-                                                    coll_name_for_remove.clone(),
-                                                ));
-                                            }
-                                        >
-                                            <Icon icon=phosphor_leptos::X size="12px" />
-                                        </button>
-                                    })
-                                } else {
-                                    None
-                                }}
+                                >
+                                    <div class="w-2 h-2 rounded-full" style=dot_color.clone() />
+                                    {name}
+                                    {if let Some(cb) = on_badge_remove {
+                                        let coll_id_for_remove = coll_id_for_remove.clone();
+                                        let dash_id_for_remove = dash_id_for_remove.clone();
+                                        let coll_name_for_remove = coll_name_for_remove.clone();
+                                        Some(view! {
+                                            <button
+                                                class="ml-1 hover:bg-foreground/10 rounded-full p-0.5"
+                                                aria-label="Remove from collection"
+                                                on:click=move |ev: leptos::ev::MouseEvent| {
+                                                    ev.prevent_default();
+                                                    ev.stop_propagation();
+                                                    cb.run((
+                                                        coll_id_for_remove.clone(),
+                                                        dash_id_for_remove.clone(),
+                                                        coll_name_for_remove.clone(),
+                                                    ));
+                                                }
+                                            >
+                                                <Icon icon=phosphor_leptos::X size="12px" />
+                                            </button>
+                                        })
+                                    } else {
+                                        None
+                                    }}
+                                </div>
+                            }
+                        }).collect_view();
+
+                        Some(view! {
+                            <div class="flex flex-wrap gap-2 mb-4">
+                                {badges}
                             </div>
+                        })
+                    } else {
+                        None
+                    }}
+
+                    // Metadata footer: relative time · view count
+                    <div class="text-xs text-muted-foreground mt-auto">
+                        "Updated "
+                        {relative_time}
+                        {" \u{00b7} "}
+                        {view_count}
+                        " views"
+                    </div>
+                </CardContent>
+
+                // Kebab menu trigger — positioned absolute top-right
+                <div
+                    node_ref=kebab_trigger_ref
+                    class="absolute top-5 right-4 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity z-10"
+                >
+                    <Button
+                        variant=ButtonVariant::GhostMuted
+                        size=ButtonSize::IconSm
+                        aria_label="Actions"
+                        on:click=move |ev: leptos::ev::MouseEvent| {
+                            ev.prevent_default();
+                            ev.stop_propagation();
+                            set_kebab_open.update(|v| *v = !*v);
                         }
-                    }).collect_view();
-
-                    Some(view! {
-                        <div class="flex flex-wrap gap-2 mb-4">
-                            {badges}
-                        </div>
-                    })
-                } else {
-                    None
-                }}
-
-                // Metadata: time + view count
-                <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-auto">
-                    <div class="flex items-center gap-1">
-                        <Icon icon=phosphor_leptos::CLOCK size="14px" />
-                        <span class="whitespace-nowrap">"Updated " {relative_time}</span>
-                    </div>
-                    <div class="flex items-center gap-1">
-                        <Icon icon=phosphor_leptos::EYE size="14px" />
-                        <span class="whitespace-nowrap">{view_count}</span>
-                    </div>
+                    >
+                        <Icon icon=phosphor_leptos::DOTS_THREE_VERTICAL size="14px" />
+                    </Button>
                 </div>
-            </CardContent>
-
-            <CardFooter>
-                <div class="flex gap-2 w-full">
-                    <ButtonLink href=view_href_footer variant=ButtonVariant::Default class="w-full flex-1">
-                        <Icon icon=phosphor_leptos::EYE size="14px" />
-                        "View"
-                    </ButtonLink>
-                    <ButtonLink href=edit_href variant=ButtonVariant::Outline class="w-full flex-1">
+                <Popover
+                    trigger_ref=kebab_trigger_ref
+                    open=Signal::from(kebab_open)
+                    on_close=Callback::new(move |_| set_kebab_open.set(false))
+                    placement=Placement::BOTTOM_END
+                    class="min-w-[10rem] rounded-md border border-border bg-popover text-popover-foreground shadow-lg p-1"
+                >
+                    // Edit — navigates to edit URL
+                    <a
+                        href=move || edit_href_stored.get_value()
+                        class="menu-item"
+                        on:click=move |ev: leptos::ev::MouseEvent| {
+                            ev.stop_propagation();
+                            set_kebab_open.set(false);
+                        }
+                    >
                         <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                         "Edit"
-                    </ButtonLink>
-                </div>
-            </CardFooter>
-        </Card>
+                    </a>
+
+                    // Add to Collection — only when callback provided and collections available
+                    {if has_available_collections {
+                        on_add_to_collection.map(|cb| {
+                            view! {
+                                <button
+                                    class="menu-item"
+                                    on:click=move |ev: leptos::ev::MouseEvent| {
+                                        ev.prevent_default();
+                                        ev.stop_propagation();
+                                        set_kebab_open.set(false);
+                                        cb.run(dashboard_for_add_stored.get_value());
+                                    }
+                                >
+                                    <Icon icon=phosphor_leptos::PLUS size="14px" />
+                                    "Add to Collection"
+                                </button>
+                            }
+                        })
+                    } else {
+                        None
+                    }}
+
+                    // Divider
+                    <div class="border-t border-border my-1" />
+
+                    // Delete — destructive
+                    <button
+                        class="menu-item text-destructive hover:bg-destructive/10"
+                        on:click=move |ev: leptos::ev::MouseEvent| {
+                            ev.prevent_default();
+                            ev.stop_propagation();
+                            set_kebab_open.set(false);
+                            on_delete.run((delete_id_stored.get_value(), delete_title_stored.get_value()));
+                        }
+                    >
+                        <Icon icon=phosphor_leptos::TRASH size="14px" />
+                        "Delete"
+                    </button>
+                </Popover>
+            </Card>
+        </a>
     }
 }

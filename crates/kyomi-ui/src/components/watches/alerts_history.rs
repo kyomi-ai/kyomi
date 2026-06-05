@@ -836,7 +836,7 @@ pub fn AlertsHistory(
                                                             <div class="min-w-0 flex-1">
                                                                 <div class="flex items-center gap-2">
                                                                     <span class=format!(
-                                                                        "text-foreground truncate {}",
+                                                                        "font-display text-foreground truncate {}",
                                                                         if is_unread { "font-semibold" } else { "font-medium" }
                                                                     )>
                                                                         {alert_title}

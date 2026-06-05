@@ -753,7 +753,7 @@ pub fn ChatsListPage() -> impl IntoView {
                                             <div class="flex items-start justify-between gap-4">
                                                 <div class="flex-1 min-w-0">
                                                     <div class="flex items-center gap-2 mb-1">
-                                                        <h3 class="text-base font-medium text-foreground truncate">
+                                                        <h3 class="text-base font-display text-foreground truncate">
                                                             {title.clone()}
                                                         </h3>
 

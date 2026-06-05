@@ -5,6 +5,16 @@
 //! Used by both `chat_page.rs` (main chat) and `chat_engine.rs` (copilot) to
 //! pass the user's local time and IANA timezone to server functions.
 
+/// Parse a timestamp string that may be RFC 3339 or Postgres format.
+///
+/// Handles `2026-06-05T09:40:53Z` (RFC 3339) and
+/// `2026-06-05 09:40:53.348324+00` (Postgres).
+pub fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .or_else(|_| chrono::DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z"))
+        .ok()
+}
+
 /// Compute the current time with timezone offset for agent awareness.
 ///
 /// Returns a string in `YYYY-MM-DDTHH:MM:SS±HH:MM` format.
