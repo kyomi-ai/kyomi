@@ -30,21 +30,19 @@
 
 use std::sync::Arc;
 
-use leptos::prelude::*;
-use phosphor_leptos::{Icon, IconWeight};
+use super::collections_sidebar::CollectionsSidebar;
 use crate::components::documents::{DocumentCardGrid, DocumentCardGridSkeleton, SearchSortBar};
+use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
     Button, ButtonSize, ButtonVariant, ConfirmDialog, EmptyState, Spinner, ToggleButton,
 };
-use super::collections_sidebar::CollectionsSidebar;
-use crate::query_cache::{use_query, QueryCache};
+use crate::query_cache::{QueryCache, use_query};
 use crate::server_fns::collections::{
-    list_collections, remove_dashboard_from_collection, CollectionItem,
+    CollectionItem, list_collections, remove_dashboard_from_collection,
 };
-use crate::components::toast::{toast_error, toast_success};
-use crate::server_fns::dashboards::{
-    create_dashboard, delete_dashboard, DashboardListItem,
-};
+use crate::server_fns::dashboards::{DashboardListItem, create_dashboard, delete_dashboard};
+use leptos::prelude::*;
+use phosphor_leptos::{Icon, IconWeight};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main page component
@@ -83,14 +81,24 @@ pub fn DashboardsListPage() -> impl IntoView {
             let q_lower = q.to_lowercase();
             items.retain(|d| {
                 d.title.to_lowercase().contains(&q_lower)
-                    || d.summary.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
+                    || d.summary
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q_lower)
             });
         }
         // Sort
         let sort = sort_signal.try_get().unwrap_or_default();
         match sort.as_str() {
             "updated_at" | "recent" | "" => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
-            "created_at" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+            "popularity" => items.sort_by(|a, b| {
+                b.popularity_score
+                    .partial_cmp(&a.popularity_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.view_count.cmp(&a.view_count))
+            }),
+            "created_at" | "created" => items.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
             "title" => items.sort_by(|a, b| a.title.cmp(&b.title)),
             _ => items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
         }
@@ -107,8 +115,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     // ── Delete confirmation ─────────────────────────────────────────────
     let (confirm_open, set_confirm_open) = signal(false);
-    let (deleting_dashboard, set_deleting_dashboard) =
-        signal(Option::<(String, String)>::None); // (id, title)
+    let (deleting_dashboard, set_deleting_dashboard) = signal(Option::<(String, String)>::None); // (id, title)
 
     let delete_action = Action::new(|dashboard_id: &String| {
         let dashboard_id = dashboard_id.clone();
@@ -147,8 +154,7 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     // ── Remove from collection ──────────────────────────────────────────
     let (remove_confirm_open, set_remove_confirm_open) = signal(false);
-    let (removing_info, set_removing_info) =
-        signal(Option::<(String, String, String)>::None); // (collection_id, dashboard_id, collection_name)
+    let (removing_info, set_removing_info) = signal(Option::<(String, String, String)>::None); // (collection_id, dashboard_id, collection_name)
 
     let remove_action = Action::new(move |(collection_id, dashboard_id): &(String, String)| {
         let collection_id = collection_id.clone();
@@ -167,7 +173,8 @@ pub fn DashboardsListPage() -> impl IntoView {
 
     let on_confirm_remove = Callback::new(move |()| {
         set_remove_confirm_open.set(false);
-        if let Some((collection_id, dashboard_id, _)) = removing_info.try_get_untracked().flatten() {
+        if let Some((collection_id, dashboard_id, _)) = removing_info.try_get_untracked().flatten()
+        {
             remove_action.dispatch((collection_id, dashboard_id));
         }
     });
@@ -214,15 +221,14 @@ pub fn DashboardsListPage() -> impl IntoView {
         let active_id = active_collection_id.get();
 
         if let Some(ref coll_id) = active_id {
-            let collection_dashboard_ids: std::collections::HashSet<String> =
-                collections_resource
-                    .get()
-                    .and_then(|r| r.ok())
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|c| c.collection_id == *coll_id)
-                    .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
-                    .collect();
+            let collection_dashboard_ids: std::collections::HashSet<String> = collections_resource
+                .get()
+                .and_then(|r| r.ok())
+                .unwrap_or_default()
+                .iter()
+                .filter(|c| c.collection_id == *coll_id)
+                .flat_map(|c| c.dashboards.iter().map(|d| d.dashboard_id.clone()))
+                .collect();
 
             Some(
                 dashboards
@@ -480,8 +486,7 @@ fn DashboardChartIcon() -> impl IntoView {
 #[component]
 fn DashboardsEmptyState(
     has_search: Signal<bool>,
-    #[prop(default = false)]
-    has_active_collection: bool,
+    #[prop(default = false)] has_active_collection: bool,
     on_create: Callback<leptos::ev::MouseEvent>,
 ) -> impl IntoView {
     view! {
