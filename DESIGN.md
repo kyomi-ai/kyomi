@@ -696,20 +696,89 @@ Dropdown menus appear from overflow buttons and context actions. Menu items are 
 
 Use the `.menu-item` CSS class in `main.css`. Do NOT use `<Button variant=Ghost>` for menu items — ghost buttons use accent (amber) text, menu items use foreground (grey) text.
 
-### Destructive Actions on Cards
+### Document Card Pattern (Gold Standard: Dashboards, Knowledge)
 
-Delete buttons on cards and list items use the same pattern as other card action buttons for consistency:
+Document cards on list pages are **clickable surfaces** — the entire card navigates to the document viewer. All secondary actions (edit, delete, add-to-collection) live in a **kebab menu** that appears on hover.
 
-1. **Same variant and size as sibling actions** — `ButtonVariant::Ghost` + `ButtonSize::Icon`, always visible. Do not hide, resize, or recolor the delete button differently from other actions on the same card.
-2. **Confirm before executing** — all destructive actions MUST go through `<ConfirmDialog>` with `confirm_text="Delete"` and a message naming the item being deleted.
-
-```rust
-<Button variant=ButtonVariant::Ghost size=ButtonSize::Icon
-    aria_label="Delete item" class="flex-shrink-0"
-    on:click=move |_| handle_delete()>
-    <Icon icon=icondata_lu::LuTrash2 width="14" height="14" />
-</Button>
 ```
+┌───────────────────────────────────────────────────────────┐
+│                                                     [⋮]  │ ← kebab, appears on hover
+│                                                           │
+│  Document Title Here                    (Instrument Serif)│ ← font-display text-xl
+│                                                           │
+│  Summary excerpt in DM Sans — first 2-3 lines of the     │ ← text-sm text-muted-foreground
+│  document give context at a glance before clicking...     │   line-clamp-3
+│                                                           │
+│  ┌─ Sales ─┐  ┌─ Monthly ─┐                              │ ← collection badges (unchanged)
+│                                                           │
+│  Updated 3h ago  ·  26 views                              │ ← text-xs text-muted-foreground
+└───────────────────────────────────────────────────────────┘
+```
+
+**Card structure:**
+- Entire card is an `<a>` element wrapping the card content. No explicit View/Edit buttons.
+- `Card` component with `hover:border-primary/30 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200`
+- Title: `font-display text-xl` (Instrument Serif, ~20px) with `group-hover:text-primary transition-colors`
+- Summary: `text-sm text-muted-foreground line-clamp-3`. If no summary exists, show muted italic "No content yet"
+- Collection badges: existing pill style (unchanged)
+- Metadata footer: `text-xs text-muted-foreground mt-auto` with relative time + view count separated by a `·` dot
+- No `CardFooter` with View/Edit buttons. The card IS the button.
+
+**Kebab menu:**
+- Position: absolute top-right of card (`top-5 right-4`)
+- Trigger: `ButtonVariant::GhostMuted` + `ButtonSize::IconSm` (28px), vertical three-dot icon
+- Visibility: `opacity-0` by default, `group-hover:opacity-100` on card hover. Always visible on touch devices via `@media (hover: none)`
+- Dropdown follows the standard Dropdown Menus pattern (see above)
+- Menu items: Edit, Add to Collection, divider, Delete (destructive)
+- Delete MUST still go through `<ConfirmDialog>` before executing
+- Clicking the kebab or any menu item must `prevent_default` + `stop_propagation` so the card navigation doesn't fire
+
+**Timestamp display:**
+- Use `format_relative_time()` which outputs: "just now" (< 60s), "5m ago" (< 60m), "2h ago" (< 24h), "3d ago" (< 30d), "Mar 15" (>= 30d same year), "Mar 15, 2025" (different year)
+- The parser must handle both RFC 3339 (`2026-06-05T09:40:53Z`) and Postgres timestamp format (`2026-06-05 09:40:53.348324+00`). If parsing fails, display "Updated recently" rather than the raw string.
+
+**What this replaces:**
+- No more `CardFooter` with full-width View/Edit `ButtonLink` pairs
+- No more always-visible delete/add-to-collection ghost icon buttons in `CardHeader`
+- Card titles switch from `font-semibold` (DM Sans) to `font-display` (Instrument Serif)
+
+### Watch Card Pattern (Gold Standard: Watches tab)
+
+Watch cards are NOT clickable surfaces (unlike document cards) because there's no single primary action — the two main actions (edit config, view logs) both open different modals. The card is a status dashboard for the watch.
+
+```
+┌───────────────────────────────────────────────────────────┐
+│  🔔 Watch Title Here              (Instrument Serif) [⏻] │ ← mode icon + title + toggle
+│  Watch prompt description text, line-clamped to 2...      │ ← text-sm text-muted-foreground
+│                                                           │
+│  🕐 Daily at 6:30 AM                                     │ ← schedule row
+│  ✅ No Alert                    Last: 25 May, 06:31 am   │ ← status badge + last run
+│  Next run: 28 May, 06:30 am                              │ ← next run (if enabled)
+│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
+│  [Edit] [Logs] [Run]                                  🗑  │ ← labeled buttons + delete icon
+└───────────────────────────────────────────────────────────┘
+```
+
+**Card structure:**
+- Title: `font-display text-base` (Instrument Serif) with mode icon (bell for alert, chart-bar for report)
+- Toggle switch: top-right, always visible — quick enable/disable is a legitimate always-visible control
+- Prompt: `text-sm text-muted-foreground line-clamp-2`
+- Hover: `hover:border-primary/30 hover:shadow-md hover:-translate-y-0.5` + title transitions to amber
+- Disabled watches: card at 70% opacity
+
+**Action row:**
+- Three labeled `ButtonSize::Sm` buttons left-aligned: Edit (pencil icon), Logs (file-text icon, conditional on has_last_run), Run (play icon)
+- Delete: `ButtonVariant::GhostDestructive` + `ButtonSize::IconSm` (trash icon), right-aligned via spacer. Still requires `<ConfirmDialog>`.
+- No kebab menu — four actions don't justify the complexity of a dropdown
+
+**What this replaces:**
+- Four unlabeled ghost icon buttons (play, file, gear, trash) in a row — ambiguous without tooltips
+- Card titles switch from `font-semibold` (DM Sans) to `font-display` (Instrument Serif)
+- Adds hover lift effect for consistency with document cards
+
+**Why this differs from Document Card Pattern:**
+- Document cards have one primary action (view) → clickable surface + kebab for secondary actions
+- Watch cards have two primary actions (edit + logs) that both open modals → explicit labeled buttons, not clickable surface
 
 ### Overlay Decision Tree
 
@@ -1053,3 +1122,5 @@ The current PDF template uses cold generic grays. Replace with warm design syste
 | 2026-04-07 | Chart design system: Kyomi overrides, not chartml defaults | chartml stays generic (cool grays, system fonts). Kyomi brands charts via CSS variable overrides in main.css. Warm grays, DM Sans, Geist Mono, slate-blue tooltips. |
 | 2026-04-09 | Unify knowledge files and dashboards into one document system | Both are markdown documents in collections. The folder-tree UI felt like Windows Explorer, not Kyomi. A type field preserves the user's mental model (separate nav items) while the data model, collections, search, editor, and agent tools are shared. Deletes the file-manager UI entirely. |
 | 2026-04-19 | Unified right-panel pattern: Editorial Margin + shared `<RightPanel>` | Copilot / collections / catalog / version-history were each re-implementing the same chrome with drift (different widths, animations, bg, headers). The old `bg-muted` + `border-l + border-t` slab looked like tacked-on chrome and violated the "one continuous warm surface" principle. Editorial Margin keeps the panel on `bg-background` separated only by a hairline, with an amber italic `§` Instrument Serif title as the shared editorial anchor. Nobody in BI does this. Mobile retains `bg-muted` + `shadow-lg` because the sheet signal is load-bearing with no adjacent content. Decision captured via `/design-consultation` — KYO-47. |
+| 2026-06-05 | Document Card redesign: Editorial Document Library | Dashboard and knowledge list cards transformed from generic CRUD grid (DM Sans titles, View/Edit button footer, always-visible action icons) to editorial document library (Instrument Serif titles, clickable card surface, kebab menu for secondary actions, summary excerpts, card lift on hover). The old cards looked like any admin panel; the new pattern extends the editorial voice from the dashboard viewer to the front door. Kebab menu chosen over floating action icons because secondary actions (edit, delete, collection) don't warrant permanent visual weight. |
+| 2026-06-05 | Watch Card consistency pass: labeled buttons, no kebab | Watch cards get Instrument Serif titles and hover lift for consistency, but keep explicit action buttons (Edit, Logs, Run) because watches have two equally important primary actions (edit config, view logs) that both open modals — no single "click the card" destination. Delete stays as a quiet ghost icon at the far right. Kebab rejected — four actions don't justify the complexity. Toggle switch stays always-visible because enable/disable is a quick-action control. |
