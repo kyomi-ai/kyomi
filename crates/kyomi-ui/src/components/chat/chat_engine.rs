@@ -402,17 +402,30 @@ impl ChatEngine {
             return;
         }
 
-        let message_id = self
-            .chat_state
-            .active_message_id()
+        let session_id = self
+            .session_id
             .get_untracked()
             .unwrap_or_default();
 
+        let message_id = self
+            .chat_state
+            .active_message_id()
+            .get_untracked();
+
+        let mut payload = serde_json::json!({
+            "type": "cancel_request",
+            "session_id": session_id,
+        });
+
+        // Include message_id when available (Streaming state); during Sending
+        // it is not yet set. The frontend subscriber uses it to confirm the
+        // right message was cancelled.
+        if let Some(mid) = message_id {
+            payload["message_id"] = serde_json::Value::String(mid);
+        }
+
         if let Some(ws) = ws_ctx.as_ref() {
-            ws.send(serde_json::json!({
-                "type": "cancel_request",
-                "message_id": message_id,
-            }));
+            ws.send(payload);
         }
     }
 
@@ -796,8 +809,15 @@ fn setup_ws_subscriptions(
             None => return,
         };
 
-        // Only confirm if this is the active message (chat_page.rs pattern).
-        if chat_state_cancelled.is_active_message(&msg_message_id) {
+        // Confirm cancellation if this event belongs to the active message OR,
+        // when cancelling during Sending (no message_id set yet), if the event
+        // session matches the active session.
+        let is_ours = chat_state_cancelled.is_active_message(&msg_message_id)
+            || (chat_state_cancelled.active_message_id().get_untracked().is_none()
+                && msg.session_id.as_deref()
+                    == session_id.get_untracked().as_deref());
+
+        if is_ours {
             chat_state_cancelled.confirm_cancelled();
         }
 

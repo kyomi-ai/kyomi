@@ -184,6 +184,27 @@ pub async fn send_error(
     manager.send_to_user(user_id, msg).await;
 }
 
+/// Send a request_cancelled event to a user.
+pub async fn send_request_cancelled(
+    manager: &WebSocketManager,
+    user_id: &str,
+    session_id: &str,
+    message_id: &str,
+    context_type: Option<&str>,
+) {
+    let mut data = serde_json::json!({});
+    if let Some(ct) = context_type {
+        data["context_type"] = serde_json::Value::String(ct.to_string());
+    }
+
+    let msg = WebSocketMessage::new(MessageType::RequestCancelled)
+        .with_session(session_id)
+        .with_message_id(message_id)
+        .with_data(data);
+
+    manager.send_to_user(user_id, msg).await;
+}
+
 // ---------------------------------------------------------------------------
 // OAuth
 // ---------------------------------------------------------------------------

@@ -211,6 +211,18 @@ pub async fn send_copilot_message(
         .await;
 
         match result {
+            Ok(exec_result) if exec_result.status == "cancelled" => {
+                // Notify the frontend that the request was cancelled so it can
+                // transition out of Cancelling state. Do NOT call deliver_response.
+                kyomi_auth::websocket::helpers::send_request_cancelled(
+                    &ws_manager,
+                    &spawn_user_id,
+                    &spawn_session_id,
+                    &exec_result.assistant_message_id,
+                    Some(&spawn_context_type),
+                )
+                .await;
+            }
             Ok(exec_result) => {
                 kyomi_agent::deliver_response(
                     &ws_manager,
