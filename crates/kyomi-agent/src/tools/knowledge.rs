@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
+use kyomi_auth::websocket::helpers as ws_helpers;
 use kyomi_core::models::DocType;
 
 use crate::tools::{AgentTool, ToolContext};
@@ -670,6 +671,12 @@ impl AgentTool for WriteDocumentTool {
                     )
                     .await?;
 
+                    ws_helpers::broadcast_dashboard_sync(
+                        &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
+                        kyomi_types::sync::SyncActionType::Update,
+                    )
+                    .await;
+
                     let new_hash = kyomi_auth::dashboard_service::hash_content(content);
                     Ok(serde_json::json!({
                         "success": true,
@@ -711,6 +718,12 @@ impl AgentTool for WriteDocumentTool {
                 &ctx.workspace_id,
             )
             .await?;
+
+            ws_helpers::broadcast_dashboard_sync(
+                &ctx.db, &ctx.ws_manager, &dashboard_id, &ctx.workspace_id,
+                kyomi_types::sync::SyncActionType::Insert,
+            )
+            .await;
 
             let new_hash = kyomi_auth::dashboard_service::hash_content(content);
             Ok(serde_json::json!({
@@ -991,6 +1004,12 @@ impl AgentTool for EditDocumentTool {
                     &ctx.workspace_id,
                 )
                 .await?;
+
+                ws_helpers::broadcast_dashboard_sync(
+                    &ctx.db, &ctx.ws_manager, &doc.dashboard_id, &ctx.workspace_id,
+                    kyomi_types::sync::SyncActionType::Update,
+                )
+                .await;
 
                 let new_hash = kyomi_auth::dashboard_service::hash_content(&new_content);
                 Ok(serde_json::json!({

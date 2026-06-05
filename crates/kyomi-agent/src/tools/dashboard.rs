@@ -402,6 +402,11 @@ impl AgentTool for CreateDashboardTool {
             None,
         )
         .await;
+        ws_helpers::broadcast_dashboard_sync(
+            &ctx.db, &ctx.ws_manager, &dashboard_id, &ctx.workspace_id,
+            kyomi_types::sync::SyncActionType::Insert,
+        )
+        .await;
 
         let frontend_url = &ctx.config.frontend_url;
 
@@ -607,6 +612,11 @@ impl AgentTool for ModifyDashboardTool {
             None,
         )
         .await;
+        ws_helpers::broadcast_dashboard_sync(
+            &ctx.db, &ctx.ws_manager, dashboard_id, &ctx.workspace_id,
+            kyomi_types::sync::SyncActionType::Update,
+        )
+        .await;
 
         let frontend_url = &ctx.config.frontend_url;
         let display_title = title.map(|t| t.trim()).unwrap_or("(unchanged)");
@@ -695,6 +705,11 @@ impl AgentTool for DeleteDashboardTool {
                     &ctx.user_id,
                     &ctx.user_display_name,
                     None,
+                )
+                .await;
+                ws_helpers::broadcast_entity_delete(
+                    &ctx.ws_manager, kyomi_types::sync::entity_types::DASHBOARD,
+                    dashboard_id, &ctx.workspace_id,
                 )
                 .await;
 
