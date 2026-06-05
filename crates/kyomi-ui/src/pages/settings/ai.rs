@@ -239,7 +239,7 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
 
     let (container_class, icon) = if is_byok {
         (
-            "flex items-start gap-3 rounded-md border border-accent/40 bg-accent p-4",
+            "flex items-start gap-3 rounded-md border border-primary/30 bg-primary/10 p-4",
             phosphor_leptos::KEY,
         )
     } else {
@@ -287,7 +287,7 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
                         " "
                         <a
                             href="/settings/billing"
-                            class="text-accent hover:underline"
+                            class="text-primary hover:underline"
                         >
                             "Buy more"
                         </a>
@@ -349,7 +349,7 @@ fn ModeCard(
     let class = move || {
         let base = "relative text-left rounded-md p-4 transition-colors w-full";
         let state = if selected.get() {
-            "border-2 border-accent bg-accent/30"
+            "border-2 border-primary bg-primary/10"
         } else {
             "border border-border hover:border-[--color-border-strong]"
         };
@@ -373,7 +373,7 @@ fn ModeCard(
             }
         >
             <Show when=move || selected.get()>
-                <div class="absolute top-3 right-3 text-accent">
+                <div class="absolute top-3 right-3 text-primary">
                     <Icon icon=phosphor_leptos::CHECK size="18px"/>
                 </div>
             </Show>
@@ -618,7 +618,7 @@ fn KyomiModelPanel(
                     href="https://openrouter.ai/models"
                     target="_blank"
                     rel="noopener noreferrer"
-                    class="text-accent hover:underline"
+                    class="text-primary hover:underline"
                 >
                     "OpenRouter"
                 </a>
