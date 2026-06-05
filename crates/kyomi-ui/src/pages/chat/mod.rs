@@ -12,16 +12,20 @@ pub use chat_page::ChatPage;
 
 // ─── Shared helpers ─────────────────────────────────────────────────────────
 
-/// Format an RFC 3339 timestamp as a human-readable relative time string.
+/// Format a timestamp as a human-readable relative time string.
+///
+/// Accepts RFC 3339 (`2026-06-05T09:40:53Z`) and Postgres format
+/// (`2026-06-05 09:40:53.348324+00`). Returns `"Updated recently"` if the
+/// timestamp cannot be parsed.
 ///
 /// Matches React's `formatRelativeTime()` from `lib/formatters.js` and
 /// `formatDate()` from `ChatsList.jsx`.
 ///
 /// Used by both `ChatMessage` and `ChatsListPage`.
-pub(crate) fn format_relative_time(rfc3339: &str) -> String {
+pub(crate) fn format_relative_time(timestamp: &str) -> String {
     use chrono::Datelike as _;
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
-        return rfc3339.to_string();
+    let Some(parsed) = crate::utils::time::parse_timestamp(timestamp) else {
+        return "Updated recently".to_string();
     };
 
     let now = chrono::Utc::now();

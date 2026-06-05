@@ -18,7 +18,11 @@ use crate::server_fns::dashboards::DashboardListItem;
 // Relative time helper
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Converts an RFC 3339 timestamp string into a compact relative time string.
+/// Converts a timestamp string into a compact relative time string.
+///
+/// Accepts RFC 3339 (`2026-06-05T09:40:53Z`) and Postgres format
+/// (`2026-06-05 09:40:53.348324+00`). Returns `"Updated recently"` if the
+/// timestamp cannot be parsed.
 ///
 /// Matches the React frontend's display format:
 /// - "just now" (< 60s)
@@ -27,9 +31,9 @@ use crate::server_fns::dashboards::DashboardListItem;
 /// - "3d ago" (< 30d)
 /// - "Mar 15" (>= 30d, same year)
 /// - "Mar 15, 2025" (different year)
-pub fn format_relative_time(rfc3339: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
-        return rfc3339.to_string();
+pub fn format_relative_time(timestamp: &str) -> String {
+    let Some(parsed) = crate::utils::time::parse_timestamp(timestamp) else {
+        return "Updated recently".to_string();
     };
 
     let now = chrono::Utc::now();
