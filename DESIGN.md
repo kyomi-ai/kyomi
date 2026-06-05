@@ -742,6 +742,44 @@ Document cards on list pages are **clickable surfaces** — the entire card navi
 - No more always-visible delete/add-to-collection ghost icon buttons in `CardHeader`
 - Card titles switch from `font-semibold` (DM Sans) to `font-display` (Instrument Serif)
 
+### Watch Card Pattern (Gold Standard: Watches tab)
+
+Watch cards are NOT clickable surfaces (unlike document cards) because there's no single primary action — the two main actions (edit config, view logs) both open different modals. The card is a status dashboard for the watch.
+
+```
+┌───────────────────────────────────────────────────────────┐
+│  🔔 Watch Title Here              (Instrument Serif) [⏻] │ ← mode icon + title + toggle
+│  Watch prompt description text, line-clamped to 2...      │ ← text-sm text-muted-foreground
+│                                                           │
+│  🕐 Daily at 6:30 AM                                     │ ← schedule row
+│  ✅ No Alert                    Last: 25 May, 06:31 am   │ ← status badge + last run
+│  Next run: 28 May, 06:30 am                              │ ← next run (if enabled)
+│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  │
+│  [Edit] [Logs] [Run]                                  🗑  │ ← labeled buttons + delete icon
+└───────────────────────────────────────────────────────────┘
+```
+
+**Card structure:**
+- Title: `font-display text-base` (Instrument Serif) with mode icon (bell for alert, chart-bar for report)
+- Toggle switch: top-right, always visible — quick enable/disable is a legitimate always-visible control
+- Prompt: `text-sm text-muted-foreground line-clamp-2`
+- Hover: `hover:border-primary/30 hover:shadow-md hover:-translate-y-0.5` + title transitions to amber
+- Disabled watches: card at 70% opacity
+
+**Action row:**
+- Three labeled `ButtonSize::Sm` buttons left-aligned: Edit (pencil icon), Logs (file-text icon, conditional on has_last_run), Run (play icon)
+- Delete: `ButtonVariant::GhostDestructive` + `ButtonSize::IconSm` (trash icon), right-aligned via spacer. Still requires `<ConfirmDialog>`.
+- No kebab menu — four actions don't justify the complexity of a dropdown
+
+**What this replaces:**
+- Four unlabeled ghost icon buttons (play, file, gear, trash) in a row — ambiguous without tooltips
+- Card titles switch from `font-semibold` (DM Sans) to `font-display` (Instrument Serif)
+- Adds hover lift effect for consistency with document cards
+
+**Why this differs from Document Card Pattern:**
+- Document cards have one primary action (view) → clickable surface + kebab for secondary actions
+- Watch cards have two primary actions (edit + logs) that both open modals → explicit labeled buttons, not clickable surface
+
 ### Overlay Decision Tree
 
 - Complex form or multi-step workflow: **Modal**
@@ -1085,3 +1123,4 @@ The current PDF template uses cold generic grays. Replace with warm design syste
 | 2026-04-09 | Unify knowledge files and dashboards into one document system | Both are markdown documents in collections. The folder-tree UI felt like Windows Explorer, not Kyomi. A type field preserves the user's mental model (separate nav items) while the data model, collections, search, editor, and agent tools are shared. Deletes the file-manager UI entirely. |
 | 2026-04-19 | Unified right-panel pattern: Editorial Margin + shared `<RightPanel>` | Copilot / collections / catalog / version-history were each re-implementing the same chrome with drift (different widths, animations, bg, headers). The old `bg-muted` + `border-l + border-t` slab looked like tacked-on chrome and violated the "one continuous warm surface" principle. Editorial Margin keeps the panel on `bg-background` separated only by a hairline, with an amber italic `§` Instrument Serif title as the shared editorial anchor. Nobody in BI does this. Mobile retains `bg-muted` + `shadow-lg` because the sheet signal is load-bearing with no adjacent content. Decision captured via `/design-consultation` — KYO-47. |
 | 2026-06-05 | Document Card redesign: Editorial Document Library | Dashboard and knowledge list cards transformed from generic CRUD grid (DM Sans titles, View/Edit button footer, always-visible action icons) to editorial document library (Instrument Serif titles, clickable card surface, kebab menu for secondary actions, summary excerpts, card lift on hover). The old cards looked like any admin panel; the new pattern extends the editorial voice from the dashboard viewer to the front door. Kebab menu chosen over floating action icons because secondary actions (edit, delete, collection) don't warrant permanent visual weight. |
+| 2026-06-05 | Watch Card consistency pass: labeled buttons, no kebab | Watch cards get Instrument Serif titles and hover lift for consistency, but keep explicit action buttons (Edit, Logs, Run) because watches have two equally important primary actions (edit config, view logs) that both open modals — no single "click the card" destination. Delete stays as a quiet ghost icon at the far right. Kebab rejected — four actions don't justify the complexity. Toggle switch stays always-visible because enable/disable is a quick-action control. |
