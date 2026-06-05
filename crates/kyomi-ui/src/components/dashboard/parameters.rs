@@ -8,11 +8,10 @@
 //! is rendered with the same CSS classes as the React frontend.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use leptos::prelude::*;
 
-use crate::components::select::DynSelect;
+use crate::components::select::Select;
 use crate::parser::ParamDef;
 
 // ---------------------------------------------------------------------------
@@ -27,22 +26,6 @@ const GRID_CLASS: &str = "grid grid-cols-12 gap-4";
 
 /// Label class from React: `block text-xs font-medium text-muted-foreground mb-1`.
 const PARAM_LABEL_CLASS: &str = "block text-xs font-medium text-muted-foreground mb-1";
-
-/// Multiselect trigger button — from React `MultiSelectDropdown`.
-const MULTISELECT_TRIGGER_CLASS: &str = "w-full px-3 py-2 text-left bg-background border border-border rounded-md text-sm hover:border-ring/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring flex items-center justify-between";
-
-/// Multiselect dropdown panel — from React `MultiSelectDropdown`.
-const MULTISELECT_DROPDOWN_CLASS: &str = "absolute z-10 mt-1 w-full bg-popover border border-border rounded-md shadow-lg max-h-[min(40vh,25rem)] overflow-y-auto overflow-x-hidden scrollbar-thin";
-
-/// Multiselect option row — from React `MultiSelectDropdown`.
-const MULTISELECT_OPTION_CLASS: &str = "flex items-center px-3 py-2 cursor-pointer transition-colors hover:bg-secondary";
-
-/// Multiselect checkbox — from React `MultiSelectDropdown`.
-const MULTISELECT_CHECKBOX_CLASS: &str =
-    "w-4 h-4 rounded-md border-input text-primary focus:ring-ring mr-2";
-
-/// Chevron icon classes — from React `MultiSelectDropdown`.
-const MULTISELECT_CHEVRON_CLASS: &str = "w-4 h-4 ml-2 text-muted-foreground";
 
 /// Date / number / text input class — from React DashboardParameters (daterange, number, text).
 /// Note: React uses slightly different classes from INPUT_CLASS for these controls.
@@ -127,184 +110,6 @@ fn get_col_span_class(param: &ParamDef, total_params: usize) -> &'static str {
         6 => "col-span-12 md:col-span-6",
         12 => "col-span-12",
         _ => "col-span-12 md:col-span-3",
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MultiSelectDropdown — internal component
-// ---------------------------------------------------------------------------
-
-/// A custom multi-select dropdown with checkboxes, matching the React
-/// `MultiSelectDropdown` component from `DashboardParameters.jsx`.
-#[component]
-fn MultiSelectDropdown(
-    /// The parameter ID used as the key in the values map.
-    param_id: String,
-    /// Available options as display strings.
-    options: Vec<String>,
-    /// Comma-separated string of currently selected values.
-    #[prop(into)]
-    current_value: Signal<String>,
-    /// Callback: receives the new comma-separated value string.
-    on_change: Arc<dyn Fn(String) + Send + Sync>,
-) -> impl IntoView {
-    let (is_open, set_is_open) = signal(false);
-    let container_ref = NodeRef::<leptos::html::Div>::new();
-
-    // Parse the comma-separated value into a Vec<String> for checking
-    let selected_set = Memo::new(move |_| {
-        let val = current_value.get();
-        if val.is_empty() {
-            Vec::<String>::new()
-        } else {
-            val.split(',').map(|s| s.to_string()).collect::<Vec<_>>()
-        }
-    });
-
-    let selected_count = Memo::new(move |_| {
-        let set = selected_set.get();
-        set.len()
-    });
-
-    // Click-outside detection — same pattern as select.rs DynSelect
-    #[cfg(target_arch = "wasm32")]
-    {
-        use send_wrapper::SendWrapper;
-        use wasm_bindgen::prelude::*;
-
-        type CleanupValue = StoredValue<Option<SendWrapper<Box<dyn FnOnce()>>>>;
-
-        let cleanup: CleanupValue = StoredValue::new(None);
-
-        Effect::new(move |_| {
-            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
-                teardown.take()();
-            }
-
-            if is_open.get() {
-                let window = web_sys::window().expect("window");
-                let container_el = container_ref.get();
-
-                let cb = Closure::<dyn Fn(web_sys::Event)>::new(move |ev: web_sys::Event| {
-                    if let Some(target) = ev.target() {
-                        let target_node: web_sys::Node = target.unchecked_into();
-                        if let Some(ref el) = container_el {
-                            let html_el: &web_sys::HtmlElement = el;
-                            let node: &web_sys::Node = html_el.as_ref();
-                            if !node.contains(Some(&target_node)) {
-                                set_is_open.set(false);
-                            }
-                        } else {
-                            set_is_open.set(false);
-                        }
-                    }
-                });
-
-                let _ = window.add_event_listener_with_callback_and_bool(
-                    "click",
-                    cb.as_ref().unchecked_ref(),
-                    true,
-                );
-
-                let window_clone = window.clone();
-                let cb_ref: js_sys::Function =
-                    cb.as_ref().unchecked_ref::<js_sys::Function>().clone();
-                let teardown: Box<dyn FnOnce()> = Box::new(move || {
-                    let _ = window_clone.remove_event_listener_with_callback_and_bool(
-                        "click",
-                        &cb_ref,
-                        true,
-                    );
-                    drop(cb);
-                });
-                cleanup.set_value(Some(SendWrapper::new(teardown)));
-            }
-        });
-
-        on_cleanup(move || {
-            if let Some(teardown) = cleanup.try_update_value(|v| v.take()).flatten() {
-                teardown.take()();
-            }
-        });
-    }
-
-    // param_id is part of the component API but not yet used in the view.
-    let _ = &param_id;
-
-    let on_trigger_click = move |_| {
-        set_is_open.update(|open| *open = !*open);
-    };
-
-    view! {
-        <div node_ref=container_ref class="relative">
-            <button
-                type="button"
-                class=MULTISELECT_TRIGGER_CLASS
-                on:click=on_trigger_click
-            >
-                <span class="truncate">
-                    {move || {
-                        let count = selected_count.get();
-                        if count == 0 {
-                            "Select...".to_string()
-                        } else {
-                            format!("{} selected", count)
-                        }
-                    }}
-                </span>
-                <svg
-                    class=MULTISELECT_CHEVRON_CLASS
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                >
-                    <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        stroke-width="2"
-                        d="M19 9l-7 7-7-7"
-                    />
-                </svg>
-            </button>
-
-            // Always rendered — visibility toggled via `hidden` class to avoid
-            // destroying and recreating DOM nodes on each re-render, which would
-            // cause focus loss on checkbox inputs.
-            <div
-                class=MULTISELECT_DROPDOWN_CLASS
-                class:hidden=move || !is_open.get()
-            >
-                {options.iter().map(|option| {
-                    let option_val = option.clone();
-                    let option_display = option.clone();
-                    let option_for_check = option.clone();
-                    let on_change = on_change.clone();
-                    view! {
-                        <label class=MULTISELECT_OPTION_CLASS>
-                            <input
-                                type="checkbox"
-                                prop:checked=move || {
-                                    selected_set.get().contains(&option_for_check)
-                                }
-                                class=MULTISELECT_CHECKBOX_CLASS
-                                on:change=move |_| {
-                                    let current = selected_set.get();
-                                    let new_values: Vec<String> = if current.contains(&option_val) {
-                                        current.into_iter().filter(|v| *v != option_val).collect()
-                                    } else {
-                                        let mut v = current;
-                                        v.push(option_val.clone());
-                                        v
-                                    };
-                                    on_change(new_values.join(","));
-                                }
-                            />
-                            <span class="text-sm text-foreground">{option_display}</span>
-                        </label>
-                    }
-                }).collect_view()}
-            </div>
-        </div>
     }
 }
 
@@ -415,7 +220,7 @@ pub fn DashboardParameters(
                             .unwrap_or_else(|| default_val.clone())
                     });
 
-                    // Build options signal for DynSelect
+                    // Build options signal for Select
                     let options_signal = Signal::derive(move || {
                         options.iter().map(|o| (o.clone(), o.clone())).collect::<Vec<_>>()
                     });
@@ -430,7 +235,7 @@ pub fn DashboardParameters(
                     view! {
                         <div class=col_class>
                             <label class=PARAM_LABEL_CLASS>{label_text}</label>
-                            <DynSelect
+                            <Select
                                 value=value_signal
                                 options=options_signal
                                 on_change=on_select_change
@@ -456,20 +261,25 @@ pub fn DashboardParameters(
                     });
 
                     let param_id_for_change = param_id.clone();
-                    let on_multi_change = Arc::new(move |new_val: String| {
+                    let on_multi_change = move |new_val: String| {
                         let mut map = values.get();
                         map.insert(param_id_for_change.clone(), new_val);
                         set_values.set(map);
+                    };
+
+                    let multi_options_signal = Signal::derive(move || {
+                        options.iter().map(|o| (o.clone(), o.clone())).collect::<Vec<_>>()
                     });
 
                     view! {
                         <div class=col_class>
                             <label class=PARAM_LABEL_CLASS>{label_text}</label>
-                            <MultiSelectDropdown
-                                param_id=param_id
-                                options=options
-                                current_value=current_value_signal
+                            <Select
+                                value=current_value_signal
+                                options=multi_options_signal
                                 on_change=on_multi_change
+                                multi=true
+                                placeholder="Select..."
                             />
                         </div>
                     }

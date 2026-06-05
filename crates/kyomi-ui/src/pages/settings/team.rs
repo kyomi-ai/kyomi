@@ -13,7 +13,7 @@ use crate::components::{
     Alert, AlertDescription, AlertTitle, AlertVariant, Badge, BadgeVariant, Button, ButtonSize,
     ButtonVariant, ConfirmDialog, EmptyState, Modal, ModalSize, Skeleton, INPUT_CLASS,
 };
-use crate::components::select::DynSelect;
+use crate::components::select::Select;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::team::*;
 use crate::types::{OwnershipTransferData, TeamInvitation, TeamMember};
@@ -548,7 +548,7 @@ fn TeamPageInner() -> impl IntoView {
                         <label class="block text-sm font-medium text-foreground mb-1">
                             "Role"
                         </label>
-                        <crate::components::StyledSelect
+                        <crate::components::StaticSelect
                             value=invite_role.get_untracked()
                             options=vec![
                                 ("user", "User - Full feature access"),
@@ -819,7 +819,7 @@ fn MemberRow(
                         <div class="flex items-center gap-2 sm:gap-3 pt-2 sm:pt-0 border-t sm:border-t-0 border-border flex-shrink-0">
                             // Role select
                             <div class="w-[100px] sm:w-[120px]">
-                                <crate::components::StyledSelect
+                                <crate::components::StaticSelect
                                     value=display_role.to_string()
                                     options=vec![("user", "User"), ("admin", "Admin")]
                                     on_change=move |val| {
@@ -1011,7 +1011,7 @@ fn TransferOwnershipModal(
                                 }.into_any()
                             } else {
                                 view! {
-                                    <DynSelect
+                                    <Select
                                         value=Signal::derive(move || transfer_selected_user_id.get())
                                         options=Signal::derive(move || {
                                             eligible_members.get().into_iter().map(|m| {

@@ -33,7 +33,7 @@ use serde_yaml::{Mapping, Value};
 use crate::components::chat::CopilotChat;
 use crate::components::input::INPUT_CLASS;
 use crate::components::modal::{Modal, ModalSize};
-use crate::components::select::DynSelect;
+use crate::components::select::Select;
 use crate::components::{Button, ButtonSize, ButtonVariant, RightPanel, SearchInput};
 use crate::components::Spinner;
 use crate::pages::sql_editor::catalog_tree::CatalogTree;
@@ -631,7 +631,7 @@ pub fn ChartBuilderModal(
         |_: ()| list_datasources(),
     );
 
-    // Derive DynSelect options: (slug, "name (type)")
+    // Derive Select options: (slug, "name (type)")
     let datasource_options = Signal::derive(move || {
         datasources_signal
             .get()
@@ -648,7 +648,7 @@ pub fn ChartBuilderModal(
 
     // ── Derived signals for Visual-tab inputs ───────────────────────────
     // Each getter reads only the slice of the AST it needs, so an edit to
-    // e.g. the title doesn't invalidate the chart-type <DynSelect>.
+    // e.g. the title doesn't invalidate the chart-type <Select>.
     // Use Memo::new (not Signal::derive) so subscribers are only notified
     // when the derived value actually changes — prevents cascading re-renders
     // that destroy DOM nodes and cause input focus loss on every keystroke.
@@ -988,7 +988,7 @@ pub fn ChartBuilderModal(
                                         <Suspense fallback=move || view! {
                                             <div class="text-sm text-muted-foreground">"Loading datasources..."</div>
                                         }>
-                                            <DynSelect
+                                            <Select
                                                 value=datasource_slug_sig.into()
                                                 options=datasource_options
                                                 on_change=move |slug: String| {
@@ -1276,7 +1276,7 @@ pub fn ChartBuilderModal(
                                             // Chart Type
                                             <div class="space-y-2">
                                                 <label class=LABEL_CLASS>"Chart Type"</label>
-                                                <DynSelect
+                                                <Select
                                                     value=chart_type_sig.into()
                                                     options=Signal::stored(
                                                         CHART_TYPES

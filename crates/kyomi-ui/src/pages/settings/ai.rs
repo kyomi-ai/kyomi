@@ -20,7 +20,7 @@ use phosphor_leptos::Icon;
 use crate::components::{
     Button, ButtonVariant, Card, CardContent, Label, Skeleton, INPUT_CLASS,
 };
-use crate::components::select::DynSelect;
+use crate::components::select::Select;
 use crate::components::toast::{toast_error, toast_success};
 use crate::pages::settings::ai_models::{label_for_model, provider_label};
 use crate::server_fns::ai::{
@@ -475,7 +475,7 @@ fn KyomiModelPanel(
             <div class="space-y-2">
                 <Label>"Default Chat Model"</Label>
                 <Suspense fallback=move || view! {
-                    <DynSelect
+                    <Select
                         value=Signal::derive(String::new)
                         options=Signal::derive(|| vec![
                             (String::new(), "Loading models\u{2026}".to_string()),
@@ -518,10 +518,11 @@ fn KyomiModelPanel(
                         ));
 
                         view! {
-                            <DynSelect
+                            <Select
                                 value=Signal::derive(move || model_choice.get())
                                 options=Signal::derive(move || model_opts.clone())
                                 disabled=Signal::derive(move || !is_admin)
+                                searchable=true
                                 on_change=move |val| {
                                     if !save_action.pending().get_untracked() {
                                         set_model_choice.set(val.clone());
@@ -564,7 +565,7 @@ fn KyomiModelPanel(
             <div class="space-y-2">
                 <Label>"Title Generation Model"</Label>
                 <Suspense fallback=move || view! {
-                    <DynSelect
+                    <Select
                         value=Signal::derive(String::new)
                         options=Signal::derive(|| vec![
                             (String::new(), "Loading models\u{2026}".to_string()),
@@ -590,10 +591,11 @@ fn KyomiModelPanel(
                         }
 
                         view! {
-                            <DynSelect
+                            <Select
                                 value=Signal::derive(move || selected_title_model.get())
                                 options=Signal::derive(move || title_opts.clone())
                                 disabled=Signal::derive(move || !is_admin)
+                                searchable=true
                                 on_change=move |val| {
                                     if !save_title_action.pending().get_untracked() {
                                         set_selected_title_model.set(val.clone());
@@ -838,7 +840,7 @@ fn ByokPanel(
                                 .map(|(id, label)| (id.to_string(), label.to_string()))
                                 .collect();
                             view! {
-                                <DynSelect
+                                <Select
                                     value=Signal::derive(move || provider.get())
                                     options=Signal::derive(move || provider_options.clone())
                                     disabled=Signal::derive(move || !is_admin)
@@ -913,7 +915,7 @@ fn ByokPanel(
                     <div class="space-y-2">
                         <Label>"Default Chat Model"</Label>
                         <Suspense fallback=move || view! {
-                            <DynSelect
+                            <Select
                                 value=Signal::derive(String::new)
                                 options=Signal::derive(|| vec![
                                     (String::new(), "Loading models\u{2026}".to_string()),
@@ -957,10 +959,11 @@ fn ByokPanel(
                                 ));
 
                                 view! {
-                                    <DynSelect
+                                    <Select
                                         value=Signal::derive(move || model_choice.get())
                                         options=Signal::derive(move || model_opts.clone())
                                         disabled=Signal::derive(move || !is_admin)
+                                        searchable=true
                                         on_change=move |val| set_model_choice.set(val)
                                         placeholder="Select a model..."
                                     />
@@ -988,7 +991,7 @@ fn ByokPanel(
                     <div class="space-y-2">
                         <Label>"Title Generation Model"</Label>
                         <Suspense fallback=move || view! {
-                            <DynSelect
+                            <Select
                                 value=Signal::derive(String::new)
                                 options=Signal::derive(|| vec![
                                     (String::new(), "Loading models\u{2026}".to_string()),
@@ -1014,10 +1017,11 @@ fn ByokPanel(
                                 }
 
                                 view! {
-                                    <DynSelect
+                                    <Select
                                         value=Signal::derive(move || selected_title_model.get())
                                         options=Signal::derive(move || title_opts.clone())
                                         disabled=Signal::derive(move || !is_admin)
+                                        searchable=true
                                         on_change=move |val| {
                                             if !save_title_model_action.pending().get_untracked() {
                                                 set_selected_title_model.set(val.clone());

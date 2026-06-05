@@ -16,7 +16,7 @@ use phosphor_leptos::{Icon, IconWeight};
 use crate::components::chat::CopilotChat;
 use crate::components::toast::{toast_error, toast_success};
 use crate::components::{
-    ButtonSize, ButtonVariant, DynSelect, Label, Modal, ModalSize, Spinner, Switch, ToggleButton,
+    ButtonSize, ButtonVariant, Select, Label, Modal, ModalSize, Spinner, Switch, ToggleButton,
     INPUT_CLASS,
 };
 use crate::types::WatchListItem;
@@ -657,7 +657,7 @@ pub fn WatchModal(
                                                         // Datasource selector
                                                         <div class="space-y-2">
                                                             <label class="text-sm font-medium leading-none text-xs">"Datasource (Optional)"</label>
-                                                            <DynSelect
+                                                            <Select
                                                                 value=Signal::derive(move || {
                                                                     queries.with(|qs| {
                                                                         qs.get(idx)
@@ -1070,7 +1070,7 @@ fn SlackNotificationsSection(
                                 });
                                 let mode_label = if mode.get() == "report" { "Reports" } else { "Alerts" };
                                 view! {
-                                    <DynSelect
+                                    <Select
                                         value=select_val
                                         options=Signal::derive(move || channel_opts_sig.get())
                                         on_change=move |val: String| {

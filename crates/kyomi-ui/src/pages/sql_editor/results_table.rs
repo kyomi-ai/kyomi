@@ -31,7 +31,7 @@ use phosphor_leptos::Icon;
 use wasm_bindgen::JsCast;
 
 use super::types::QueryResult;
-use crate::components::{Button, ButtonSize, ButtonVariant, StyledSelect};
+use crate::components::{Button, ButtonSize, ButtonVariant, StaticSelect};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -41,7 +41,7 @@ use crate::components::{Button, ButtonSize, ButtonVariant, StyledSelect};
 const MIN_COL_WIDTH: f64 = 50.0;
 const DEFAULT_COL_WIDTH: f64 = 150.0;
 
-/// Page size options as static string pairs for `StyledSelect`.
+/// Page size options as static string pairs for `StaticSelect`.
 const PAGE_SIZE_OPTIONS: [(&str, &str); 5] = [
     ("10", "10"), ("25", "25"), ("50", "50"), ("100", "100"), ("200", "200"),
 ];
@@ -566,7 +566,7 @@ fn PaginationControls(
             <div class="flex items-center gap-1 sm:gap-2 text-xs whitespace-nowrap text-muted-foreground">
                 <span class="hidden sm:inline">"Rows per page:"</span>
                 <div class="w-20">
-                    <StyledSelect
+                    <StaticSelect
                         value=page_size.to_string()
                         options=PAGE_SIZE_OPTIONS.to_vec()
                         on_change=move |val: String| {

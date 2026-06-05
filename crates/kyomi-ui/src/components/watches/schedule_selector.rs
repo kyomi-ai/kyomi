@@ -9,7 +9,7 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-use crate::components::{DynSelect, Label, Switch, INPUT_CLASS};
+use crate::components::{Select, Label, Switch, INPUT_CLASS};
 use crate::utils::cron::{describe_cron, get_tz_offset_minutes, local_hour_to_utc, utc_to_local_hour};
 
 /// Parse a cron field value that may contain commas and/or ranges.
@@ -862,7 +862,7 @@ pub fn ScheduleSelector(
 }
 
 // ---------------------------------------------------------------------------
-// Small sub-components for Select dropdowns (using DynSelect)
+// Small sub-components for Select dropdowns (using Select)
 // ---------------------------------------------------------------------------
 
 /// Schedule type dropdown.
@@ -881,7 +881,7 @@ fn ScheduleTypeSelect(
     });
 
     view! {
-        <DynSelect
+        <Select
             value=value
             options=options
             on_change=move |v| on_change.run(v)
@@ -904,7 +904,7 @@ fn Hour12Select(
 
     view! {
         <div class="w-[70px]">
-            <DynSelect
+            <Select
                 value=value
                 options=options
                 on_change=move |v| on_change.run(v)
@@ -941,7 +941,7 @@ fn MinuteSelect(
 
     view! {
         <div class=width>
-            <DynSelect
+            <Select
                 value=value
                 options=options
                 on_change=move |v| on_change.run(v)
@@ -965,7 +965,7 @@ fn AmPmSelect(
 
     view! {
         <div class="w-[70px]">
-            <DynSelect
+            <Select
                 value=value
                 options=options
                 on_change=move |v| on_change.run(v)
@@ -991,7 +991,7 @@ fn DayOfMonthSelect(
 
     view! {
         <div class="w-[100px]">
-            <DynSelect
+            <Select
                 value=value
                 options=options
                 on_change=move |v| on_change.run(v)

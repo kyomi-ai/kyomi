@@ -129,6 +129,7 @@ kyomi-agent = { path = "crates/kyomi-agent" }
 kyomi-chart-theme = { path = "crates/kyomi-chart-theme" }
 kyomi-knowledge = { path = "crates/kyomi-knowledge" }
 kyomi-ui = { path = "crates/kyomi-ui" }
+kyomi-ui-components = { path = "crates/kyomi-ui-components" }
 kyomi-server = { path = "apps/server" }
 kyomi-test-harness = { path = "crates/kyomi-test-harness" }
 kyomi-types = { path = "crates/kyomi-types" }

@@ -59,6 +59,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 kyomi-types = { workspace = true }
 
+# Shared UI component primitives (Select, Button, Card, etc.) — no server deps.
+kyomi-ui-components = { workspace = true }
+
 # Icons — Phosphor icon set. Uses the Light weight for inactive nav items
 # and the Fill weight for active nav items (see NavItem in components/layout.rs).
 # DESIGN.md convention: Light for form/utility icons, Regular for buttons,

@@ -7,7 +7,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::{SearchInput, StyledSelect};
+use crate::components::{SearchInput, StaticSelect};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Search + Sort bar
@@ -127,7 +127,7 @@ pub fn SearchSortBar(
                     class="flex-1"
                 />
                 <div class="w-40">
-                    <StyledSelect
+                    <StaticSelect
                         value=sort_signal.get_untracked()
                         options=sort_options
                         on_change=move |val: String| set_sort_signal.set(val)
