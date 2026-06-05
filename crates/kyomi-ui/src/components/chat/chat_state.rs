@@ -41,7 +41,7 @@ impl ChatState {
     fn valid_transitions(self) -> &'static [ChatState] {
         match self {
             ChatState::Idle => &[ChatState::Sending],
-            ChatState::Sending => &[ChatState::Streaming, ChatState::Error, ChatState::Idle],
+            ChatState::Sending => &[ChatState::Streaming, ChatState::Cancelling, ChatState::Error, ChatState::Idle],
             ChatState::Streaming => &[ChatState::Idle, ChatState::Cancelling, ChatState::Error],
             ChatState::Cancelling => &[ChatState::Cancelled, ChatState::Idle, ChatState::Error],
             ChatState::Cancelled => &[ChatState::Idle],
@@ -95,7 +95,7 @@ pub struct ChatStateMachine {
     pub is_streaming: Signal<bool>,
     /// `true` when `state` is `Sending | Streaming | Cancelling` — show stop button.
     pub show_stop_button: Signal<bool>,
-    /// `true` when `state == Streaming` AND `active_message_id.is_some()`.
+    /// `true` when `state` is `Sending` or `Streaming`.
     pub can_cancel: Signal<bool>,
     /// `true` when `state == Cancelling`.
     pub is_cancelling: Signal<bool>,
@@ -128,7 +128,7 @@ impl ChatStateMachine {
             )
         });
         let can_cancel = Signal::derive(move || {
-            state.get() == ChatState::Streaming && active_message_id.get().is_some()
+            matches!(state.get(), ChatState::Streaming | ChatState::Sending)
         });
         let is_cancelling = Signal::derive(move || state.get() == ChatState::Cancelling);
         let has_error = Signal::derive(move || state.get() == ChatState::Error);
@@ -219,18 +219,13 @@ impl ChatStateMachine {
 
     /// User requested cancellation. Returns `true` if the cancel was accepted.
     ///
-    /// Can only cancel when streaming AND we have a message_id (from first
-    /// thinking event). Matches React's `requestCancel()`.
+    /// Cancellation is accepted from `Streaming` (with or without message_id)
+    /// and from `Sending` (session_id is sufficient for the backend to cancel).
+    /// Matches React's `requestCancel()`.
     pub fn request_cancel(&self) -> bool {
         let current = self.state.get_untracked();
-        let has_message_id = self.active_message_id.get_untracked().is_some();
 
-        // Can only cancel when streaming (need message_id to send cancel to backend)
-        if current != ChatState::Streaming {
-            return false;
-        }
-
-        if !has_message_id {
+        if current != ChatState::Streaming && current != ChatState::Sending {
             return false;
         }
 
