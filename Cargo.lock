@@ -5996,6 +5996,7 @@ dependencies = [
  "kyomi-datasource-server",
  "kyomi-embed",
  "kyomi-knowledge",
+ "kyomi-types",
  "pgvector",
  "rand 0.9.4",
  "redis",
