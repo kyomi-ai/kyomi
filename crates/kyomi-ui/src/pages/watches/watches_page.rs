@@ -144,12 +144,18 @@ fn WatchCard(
     // Switch needs Signal<bool>, not plain bool.
     let enabled_signal = Signal::derive(move || watch_enabled);
 
+    let card_class = if watch_enabled {
+        "group hover:border-primary/30 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200"
+    } else {
+        "opacity-70 transition-all duration-200"
+    };
+
     view! {
-        <Card>
+        <Card class=card_class>
             <CardHeader class="pb-2".to_string()>
                 <div class="flex items-start justify-between">
                     <div class="flex-1 min-w-0">
-                        <CardTitle class="text-base truncate flex items-center gap-2".to_string()>
+                        <CardTitle class="font-display text-base truncate flex items-center gap-2 group-hover:text-primary transition-colors".to_string()>
                             {if watch_mode == "report" {
                                 view! { <Icon icon=phosphor_leptos::CHART_BAR attr:class="h-4 w-4 shrink-0 text-muted-foreground" /> }.into_any()
                             } else {
@@ -217,38 +223,39 @@ fn WatchCard(
                 // Actions
                 <div class="flex items-center gap-2 pt-2 border-t border-border">
                     <Button
-                        variant=ButtonVariant::GhostMuted
-                        size=ButtonSize::IconSm
-                        on:click=move |_| on_run.run(wid_run.clone())
-                        disabled=MaybeProp::derive(move || Some(run_pending.get()))
-                        aria_label="Run now"
+                        variant=ButtonVariant::Secondary
+                        size=ButtonSize::Sm
+                        on:click={
+                            let w = watch_for_edit.clone();
+                            move |_| on_edit.run(w.clone())
+                        }
                     >
-                        <Icon icon=phosphor_leptos::PLAY attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
+                        "Edit"
                     </Button>
                     {has_last_run.then(|| {
                         let w = watch_for_log.clone();
                         view! {
                             <Button
-                                variant=ButtonVariant::GhostMuted
-                                size=ButtonSize::IconSm
+                                variant=ButtonVariant::Secondary
+                                size=ButtonSize::Sm
                                 on:click=move |_| on_view_log.run(w.clone())
-                                aria_label="View execution log"
                             >
-                                <Icon icon=phosphor_leptos::FILE_TEXT attr:class="h-4 w-4" />
+                                <Icon icon=phosphor_leptos::FILE_TEXT size="14px" />
+                                "Logs"
                             </Button>
                         }
                     })}
                     <Button
-                        variant=ButtonVariant::GhostMuted
-                        size=ButtonSize::IconSm
-                        on:click={
-                            let w = watch_for_edit.clone();
-                            move |_| on_edit.run(w.clone())
-                        }
-                        aria_label="Edit watch"
+                        variant=ButtonVariant::Secondary
+                        size=ButtonSize::Sm
+                        on:click=move |_| on_run.run(wid_run.clone())
+                        disabled=MaybeProp::derive(move || Some(run_pending.get()))
                     >
-                        <Icon icon=phosphor_leptos::GEAR attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::PLAY size="14px" />
+                        "Run"
                     </Button>
+                    <div class="flex-1" />
                     <Button
                         variant=ButtonVariant::GhostDestructive
                         size=ButtonSize::IconSm
@@ -258,7 +265,7 @@ fn WatchCard(
                         }
                         aria_label="Delete watch"
                     >
-                        <Icon icon=phosphor_leptos::TRASH attr:class="h-4 w-4" />
+                        <Icon icon=phosphor_leptos::TRASH size="14px" />
                     </Button>
                 </div>
             </CardContent>
