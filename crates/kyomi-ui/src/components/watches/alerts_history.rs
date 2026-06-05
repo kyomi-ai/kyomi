@@ -21,7 +21,7 @@ use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
 use crate::components::popover::{Placement, Popover};
 use crate::components::{
     AlertsListSkeleton, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Checkbox,
-    DynSelect, EmptyState, Label, Spinner, Switch,
+    Select, EmptyState, Label, Spinner, Switch,
 };
 use crate::query_cache::{use_query, QueryCache};
 use crate::server_fns::context::UserContext;
@@ -705,7 +705,7 @@ pub fn AlertsHistory(
                                     <div class="flex items-center gap-2 min-w-0 flex-1 sm:flex-none">
                                         <Label class="text-muted-foreground hidden sm:inline">"Filter:"</Label>
                                         <div class="w-full sm:w-[200px]">
-                                            <DynSelect
+                                            <Select
                                                 value=Signal::derive(move || filter_value.get())
                                                 options=Signal::derive(move || watch_options.get())
                                                 on_change=move |val: String| {

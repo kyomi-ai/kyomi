@@ -6395,6 +6395,7 @@ dependencies = [
  "kyomi-knowledge",
  "kyomi-slack",
  "kyomi-types",
+ "kyomi-ui-components",
  "leptos",
  "leptos_axum",
  "leptos_meta",

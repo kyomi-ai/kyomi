@@ -9,9 +9,9 @@ use leptos::prelude::*;
 
 use crate::components::{
     ActionStatus, Card, CardContent, CardDescription, CardHeader, CardTitle, Label,
-    SettingsPageSkeleton, StyledSelect, INPUT_CLASS,
+    SettingsPageSkeleton, StaticSelect, INPUT_CLASS,
 };
-use crate::components::select::DynSelect;
+use crate::components::select::Select;
 use crate::pages::settings::push_notifications::PushNotificationsCard;
 use crate::server_fns::context::UserContext;
 use crate::server_fns::profile::*;
@@ -337,7 +337,7 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
                     // Landing Page
                     <div class="space-y-2">
                         <Label>"Landing Page"</Label>
-                        <StyledSelect
+                        <StaticSelect
                             value=landing.get_untracked()
                             options=landing_options
                             on_change=move |val| {
@@ -350,7 +350,7 @@ fn PreferencesCard(data: ProfileData, dashboards: Vec<DashboardSummary>) -> impl
                     // Default Dashboard
                     <div class="space-y-2">
                         <Label>"My Default Dashboard"</Label>
-                        <DynSelect
+                        <Select
                             value=Signal::derive(move || default_dash.get())
                             options=Signal::derive(move || {
                                 let mut opts: Vec<(String, String)> = vec![
@@ -503,7 +503,7 @@ fn QueryRetentionCard(data: ProfileData) -> impl IntoView {
             <CardContent>
                 <div class="space-y-2">
                     <Label>"Retention Period"</Label>
-                    <StyledSelect
+                    <StaticSelect
                         value=initial_value
                         options=options
                         on_change=move |val| {

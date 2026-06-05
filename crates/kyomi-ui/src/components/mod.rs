@@ -1,67 +1,75 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! Shared UI components for the Leptos frontend.
+//! UI components for the Leptos frontend.
 //!
-//! These components match the React shadcn/ui components in
-//! `apps/frontend/src/components/ui/` exactly. Classes are copied
-//! from the React source, not approximated.
+//! Shared primitives (Select, Button, Card, etc.) live in `kyomi-ui-components`
+//! and are re-exported here. App-specific components (chat, dashboard, layout,
+//! etc.) live directly in this crate.
 //!
 //! Design system: `DESIGN.md`
 
-pub mod action_status;
-pub mod alert;
-pub mod badge;
-pub mod button;
-pub mod card;
+// ── App-specific modules (not in kyomi-ui-components) ──────────────────────
 pub mod chat;
-pub mod checkbox;
-pub mod confirm_dialog;
 pub mod dashboard;
-pub mod empty_state;
-pub mod feedback_modal;
-pub mod input;
 pub mod documents;
-pub mod label;
+pub mod feedback_modal;
 pub mod layout;
-pub mod modal;
-pub mod navigation_progress;
-pub mod popover;
 pub mod right_panel;
-pub mod search_input;
-pub mod select;
 pub mod skeleton;
-pub mod spinner;
-pub mod status_badge;
-pub mod switch;
-pub mod theme;
-pub mod toast;
-pub mod tooltip;
 pub mod watches;
 
-// Re-export commonly used components
-pub use action_status::ActionStatus;
-pub use alert::{Alert, AlertDescription, AlertTitle, AlertVariant};
-pub use badge::{Badge, BadgeVariant};
-pub use button::{Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton};
-pub use card::{Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle};
-pub use checkbox::Checkbox;
-pub use confirm_dialog::ConfirmDialog;
-pub use empty_state::{EmptyState, EmptyStateVariant};
+// ── Re-export all shared primitives from kyomi-ui-components ───────────────
+pub use kyomi_ui_components::components::action_status;
+pub use kyomi_ui_components::components::alert;
+pub use kyomi_ui_components::components::badge;
+pub use kyomi_ui_components::components::button;
+pub use kyomi_ui_components::components::card;
+pub use kyomi_ui_components::components::checkbox;
+pub use kyomi_ui_components::components::confirm_dialog;
+pub use kyomi_ui_components::components::empty_state;
+pub use kyomi_ui_components::components::input;
+pub use kyomi_ui_components::components::label;
+pub use kyomi_ui_components::components::modal;
+pub use kyomi_ui_components::components::navigation_progress;
+pub use kyomi_ui_components::components::popover;
+pub use kyomi_ui_components::components::search_input;
+pub use kyomi_ui_components::components::select;
+pub use kyomi_ui_components::components::spinner;
+pub use kyomi_ui_components::components::status_badge;
+pub use kyomi_ui_components::components::switch;
+pub use kyomi_ui_components::components::theme;
+pub use kyomi_ui_components::components::toast;
+pub use kyomi_ui_components::components::tooltip;
+
+// ── Re-export commonly used types ──────────────────────────────────────────
+pub use kyomi_ui_components::components::{
+    ActionStatus,
+    Alert, AlertDescription, AlertTitle, AlertVariant,
+    Badge, BadgeVariant,
+    Button, ButtonLink, ButtonSize, ButtonVariant, ToggleButton,
+    Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle,
+    Checkbox,
+    ConfirmDialog,
+    EmptyState, EmptyStateVariant,
+    INPUT_CLASS,
+    Label,
+    Modal, ModalSize,
+    NavigationProgress,
+    SearchInput,
+    Select, StaticSelect,
+    Skeleton,
+    Spinner,
+    StatusBadge, StatusBadgeVariant,
+    Switch,
+    ThemeProvider,
+    Tooltip,
+};
+
+// App-specific re-exports
 pub use feedback_modal::FeedbackModal;
-pub use input::INPUT_CLASS;
-pub use label::Label;
 pub use layout::Layout;
-pub use modal::{Modal, ModalSize};
-pub use navigation_progress::NavigationProgress;
 pub use right_panel::RightPanel;
-pub use search_input::SearchInput;
-pub use select::{DynSelect, StyledSelect};
 pub use skeleton::{
     AlertsListSkeleton, DetailPageSkeleton, ListPageSkeleton, ModalListSkeleton,
-    SettingsPageSkeleton, Skeleton,
+    SettingsPageSkeleton,
 };
-pub use spinner::Spinner;
-pub use status_badge::{StatusBadge, StatusBadgeVariant};
-pub use switch::Switch;
-pub use theme::ThemeProvider;
-pub use tooltip::Tooltip;

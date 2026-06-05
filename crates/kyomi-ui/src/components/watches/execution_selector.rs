@@ -8,7 +8,7 @@
 
 use leptos::prelude::*;
 
-use crate::components::DynSelect;
+use crate::components::Select;
 use crate::types::WatchExecutionItem;
 
 // ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ pub fn ExecutionSelector(
     let first_id = executions[0].id;
 
     // Build a display string per execution for the select dropdown.
-    // DynSelect uses (value, label) pairs of Strings.
+    // Select uses (value, label) pairs of Strings.
     let options: Vec<(String, String)> = executions
         .iter()
         .enumerate()
@@ -147,7 +147,7 @@ pub fn ExecutionSelector(
         <div class="flex items-center gap-2">
             <span class="text-sm text-muted-foreground">"Execution run:"</span>
             <div class="w-[280px]">
-                <DynSelect
+                <Select
                     value=current_value
                     options=options_signal
                     on_change=move |v: String| {

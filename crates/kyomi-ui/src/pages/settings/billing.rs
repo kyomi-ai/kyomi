@@ -1043,7 +1043,7 @@ fn SeatCapCard(
 const AI_BUNDLE_PRICE: f64 = 10.0;
 
 /// Predefined quantity options for bundle purchases.
-/// Quantity options for bundle purchase StyledSelect.
+/// Quantity options for bundle purchase StaticSelect.
 const BUNDLE_QUANTITY_OPTIONS: [(&str, &str); 5] = [
     ("1", "1"), ("2", "2"), ("3", "3"), ("5", "5"), ("10", "10"),
 ];
@@ -1086,7 +1086,7 @@ fn AiCreditsCard(
                     <div class="flex items-center gap-3">
                         <label class="text-sm text-muted-foreground">"Quantity"</label>
                         <div class="w-20">
-                            <crate::components::StyledSelect
+                            <crate::components::StaticSelect
                                 value="1".to_string()
                                 options=BUNDLE_QUANTITY_OPTIONS.to_vec()
                                 on_change=move |val: String| {
@@ -1208,7 +1208,7 @@ fn AnalyticsCard(
                     <div class="flex items-center gap-3">
                         <label class="text-sm text-muted-foreground">"Quantity"</label>
                         <div class="w-20">
-                            <crate::components::StyledSelect
+                            <crate::components::StaticSelect
                                 value="1".to_string()
                                 options=BUNDLE_QUANTITY_OPTIONS.to_vec()
                                 on_change=move |val: String| {

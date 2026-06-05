@@ -11,7 +11,7 @@
 //!   component simply renders nothing when no datasources are accessible.
 
 use leptos::prelude::*;
-use crate::components::{DynSelect, Spinner};
+use crate::components::{Select, Spinner};
 use crate::query_cache::use_query;
 use crate::server_fns::datasources::{list_datasources, DatasourceInfo};
 
@@ -136,7 +136,7 @@ pub fn DatasourceSelector() -> impl IntoView {
 
         <Show when=move || !is_loading.get() && !has_error.get() && !accessible_datasources.get().is_empty()>
             <div class="w-[140px] sm:w-[240px]">
-                <DynSelect
+                <Select
                     value=Signal::derive(move || selection.slug.get().unwrap_or_default())
                     options=Signal::derive(move || {
                         accessible_datasources

@@ -39,7 +39,7 @@ pub use label::Label;
 pub use modal::{Modal, ModalSize};
 pub use navigation_progress::NavigationProgress;
 pub use search_input::SearchInput;
-pub use select::{DynSelect, StyledSelect};
+pub use select::{Select, StaticSelect};
 pub use skeleton::Skeleton;
 pub use spinner::Spinner;
 pub use status_badge::{StatusBadge, StatusBadgeVariant};

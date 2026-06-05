@@ -15,7 +15,7 @@ use crate::components::{
 use crate::components::toast::toast_error;
 #[cfg(target_arch = "wasm32")]
 use crate::components::toast::toast_success;
-use crate::components::DynSelect;
+use crate::components::Select;
 use crate::pages::connect_setup::CONNECT_TYPES;
 use crate::pages::settings::connect_deployment::{
     CopyButton, DeploymentCommands, DeploymentTabStrip, build_deployment_commands, default_port,
@@ -975,7 +975,7 @@ pub fn DatasourceModal(
 
     // ── BigQuery project list (fetched after OAuth connects) ─────────────
     // Populated when modal_oauth_connected becomes true in kyomi_oauth or
-    // enterprise_oauth mode.  Used to drive DynSelect dropdowns for
+    // enterprise_oauth mode.  Used to drive Select dropdowns for
     // billing_project and default_project instead of free-text inputs.
     let (bq_projects, set_bq_projects) = signal::<Vec<(String, String)>>(vec![]);
     let (bq_projects_loading, set_bq_projects_loading) = signal(false);
@@ -2476,7 +2476,7 @@ pub fn DatasourceModal(
                                     <Show when=move || is_create_mode.get()>
                                         <div>
                                             <label class="block text-sm font-medium mb-1">"Type"</label>
-                                            <DynSelect
+                                            <Select
                                                 value=Signal::derive(move || ds_type.get())
                                                 options=Signal::stored(PROVIDER_TYPES.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect::<Vec<_>>())
                                                 on_change=move |val: String| {
@@ -2965,7 +2965,7 @@ fn ConnectCreateForm(
             // on the post-create view.
             <div>
                 <label class="block text-sm font-medium mb-1">"Type"</label>
-                <DynSelect
+                <Select
                     value=Signal::derive(move || ds_type.get())
                     options=Signal::stored(
                         CONNECT_TYPES
@@ -3293,12 +3293,12 @@ fn ModalOAuthStatusPanel(
 // BigQuery Auth Mode Section
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A single BigQuery project field that renders a [`DynSelect`] when projects
+/// A single BigQuery project field that renders a [`Select`] when projects
 /// are loading or available, and falls back to a plain text input otherwise.
 ///
 /// Using `<Show>` here (instead of `{move || ...}` branching) keeps a stable
 /// component tree and avoids the disposal panic that occurs when an `Effect`
-/// inside `DynSelect` fires after the surrounding closure's reactive scope is
+/// inside `Select` fires after the surrounding closure's reactive scope is
 /// torn down during a branch swap.
 #[component]
 fn BqProjectField(
@@ -3323,7 +3323,7 @@ fn BqProjectField(
                     />
                 }
             >
-                <DynSelect
+                <Select
                     value=Signal::derive(move || value.get())
                     options=Signal::derive(move || bq_projects.get())
                     on_change=move |val| set_value.set(val)
@@ -3375,7 +3375,7 @@ fn BigQueryAuthModeSection(
     /// True in create mode — OAuth status panel is hidden in create mode.
     is_create_mode: Signal<bool>,
     /// GCP project list fetched after OAuth connects.  Empty until OAuth is
-    /// connected; drives DynSelect dropdowns for billing/default project.
+    /// connected; drives Select dropdowns for billing/default project.
     bq_projects: ReadSignal<Vec<(String, String)>>,
     /// True while the project list is being fetched.
     bq_projects_loading: ReadSignal<bool>,
@@ -3487,7 +3487,7 @@ fn BigQueryAuthModeSection(
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
             <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <DynSelect
+            <Select
                 value=Signal::derive(move || bq_auth_mode.get())
                 options=Signal::stored(vec![
                     ("kyomi_oauth".to_string(), "Kyomi OAuth (Recommended)".to_string()),
@@ -3630,7 +3630,7 @@ fn BigQueryAuthModeSection(
                         </p>
                     </Show>
                     // Billing / default project fields — same conditional
-                    // DynSelect pattern as kyomi_oauth mode.
+                    // Select pattern as kyomi_oauth mode.
                     <Show when=move || !oauth_connected.get()>
                         <p class="text-xs text-muted-foreground">
                             "After connecting, you can set the billing and default project."
@@ -3802,7 +3802,7 @@ fn SnowflakeAuthModeSection(
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
             <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <DynSelect
+            <Select
                 value=Signal::derive(move || sf_auth_mode.get())
                 options=Signal::stored(vec![
                     ("password".to_string(), "Password".to_string()),
@@ -3961,7 +3961,7 @@ fn DatabricksAuthModeSection(
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
             <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <DynSelect
+            <Select
                 value=Signal::derive(move || db_auth_mode.get())
                 options=Signal::stored(vec![
                     ("token".to_string(), "Personal Access Token".to_string()),
@@ -4121,7 +4121,7 @@ fn SynapseAuthModeSection(
     view! {
         <div class="space-y-2 pb-4 border-b border-border">
             <label class="block text-sm font-medium">"Authentication Mode"</label>
-            <DynSelect
+            <Select
                 value=Signal::derive(move || synapse_auth_mode.get())
                 options=Signal::stored(vec![
                     ("sql".to_string(), "SQL Authentication".to_string()),
@@ -4317,7 +4317,7 @@ fn ProviderConnectionFields(signals: ConnectionFieldsSignals) -> impl IntoView {
                         </div>
                         <div>
                             <label class="block text-sm font-medium mb-1">"SSL Mode"</label>
-                            <DynSelect
+                            <Select
                                 value=Signal::derive(move || cfg_ssl_mode.get())
                                 options=Signal::stored(vec![
                                     ("disable".to_string(), "Disable".to_string()),
@@ -4933,7 +4933,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 </label>
                                 {if succeeded && !discovered_databases.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_database.get())
                                             options=Signal::derive(move || {
                                                 discovered_databases.get().into_iter()
@@ -4958,7 +4958,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 <label class="block text-sm font-medium mb-1">"Default Schema"</label>
                                 {if succeeded && !discovered_schemas.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_schema.get())
                                             options=Signal::derive(move || {
                                                 discovered_schemas.get().into_iter()
@@ -4992,7 +4992,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                             </label>
                             {if succeeded && !discovered_databases.get().is_empty() {
                                 view! {
-                                    <DynSelect
+                                    <Select
                                         value=Signal::derive(move || cfg_database.get())
                                         options=Signal::derive(move || {
                                             discovered_databases.get().into_iter()
@@ -5022,7 +5022,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 <label class="block text-sm font-medium mb-1">"Warehouse"</label>
                                 {if succeeded && !discovered_warehouses.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_warehouse.get())
                                             options=Signal::derive(move || {
                                                 discovered_warehouses.get().into_iter()
@@ -5048,7 +5048,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 <label class="block text-sm font-medium mb-1">"Default Database"</label>
                                 {if succeeded && !discovered_databases.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_database.get())
                                             options=Signal::derive(move || {
                                                 discovered_databases.get().into_iter()
@@ -5097,7 +5097,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 <label class="block text-sm font-medium mb-1">"Catalog"</label>
                                 {if succeeded && !discovered_catalogs.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_catalog.get())
                                             options=Signal::derive(move || {
                                                 discovered_catalogs.get().into_iter()
@@ -5138,7 +5138,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 </label>
                                 {if succeeded && !discovered_databases.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_database.get())
                                             options=Signal::derive(move || {
                                                 discovered_databases.get().into_iter()
@@ -5163,7 +5163,7 @@ fn DiscoveryFields(signals: DiscoveryFieldsSignals) -> impl IntoView {
                                 <label class="block text-sm font-medium mb-1">"Default Schema"</label>
                                 {if succeeded && !discovered_schemas.get().is_empty() {
                                     view! {
-                                        <DynSelect
+                                        <Select
                                             value=Signal::derive(move || cfg_schema.get())
                                             options=Signal::derive(move || {
                                                 discovered_schemas.get().into_iter()

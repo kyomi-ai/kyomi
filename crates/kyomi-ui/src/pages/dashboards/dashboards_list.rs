@@ -15,7 +15,7 @@
 //!    primary action button.
 //! 2. Toolbar row inside `bg-background px-4 md:px-6 pb-3 flex-shrink-0`
 //!    containing a full-width `<SearchInput class="flex-1" />` plus an
-//!    optional sort `StyledSelect` (Dashboards/Knowledge) or pinned-toggle
+//!    optional sort `StaticSelect` (Dashboards/Knowledge) or pinned-toggle
 //!    (Chats).
 //! 3. Optional chip row using identical button classes:
 //!    `px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 bg-primary text-primary-foreground`

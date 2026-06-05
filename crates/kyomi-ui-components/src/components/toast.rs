@@ -2,7 +2,7 @@
 
 //! Toast notification system.
 //!
-//! Provides global toast notifications via Leptos context.
+//! Provides global toast notifications via a thread-local singleton.
 //! Usage:
 //! ```ignore
 //! // At app root:
@@ -32,16 +32,22 @@ pub struct Toast {
 }
 
 /// Signal holding the current list of toasts.
-/// Provided via Leptos context at the app root.
 #[derive(Clone, Copy)]
 struct ToastState {
     toasts: RwSignal<Vec<Toast>>,
     next_id: RwSignal<u64>,
 }
 
+// Thread-local storage for ToastState so toast functions work inside
+// spawn_local async blocks where the reactive owner (and thus use_context)
+// is unavailable after .await points.
+thread_local! {
+    static GLOBAL_TOAST_STATE: std::cell::Cell<Option<ToastState>> = const { std::cell::Cell::new(None) };
+}
+
 /// Add a toast and auto-dismiss after a delay.
 fn add_toast(variant: ToastVariant, message: impl Into<String>) {
-    let Some(state) = use_context::<ToastState>() else {
+    let Some(state) = GLOBAL_TOAST_STATE.get() else {
         return;
     };
 
@@ -68,7 +74,7 @@ fn add_toast(variant: ToastVariant, message: impl Into<String>) {
         move || {
             state
                 .toasts
-                .update(|toasts| toasts.retain(|t| t.id != id));
+                .try_update(|toasts| toasts.retain(|t| t.id != id));
         },
         std::time::Duration::from_millis(dismiss_ms),
     );
@@ -96,7 +102,7 @@ pub fn ToastProvider(children: Children) -> impl IntoView {
         toasts: RwSignal::new(Vec::new()),
         next_id: RwSignal::new(0),
     };
-    provide_context(state);
+    GLOBAL_TOAST_STATE.set(Some(state));
 
     view! {
         {children()}

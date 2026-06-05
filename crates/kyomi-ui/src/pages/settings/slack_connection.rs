@@ -263,7 +263,7 @@ fn SlackConnectionInner(status: SlackStatus) -> impl IntoView {
                                                         let channel_list_for_cb = channel_list.clone();
                                                         view! {
                                                             <div class="space-y-2">
-                                                                <crate::components::select::DynSelect
+                                                                <crate::components::select::Select
                                                                     value=Signal::derive(move || current_channel_id.clone())
                                                                     options=Signal::derive(move || channel_opts.clone())
                                                                     disabled=Signal::derive(move || saving_channel.get())
