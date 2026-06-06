@@ -1271,6 +1271,7 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
  * text clears the kode drag handle (20px icon at left: 8px). Only
  * applies in the WYSIWYG editor where drag handles are visible. */
 .dashboard-wysiwyg .chartml-resize-container .chart-card > div:first-child {
+  position: relative;
   opacity: 1;
   pointer-events: auto;
   padding-left: 32px;
