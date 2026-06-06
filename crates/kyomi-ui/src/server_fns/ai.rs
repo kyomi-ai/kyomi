@@ -661,6 +661,8 @@ fn parse_openai_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
         id: String,
         #[serde(default)]
         created: Option<i64>,
+        #[serde(default)]
+        context_length: Option<u64>,
     }
 
     let parsed: Resp = serde_json::from_str(body)?;
@@ -674,6 +676,7 @@ fn parse_openai_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
                 AiModelInfo {
                     label: e.id.clone(),
                     id: e.id,
+                    context_length: e.context_length,
                     ..Default::default()
                 },
             )

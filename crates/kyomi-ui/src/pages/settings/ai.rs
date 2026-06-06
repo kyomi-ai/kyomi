@@ -177,6 +177,16 @@ fn SaasView(
     let initial_is_byok = cfg.provider != KYOMI_PROVIDER;
     let (byok_selected, set_byok_selected) = signal(initial_is_byok);
 
+    let switch_to_kyomi = Action::new(move |_: &()| async move {
+        match update_workspace_ai_config("kyomi".to_string(), None, None, None).await {
+            Ok(_) => {
+                set_byok_selected.set(false);
+                refresh.try_run(());
+            }
+            Err(e) => toast_error(format!("Failed to switch: {e}")),
+        }
+    });
+
     let cfg_for_banner = cfg.clone();
     let cfg_for_kyomi = cfg.clone();
     let cfg_for_byok = cfg;
@@ -188,6 +198,7 @@ fn SaasView(
             <ModeSelector
                 byok_selected=byok_selected
                 set_byok_selected=set_byok_selected
+                switch_to_kyomi=switch_to_kyomi
                 is_admin=is_admin
             />
 
@@ -305,6 +316,7 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
 fn ModeSelector(
     byok_selected: ReadSignal<bool>,
     set_byok_selected: WriteSignal<bool>,
+    switch_to_kyomi: Action<(), ()>,
     is_admin: bool,
 ) -> impl IntoView {
     view! {
@@ -315,7 +327,7 @@ fn ModeSelector(
                     body="Pay Kyomi per request. Use our infrastructure, no setup."
                     selected=Signal::derive(move || !byok_selected.get())
                     is_admin=is_admin
-                    on_select=Callback::new(move |_| set_byok_selected.set(false))
+                    on_select=Callback::new(move |_| { switch_to_kyomi.dispatch(()); })
                 />
                 <ModeCard
                     title="Your own API key"

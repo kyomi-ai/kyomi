@@ -15,9 +15,8 @@
 //! 3. Call LLM with conversation history and tool definitions
 //! 4. If no tool calls: validate ChartML, return response
 //! 5. If tool calls: execute each tool, add results, continue loop
-//! 6. If a "final" tool is called and there is response content, return
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
@@ -25,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::provider::LLMProvider;
-use crate::tools::{FINAL_TOOL_NAMES, ToolContext, ToolFilter, ToolRegistry};
+use crate::tools::{ToolContext, ToolFilter, ToolRegistry};
 use crate::types::{Message, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -56,8 +55,6 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     /// Maximum tokens to generate per LLM call.
     pub max_tokens: u32,
-    /// Tool names that signal the loop should stop after execution.
-    pub final_tool_names: HashSet<String>,
     /// Whether to log full LLM context (for debugging).
     pub log_context: bool,
     /// Filter controlling which tools are exposed to the LLM.
@@ -76,7 +73,6 @@ impl Default for AgentConfig {
             max_iterations: 25,
             temperature: None,
             max_tokens: 4096,
-            final_tool_names: FINAL_TOOL_NAMES.iter().map(|s| s.to_string()).collect(),
             log_context: false,
             // Default: chat context — exclude copilot-only and MCP-only tools.
             // This is the safe default matching the Python backend's behaviour.
@@ -386,7 +382,6 @@ impl CustomAgent {
             }
 
             // Execute each tool call.
-            let mut has_final_tool = false;
             for tool_call in &tool_calls {
                 let result = self.execute_tool(tool_call).await;
                 self.state.messages.push(Message::tool_result(
@@ -394,10 +389,6 @@ impl CustomAgent {
                     &tool_call.name,
                     &result,
                 ));
-
-                if self.config.final_tool_names.contains(&tool_call.name) {
-                    has_final_tool = true;
-                }
             }
 
             // Check cancellation after tool execution.
@@ -429,33 +420,6 @@ impl CustomAgent {
                 return Ok(response.content);
             }
 
-            // If a final tool was called, try to extract final content.
-            if has_final_tool {
-                let final_content = if !response.content.trim().is_empty() {
-                    // Use the text content from the response.
-                    Some(response.content.clone())
-                } else {
-                    // No text content — check for 'summary' arg in the final tool call.
-                    tool_calls
-                        .iter()
-                        .filter(|tc| self.config.final_tool_names.contains(&tc.name))
-                        .find_map(|tc| {
-                            tc.arguments
-                                .get("summary")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                };
-
-                if let Some(content) = final_content {
-                    info!("final tool called, using extracted content as response");
-                    if let Some(ref cb) = self.callbacks.on_preparing_response {
-                        cb();
-                    }
-                    self.state.messages.push(Message::assistant(&content));
-                    return Ok(content);
-                }
-            }
         }
 
         // Exhausted all iterations.
@@ -908,7 +872,6 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
         assert!(config.temperature.is_none());
         assert_eq!(config.max_tokens, 4096);
         assert!(!config.log_context);
-        assert!(config.final_tool_names.contains("write_knowledge_file"));
     }
 
     // -- AgentCallbacks tests ------------------------------------------------
@@ -940,26 +903,6 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
         let state = AgentState::default();
         assert!(state.messages.is_empty());
         assert_eq!(state.global_iteration, 0);
-    }
-
-    // -- Contract: AgentConfig default final_tool_names ----------------------
-
-    #[test]
-    fn agent_config_final_tool_names_contains_write_knowledge_file() {
-        let config = AgentConfig::default();
-        assert!(config.final_tool_names.contains("write_knowledge_file"));
-    }
-
-    #[test]
-    fn agent_config_final_tool_names_matches_constant() {
-        // Verify the default config final_tool_names contains all items from FINAL_TOOL_NAMES.
-        let config = AgentConfig::default();
-        for name in FINAL_TOOL_NAMES {
-            assert!(
-                config.final_tool_names.contains(*name),
-                "FINAL_TOOL_NAMES '{name}' missing from AgentConfig::default()"
-            );
-        }
     }
 
     // -- Contract: Metadata prefix ordering ---------------------------------

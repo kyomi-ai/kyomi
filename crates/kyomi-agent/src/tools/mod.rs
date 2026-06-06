@@ -55,10 +55,6 @@ pub const MCP_ONLY_TOOLS: &[&str] = &[
     "delete_analytics_site",
 ];
 
-/// Tool names that signal the agent should stop iterating and return the
-/// current response content (e.g., after writing a knowledge document).
-pub const FINAL_TOOL_NAMES: &[&str] = &["write_knowledge_file"];
-
 /// Tools available to watch execution agents (data query only, no mutations).
 /// Matches Python `watch_scheduler.py` watch_tools list.
 pub const WATCH_TOOLS: &[&str] = &[
@@ -769,7 +765,6 @@ mod tests {
         // and MCP agents rely on it for actual watch persistence.
         assert!(!COPILOT_ONLY_TOOLS.contains(&"update_watch"));
         assert!(MCP_ONLY_TOOLS.contains(&"render_chart"));
-        assert!(FINAL_TOOL_NAMES.contains(&"write_knowledge_file"));
         assert!(WATCH_TOOLS.contains(&"browse_catalog"));
         assert!(WATCH_TOOLS.contains(&"list_knowledge_files"));
         assert!(WATCH_TOOLS.contains(&"read_knowledge_file"));
