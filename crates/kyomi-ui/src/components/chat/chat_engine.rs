@@ -346,7 +346,7 @@ impl ChatEngine {
                 message_id: user_msg_id.clone(),
                 message_type: "user".to_string(),
                 content: content.to_string(),
-                timestamp: String::new(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
                 pinned: false,
                 sent_by: None,
                 thinking_events: Vec::new(),

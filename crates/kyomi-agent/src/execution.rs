@@ -241,6 +241,8 @@ pub async fn execute_agent_chat(
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
+    let provider_context_window = client.context_window();
+
 
     // 4. Create agent config with context-appropriate tool filter.
     //
@@ -349,13 +351,12 @@ pub async fn execute_agent_chat(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // 10. Create thinking tracker.
-    // When context_window is 0 (caller did not set it), fall back to the
-    // provider-level lookup so the UI can still show utilisation for
-    // known hardcoded models (Anthropic, Gemini, common OpenAI models).
+    // Context window comes from the provider (which gets it from the workspace
+    // config or falls back to hardcoded values per model).
     let resolved_context_window = if config.context_window > 0 {
         config.context_window
     } else {
-        crate::provider::get_context_window(&model_name, provider_kind, 0)
+        provider_context_window
     };
     let tracker = AgentThinkingTracker::new(
         config.session_id.clone(),
@@ -428,11 +429,15 @@ pub async fn execute_agent_chat(
         let inp = t.total_input_tokens();
         let out = t.total_output_tokens();
         let cost = t.total_cost();
+        let ctx = t.last_input_tokens();
+        let ctx_win = t.context_window();
         let usage = serde_json::json!({
             "input_tokens": inp,
             "output_tokens": out,
             "total_tokens": inp + out,
             "cost": cost,
+            "context_tokens": ctx,
+            "context_window": ctx_win,
         });
         (events, Some(usage), inp, out, cost)
     };
@@ -720,12 +725,24 @@ async fn generate_title_inner(
             .ok()
             .flatten();
 
-        if let Some(tm) = title_model {
+        let is_kyomi = ws_config.provider == WorkspaceAiProvider::Kyomi;
+
+        if is_kyomi {
+            // Kyomi mode: LLM_TITLE_MODEL > cheapest model.
+            if let Some(ref tm) = app_config.llm_title_model {
+                ws_config.model = Some(tm.clone());
+            }
+        } else if let Some(tm) = title_model {
+            // BYOK: workspace title_model > LLM_TITLE_MODEL > cheapest.
             ws_config.model = Some(tm);
-        } else {
+        } else if let Some(ref tm) = app_config.llm_title_model {
+            ws_config.model = Some(tm.clone());
+        }
+
+        // Fallback: cheapest model for the provider (when nothing above set it).
+        if !is_kyomi && ws_config.model.is_none() || (is_kyomi && app_config.llm_title_model.is_none()) {
             let provider_kind = match ws_config.provider {
                 WorkspaceAiProvider::Kyomi => {
-                    // Resolve the actual provider kind from server env config.
                     resolve_provider_config(app_config)
                         .map(|c| c.provider)
                         .ok()
@@ -758,8 +775,9 @@ async fn generate_title_inner(
     // thinking (e.g. Qwen3) — the thinking tokens are stripped in parse_response.
     let response = client.complete(&messages, &tools, Some(0.3), 512, &user_names).await?;
 
-    // Clean up the title: remove quotes, hashes, and trim.
-    let title = response
+    // Clean up the title: remove quotes, hashes, trim, and truncate to fit
+    // the DB column (varchar 255).
+    let mut title = response
         .content
         .trim()
         .trim_matches('"')
@@ -769,6 +787,14 @@ async fn generate_title_inner(
 
     if title.is_empty() {
         return Ok(());
+    }
+
+    if title.len() > 250 {
+        let boundary = crate::compaction::floor_char_boundary(&title, 250);
+        title.truncate(boundary);
+        if let Some(last_space) = title.rfind(' ') {
+            title.truncate(last_space);
+        }
     }
 
     // Update DB.
@@ -783,6 +809,134 @@ async fn generate_title_inner(
         "Generated session title"
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard summary generation
+// ---------------------------------------------------------------------------
+
+/// Parameters for dashboard summary generation.
+pub struct DashboardSummaryParams {
+    pub db: DbPool,
+    pub ws_manager: WebSocketManager,
+    pub dashboard_id: String,
+    pub user_id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub content: String,
+    pub app_config: Arc<kyomi_core::Config>,
+}
+
+/// Generate a dashboard summary in the background (fire-and-forget).
+pub fn generate_dashboard_summary(params: DashboardSummaryParams) {
+    let dashboard_id = params.dashboard_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = generate_dashboard_summary_inner(params).await {
+            warn!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard summary");
+        }
+    });
+}
+
+async fn generate_dashboard_summary_inner(
+    params: DashboardSummaryParams,
+) -> kyomi_core::Result<()> {
+    let DashboardSummaryParams {
+        ref db, ref ws_manager, ref dashboard_id, ref user_id,
+        ref workspace_id, ref title, ref content, ref app_config,
+    } = params;
+    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to load workspace AI config for dashboard summary ({workspace_id}): {e}"
+            ))
+        })?;
+
+    let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
+        .await
+        .ok()
+        .flatten();
+
+    let is_kyomi = ws_config.provider == WorkspaceAiProvider::Kyomi;
+
+    if is_kyomi {
+        if let Some(ref tm) = app_config.llm_title_model {
+            ws_config.model = Some(tm.clone());
+        }
+    } else if let Some(tm) = title_model {
+        ws_config.model = Some(tm);
+    } else if let Some(ref tm) = app_config.llm_title_model {
+        ws_config.model = Some(tm.clone());
+    }
+
+    if !is_kyomi && ws_config.model.is_none() || (is_kyomi && app_config.llm_title_model.is_none()) {
+        let provider_kind = match ws_config.provider {
+            WorkspaceAiProvider::Kyomi => {
+                resolve_provider_config(app_config).map(|c| c.provider).ok()
+            }
+            WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
+            WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
+            WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
+        };
+        let has_custom_base_url = ws_config.base_url.is_some()
+            || (ws_config.provider == WorkspaceAiProvider::Kyomi
+                && app_config.llm_base_url.is_some());
+        if let Some(kind) = provider_kind && !has_custom_base_url {
+            ws_config.model = Some(kind.cheapest_model().to_string());
+        }
+    }
+
+    let client = create_provider_from_workspace(&ws_config, app_config)?;
+
+    let system_prompt = "Generate a concise ~20 word summary of this dashboard based on its \
+                         title and content. The summary should describe what the dashboard \
+                         shows and its purpose. Return ONLY the summary text, nothing else. \
+                         No quotes, no prefixes.";
+
+    let max = crate::compaction::floor_char_boundary(content, 4000);
+    let truncated_content = &content[..max];
+    let user_message = format!("Title: {title}\n\nContent:\n{truncated_content}");
+
+    let messages = vec![
+        crate::types::Message::system(system_prompt),
+        crate::types::Message::user(&user_message),
+    ];
+
+    let response = client.complete(&messages, &[], Some(0.3), 512, &HashMap::new()).await?;
+
+    let mut summary = response.content.trim().trim_matches('"').trim().to_string();
+    if summary.is_empty() { return Ok(()); }
+    if summary.len() > 200 {
+        let boundary = crate::compaction::floor_char_boundary(&summary, 200);
+        summary.truncate(boundary);
+        if let Some(last_space) = summary.rfind(' ') { summary.truncate(last_space); }
+    }
+    let summary = summary.replace("-->", "\u{2014}");
+
+    let new_content = format!("<!-- dashboard-summary: {summary} -->\n{content}");
+
+    kyomi_auth::dashboard_service::update_dashboard(
+        kyomi_auth::dashboard_service::UpdateDashboardParams {
+            db, embed: None, dashboard_id, workspace_id, user_id,
+            title: None, content: Some(&new_content),
+            change_summary: Some("Auto-generated summary"),
+            expected_content_hash: None,
+        },
+    ).await?;
+
+    ws_helpers::send_dashboard_summary_ready(ws_manager, user_id, dashboard_id, &summary, &new_content).await;
+    ws_helpers::broadcast_dashboard_sync(
+        db, ws_manager, dashboard_id, workspace_id,
+        kyomi_types::sync::SyncActionType::Update,
+    ).await;
+    info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");
     Ok(())
 }
 

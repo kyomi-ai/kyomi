@@ -32,7 +32,7 @@ use chartml_core::ChartRenderer;
 // file don't have to touch their import paths.
 #[cfg(target_arch = "wasm32")]
 pub(crate) use kyomi_chart_theme::{kyomi_palette, kyomi_theme};
-use crate::chartml_provider::configured_chartml;
+use crate::chartml_provider::{configured_chartml, ChartCacheWorkspaceId};
 use super::kyomi_chart::KyomiChart;
 use leptos::prelude::*;
 
@@ -737,6 +737,14 @@ pub fn MarkdownRenderer(
     {
         crate::chartml_provider::provide_chart_context(&workspace_id);
     }
+
+    let workspace_id = if workspace_id.is_empty() {
+        use_context::<ChartCacheWorkspaceId>()
+            .map(|c| c.0)
+            .unwrap_or_default()
+    } else {
+        workspace_id
+    };
 
     let palette_name = chart_palette.unwrap_or_else(|| "kyomi".to_string());
     let theme_state = crate::components::theme::use_theme();

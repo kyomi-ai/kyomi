@@ -155,11 +155,7 @@ fn format_token_count(n: u64) -> String {
 /// Sub-dollar amounts use 4 decimal places (`$0.0102`).
 /// Amounts >= $1.00 use 2 decimal places (`$1.23`).
 fn format_cost(cost: f64) -> String {
-    if cost >= 1.0 {
-        format!("${:.2}", cost)
-    } else {
-        format!("${:.4}", cost)
-    }
+    format!("${:.2}", cost)
 }
 
 /// Agent Thinking UI component.
@@ -305,18 +301,20 @@ pub fn AgentThinking(
         if !show_token_usage.get() {
             return String::new();
         }
-        let Some(tu) = token_usage.get().filter(|tu| tu.context_tokens > 0) else {
+        let Some(tu) = token_usage.get() else {
             return String::new();
         };
-        let context_part = if tu.context_window > 0 {
-            format!(
+        let mut parts = Vec::new();
+        if tu.context_tokens > 0 && tu.context_window > 0 {
+            parts.push(format!(
                 "{:.0}%",
                 (tu.context_tokens as f64 / tu.context_window as f64 * 100.0).min(100.0)
-            )
-        } else {
-            format_token_count(tu.context_tokens)
-        };
-        format!("{} \u{2022} {}", context_part, format_cost(tu.cost))
+            ));
+        }
+        if tu.cost > 0.0 {
+            parts.push(format_cost(tu.cost));
+        }
+        parts.join(" \u{2022} ")
     });
 
     // Unified display duration — elapsed when active, total when complete.
@@ -368,7 +366,7 @@ pub fn AgentThinking(
                             if left.is_empty() {
                                 right
                             } else {
-                                format!("{} | {}", left, right)
+                                format!("{} \u{2022} {}", left, right)
                             }
                         }}
                     </span>

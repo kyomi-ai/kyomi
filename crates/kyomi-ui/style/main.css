@@ -252,8 +252,8 @@ html {
  * carry no vertical margin. `overflow: hidden` ensures the ChartHeaderBar's
  * border-b is clipped to the card's rounded corners.
  * See DESIGN.md "Chart Container Pattern". */
-.dashboard-content .chart-card,
-.dashboard-wysiwyg .chart-card {
+.chart-card {
+  position: relative;
   background-color: var(--color-card);
   border: 1px solid var(--color-border);
   border-radius: 8px;
@@ -261,8 +261,35 @@ html {
   overflow: hidden;
 }
 
-.dashboard-content .chart-card > div:not(:first-child),
-.dashboard-wysiwyg .chart-card > div:not(:first-child) {
+.chart-card > div:first-child {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.15s ease 0.2s;
+}
+
+/* Header children are non-interactive when hidden so invisible buttons
+ * don't swallow clicks, but the container itself receives hover events
+ * — it IS the hover zone (only the top strip of the card). */
+.chart-card > div:first-child > * {
+  pointer-events: none;
+}
+
+.chart-card > div:first-child:hover,
+.chart-card:focus-within > div:first-child {
+  opacity: 1;
+  transition-delay: 0s;
+}
+
+.chart-card > div:first-child:hover > *,
+.chart-card:focus-within > div:first-child > * {
+  pointer-events: auto;
+}
+
+.chart-card > div:not(:first-child) {
   padding: 16px;
 }
 
@@ -270,8 +297,7 @@ html {
  * need the 16px breathing room that bar/line/scatter/pie need for tick
  * labels, so tables get `padding: 0` overriding the default above when
  * the chart content is a chartml-table. KYO-14. */
-.dashboard-content .chart-card:has(.chartml-table) > div:not(:first-child),
-.dashboard-wysiwyg .chart-card:has(.chartml-table) > div:not(:first-child) {
+.chart-card:has(.chartml-table) > div:not(:first-child) {
   padding: 0;
 }
 
@@ -1245,6 +1271,9 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible {
  * text clears the kode drag handle (20px icon at left: 8px). Only
  * applies in the WYSIWYG editor where drag handles are visible. */
 .dashboard-wysiwyg .chartml-resize-container .chart-card > div:first-child {
+  position: relative;
+  opacity: 1;
+  pointer-events: auto;
   padding-left: 32px;
 }
 

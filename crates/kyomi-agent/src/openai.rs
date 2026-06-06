@@ -22,7 +22,7 @@ use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, Too
 // ---------------------------------------------------------------------------
 
 /// Default OpenAI Chat Completions API endpoint.
-const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_API_URL: &str = "https://api.openai.com/v1";
 
 /// Default model for chat completions.
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
@@ -39,7 +39,11 @@ pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 /// indicating the response was not a valid generation record.
 fn parse_openrouter_cost(json: &serde_json::Value) -> Option<f64> {
     let data = json.get("data")?;
-    Some(data.get("total_cost").and_then(|v| v.as_f64()).unwrap_or(0.0))
+    Some(
+        data.get("total_cost")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    )
 }
 
 /// Fetch the actual USD cost of a generation from the OpenRouter generation endpoint.
@@ -159,6 +163,7 @@ fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
 /// vLLM, and any service that implements the OpenAI chat completions spec.
 pub struct OpenAIProvider {
     base: crate::provider::ProviderBase,
+    ctx_window: u32,
 }
 
 impl OpenAIProvider {
@@ -181,6 +186,7 @@ impl OpenAIProvider {
                 base_url,
                 OPENAI_API_URL,
             )?,
+            ctx_window: 0,
         })
     }
 
@@ -197,7 +203,22 @@ impl OpenAIProvider {
                 DEFAULT_MODEL,
                 base_url,
             )?,
+            ctx_window: 0,
         })
+    }
+
+    /// Set the context window size (called by the factory when known).
+    pub fn set_context_window(&mut self, size: u32) {
+        self.ctx_window = size;
+    }
+
+    /// Return the context window size.
+    pub fn context_window(&self) -> u32 {
+        if self.ctx_window > 0 {
+            self.ctx_window
+        } else {
+            get_context_window(self.base.model())
+        }
     }
 
     /// Return the model name this provider is configured with.
@@ -366,8 +387,7 @@ impl OpenAIProvider {
         let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Parse response.
-        let (mut response, generation_id) =
-            Self::parse_response(&self.base.model, &response_json)?;
+        let (mut response, generation_id) = Self::parse_response(&self.base.model, &response_json)?;
 
         // For OpenRouter requests, fetch the actual cost from the generation endpoint
         // and override the estimate-based cost. Fall back to estimate on any error.
@@ -394,12 +414,20 @@ impl OpenAIProvider {
     async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
         crate::provider::maybe_log_llm("openai", "request", body);
 
-        let response = self
+        let mut request = self
             .base
             .client
-            .post(&self.base.base_url)
+            .post(format!("{}/chat/completions", self.base.base_url.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", self.base.api_key))
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+
+        if self.base.base_url.contains("openrouter.ai") {
+            request = request
+                .header("X-OpenRouter-Title", "Kyomi")
+                .header("HTTP-Referer", "https://kyomi.ai");
+        }
+
+        let response = request
             .json(body)
             .send()
             .await
@@ -496,24 +524,40 @@ impl OpenAIProvider {
             })?;
 
         // Extract content (may be null).
-        // Some models (e.g. Qwen3) embed chain-of-thought inside
-        // `<thinking>...` tags in the content field. Strip that so only
-        // the final answer is returned to the user.
-        // OpenRouter models may return content in `reasoning` field when content is null.
-        let raw_content = message
+        // OpenAI o-series and OpenRouter models may return reasoning in
+        // `reasoning_content` or `reasoning` fields. These are extracted
+        // separately into thinking_content — they must NOT be used as a
+        // fallback for content.
+        let content = message
             .get("content")
             .and_then(|c| c.as_str())
             .filter(|s| !s.is_empty())
-            .or_else(|| message.get("reasoning").and_then(|r| r.as_str()))
-            .unwrap_or("");
-        let content = if let Some(pos) = raw_content.find("</thinking>") {
-            // Thinking block completed — take everything after it.
-            raw_content[pos + "</thinking>".len()..].trim().to_string()
-        } else if raw_content.starts_with("<thinking>") || raw_content.contains("\n<thinking>") {
-            // Truncated thinking (hit max_tokens mid-think) — discard all of it.
+            .unwrap_or("")
+            .to_string();
+
+        // Extract reasoning/thinking content from structured fields.
+        // This is separate from the <thinking>...</thinking> tag stripping
+        // which handles models that embed reasoning inside content.
+        let thinking_content = message
+            .get("reasoning_content")
+            .and_then(|r| r.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                message
+                    .get("reasoning")
+                    .and_then(|r| r.as_str())
+                    .filter(|s| !s.is_empty())
+            })
+            .map(|s| s.to_string());
+
+        // Strip <thinking>...</thinking> tags from content for models that
+        // embed chain-of-thought inside the content field (e.g. Qwen3).
+        let content = if let Some(pos) = content.find("</thinking>") {
+            content[pos + "</thinking>".len()..].trim().to_string()
+        } else if content.starts_with("<thinking>") || content.contains("\n<thinking>") {
             String::new()
         } else {
-            raw_content.to_string()
+            content
         };
 
         // Extract tool calls if present.
@@ -567,6 +611,7 @@ impl OpenAIProvider {
             model = model,
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
+            reasoning_tokens = usage.reasoning_tokens,
             cost = format!("${cost:.6}"),
             finish_reason = %finish_reason,
             "OpenAI API call complete"
@@ -579,14 +624,25 @@ impl OpenAIProvider {
                 usage,
                 tool_calls,
                 cost: Some(cost),
+                thinking_content,
             },
             generation_id,
         ))
     }
 
     /// Parse the `usage` object from the OpenAI response.
+    ///
+    /// Extracts `reasoning_tokens` from `completion_tokens_details` when present
+    /// (o-series models). Reasoning tokens are a subset of `completion_tokens`,
+    /// not additional — they're tracked separately for cost transparency.
     fn parse_usage(response: &serde_json::Value) -> AgentTokenUsage {
         let usage = response.get("usage");
+        let reasoning_tokens = usage
+            .and_then(|u| u.get("completion_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
         AgentTokenUsage {
             input_tokens: usage
                 .and_then(|u| u.get("prompt_tokens"))
@@ -599,6 +655,7 @@ impl OpenAIProvider {
             // OpenAI doesn't expose prompt caching tokens the same way.
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens,
         }
     }
 }
@@ -894,6 +951,7 @@ mod tests {
         assert_eq!(response.usage.output_tokens, 20);
         assert!(response.tool_calls.is_none());
         assert!(response.cost.is_some());
+        assert!(response.thinking_content.is_none());
     }
 
     #[test]
@@ -1083,6 +1141,182 @@ mod tests {
         assert_eq!(response.usage.cache_read_input_tokens, 0);
     }
 
+    // -- Reasoning content extraction tests ----------------------------------
+
+    #[test]
+    fn parse_response_reasoning_content_field() {
+        // OpenAI o-series returns reasoning_content alongside content.
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think step by step about this..."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("o3", &response).unwrap();
+
+        assert_eq!(response.content, "The answer is 42.");
+        assert_eq!(
+            response.thinking_content.as_deref(),
+            Some("Let me think step by step about this...")
+        );
+    }
+
+    #[test]
+    fn parse_response_reasoning_field_openrouter() {
+        // OpenRouter returns reasoning in a separate `reasoning` field.
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Here is my answer.",
+                    "reasoning": "I considered multiple approaches..."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("o3", &response).unwrap();
+
+        assert_eq!(response.content, "Here is my answer.");
+        assert_eq!(
+            response.thinking_content.as_deref(),
+            Some("I considered multiple approaches...")
+        );
+    }
+
+    #[test]
+    fn parse_response_reasoning_not_used_as_content_fallback() {
+        // When content is null and reasoning exists, content must stay empty.
+        // Previously, reasoning was used as a fallback for content — this test
+        // ensures that no longer happens.
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Deep thinking here..."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("o3", &response).unwrap();
+
+        assert_eq!(response.content, "");
+        assert_eq!(
+            response.thinking_content.as_deref(),
+            Some("Deep thinking here...")
+        );
+    }
+
+    #[test]
+    fn parse_response_no_reasoning_fields() {
+        // Standard response without reasoning — thinking_content must be None.
+        let response = json!({
+            "choices": [{"message": {"content": "Hello!"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+
+        assert_eq!(response.content, "Hello!");
+        assert!(response.thinking_content.is_none());
+    }
+
+    #[test]
+    fn parse_response_empty_reasoning_fields_are_none() {
+        // Empty reasoning strings should produce None, not Some("").
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "Answer.",
+                    "reasoning_content": "",
+                    "reasoning": ""
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("o3", &response).unwrap();
+
+        assert!(response.thinking_content.is_none());
+    }
+
+    #[test]
+    fn parse_response_reasoning_content_takes_precedence_over_reasoning() {
+        // When both fields exist, reasoning_content should take precedence.
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "Answer.",
+                    "reasoning_content": "From reasoning_content field",
+                    "reasoning": "From reasoning field"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("o3", &response).unwrap();
+
+        assert_eq!(
+            response.thinking_content.as_deref(),
+            Some("From reasoning_content field")
+        );
+    }
+
+    // -- Reasoning tokens parsing tests --------------------------------------
+
+    #[test]
+    fn parse_response_reasoning_tokens_from_completion_details() {
+        let response = json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 30
+                }
+            }
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("o3", &response).unwrap();
+
+        assert_eq!(response.usage.output_tokens, 50);
+        assert_eq!(response.usage.reasoning_tokens, 30);
+    }
+
+    #[test]
+    fn parse_response_reasoning_tokens_missing_details_is_zero() {
+        let response = json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50}
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+
+        assert_eq!(response.usage.reasoning_tokens, 0);
+    }
+
+    #[test]
+    fn parse_response_reasoning_tokens_missing_field_is_zero() {
+        // completion_tokens_details exists but without reasoning_tokens.
+        let response = json!({
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "completion_tokens_details": {
+                    "accepted_prediction_tokens": 0
+                }
+            }
+        });
+        let (response, _gen_id) = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+
+        assert_eq!(response.usage.reasoning_tokens, 0);
+    }
+
     // -- Missing/malformed response tests -----------------------------------
 
     #[test]
@@ -1174,6 +1408,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gpt-4o", &usage);
         // 1M input * $2.50/M + 1M output * $10.00/M = $12.50
@@ -1187,6 +1422,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gpt-4o-mini", &usage);
         // 1M * $0.15/M + 1M * $0.60/M = $0.75

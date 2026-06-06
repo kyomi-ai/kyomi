@@ -931,7 +931,7 @@ pub fn ChatPage() -> impl IntoView {
                                 "I'm ready to help you explore this chart:\n\n{}\n\nWhat would you like to know about it?",
                                 ctx.chart_markdown
                             ),
-                            timestamp: String::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
                             pinned: false,
                             sent_by: None,
                             thinking_events: Vec::new(),
@@ -957,7 +957,7 @@ pub fn ChatPage() -> impl IntoView {
                             ),
                             message_type: "assistant".to_string(),
                             content: "This chart link has expired or is no longer available. You can still ask me anything about your data!".to_string(),
-                            timestamp: String::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
                             pinned: false,
                             sent_by: None,
                             thinking_events: Vec::new(),
@@ -976,7 +976,7 @@ pub fn ChatPage() -> impl IntoView {
                             ),
                             message_type: "assistant".to_string(),
                             content: "This chart link has expired or is no longer available. You can still ask me anything about your data!".to_string(),
-                            timestamp: String::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
                             pinned: false,
                             sent_by: None,
                             thinking_events: Vec::new(),
@@ -1040,7 +1040,7 @@ pub fn ChatPage() -> impl IntoView {
                             "I'm ready to help you explore this chart:\n\n{}\n\nWhat would you like to know about it?",
                             markdown
                         ),
-                        timestamp: String::new(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
                         pinned: false,
                         sent_by: None,
                         thinking_events: Vec::new(),
@@ -1070,7 +1070,7 @@ pub fn ChatPage() -> impl IntoView {
                         - \"Monitor our conversion rate and tell me if it changes significantly\"\n\
                         - \"Check our inventory levels daily and warn me if anything is running low\"\n\n\
                         Just describe what you want to monitor, and I'll set it up for you.".to_string(),
-                    timestamp: String::new(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
                     pinned: false,
                     sent_by: None,
                     thinking_events: Vec::new(),
@@ -1383,7 +1383,7 @@ pub fn ChatPage() -> impl IntoView {
                         message_id: generate_user_message_id().replace("user-", "error-"),
                         message_type: "assistant".to_string(),
                         content: error_content,
-                        timestamp: String::new(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
                         pinned: false,
                         sent_by: None,
                         thinking_events: Vec::new(),
@@ -1866,19 +1866,6 @@ pub fn ChatPage() -> impl IntoView {
                         // When messages are empty (new chat), the input is rendered inline
                         // with the greeting above, not at the bottom.
                         <Show when=move || !messages.get().is_empty()>
-                            // Model indicator — subtle metadata line above the input.
-                            // Displays the workspace-configured model so users know which
-                            // model will handle their next message.
-                            {move || {
-                                workspace_default_model.get().map(|model| view! {
-                                    <div class="flex-shrink-0 px-4 md:px-6 pt-2 pb-0">
-                                        <p class="text-xs text-muted-foreground flex items-center gap-1">
-                                            <Icon icon=phosphor_leptos::BRAIN size="12px" />
-                                            {model}
-                                        </p>
-                                    </div>
-                                })
-                            }}
                             // Chat input area — wired to send_message and cancel handlers.
                             // Skip AI checkbox is built into ChatInput (show_skip_ai + skip_ai props).
                             <ChatInput

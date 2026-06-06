@@ -63,15 +63,17 @@ pub struct WorkspaceAiConfigView {
     pub title_model: Option<String>,
 }
 
-/// One model entry returned by [`list_workspace_ai_models`].
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// One model entry returned by model-listing functions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AiModelInfo {
-    /// Provider-specific model identifier (e.g. `gpt-4o`, `claude-sonnet-4-5-20250929`,
-    /// `gemini-2.5-pro`). Sent verbatim back to the provider when issuing requests.
     pub id: String,
-    /// Human-readable display label. Falls back to `id` when the provider does
-    /// not supply a friendly name.
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cost_per_token: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_cost_per_token: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
 }
 
 /// Result of a candidate-config connectivity test.
@@ -504,17 +506,21 @@ pub async fn list_workspace_ai_models(
     fetch_provider_models(&provider, &resolved_key, &base).await
 }
 
-/// HTTP fetch + parse dispatch for the three live-listing providers.
+/// Fetch the raw model-list response body from a provider's API.
+///
+/// Shared by both `fetch_provider_models` (BYOK) and
+/// `fetch_openrouter_models_live` (Kyomi credits). Each caller parses the
+/// body with its own parser to produce the appropriate return type.
 #[cfg(feature = "ssr")]
-async fn fetch_provider_models(
+async fn fetch_models_raw(
     provider: &str,
     api_key: &str,
     base: &str,
-) -> Result<Vec<AiModelInfo>, ServerFnError> {
+) -> Result<String, ServerFnError> {
     use std::time::Duration;
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| ServerFnError::new(format!("Failed to create HTTP client: {e}")))?;
 
@@ -553,10 +559,19 @@ async fn fetch_provider_models(
         return Err(ServerFnError::new(sanitise_error(&detail, api_key)));
     }
 
-    let body = resp
-        .text()
+    resp.text()
         .await
-        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))?;
+        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))
+}
+
+/// Fetch and parse the model list for a BYOK provider.
+#[cfg(feature = "ssr")]
+async fn fetch_provider_models(
+    provider: &str,
+    api_key: &str,
+    base: &str,
+) -> Result<Vec<AiModelInfo>, ServerFnError> {
+    let body = fetch_models_raw(provider, api_key, base).await?;
 
     let parsed = match provider {
         "anthropic" => parse_anthropic_models(&body),
@@ -611,6 +626,7 @@ fn parse_anthropic_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Er
                 AiModelInfo {
                     id: e.id,
                     label,
+                    ..Default::default()
                 },
             )
         })
@@ -628,12 +644,12 @@ fn parse_anthropic_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Er
     Ok(entries.into_iter().map(|(_, m)| m).collect())
 }
 
-/// Parse OpenAI `GET /v1/models` response.
+/// Parse an OpenAI-compatible `GET /v1/models` response.
 ///
 /// Shape: `{"data":[{"id":"gpt-4o","created":1234567890,"object":"model"}]}`.
-/// Filters to chat-completion-capable models (allowlist of id prefixes minus
-/// a denylist of substrings for non-chat variants like embeddings, audio,
-/// vision-only, image, moderation, etc.). Sorted by `created` desc.
+/// Returns all models from the endpoint — no filtering. Works for OpenAI,
+/// OpenRouter, vLLM, Ollama, and any other OpenAI-compatible API.
+/// Sorted by `created` desc, then alphabetically by id.
 #[cfg(feature = "ssr")]
 fn parse_openai_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error> {
     #[derive(Deserialize)]
@@ -645,43 +661,23 @@ fn parse_openai_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
         id: String,
         #[serde(default)]
         created: Option<i64>,
+        #[serde(default)]
+        context_length: Option<u64>,
     }
 
     let parsed: Resp = serde_json::from_str(body)?;
 
-    const ALLOWED_PREFIXES: &[&str] = &["gpt-", "chatgpt-", "o1", "o3", "o4"];
-    const DENY_SUBSTRINGS: &[&str] = &[
-        "-instruct",
-        "-audio",
-        "-realtime",
-        "-tts",
-        "-transcribe",
-        "-search",
-        "-image",
-        "embedding",
-        "whisper",
-        "dall-e",
-        "tts-",
-        "moderation",
-        "babbage",
-        "davinci",
-        "-vision-preview",
-    ];
-
     let mut entries: Vec<(Option<i64>, AiModelInfo)> = parsed
         .data
         .into_iter()
-        .filter(|e| {
-            let id = &e.id;
-            ALLOWED_PREFIXES.iter().any(|p| id.starts_with(p))
-                && !DENY_SUBSTRINGS.iter().any(|s| id.contains(s))
-        })
         .map(|e| {
             (
                 e.created,
                 AiModelInfo {
                     label: e.id.clone(),
                     id: e.id,
+                    context_length: e.context_length,
+                    ..Default::default()
                 },
             )
         })
@@ -744,7 +740,7 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
                 return None;
             }
             let label = e.display_name.unwrap_or_else(|| id.clone());
-            Some(AiModelInfo { id, label })
+            Some(AiModelInfo { id, label, ..Default::default() })
         })
         .collect();
 
@@ -755,24 +751,6 @@ fn parse_gemini_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error
 // ---------------------------------------------------------------------------
 // list_openrouter_models
 // ---------------------------------------------------------------------------
-
-/// One model entry returned by [`list_openrouter_models`].
-///
-/// Extends [`AiModelInfo`] with pricing information so the frontend can show
-/// cost-per-million-token estimates next to each model name.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OpenRouterModelInfo {
-    /// OpenRouter model identifier, e.g. `"openai/gpt-4o"`.
-    pub id: String,
-    /// Human-readable display name, e.g. `"GPT-4o"`.
-    pub name: String,
-    /// Input (prompt) cost in USD per token.  May be 0.0 for free models.
-    pub prompt_cost_per_token: f64,
-    /// Output (completion) cost in USD per token.  May be 0.0 for free models.
-    pub completion_cost_per_token: f64,
-    /// Context window size in tokens.
-    pub context_length: u64,
-}
 
 /// List models available from OpenRouter.
 ///
@@ -797,7 +775,7 @@ pub struct OpenRouterModelInfo {
 #[server(prefix = "/leptos-api")]
 pub async fn list_openrouter_models(
     force_refresh: bool,
-) -> Result<Vec<OpenRouterModelInfo>, ServerFnError> {
+) -> Result<Vec<AiModelInfo>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     require_workspace_admin(&ac.auth)?;
 
@@ -857,13 +835,13 @@ fn cache_key_for_api_key(api_key: &str) -> String {
 async fn fetch_openrouter_models_cached(
     api_key: &str,
     force_refresh: bool,
-) -> Result<Vec<OpenRouterModelInfo>, ServerFnError> {
+) -> Result<Vec<AiModelInfo>, ServerFnError> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     struct CacheEntry {
-        models: Vec<OpenRouterModelInfo>,
+        models: Vec<AiModelInfo>,
         fetched_at: Instant,
     }
 
@@ -899,36 +877,15 @@ async fn fetch_openrouter_models_cached(
     Ok(models)
 }
 
-/// Perform the live HTTP fetch from `GET https://openrouter.ai/api/v1/models`.
+/// Fetch and parse OpenRouter models. Uses the shared `fetch_models_raw`
+/// (OpenRouter is OpenAI-compatible) and applies the OpenRouter-specific
+/// parser that extracts pricing and context length.
 #[cfg(feature = "ssr")]
 async fn fetch_openrouter_models_live(
     api_key: &str,
-) -> Result<Vec<OpenRouterModelInfo>, ServerFnError> {
-    use std::time::Duration;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| ServerFnError::new(format!("Failed to create HTTP client: {e}")))?;
-
-    let resp = client
-        .get("https://openrouter.ai/api/v1/models")
-        .header("Authorization", format!("Bearer {api_key}"))
-        .send()
-        .await
-        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let detail = extract_error_message(&body).unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(ServerFnError::new(sanitise_error(&detail, api_key)));
-    }
-
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| ServerFnError::new(sanitise_error(&e.to_string(), api_key)))?;
+) -> Result<Vec<AiModelInfo>, ServerFnError> {
+    let body =
+        fetch_models_raw("openai", api_key, "https://openrouter.ai/api/v1").await?;
 
     parse_openrouter_models(&body)
         .map_err(|e| ServerFnError::new(format!("Failed to parse OpenRouter response: {e}")))
@@ -954,7 +911,7 @@ async fn fetch_openrouter_models_live(
 /// default to `0.0` on parse failure so a single malformed entry does not
 /// discard the whole list.
 #[cfg(feature = "ssr")]
-fn parse_openrouter_models(body: &str) -> Result<Vec<OpenRouterModelInfo>, serde_json::Error> {
+fn parse_openrouter_models(body: &str) -> Result<Vec<AiModelInfo>, serde_json::Error> {
     #[derive(Deserialize)]
     struct Resp {
         data: Vec<Entry>,
@@ -979,7 +936,7 @@ fn parse_openrouter_models(body: &str) -> Result<Vec<OpenRouterModelInfo>, serde
 
     let parsed: Resp = serde_json::from_str(body)?;
 
-    let mut models: Vec<OpenRouterModelInfo> = parsed
+    let mut models: Vec<AiModelInfo> = parsed
         .data
         .into_iter()
         .map(|e| {
@@ -993,12 +950,12 @@ fn parse_openrouter_models(body: &str) -> Result<Vec<OpenRouterModelInfo>, serde
                     )
                 })
                 .unwrap_or((0.0, 0.0));
-            OpenRouterModelInfo {
+            AiModelInfo {
                 id: e.id,
-                name,
-                prompt_cost_per_token: prompt_cost,
-                completion_cost_per_token: completion_cost,
-                context_length: e.context_length.unwrap_or(0),
+                label: name,
+                prompt_cost_per_token: Some(prompt_cost),
+                completion_cost_per_token: Some(completion_cost),
+                context_length: e.context_length,
             }
         })
         .collect();

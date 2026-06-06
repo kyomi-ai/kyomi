@@ -27,7 +27,6 @@ const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta
 /// Default model for Gemini completions.
 pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
 
-
 // ---------------------------------------------------------------------------
 // Context Window
 // ---------------------------------------------------------------------------
@@ -205,16 +204,12 @@ impl GeminiProvider {
                 }
 
                 MessageRole::Tool => {
-                    let tool_name = msg
-                        .name
-                        .as_deref()
-                        .unwrap_or("unknown_tool");
+                    let tool_name = msg.name.as_deref().unwrap_or("unknown_tool");
 
                     // Try to parse content as JSON for structured responses;
                     // fall back to a string wrapper if parsing fails.
-                    let result_value: serde_json::Value =
-                        serde_json::from_str(&msg.content)
-                            .unwrap_or_else(|_| json!({ "output": &msg.content }));
+                    let result_value: serde_json::Value = serde_json::from_str(&msg.content)
+                        .unwrap_or_else(|_| json!({ "output": &msg.content }));
 
                     let entry = json!({
                         "role": "function",
@@ -299,8 +294,7 @@ impl GeminiProvider {
         max_tokens: u32,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        let (system_instruction, contents) =
-            Self::convert_messages_to_gemini(messages, user_names);
+        let (system_instruction, contents) = Self::convert_messages_to_gemini(messages, user_names);
 
         // Build request body.
         let message_count = contents.len();
@@ -331,18 +325,14 @@ impl GeminiProvider {
         );
 
         // Call with retry.
-        let response_json =
-            kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
+        let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Parse response.
         Self::parse_response(&self.base.model, &response_json)
     }
 
     /// Send a single HTTP request to the Gemini API.
-    async fn call_api(
-        &self,
-        body: &serde_json::Value,
-    ) -> kyomi_core::Result<serde_json::Value> {
+    async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
         crate::provider::maybe_log_llm("gemini", "request", body);
 
         let url = format!(
@@ -367,9 +357,7 @@ impl GeminiProvider {
 
         if status.is_success() {
             let json: serde_json::Value = response.json().await.map_err(|e| {
-                kyomi_core::Error::Internal(format!(
-                    "Gemini API: failed to parse response: {e}"
-                ))
+                kyomi_core::Error::Internal(format!("Gemini API: failed to parse response: {e}"))
             })?;
             crate::provider::maybe_log_llm("gemini", "response", &json);
             return Ok(json);
@@ -440,10 +428,7 @@ impl GeminiProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let arguments = fc
-                    .get("args")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
+                let arguments = fc.get("args").cloned().unwrap_or(serde_json::Value::Null);
 
                 tool_calls.push(ToolCall {
                     id: format!("gemini_call_{tool_call_idx}"),
@@ -500,6 +485,7 @@ impl GeminiProvider {
                 Some(tool_calls)
             },
             cost: Some(cost),
+            thinking_content: None,
         })
     }
 
@@ -517,6 +503,7 @@ impl GeminiProvider {
                 .unwrap_or(0) as u32,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         }
     }
 }
@@ -534,7 +521,10 @@ pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
         model,
         usage,
         |m| Some(get_model_pricing(m)),
-        crate::pricing::ModelPricing { input: 0.0, output: 0.0 },
+        crate::pricing::ModelPricing {
+            input: 0.0,
+            output: 0.0,
+        },
         "gemini",
     )
 }
@@ -553,8 +543,7 @@ mod tests {
     fn convert_system_message_extracted() {
         let messages = vec![Message::system("You are helpful."), Message::user("hi")];
         let names = HashMap::new();
-        let (system, contents) =
-            GeminiProvider::convert_messages_to_gemini(&messages, &names);
+        let (system, contents) = GeminiProvider::convert_messages_to_gemini(&messages, &names);
 
         let system = system.unwrap();
         assert_eq!(system["parts"][0]["text"], "You are helpful.");
@@ -568,8 +557,7 @@ mod tests {
     fn convert_no_system_message() {
         let messages = vec![Message::user("hello")];
         let names = HashMap::new();
-        let (system, contents) =
-            GeminiProvider::convert_messages_to_gemini(&messages, &names);
+        let (system, contents) = GeminiProvider::convert_messages_to_gemini(&messages, &names);
 
         assert!(system.is_none());
         assert_eq!(contents.len(), 1);
@@ -593,10 +581,12 @@ mod tests {
         let msg = Message::user_with_id("show revenue", "user-abcd-1234-efgh");
         let mut names = HashMap::new();
         names.insert("user-abcd-1234-efgh".to_string(), "Alice".to_string());
-        let (_, contents) =
-            GeminiProvider::convert_messages_to_gemini(&[msg], &names);
+        let (_, contents) = GeminiProvider::convert_messages_to_gemini(&[msg], &names);
 
-        assert_eq!(contents[0]["parts"][0]["text"], "[Alice (234-efgh)]: show revenue");
+        assert_eq!(
+            contents[0]["parts"][0]["text"],
+            "[Alice (234-efgh)]: show revenue"
+        );
     }
 
     // -- Message conversion: model (assistant) messages ---------------------
@@ -720,10 +710,7 @@ mod tests {
 
     #[test]
     fn merge_consecutive_user_messages() {
-        let messages = vec![
-            Message::user("hello"),
-            Message::user("how are you"),
-        ];
+        let messages = vec![Message::user("hello"), Message::user("how are you")];
         let names = HashMap::new();
         let (_, contents) = GeminiProvider::convert_messages_to_gemini(&messages, &names);
 
@@ -1146,6 +1133,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-2.5-flash", &usage);
         // 1M * $0.15/M + 1M * $0.60/M = $0.75
@@ -1159,6 +1147,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-2.5-pro", &usage);
         // 1M * $1.25/M + 1M * $10.00/M = $11.25
@@ -1172,6 +1161,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-2.0-flash", &usage);
         // 1M * $0.10/M + 1M * $0.40/M = $0.50
@@ -1185,6 +1175,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-unknown-model", &usage);
         // Fallback is gemini-2.0-flash: 1M * $0.10/M + 1M * $0.40/M = $0.50
@@ -1205,6 +1196,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-2.5-flash", &usage);
         // 0.5M * $0.15/M = $0.075
@@ -1218,6 +1210,7 @@ mod tests {
             output_tokens: 100_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-2.5-flash", &usage);
         // 0.1M * $0.60/M = $0.06
@@ -1232,6 +1225,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("gemini-2.5-pro-latest", &usage);
         // Should match gemini-2.5-pro: 1M * $1.25/M = $1.25
@@ -1335,12 +1329,14 @@ mod tests {
             Message::assistant("Here is the monthly revenue data."),
         ];
         let names = HashMap::new();
-        let (system, contents) =
-            GeminiProvider::convert_messages_to_gemini(&messages, &names);
+        let (system, contents) = GeminiProvider::convert_messages_to_gemini(&messages, &names);
 
         // System extracted.
         assert!(system.is_some());
-        assert_eq!(system.unwrap()["parts"][0]["text"], "You are a helpful data analyst.");
+        assert_eq!(
+            system.unwrap()["parts"][0]["text"],
+            "You are a helpful data analyst."
+        );
 
         // 4 entries: user, model(+tool call), function, model.
         assert_eq!(contents.len(), 4);

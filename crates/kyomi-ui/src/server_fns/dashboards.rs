@@ -337,6 +337,44 @@ pub async fn update_dashboard(
         }
     }
 
+    // Generate dashboard summary if content changed and none exists.
+    tracing::info!(
+        dashboard_id = %dashboard_id,
+        has_content = content.is_some(),
+        content_empty = content.as_ref().map(|c| c.is_empty()).unwrap_or(true),
+        has_summary = content.as_ref().map(|c| kyomi_auth::dashboard_service::extract_summary(c).is_some()).unwrap_or(false),
+        "Dashboard summary check"
+    );
+    if let Some(ref c) = content
+        && !c.is_empty()
+        && kyomi_auth::dashboard_service::extract_summary(c).is_none()
+        && let Some(ws_manager) = ac.ctx.ws_manager.clone()
+    {
+            let title_for_summary = match &title {
+                Some(t) => t.clone(),
+                None => {
+                    kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|d| d.title)
+                        .unwrap_or_default()
+                }
+            };
+            kyomi_agent::generate_dashboard_summary(
+                kyomi_agent::DashboardSummaryParams {
+                    db: ac.ctx.db.clone(),
+                    ws_manager,
+                    dashboard_id: dashboard_id.clone(),
+                    user_id: ac.auth.user_id.clone(),
+                    workspace_id: ac.ws_id.clone(),
+                    title: title_for_summary,
+                    content: c.clone(),
+                    app_config: ac.ctx.config.clone(),
+                },
+            );
+    }
+
     if let Some(ws_manager) = &ac.ctx.ws_manager {
         kyomi_auth::websocket::helpers::broadcast_dashboard_sync(
             ac.db(), ws_manager, &dashboard_id, &ac.ws_id,

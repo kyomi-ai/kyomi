@@ -99,6 +99,9 @@ pub struct WorkspaceAiConfig {
     /// When `None`, title generation falls back to the cheapest model for the
     /// configured provider.
     pub title_model: Option<String>,
+    /// Context window size for the configured model in tokens (0 = unknown).
+    /// Stored in `settings.custom_settings.context_window`.
+    pub context_window: u32,
 }
 
 impl WorkspaceAiConfig {
@@ -230,12 +233,15 @@ pub async fn load(
         }
     };
 
+    let context_window = read_context_window(&row.settings);
+
     Ok(WorkspaceAiConfig {
         provider,
         model,
         api_key,
         base_url,
         title_model,
+        context_window,
     })
 }
 
@@ -281,8 +287,9 @@ pub async fn update(
     // Compute the new column values.
     let (new_encrypted_key, new_base_url): (Option<String>, Option<String>) = match input.provider {
         WorkspaceAiProvider::Kyomi => {
-            // Always clear the encrypted key + base URL when switching to Kyomi.
-            (None, None)
+            // Preserve the encrypted key + base URL so switching back to BYOK
+            // doesn't require re-entering credentials.
+            (row.ai_api_key_encrypted.clone(), row.ai_base_url.clone())
         }
         _ => {
             // BYOK validation + key preservation.
@@ -378,6 +385,22 @@ pub async fn update(
         }
     }
 
+    // Sync log — notify the frontend that workspace settings changed.
+    let snapshot =
+        crate::workspace_service::get_workspace_settings_for_sync(db, workspace_id).await;
+    if let Err(e) = crate::sync_log_service::write_sync_entry(
+        db,
+        kyomi_types::sync::entity_types::WORKSPACE_SETTINGS,
+        workspace_id,
+        workspace_id,
+        kyomi_types::sync::SyncActionType::Update,
+        snapshot,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log for AI config update");
+    }
+
     Ok(())
 }
 
@@ -398,6 +421,15 @@ fn read_default_model(settings: &Option<serde_json::Value>) -> Option<String> {
 /// (existing fallback behaviour).
 pub fn read_title_model(settings: &Option<serde_json::Value>) -> Option<String> {
     read_custom_settings_string(settings, "title_model")
+}
+
+fn read_context_window(settings: &Option<serde_json::Value>) -> u32 {
+    settings
+        .as_ref()
+        .and_then(|s| s.get("custom_settings"))
+        .and_then(|cs| cs.get("context_window"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
 }
 
 /// Load the `title_model` setting for a workspace directly from the database.
@@ -543,6 +575,7 @@ mod tests {
             api_key: None,
             base_url: None,
             title_model: None,
+        context_window: 0,
         };
         assert!(!cfg.is_byok());
     }
@@ -560,6 +593,7 @@ mod tests {
                 api_key: Some("sk-...".into()),
                 base_url: None,
                 title_model: None,
+            context_window: 0,
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

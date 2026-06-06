@@ -851,6 +851,36 @@ pub async fn broadcast_watch_sync(
     send_sync_action(manager, workspace_id, &sync_action, None).await;
 }
 
+/// Broadcast a chat session mutation to all workspace members.
+pub async fn broadcast_chat_session_sync(
+    db: &kyomi_core::DbPool,
+    manager: &WebSocketManager,
+    session_id: &str,
+    workspace_id: &str,
+    action: kyomi_types::sync::SyncActionType,
+) {
+    use kyomi_types::sync::{SyncAction, SyncActionType, entity_types};
+
+    let data = if matches!(action, SyncActionType::Delete) {
+        None
+    } else {
+        crate::chat_service::fetch_session_snapshot(db, session_id)
+            .await
+            .map(|(_ws_id, snapshot)| snapshot)
+    };
+
+    let sync_action = SyncAction {
+        sync_id: 0,
+        entity_type: entity_types::CHAT_SESSION.to_string(),
+        entity_id: session_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        action,
+        data,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    send_sync_action(manager, workspace_id, &sync_action, None).await;
+}
+
 /// Broadcast an entity deletion to all workspace members.
 ///
 /// Generic helper for any entity type — no snapshot needed since the entity

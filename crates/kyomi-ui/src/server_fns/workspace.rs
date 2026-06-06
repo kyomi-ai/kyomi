@@ -166,7 +166,10 @@ pub async fn update_workspace_name(name: String) -> Result<(), ServerFnError> {
 
 /// Update the workspace default AI model. Requires admin role.
 #[server(prefix = "/leptos-api")]
-pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> {
+pub async fn update_workspace_model(
+    model: String,
+    context_window: Option<u64>,
+) -> Result<(), ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
     require_workspace_admin(&ac.auth)?;
 
@@ -175,11 +178,19 @@ pub async fn update_workspace_model(model: String) -> Result<(), ServerFnError> 
         .into_sfn()?
         .ok_or_else(|| ServerFnError::new("Workspace not found"))?;
 
-    let updated_settings = merge_custom_settings(
+    let mut updated_settings = merge_custom_settings(
         &workspace.settings,
         "default_model",
         serde_json::json!(model),
     );
+
+    if let Some(cw) = context_window {
+        updated_settings = merge_custom_settings(
+            &Some(updated_settings),
+            "context_window",
+            serde_json::json!(cw),
+        );
+    }
 
     kyomi_auth::workspace_service::update_workspace_settings(
         ac.db(),

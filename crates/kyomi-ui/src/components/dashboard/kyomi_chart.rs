@@ -212,17 +212,12 @@ pub fn KyomiChart(
     // ------------------------------------------------------------------
     // 6. Last-refreshed timestamp (parity fix #18)
     // ------------------------------------------------------------------
-    // Seeded with `now` at mount; updated whenever any input that drives a
-    // resolver call changes (spec, refresh tick, parameters). This is one
-    // reactive frame later than reality but stays within the resolver's
-    // cache TTL so the displayed value is always "the last time we asked
-    // for fresh data."
-    let (last_refreshed, set_last_refreshed) = signal(Some(js_sys::Date::now()));
-    Effect::new(move || {
-        let _spec_tick = effective_yaml.get();
-        let _refresh_tick = combined_refresh.get();
-        let _params_tick = parameters.get();
-        set_last_refreshed.set(Some(js_sys::Date::now()));
+    // Driven by `ChartMLChart`'s `on_refreshed` callback after each
+    // fetch + transform + render completes. On cache hits this reflects
+    // when the data was originally fetched from the server, not "now".
+    let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
+    let on_refreshed_cb = Callback::new(move |ms: f64| {
+        set_last_refreshed.set(Some(ms));
     });
 
     // ------------------------------------------------------------------
@@ -385,6 +380,7 @@ pub fn KyomiChart(
                     spec=spec_signal
                     chartml=chartml
                     refresh_trigger=combined_refresh
+                    on_refreshed=on_refreshed_cb
                 />
             </div>
         </div>

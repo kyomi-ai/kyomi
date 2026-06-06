@@ -189,7 +189,7 @@ struct SessionSnapshotRow {
 ///
 /// Returns `(workspace_id, snapshot_json)`. Returns `None` if the session is
 /// not found or if the query fails.
-pub(crate) async fn fetch_session_snapshot(
+pub async fn fetch_session_snapshot(
     db: &DbPool,
     session_id: &str,
 ) -> Option<(String, serde_json::Value)> {
@@ -1616,13 +1616,19 @@ pub async fn prepare_chat_dispatch(
         let new_sid = create_session(p.db, p.user_id, p.workspace_id, None).await?;
 
         // Notify the frontend so the sidebar updates immediately.
-        if let Some(ws_manager) = p.ws_manager
-            && let Ok(Some(session_info)) =
+        if let Some(ws_manager) = p.ws_manager {
+            if let Ok(Some(session_info)) =
                 get_session_info(p.db, p.user_id, &new_sid, Some(p.workspace_id)).await
-            && let Ok(data) = serde_json::to_value(&session_info)
-        {
-            crate::websocket::helpers::send_session_created(ws_manager, p.user_id, &new_sid, data)
-                .await;
+                && let Ok(data) = serde_json::to_value(&session_info)
+            {
+                crate::websocket::helpers::send_session_created(ws_manager, p.user_id, &new_sid, data)
+                    .await;
+            }
+            crate::websocket::helpers::broadcast_chat_session_sync(
+                p.db, ws_manager, &new_sid, p.workspace_id,
+                kyomi_types::sync::SyncActionType::Insert,
+            )
+            .await;
         }
 
         (new_sid, false) // New sessions are always private
