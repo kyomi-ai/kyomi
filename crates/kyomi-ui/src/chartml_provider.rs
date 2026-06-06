@@ -218,6 +218,11 @@ impl DataSourceProvider for KyomiDatasourceProvider {
             "rows_returned".to_string(),
             serde_json::Value::from(num_rows),
         );
+        #[cfg(target_arch = "wasm32")]
+        metadata.insert(
+            "fetched_at_ms".to_string(),
+            serde_json::Value::from(js_sys::Date::now()),
+        );
 
         Ok(FetchResult { data, metadata })
     }
