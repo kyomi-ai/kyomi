@@ -95,3 +95,4 @@ infra/arc/
 scripts/prod/
 .agents/
 
+/rust_out

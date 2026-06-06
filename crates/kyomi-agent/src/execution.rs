@@ -428,11 +428,15 @@ pub async fn execute_agent_chat(
         let inp = t.total_input_tokens();
         let out = t.total_output_tokens();
         let cost = t.total_cost();
+        let ctx = t.last_input_tokens();
+        let ctx_win = t.context_window();
         let usage = serde_json::json!({
             "input_tokens": inp,
             "output_tokens": out,
             "total_tokens": inp + out,
             "cost": cost,
+            "context_tokens": ctx,
+            "context_window": ctx_win,
         });
         (events, Some(usage), inp, out, cost)
     };
@@ -758,8 +762,9 @@ async fn generate_title_inner(
     // thinking (e.g. Qwen3) — the thinking tokens are stripped in parse_response.
     let response = client.complete(&messages, &tools, Some(0.3), 512, &user_names).await?;
 
-    // Clean up the title: remove quotes, hashes, and trim.
-    let title = response
+    // Clean up the title: remove quotes, hashes, trim, and truncate to fit
+    // the DB column (varchar 255).
+    let mut title = response
         .content
         .trim()
         .trim_matches('"')
@@ -769,6 +774,14 @@ async fn generate_title_inner(
 
     if title.is_empty() {
         return Ok(());
+    }
+
+    if title.len() > 250 {
+        let boundary = crate::compaction::floor_char_boundary(&title, 250);
+        title.truncate(boundary);
+        if let Some(last_space) = title.rfind(' ') {
+            title.truncate(last_space);
+        }
     }
 
     // Update DB.
@@ -783,6 +796,122 @@ async fn generate_title_inner(
         "Generated session title"
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard summary generation
+// ---------------------------------------------------------------------------
+
+/// Generate a dashboard summary in the background (fire-and-forget).
+pub fn generate_dashboard_summary(
+    db: DbPool,
+    ws_manager: WebSocketManager,
+    dashboard_id: String,
+    user_id: String,
+    workspace_id: String,
+    title: String,
+    content: String,
+    app_config: Arc<kyomi_core::Config>,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = generate_dashboard_summary_inner(
+            &db, &ws_manager, &dashboard_id, &user_id, &workspace_id,
+            &title, &content, &app_config,
+        ).await {
+            warn!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard summary");
+        }
+    });
+}
+
+async fn generate_dashboard_summary_inner(
+    db: &DbPool,
+    ws_manager: &WebSocketManager,
+    dashboard_id: &str,
+    user_id: &str,
+    workspace_id: &str,
+    title: &str,
+    content: &str,
+    app_config: &kyomi_core::Config,
+) -> kyomi_core::Result<()> {
+    use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
+
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut ws_config = kyomi_auth::workspace_ai_config::load(db, workspace_id)
+        .await
+        .map_err(|e| {
+            kyomi_core::Error::Internal(format!(
+                "failed to load workspace AI config for dashboard summary ({workspace_id}): {e}"
+            ))
+        })?;
+
+    let title_model = kyomi_auth::workspace_ai_config::load_title_model(db, workspace_id)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(tm) = title_model {
+        ws_config.model = Some(tm);
+    } else {
+        let provider_kind = match ws_config.provider {
+            WorkspaceAiProvider::Kyomi => {
+                resolve_provider_config(app_config).map(|c| c.provider).ok()
+            }
+            WorkspaceAiProvider::Anthropic => Some(ProviderKind::Anthropic),
+            WorkspaceAiProvider::OpenAI => Some(ProviderKind::OpenAI),
+            WorkspaceAiProvider::Gemini => Some(ProviderKind::Gemini),
+        };
+        let has_custom_base_url = ws_config.base_url.is_some()
+            || (ws_config.provider == WorkspaceAiProvider::Kyomi
+                && app_config.llm_base_url.is_some());
+        if let Some(kind) = provider_kind && !has_custom_base_url {
+            ws_config.model = Some(kind.cheapest_model().to_string());
+        }
+    }
+
+    let client = create_provider_from_workspace(&ws_config, app_config)?;
+
+    let system_prompt = "Generate a concise ~20 word summary of this dashboard based on its \
+                         title and content. The summary should describe what the dashboard \
+                         shows and its purpose. Return ONLY the summary text, nothing else. \
+                         No quotes, no prefixes.";
+
+    let max = crate::compaction::floor_char_boundary(content, 4000);
+    let truncated_content = &content[..max];
+    let user_message = format!("Title: {title}\n\nContent:\n{truncated_content}");
+
+    let messages = vec![
+        crate::types::Message::system(system_prompt),
+        crate::types::Message::user(&user_message),
+    ];
+
+    let response = client.complete(&messages, &[], Some(0.3), 512, &HashMap::new()).await?;
+
+    let mut summary = response.content.trim().trim_matches('"').trim().to_string();
+    if summary.is_empty() { return Ok(()); }
+    if summary.len() > 200 {
+        let boundary = crate::compaction::floor_char_boundary(&summary, 200);
+        summary.truncate(boundary);
+        if let Some(last_space) = summary.rfind(' ') { summary.truncate(last_space); }
+    }
+    let summary = summary.replace("-->", "\u{2014}");
+
+    let new_content = format!("<!-- dashboard-summary: {summary} -->\n{content}");
+
+    kyomi_auth::dashboard_service::update_dashboard(
+        kyomi_auth::dashboard_service::UpdateDashboardParams {
+            db, embed: None, dashboard_id, workspace_id, user_id,
+            title: None, content: Some(&new_content),
+            change_summary: Some("Auto-generated summary"),
+            expected_content_hash: None,
+        },
+    ).await?;
+
+    ws_helpers::send_dashboard_summary_ready(ws_manager, user_id, dashboard_id, &summary, &new_content).await;
+    info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");
     Ok(())
 }
 

@@ -34,7 +34,7 @@ use crate::types::{Message, MessageRole};
 /// Find the largest byte index `<= max_bytes` that lies on a UTF-8 character
 /// boundary. Equivalent to `str::floor_char_boundary` (nightly-only as of
 /// Rust 1.85).
-fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     if max_bytes >= s.len() {
         return s.len();
     }

@@ -544,6 +544,16 @@ impl AgentThinkingTracker {
     pub fn total_cost(&self) -> f64 {
         self.total_cost
     }
+
+    /// Token count from the most recent LLM request.
+    pub fn last_input_tokens(&self) -> u32 {
+        self.last_input_tokens
+    }
+
+    /// Context window size for the model in use.
+    pub fn context_window(&self) -> u32 {
+        self.context_window
+    }
 }
 
 // ---------------------------------------------------------------------------

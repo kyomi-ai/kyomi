@@ -384,6 +384,22 @@ pub async fn update(
         }
     }
 
+    // Sync log — notify the frontend that workspace settings changed.
+    let snapshot =
+        crate::workspace_service::get_workspace_settings_for_sync(db, workspace_id).await;
+    if let Err(e) = crate::sync_log_service::write_sync_entry(
+        db,
+        kyomi_types::sync::entity_types::WORKSPACE_SETTINGS,
+        workspace_id,
+        workspace_id,
+        kyomi_types::sync::SyncActionType::Update,
+        snapshot,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, workspace_id = %workspace_id, "Failed to write sync log for AI config update");
+    }
+
     Ok(())
 }
 

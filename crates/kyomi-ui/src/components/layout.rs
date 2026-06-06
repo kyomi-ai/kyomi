@@ -77,7 +77,13 @@ pub fn Layout(children: ChildrenFn) -> impl IntoView {
     // network request (and the accompanying skeleton flash) on every
     // navigation. The Layout is a parent route and mounts once for the whole
     // authed session, so this resource survives page changes.
-    let user_ctx = LocalResource::new(get_user_context);
+    let (user_ctx_version, set_user_ctx_version) = signal(0u32);
+    provide_context(set_user_ctx_version);
+
+    let user_ctx = LocalResource::new(move || {
+        let _v = user_ctx_version.get();
+        get_user_context()
+    });
     provide_context(user_ctx);
 
     // Install the list-query cache (KYO-22 Part 2). Lives at the Layout
@@ -525,8 +531,10 @@ fn QueryCacheWsBridge() -> impl IntoView {
             // Datasource CRUD mutation — create/update/delete of a datasource by
             // this user or another workspace member. Refresh the datasources list.
             let cache_datasources = query_cache;
+            let refresh_user_ctx = expect_context::<WriteSignal<u32>>();
             let datasource_update_unsub = ws.subscribe("datasource_update", move |_msg| {
                 cache_datasources.invalidate("datasources");
+                refresh_user_ctx.update(|v| *v += 1);
             });
 
             let session_created_unsub = send_wrapper::SendWrapper::new(session_created_unsub);

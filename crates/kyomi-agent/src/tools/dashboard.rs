@@ -388,6 +388,22 @@ impl AgentTool for CreateDashboardTool {
             );
         }
 
+        // Spawn background dashboard summary generation (only if none exists).
+        if !content.is_empty()
+            && kyomi_auth::dashboard_service::extract_summary(content).is_none()
+        {
+            crate::execution::generate_dashboard_summary(
+                ctx.db.clone(),
+                ctx.ws_manager.clone(),
+                dashboard_id.clone(),
+                ctx.user_id.clone(),
+                ctx.workspace_id.clone(),
+                title.trim().to_string(),
+                content.to_string(),
+                ctx.config.clone(),
+            );
+        }
+
         // Broadcast dashboard creation to workspace members.
         // Broadcast to all workspace members including the actor's other tabs —
         // same-user multi-tab sync requires this. QueryCache is stale-while-
@@ -593,9 +609,23 @@ impl AgentTool for ModifyDashboardTool {
                 ctx.embedding.wait_ready().await?.clone(),
                 dashboard_id.to_string(),
                 ctx.workspace_id.clone(),
-                effective_title,
+                effective_title.clone(),
                 c.to_string(),
             );
+
+            // Generate dashboard summary if none exists.
+            if kyomi_auth::dashboard_service::extract_summary(c).is_none() {
+                crate::execution::generate_dashboard_summary(
+                    ctx.db.clone(),
+                    ctx.ws_manager.clone(),
+                    dashboard_id.to_string(),
+                    ctx.user_id.clone(),
+                    ctx.workspace_id.clone(),
+                    effective_title,
+                    c.to_string(),
+                    ctx.config.clone(),
+                );
+            }
         }
 
         // Broadcast dashboard update to workspace members.

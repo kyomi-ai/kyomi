@@ -22,7 +22,7 @@ use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, Too
 // ---------------------------------------------------------------------------
 
 /// Default OpenAI Chat Completions API endpoint.
-const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_API_URL: &str = "https://api.openai.com/v1";
 
 /// Default model for chat completions.
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
@@ -417,7 +417,7 @@ impl OpenAIProvider {
         let response = self
             .base
             .client
-            .post(&self.base.base_url)
+            .post(&format!("{}/chat/completions", self.base.base_url.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", self.base.api_key))
             .header("Content-Type", "application/json")
             .json(body)

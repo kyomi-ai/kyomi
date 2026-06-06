@@ -25,7 +25,7 @@ use crate::components::toast::{toast_error, toast_success};
 use crate::pages::settings::ai_models::{label_for_model, provider_label};
 use crate::server_fns::ai::{
     get_workspace_ai_config, list_openrouter_models, list_workspace_ai_models,
-    test_workspace_ai_config, update_workspace_ai_config, AiModelInfo, OpenRouterModelInfo,
+    test_workspace_ai_config, update_workspace_ai_config, AiModelInfo,
     WorkspaceAiConfigView,
 };
 use crate::server_fns::workspace::{update_workspace_model, update_workspace_title_model};
@@ -271,7 +271,7 @@ fn StatusBanner(cfg: WorkspaceAiConfigView, is_owner: bool) -> impl IntoView {
     // Kyomi mode: prefix + optional "$X.XX remaining in token bundle" clause.
     // If the balance is `None` (edge case: workspace row missing) we omit the
     // clause rather than rendering "$0.00", which would be misleading.
-    let prefix = format!("Using Kyomi credits · {model_label}");
+    let prefix = "Using Kyomi credits".to_string();
     let balance_clause = cfg
         .ai_bundle_balance_usd
         .map(|b| format!(" · ${b:.2} remaining in token bundle"));
@@ -425,7 +425,7 @@ fn KyomiModelPanel(
         let current = model_choice.get_untracked();
         if !current.is_empty()
             && current != CUSTOM_MODEL_SENTINEL
-            && !list.iter().any(|m: &OpenRouterModelInfo| m.id == current)
+            && !list.iter().any(|m: &AiModelInfo| m.id == current)
         {
             set_custom_model.set(current);
             set_model_choice.set(CUSTOM_MODEL_SENTINEL.to_string());
@@ -486,7 +486,7 @@ fn KyomiModelPanel(
                 }>
                     {move || {
                         let resource_value = models_resource.get();
-                        let (models, fetch_error): (Vec<OpenRouterModelInfo>, Option<String>) =
+                        let (models, fetch_error): (Vec<AiModelInfo>, Option<String>) =
                             match resource_value {
                                 Some(Ok(list)) => (list, None),
                                 Some(Err(ref e)) => (Vec::new(), Some(e.to_string())),
@@ -510,7 +510,7 @@ fn KyomiModelPanel(
                             model_opts.push((synthetic_id.clone(), synthetic_id));
                         }
                         for m in &models {
-                            model_opts.push((m.id.clone(), m.name.clone()));
+                            model_opts.push((m.id.clone(), m.label.clone()));
                         }
                         model_opts.push((
                             CUSTOM_MODEL_SENTINEL.to_string(),
@@ -576,7 +576,7 @@ fn KyomiModelPanel(
                 }>
                     {move || {
                         let resource_value = models_resource.get();
-                        let models: Vec<OpenRouterModelInfo> = match resource_value {
+                        let models: Vec<AiModelInfo> = match resource_value {
                             Some(Ok(list)) => list,
                             _ => Vec::new(),
                         };
@@ -587,7 +587,7 @@ fn KyomiModelPanel(
                             "Auto (cheapest model)".to_string(),
                         )];
                         for m in &models {
-                            title_opts.push((m.id.clone(), m.name.clone()));
+                            title_opts.push((m.id.clone(), m.label.clone()));
                         }
 
                         view! {
@@ -892,7 +892,15 @@ fn ByokPanel(
                             </Button>
                         </div>
                         <p class="text-xs text-muted-foreground">
-                            "Stored encrypted. All workspace members automatically use this key for AI requests."
+                            "Stored encrypted. All workspace members automatically use this key for AI requests. "
+                            <a
+                                href="https://kyomi.ai/docs/self-hosting/llm-providers"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="text-primary hover:underline"
+                            >
+                                "Setup guide"
+                            </a>
                         </p>
                         {move || match test_result.get() {
                             Some(Ok(msg)) => view! {
@@ -909,6 +917,40 @@ fn ByokPanel(
                             }.into_any(),
                             None => view! { <span class="hidden"></span> }.into_any(),
                         }}
+                    </div>
+
+                    // ── Advanced disclosure (base URL) ──────────────────
+                    <div>
+                        <button
+                            type="button"
+                            class="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1"
+                            on:click=move |_| set_show_advanced.update(|v| *v = !*v)
+                        >
+                            {move || if show_advanced.get() { "Advanced \u{25BE}" } else { "Advanced \u{25B8}" }}
+                        </button>
+                        <Show when=move || show_advanced.get()>
+                            <div class="space-y-2 mt-2">
+                                <Label>"Base URL"</Label>
+                                <input
+                                    type="text"
+                                    class=format!("{INPUT_CLASS} font-mono tabular-nums")
+                                    disabled=!is_admin
+                                    placeholder=move || {
+                                        match provider.get().as_str() {
+                                            "anthropic" => "https://api.anthropic.com".to_string(),
+                                            "openai" => "https://api.openai.com/v1".to_string(),
+                                            "gemini" => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                                            _ => "https://api.example.com/v1".to_string(),
+                                        }
+                                    }
+                                    prop:value=move || base_url.get()
+                                    on:input=move |ev| set_base_url.set(event_target_value(&ev))
+                                />
+                                <p class="text-xs text-muted-foreground">
+                                    "Override the API base URL for proxies, OpenRouter, or any OpenAI-compatible endpoint."
+                                </p>
+                            </div>
+                        </Show>
                     </div>
 
                     // ── Default Chat Model ───────────────────────────────
@@ -1037,32 +1079,6 @@ fn ByokPanel(
                         </p>
                     </div>
 
-                    // ── Advanced disclosure ──────────────────────────────
-                    <div>
-                        <button
-                            type="button"
-                            class="text-sm text-muted-foreground hover:text-foreground flex items-center gap-1"
-                            on:click=move |_| set_show_advanced.update(|v| *v = !*v)
-                        >
-                            {move || if show_advanced.get() { "Advanced \u{25BE}" } else { "Advanced \u{25B8}" }}
-                        </button>
-                        <Show when=move || show_advanced.get()>
-                            <div class="space-y-2 mt-2">
-                                <Label>"Base URL override"</Label>
-                                <input
-                                    type="text"
-                                    class=format!("{INPUT_CLASS} font-mono tabular-nums")
-                                    disabled=!is_admin
-                                    placeholder="https://api.anthropic.com"
-                                    prop:value=move || base_url.get()
-                                    on:input=move |ev| set_base_url.set(event_target_value(&ev))
-                                />
-                                <p class="text-xs text-muted-foreground">
-                                    "Override the API base URL for proxies or custom endpoints."
-                                </p>
-                            </div>
-                        </Show>
-                    </div>
                 </div>
             </CardContent>
         </Card>
