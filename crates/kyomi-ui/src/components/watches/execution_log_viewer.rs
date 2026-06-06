@@ -12,7 +12,6 @@
 use leptos::prelude::*;
 use leptos::server_fn::ServerFnError;
 use phosphor_leptos::Icon;
-use crate::cache::store::SyncStore;
 use crate::components::chat::AgentThinking;
 use crate::components::chat::thinking::ThinkingEvent;
 use crate::components::dashboard::{ChartInfoModal, MarkdownRenderer};
@@ -208,16 +207,6 @@ pub fn ExecutionLogViewer(
             .and_then(|ctx| ctx.workspace_id)
     });
 
-    // ── Workspace setting: show token usage ──────────────────────────────
-    let sync_store = expect_context::<SyncStore>();
-    let show_token_usage = Signal::derive(move || {
-        sync_store
-            .workspace_settings()
-            .get()
-            .map(|ws| ws.show_token_usage)
-            .unwrap_or(false)
-    });
-
     // ── Chart header action state (KYO-120) ──────────────────────────────
     // The execution log renders chartml blocks through `MarkdownRenderer`,
     // and the renderer only shows the `info` + `ask-about-chart` header
@@ -404,7 +393,6 @@ pub fn ExecutionLogViewer(
                                     // Agent thinking trace (above the response markdown)
                                     <Transition fallback=|| ()>
                                         {move || {
-                                            let show_tu = show_token_usage.get();
                                             Suspend::new(async move {
                                                 let events: Vec<ThinkingEvent> = thinking_events_resource.await.to_vec();
                                                 if events.is_empty() {
@@ -414,7 +402,6 @@ pub fn ExecutionLogViewer(
                                                         <AgentThinking
                                                             thinking_events=events
                                                             is_active=false
-                                                            show_token_usage=show_tu
                                                         />
                                                     })
                                                 }

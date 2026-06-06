@@ -150,14 +150,6 @@ fn format_token_count(n: u64) -> String {
     result.chars().rev().collect()
 }
 
-/// Format a cost value for display.
-///
-/// Sub-dollar amounts use 4 decimal places (`$0.0102`).
-/// Amounts >= $1.00 use 2 decimal places (`$1.23`).
-fn format_cost(cost: f64) -> String {
-    format!("${:.2}", cost)
-}
-
 /// Agent Thinking UI component.
 ///
 /// Displays agent thinking events in an expandable/collapsible panel with a
@@ -182,9 +174,6 @@ pub fn AgentThinking(
     /// Token usage information (prompt + completion counts).
     #[prop(into, default = Signal::stored(None))]
     token_usage: Signal<Option<TokenUsage>>,
-    /// Whether to show token count and cost in the metadata bar.
-    #[prop(into, default = false.into())]
-    show_token_usage: Signal<bool>,
     /// Optional start time in milliseconds (from `js_sys::Date::now()`).
     /// When provided, the live timer measures elapsed time from this value
     /// instead of from the moment the component mounts. This prevents the
@@ -289,34 +278,6 @@ pub fn AgentThinking(
         }
     });
 
-    // -- Left metadata group (stable): context % + cost --
-    // Reactive: re-evaluates when show_token_usage or token_usage changes.
-    // This is the core fix for the reactivity bug: token_usage arrives via
-    // WebSocket after the component mounts, so this must be a derived
-    // Signal rather than a static String computed at mount time.
-    //
-    // Format: "67% • $0.0554" (or raw token count when context_window = 0).
-    // Only rendered when show_token_usage is true and context_tokens > 0.
-    let left_meta = Signal::derive(move || {
-        if !show_token_usage.get() {
-            return String::new();
-        }
-        let Some(tu) = token_usage.get() else {
-            return String::new();
-        };
-        let mut parts = Vec::new();
-        if tu.context_tokens > 0 && tu.context_window > 0 {
-            parts.push(format!(
-                "{:.0}%",
-                (tu.context_tokens as f64 / tu.context_window as f64 * 100.0).min(100.0)
-            ));
-        }
-        if tu.cost > 0.0 {
-            parts.push(format_cost(tu.cost));
-        }
-        parts.join(" \u{2022} ")
-    });
-
     // Unified display duration — elapsed when active, total when complete.
     let display_duration = Signal::derive(move || {
         if is_active.get() { elapsed_time.get() } else { total_duration.get() }
@@ -356,19 +317,11 @@ pub fn AgentThinking(
                                 .unwrap_or_default()
                         }
                     >
-                        {move || {
-                            let left = left_meta.get();
-                            let right = format!(
-                                "{} tools \u{2022} {}",
-                                tool_executions_count.get(),
-                                format_duration(display_duration.get())
-                            );
-                            if left.is_empty() {
-                                right
-                            } else {
-                                format!("{} \u{2022} {}", left, right)
-                            }
-                        }}
+                        {move || format!(
+                            "{} tools \u{2022} {}",
+                            tool_executions_count.get(),
+                            format_duration(display_duration.get())
+                        )}
                     </span>
                     <Icon
                         icon=phosphor_leptos::CARET_DOWN

@@ -12,7 +12,6 @@
 
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
-use crate::cache::store::SyncStore;
 use crate::components::chat::{AgentThinking, ThinkingState};
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::Tooltip;
@@ -62,15 +61,6 @@ pub fn ChatMessage(
 ) -> impl IntoView {
     // These props are part of the API but will be wired in later phases.
     let _ = (&current_session_id, &session_metadata, &on_message_update);
-
-    let sync_store = expect_context::<SyncStore>();
-    let show_token_usage = Signal::derive(move || {
-        sync_store
-            .workspace_settings()
-            .get()
-            .map(|ws| ws.show_token_usage)
-            .unwrap_or(false)
-    });
 
     // ── Determine alignment and sender ──────────────────────────────────
 
@@ -235,7 +225,6 @@ pub fn ChatMessage(
                             thinking_events=thinking_events_signal
                             is_active=thinking_is_active_signal
                             token_usage=thinking_token_usage
-                            show_token_usage=show_token_usage
                         />
                     </Show>
 

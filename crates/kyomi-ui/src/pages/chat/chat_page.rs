@@ -160,6 +160,33 @@ fn generate_user_message_id() -> String {
     }
 }
 
+/// Format a token count in compact form for the chat footer.
+///
+/// - `< 1000`: raw number (e.g. `847`)
+/// - `>= 1000 && < 1_000_000`: `X.XK` (e.g. `13.7K`)
+/// - `>= 1_000_000`: `X.XM`
+fn format_compact_tokens(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+/// Format cost for the chat footer.
+///
+/// Sub-dollar amounts use 4 decimal places (`$0.0102`).
+/// Amounts >= $1.00 use 2 decimal places (`$1.23`).
+fn format_footer_cost(cost: f64) -> String {
+    if cost < 1.0 {
+        format!("${:.4}", cost)
+    } else {
+        format!("${:.2}", cost)
+    }
+}
+
 // ─── Chat Page Component ────────────────────────────────────────────────────
 
 /// Main chat page component.
@@ -319,6 +346,14 @@ pub fn ChatPage() -> impl IntoView {
             .workspace_settings()
             .get()
             .and_then(|ws| ws.default_model)
+    });
+
+    let show_token_usage = Signal::derive(move || {
+        sync_store
+            .workspace_settings()
+            .get()
+            .map(|ws| ws.show_token_usage)
+            .unwrap_or(false)
     });
 
     // ── Refs for smart scroll ───────────────────────────────────────────
@@ -1421,6 +1456,30 @@ pub fn ChatPage() -> impl IntoView {
     // into non-FnMut closures.
     let thinking_state_signal = engine.thinking().state();
 
+    // Cumulative cost across all messages
+    let cumulative_cost = Signal::derive(move || {
+        thinking_state_signal
+            .get()
+            .values()
+            .filter_map(|ts| ts.token_usage.as_ref())
+            .map(|tu| tu.cost)
+            .sum::<f64>()
+    });
+
+    // Latest context usage from the most recent assistant message
+    let latest_context = Signal::derive(move || {
+        let msgs = messages.get();
+        let thinking_map = thinking_state_signal.get();
+        msgs.iter()
+            .rev()
+            .filter(|m| m.message_type == "assistant")
+            .find_map(|m| {
+                thinking_map
+                    .get(&m.message_id)
+                    .and_then(|ts| ts.token_usage.clone())
+            })
+    });
+
     // Credits exhausted — disable chat input when workspace has no AI budget.
     // Matches React: Chat.jsx uses `creditsExhausted` from useCapabilities() to
     // disable the textarea and send button (Chat.jsx lines 1668-1677).
@@ -1878,6 +1937,45 @@ pub fn ChatPage() -> impl IntoView {
                                 show_skip_ai=current_session_id.get().is_some()
                                 skip_ai=skip_ai_response
                             />
+                        </Show>
+
+                        // Persistent footer: context usage + cumulative cost.
+                        // Shown when token usage display is enabled, messages exist,
+                        // and there is data to show.
+                        <Show when=move || {
+                            show_token_usage.get()
+                                && !messages.get().is_empty()
+                                && (cumulative_cost.get() > 0.0
+                                    || latest_context.get().is_some_and(|tu| tu.context_tokens > 0))
+                        }>
+                            <div class="flex-shrink-0 px-4 md:px-6 py-1.5 bg-background">
+                                <div class="flex items-center justify-end text-xs text-muted-foreground font-mono">
+                                    {move || {
+                                        let mut parts = Vec::new();
+                                        if let Some(tu) = latest_context.get() {
+                                            if tu.context_tokens > 0 && tu.context_window > 0 {
+                                                let pct = (tu.context_tokens as f64
+                                                    / tu.context_window as f64
+                                                    * 100.0)
+                                                    .min(100.0);
+                                                parts.push(format!(
+                                                    "{} ({:.0}%)",
+                                                    format_compact_tokens(tu.context_tokens),
+                                                    pct
+                                                ));
+                                            } else if tu.context_tokens > 0 {
+                                                parts
+                                                    .push(format_compact_tokens(tu.context_tokens));
+                                            }
+                                        }
+                                        let cost = cumulative_cost.get();
+                                        if cost > 0.0 {
+                                            parts.push(format_footer_cost(cost));
+                                        }
+                                        parts.join(" \u{00B7} ")
+                                    }}
+                                </div>
+                            </div>
                         </Show>
                     </div>
                 </div>
