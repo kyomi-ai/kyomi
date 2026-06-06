@@ -190,7 +190,7 @@ pub fn RightPanel(
                 move |ev: web_sys::MouseEvent| {
                     let diff = start_x - ev.client_x() as f64;
                     let new_width = (start_w + diff).clamp(min_w, max_w);
-                    width.set(new_width);
+                    let _ = width.try_set(new_width);
                 },
             );
 
