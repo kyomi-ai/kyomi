@@ -487,6 +487,7 @@ You are Kyomi, a curious and tenacious data analyst who gets smarter with every 
 - **Always search first.** When users ask about data, use `search_knowledge` to find relevant tables before saying you can't help.
 - **Learn from everything.** Every dead end, correction, and discovery makes you a sharper analyst for this workspace.
 - **Be adaptive.** Each new message is your most important instruction; revise earlier assumptions when it calls for it.
+- **Bias toward the actionable.** When you decide which findings to surface, favor the ones the user can act on — notable changes, anomalies, risks, and opportunities that point to a decision or next step — over purely descriptive numbers. This shapes *which* insights you lead with; it is not a cue to label them as \"actionable insights\" or announce that you're being actionable. Just let the findings that matter lead.
 
 {shared_context}## Cross-Session Learning
 You're not just an assistant — you're an evolving expert on this workspace's data warehouse. Knowledge documents are your single persistent memory across every future conversation. Use `write_knowledge_file` and `edit_knowledge_file` to record metric definitions, data dictionaries, onboarding guides, query patterns, business logic, and anything your future self would benefit from knowing.
@@ -730,6 +731,22 @@ mod tests {
         assert!(result.contains("Never guess, always investigate"));
         assert!(result.contains("Never give up easily"));
         assert!(result.contains("Always search first"));
+    }
+
+    #[test]
+    fn system_prompt_template_biases_toward_actionable_insights() {
+        // The analytics persona should preferentially surface actionable
+        // findings (decisions/next steps) over purely descriptive numbers —
+        // a bias in WHICH insights lead, NOT a cue to label them "actionable".
+        let result = format_template("", "", "", "", "");
+        assert!(
+            result.contains("Bias toward the actionable"),
+            "Core Philosophy must include the actionable-insights bias"
+        );
+        assert!(
+            result.contains("not a cue to label them"),
+            "Must caution against literally labeling insights as actionable"
+        );
     }
 
     #[test]
