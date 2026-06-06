@@ -725,14 +725,22 @@ async fn generate_title_inner(
             .ok()
             .flatten();
 
-        if let Some(tm) = title_model {
-            // 1. Workspace-level title_model takes priority.
+        let is_kyomi = ws_config.provider == WorkspaceAiProvider::Kyomi;
+
+        if is_kyomi {
+            // Kyomi mode: LLM_TITLE_MODEL > cheapest model.
+            if let Some(ref tm) = app_config.llm_title_model {
+                ws_config.model = Some(tm.clone());
+            }
+        } else if let Some(tm) = title_model {
+            // BYOK: workspace title_model > LLM_TITLE_MODEL > cheapest.
             ws_config.model = Some(tm);
-        } else if let Some(ref server_tm) = app_config.llm_title_model {
-            // 2. Server-level LLM_TITLE_MODEL env var.
-            ws_config.model = Some(server_tm.clone());
-        } else {
-            // 3. Fall back to cheapest model for the provider.
+        } else if let Some(ref tm) = app_config.llm_title_model {
+            ws_config.model = Some(tm.clone());
+        }
+
+        // Fallback: cheapest model for the provider (when nothing above set it).
+        if !is_kyomi && ws_config.model.is_none() || (is_kyomi && app_config.llm_title_model.is_none()) {
             let provider_kind = match ws_config.provider {
                 WorkspaceAiProvider::Kyomi => {
                     resolve_provider_config(app_config)
@@ -858,11 +866,19 @@ async fn generate_dashboard_summary_inner(
         .ok()
         .flatten();
 
-    if let Some(tm) = title_model {
+    let is_kyomi = ws_config.provider == WorkspaceAiProvider::Kyomi;
+
+    if is_kyomi {
+        if let Some(ref tm) = app_config.llm_title_model {
+            ws_config.model = Some(tm.clone());
+        }
+    } else if let Some(tm) = title_model {
         ws_config.model = Some(tm);
-    } else if let Some(ref server_tm) = app_config.llm_title_model {
-        ws_config.model = Some(server_tm.clone());
-    } else {
+    } else if let Some(ref tm) = app_config.llm_title_model {
+        ws_config.model = Some(tm.clone());
+    }
+
+    if !is_kyomi && ws_config.model.is_none() || (is_kyomi && app_config.llm_title_model.is_none()) {
         let provider_kind = match ws_config.provider {
             WorkspaceAiProvider::Kyomi => {
                 resolve_provider_config(app_config).map(|c| c.provider).ok()

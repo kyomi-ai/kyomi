@@ -287,8 +287,9 @@ pub async fn update(
     // Compute the new column values.
     let (new_encrypted_key, new_base_url): (Option<String>, Option<String>) = match input.provider {
         WorkspaceAiProvider::Kyomi => {
-            // Always clear the encrypted key + base URL when switching to Kyomi.
-            (None, None)
+            // Preserve the encrypted key + base URL so switching back to BYOK
+            // doesn't require re-entering credentials.
+            (row.ai_api_key_encrypted.clone(), row.ai_base_url.clone())
         }
         _ => {
             // BYOK validation + key preservation.

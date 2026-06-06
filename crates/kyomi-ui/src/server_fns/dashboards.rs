@@ -338,11 +338,18 @@ pub async fn update_dashboard(
     }
 
     // Generate dashboard summary if content changed and none exists.
+    tracing::info!(
+        dashboard_id = %dashboard_id,
+        has_content = content.is_some(),
+        content_empty = content.as_ref().map(|c| c.is_empty()).unwrap_or(true),
+        has_summary = content.as_ref().map(|c| kyomi_auth::dashboard_service::extract_summary(c).is_some()).unwrap_or(false),
+        "Dashboard summary check"
+    );
     if let Some(ref c) = content
         && !c.is_empty()
         && kyomi_auth::dashboard_service::extract_summary(c).is_none()
     {
-        if let Some(ws_manager) = &ac.ctx.ws_manager {
+        if let Some(ws_manager) = ac.ctx.ws_manager.clone() {
             let title_for_summary = match &title {
                 Some(t) => t.clone(),
                 None => {
@@ -356,7 +363,7 @@ pub async fn update_dashboard(
             };
             kyomi_agent::generate_dashboard_summary(
                 ac.ctx.db.clone(),
-                ws_manager.clone(),
+                ws_manager,
                 dashboard_id.clone(),
                 ac.auth.user_id.clone(),
                 ac.ws_id.clone(),
