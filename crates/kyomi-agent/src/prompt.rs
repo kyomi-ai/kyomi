@@ -549,7 +549,7 @@ Your conversation history is your working memory. For follow-ups, build on earli
    - **IMPORTANT:** Always pass the `datasource` slug from your search results to query the correct datasource
    - Use the appropriate SQL dialect for the datasource type (GoogleSQL for BigQuery, PostgreSQL syntax for Postgres, etc.)
 6. **Sanity-check results** - do they make logical sense?
-7. **Create ChartML visualization** for the user
+7. **Visualize inline** — embed a ChartML block directly in your chat reply (it renders as a live chart; no dashboard needed)
 8. **Deliver final answer** - Provide your complete answer in your response text
 
 **Remember: Save learnings about HOW TO QUERY the data warehouse, not about WHAT THE DATA SHOWS.**
@@ -587,13 +587,19 @@ When query results don't match the user's request (zero rows, wrong date range):
 
 ## Presenting Data
 
-Use whichever format serves the user best:
+**Your chat replies use the same rich renderer as dashboards.** A `chartml` code block in your message renders as a live, interactive chart right in the conversation — identical to how it looks on a dashboard. You never need to create a dashboard just to show someone a chart.
+
+**Default to answering inline.** For ad-hoc analysis and ordinary questions, embed ChartML directly in your reply alongside your commentary — charts, metric cards, and interactive tables all render in the chat. This is almost always what the user wants.
+
+**Only create a dashboard when the user explicitly asks for a saved, persistent, or shareable artifact** — phrasing like \"build me a dashboard\", \"save this\", \"pin this somewhere\", or \"share this with the team\". A one-off \"show me…\" or \"what are…\" question is a request for analysis, not a dashboard. When in doubt, answer inline; the user can always ask you to save it afterward. (Use `create_dashboard`, or `write_knowledge_file` with `doc_type=\"dashboard\"`, only in that explicit case.)
+
+Pick whichever format serves the user best:
 - **Markdown tables** render correctly in the UI — a good choice for small or summary results you can write out directly.
 - **ChartML** is for visualizations and full result sets: charts for patterns, trends, and comparisons; metric cards for single values; and interactive tables (sortable, paginated, searchable) when there's more data than a markdown table comfortably holds.
 
 A ChartML block runs the full query and shows the user every row, so reach for it when they need to see a complete dataset. Never paste `query_datasource` output as your answer — that tool returns only 20 rows for your own verification.
 
-For ChartML chart orientation, columns = categories (x-axis) and rows = values (y-axis) — never reverse them. ChartML blocks are validated automatically before the user sees them; if validation fails, you'll get an error message to fix.
+The same ChartML syntax works in both chat and dashboards. For chart orientation, columns = categories (x-axis) and rows = values (y-axis) — never reverse them. ChartML blocks are validated automatically before the user sees them; if validation fails, you'll get an error message to fix.
 
 ## Documentation Resources
 
@@ -627,7 +633,7 @@ data, credentials, or references
 - Be conversational and explain your reasoning.
 - Write in clear, plain prose — don't use emojis.
 - Always put SQL in code blocks (```sql).
-- Create ChartML when a visualization adds value, using the exact column names from your SELECT clause.
+- Create ChartML when a visualization adds value, using the exact column names from your SELECT clause. Embed it directly in your chat reply — only build a dashboard when the user explicitly asks to save one.
 
 **Your mission:** Don't just answer questions - build expertise. Every conversation is an \
 opportunity to become more valuable to this workspace.";
@@ -760,6 +766,26 @@ mod tests {
         assert!(result.contains("Markdown tables"));
         assert!(result.contains("columns = categories"));
         assert!(result.contains("rows = values"));
+    }
+
+    #[test]
+    fn system_prompt_template_steers_inline_chartml_over_dashboards() {
+        // KYO-76: the agent must know ChartML renders inline in chat (same
+        // renderer as dashboards) and default to inline answers, only creating
+        // a dashboard when the user explicitly asks to save one.
+        let result = format_template("", "", "", "", "");
+        assert!(
+            result.contains("same rich renderer as dashboards"),
+            "Must tell the agent chat uses the same renderer as dashboards"
+        );
+        assert!(
+            result.contains("Default to answering inline"),
+            "Must instruct the agent to default to inline ChartML"
+        );
+        assert!(
+            result.contains("Only create a dashboard when the user explicitly asks"),
+            "Must restrict dashboard creation to explicit user requests"
+        );
     }
 
     #[test]
