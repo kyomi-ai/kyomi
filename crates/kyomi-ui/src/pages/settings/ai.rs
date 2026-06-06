@@ -24,7 +24,7 @@ use crate::components::select::Select;
 use crate::components::toast::{toast_error, toast_success};
 use crate::pages::settings::ai_models::{label_for_model, provider_label};
 use crate::server_fns::ai::{
-    get_workspace_ai_config, list_openrouter_models, list_workspace_ai_models,
+    get_workspace_ai_config, list_workspace_ai_models,
     test_workspace_ai_config, update_workspace_ai_config, AiModelInfo,
     WorkspaceAiConfigView,
 };
@@ -106,7 +106,7 @@ pub fn AiPage() -> impl IntoView {
                         Ok(cfg) => {
                             if is_self_hosted {
                                 view! {
-                                    <SelfHostedView cfg=cfg is_admin=is_admin refresh=refresh/>
+                                    <SelfHostedView cfg=cfg/>
                                 }.into_any()
                             } else {
                                 view! {
@@ -142,8 +142,6 @@ pub fn AiPage() -> impl IntoView {
 #[component]
 fn SelfHostedView(
     cfg: WorkspaceAiConfigView,
-    is_admin: bool,
-    refresh: Callback<()>,
 ) -> impl IntoView {
     view! {
         <Card>
@@ -155,7 +153,7 @@ fn SelfHostedView(
                             "Kyomi provides the LLM infrastructure. Your admin picks the model; all workspace members use it."
                         </p>
                     </div>
-                    <KyomiModelPanel cfg=cfg is_admin=is_admin refresh=refresh/>
+                    <KyomiModelPanel cfg=cfg/>
                 </div>
             </CardContent>
         </Card>
@@ -211,8 +209,6 @@ fn SaasView(
                                 <div class="p-2">
                                     <KyomiModelPanel
                                         cfg=cfg_for_kyomi
-                                        is_admin=is_admin
-                                        refresh=refresh
                                     />
                                 </div>
                             </CardContent>
@@ -390,248 +386,16 @@ fn ModeCard(
 #[component]
 fn KyomiModelPanel(
     cfg: WorkspaceAiConfigView,
-    is_admin: bool,
-    refresh: Callback<()>,
 ) -> impl IntoView {
-    let initial_model = cfg.model.clone().unwrap_or_default();
-    let initial_title_model = cfg.title_model.clone().unwrap_or_default();
-
-    // `model_choice` holds either a concrete model ID or `CUSTOM_MODEL_SENTINEL`.
-    let (model_choice, set_model_choice) = signal(initial_model.clone());
-    let (custom_model, set_custom_model) = signal(initial_model);
-    let (selected_title_model, set_selected_title_model) = signal(initial_title_model);
-
-    // Tracks whether we've already reconciled `model_choice` against the
-    // initial fetched-models list (to convert unknown ids → custom mode).
-    let (initial_apply_done, set_initial_apply_done) = signal(false);
-
-    // Fetch models from OpenRouter using server-level credentials for Kyomi mode.
-    // Fetched once on mount; no reactivity key needed.
-    let models_resource = Resource::new(
-        || (),
-        |_| async move { list_openrouter_models(false).await },
-    );
-
-    // After the first successful fetch, if the currently-selected model isn't
-    // in the returned list, flip to custom-model mode preserving the value.
-    // Runs at most once.
-    Effect::new(move |_| {
-        if initial_apply_done.get() {
-            return;
-        }
-        let Some(Ok(list)) = models_resource.get() else {
-            return;
-        };
-        let current = model_choice.get_untracked();
-        if !current.is_empty()
-            && current != CUSTOM_MODEL_SENTINEL
-            && !list.iter().any(|m: &AiModelInfo| m.id == current)
-        {
-            set_custom_model.set(current);
-            set_model_choice.set(CUSTOM_MODEL_SENTINEL.to_string());
-        }
-        set_initial_apply_done.set(true);
-    });
-
-    // Resolve the actual model ID to send to the server.
-    let effective_model = Signal::derive(move || {
-        let choice = model_choice.get();
-        if choice == CUSTOM_MODEL_SENTINEL {
-            custom_model.get().trim().to_string()
-        } else {
-            choice.trim().to_string()
-        }
-    });
-
-    let save_action = Action::new(move |(model, ctx_len): &(String, Option<u64>)| {
-        let model = model.clone();
-        let ctx_len = *ctx_len;
-        async move {
-            match update_workspace_model(model, ctx_len).await {
-                Ok(()) => {
-                    toast_success("Default chat model saved.");
-                    refresh.try_run(());
-                }
-                Err(e) => toast_error(format!("Failed to save: {e}")),
-            }
-        }
-    });
-
-    let save_title_action = Action::new(move |model: &String| {
-        let model = model.clone();
-        async move {
-            match update_workspace_title_model(model).await {
-                Ok(()) => {
-                    toast_success("Title generation model saved.");
-                    refresh.try_run(());
-                }
-                Err(e) => toast_error(format!("Failed to save: {e}")),
-            }
-        }
-    });
-
+    let _ = cfg;
     view! {
-        <div class="space-y-4">
-            // ── Default Chat Model ───────────────────────────────────────
-            <div class="space-y-2">
-                <Label>"Default Chat Model"</Label>
-                <Suspense fallback=move || view! {
-                    <Select
-                        value=Signal::derive(String::new)
-                        options=Signal::derive(|| vec![
-                            (String::new(), "Loading models\u{2026}".to_string()),
-                        ])
-                        disabled=Signal::derive(|| true)
-                        on_change=|_| {}
-                    />
-                }>
-                    {move || {
-                        let resource_value = models_resource.get();
-                        let (models, fetch_error): (Vec<AiModelInfo>, Option<String>) =
-                            match resource_value {
-                                Some(Ok(list)) => (list, None),
-                                Some(Err(ref e)) => (Vec::new(), Some(e.to_string())),
-                                None => (Vec::new(), None),
-                            };
-
-                        let current = model_choice.get();
-                        // If the current selection isn't in the fetched list
-                        // (and isn't custom/empty), inject a synthetic option
-                        // so the dropdown isn't blank during the
-                        // pre-reconciliation flicker window.
-                        let needs_synthetic = !current.is_empty()
-                            && current != CUSTOM_MODEL_SENTINEL
-                            && !models.iter().any(|m| m.id == current);
-                        let synthetic_id = current.clone();
-
-                        // Build the options list: optional synthetic +
-                        // fetched models + custom sentinel.
-                        let mut model_opts: Vec<(String, String)> = Vec::new();
-                        if needs_synthetic {
-                            model_opts.push((synthetic_id.clone(), synthetic_id));
-                        }
-                        for m in &models {
-                            model_opts.push((m.id.clone(), m.label.clone()));
-                        }
-                        model_opts.push((
-                            CUSTOM_MODEL_SENTINEL.to_string(),
-                            "Custom model ID\u{2026}".to_string(),
-                        ));
-
-                        view! {
-                            <Select
-                                value=Signal::derive(move || model_choice.get())
-                                options=Signal::derive(move || model_opts.clone())
-                                disabled=Signal::derive(move || !is_admin)
-                                searchable=true
-                                on_change=move |val| {
-                                    if !save_action.pending().get_untracked() {
-                                        set_model_choice.set(val.clone());
-                                        if val != CUSTOM_MODEL_SENTINEL {
-                                            let ctx_len = models_resource
-                                                .get()
-                                                .and_then(|r| r.ok())
-                                                .and_then(|list| list.iter().find(|m| m.id == val).and_then(|m| m.context_length));
-                                            save_action.dispatch((val, ctx_len));
-                                        }
-                                    }
-                                }
-                            />
-                            {fetch_error.map(|msg| view! {
-                                <p class="text-xs text-error-foreground">
-                                    "Couldn\u{2019}t load models: " {msg}
-                                </p>
-                            })}
-                        }
-                    }}
-                </Suspense>
-                <Show when=move || model_choice.get() == CUSTOM_MODEL_SENTINEL>
-                    <input
-                        type="text"
-                        class=format!("{INPUT_CLASS} font-mono tabular-nums")
-                        disabled=!is_admin
-                        placeholder="provider/model-id"
-                        prop:value=move || custom_model.get()
-                        on:input=move |ev| set_custom_model.set(event_target_value(&ev))
-                        on:blur=move |_| {
-                            let val = effective_model.get_untracked();
-                            if !save_action.pending().get_untracked() && !val.trim().is_empty() {
-                                save_action.dispatch((val, None));
-                            }
-                        }
-                    />
-                </Show>
-                <p class="text-xs text-muted-foreground">
-                    "Kyomi provides the LLM infrastructure. Your admin picks the model; all workspace members use it."
-                </p>
-            </div>
-
-            // ── Title Generation Model ───────────────────────────────────
-            <div class="space-y-2">
-                <Label>"Title Generation Model"</Label>
-                <Suspense fallback=move || view! {
-                    <Select
-                        value=Signal::derive(String::new)
-                        options=Signal::derive(|| vec![
-                            (String::new(), "Loading models\u{2026}".to_string()),
-                        ])
-                        disabled=Signal::derive(|| true)
-                        on_change=|_| {}
-                    />
-                }>
-                    {move || {
-                        let resource_value = models_resource.get();
-                        let models: Vec<AiModelInfo> = match resource_value {
-                            Some(Ok(list)) => list,
-                            _ => Vec::new(),
-                        };
-
-                        // Build options: Auto at top, then all fetched models.
-                        let mut title_opts: Vec<(String, String)> = vec![(
-                            TITLE_MODEL_AUTO.to_string(),
-                            "Auto (cheapest model)".to_string(),
-                        )];
-                        for m in &models {
-                            title_opts.push((m.id.clone(), m.label.clone()));
-                        }
-
-                        view! {
-                            <Select
-                                value=Signal::derive(move || selected_title_model.get())
-                                options=Signal::derive(move || title_opts.clone())
-                                disabled=Signal::derive(move || !is_admin)
-                                searchable=true
-                                on_change=move |val| {
-                                    if !save_title_action.pending().get_untracked() {
-                                        set_selected_title_model.set(val.clone());
-                                        save_title_action.dispatch(val);
-                                    }
-                                }
-                            />
-                        }
-                    }}
-                </Suspense>
-                <p class="text-xs text-muted-foreground">
-                    "Model used to generate conversation titles. Auto uses the cheapest available model."
-                </p>
-            </div>
-
-            // ── OpenRouter attribution ───────────────────────────────────
-            <p class="text-xs text-muted-foreground">
-                "Models provided by "
-                <a
-                    href="https://openrouter.ai/models"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="text-primary hover:underline"
-                >
-                    "OpenRouter"
-                </a>
-                ". Pricing varies by model."
-            </p>
-        </div>
+        <p class="text-sm text-foreground">
+            "Kyomi automatically selects the best model for each task. "
+            "No configuration needed \u{2014} just chat."
+        </p>
     }
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BYOK panel — provider / api_key / model / advanced disclosure

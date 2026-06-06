@@ -202,6 +202,17 @@ impl SyncStore {
         self.inner.with_value(|inner| inner.workspace_settings.set(Some(settings)));
     }
 
+    /// Apply a mutation to the current workspace settings in place.
+    pub fn update_workspace_setting(&self, f: impl FnOnce(&mut WorkspaceSettingsData)) {
+        self.inner.with_value(|inner| {
+            inner.workspace_settings.update(|opt| {
+                if let Some(ws) = opt.as_mut() {
+                    f(ws);
+                }
+            });
+        });
+    }
+
     // ── Single-item removes (delete sync) ────────────────────────────────────
 
     /// Remove a dashboard by `dashboard_id`.

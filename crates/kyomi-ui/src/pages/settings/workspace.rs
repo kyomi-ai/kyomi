@@ -134,9 +134,15 @@ fn WorkspaceNameCard(data: WorkspaceSettingsData) -> impl IntoView {
 #[component]
 fn TokenUsageCard(data: WorkspaceSettingsData) -> impl IntoView {
     let sync_store = expect_context::<SyncStore>();
-    let save_action = Action::new(|show: &bool| {
+    let save_action = Action::new(move |show: &bool| {
         let show = *show;
-        async move { update_workspace_show_token_usage(show).await }
+        async move {
+            let result = update_workspace_show_token_usage(show).await;
+            if result.is_ok() {
+                sync_store.update_workspace_setting(|ws| ws.show_token_usage = show);
+            }
+            result
+        }
     });
 
     // Derive the current value reactively from the SyncStore so changes
