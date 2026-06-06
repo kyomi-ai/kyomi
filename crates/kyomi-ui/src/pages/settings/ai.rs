@@ -589,13 +589,6 @@ fn ByokPanel(
     let save_action = Action::new(move |_: &()| async move {
         let prov = provider.get_untracked();
         let key = api_key.get_untracked();
-        let model = effective_model.get_untracked();
-        if model.is_empty() {
-            toast_error("Pick a model (or enter a custom model ID).");
-            return;
-        }
-        // Only send the api_key when the user typed something new. Passing
-        // `None` preserves the existing encrypted key on the server.
         let key_opt = if key.trim().is_empty() { None } else { Some(key) };
         if key_opt.is_none() && !had_api_key {
             toast_error("Enter an API key.");
@@ -607,8 +600,12 @@ fn ByokPanel(
         } else {
             Some(url_override.trim().to_string())
         };
+        let model_opt = {
+            let m = effective_model.get_untracked();
+            if m.is_empty() { None } else { Some(m) }
+        };
 
-        match update_workspace_ai_config(prov, key_opt, url_opt, Some(model)).await {
+        match update_workspace_ai_config(prov, key_opt, url_opt, model_opt).await {
             Ok(_) => {
                 toast_success("AI configuration saved.");
                 set_api_key.set(String::new());
