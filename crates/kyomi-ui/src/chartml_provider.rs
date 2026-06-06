@@ -229,6 +229,14 @@ impl DataSourceProvider for KyomiDatasourceProvider {
 /// loads attach to the same store rather than creating a fresh database.
 pub const KYOMI_CHARTML_CACHE_DB: &str = "kyomi-chartml-cache";
 
+/// Workspace UUID stored in Leptos context so [`configured_chartml`] can enable
+/// the IndexedDB persistent cache without every call site threading the ID as
+/// a prop. Provided by [`provide_chart_context`] /
+/// [`DashboardChartProviders`]; consumed by [`MarkdownRenderer`] as a fallback
+/// when its `workspace_id` prop is empty.
+#[derive(Clone, Debug)]
+pub struct ChartCacheWorkspaceId(pub String);
+
 /// Tracing-based [`chartml_core::ResolverHooks`] impl for first-pass
 /// observability. Errors flow through `tracing::warn!`; cache hit/miss and
 /// progress events are silent for now (they're high-volume and we don't yet
@@ -417,9 +425,9 @@ pub fn DashboardChartProviders(
 /// The IndexedDB persistent cache is set up per-chart inside
 /// [`configured_chartml`] via `chartml.enable_indexeddb_cache`, not here.
 pub fn provide_chart_context(workspace_id: &str) {
-    // Provider — synchronous, cheap, ready immediately.
     let provider: ProviderRef = Arc::new(KyomiDatasourceProvider::new(workspace_id.to_string()));
     provide_context(provider);
+    provide_context(ChartCacheWorkspaceId(workspace_id.to_string()));
 }
 
 #[cfg(test)]
