@@ -310,23 +310,12 @@ pub fn create_provider(
 /// Build an [`LLMProvider`] from a workspace AI config.
 ///
 /// * **Kyomi mode** (`ws_config.provider == WorkspaceAiProvider::Kyomi`):
-///   falls back to `fallback_config` — the server's env-configured keys
-///   (`ANTHROPIC_API_KEY` / `LLM_API_KEY`). Matches the legacy behaviour of
-///   [`create_provider`] + [`resolve_provider_config`] exactly so that
-///   existing Kyomi-hosted tenants see no change.
-///   * Model override: `ws_config.model` wins over `fallback_config.llm_model`.
-///   * Base URL: inherited from `fallback_config.llm_base_url` (workspaces
-///     in Kyomi mode never set their own base URL).
+///   uses the server's env-configured keys and model (`LLM_PROVIDER`,
+///   `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL`). The workspace's
+///   `default_model` is ignored — the server controls the model entirely.
 ///
 /// * **BYOK mode** (anthropic / openai / gemini): uses the workspace's
-///   decrypted API key, model, and optional base URL. Returns
-///   [`kyomi_core::Error::Internal`] if the workspace is BYOK but has no
-///   stored API key (can only happen if Track 2's [`update`] invariant was
-///   bypassed via direct DB write).
-///
-/// Prefer this over [`create_provider`] anywhere a workspace ID is in scope.
-/// [`create_provider`] remains for anonymous entry points (trial chat) that
-/// have no workspace context.
+///   decrypted API key, model, and optional base URL.
 pub fn create_provider_from_workspace(
     ws_config: &kyomi_auth::workspace_ai_config::WorkspaceAiConfig,
     fallback_config: &kyomi_core::Config,
@@ -335,13 +324,10 @@ pub fn create_provider_from_workspace(
 
     let llm_config = match ws_config.provider {
         WorkspaceAiProvider::Kyomi => {
-            // Server-side keys: reuse the existing resolver so Kyomi-mode
-            // workspaces get identical behaviour to the old global path.
-            let mut resolved = resolve_provider_config(fallback_config)?;
-            if let Some(ref model) = ws_config.model {
-                resolved.model = Some(model.clone());
-            }
-            resolved
+            // Server-side keys: server controls the model entirely.
+            // Workspace default_model is ignored — it may reference a
+            // BYOK-only model from a previous provider configuration.
+            resolve_provider_config(fallback_config)?
         }
         WorkspaceAiProvider::Anthropic
         | WorkspaceAiProvider::OpenAI
@@ -706,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_factory_kyomi_mode_workspace_model_overrides_server() {
+    fn workspace_factory_kyomi_mode_ignores_workspace_model() {
         use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
 
         let mut fallback = kyomi_core::Config::test_config();
@@ -723,7 +709,8 @@ mod tests {
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
-        assert_eq!(provider.model(), "claude-haiku-4-5-20251001");
+        // Kyomi mode: server controls the model, workspace model is ignored.
+        assert_eq!(provider.model(), "claude-sonnet-4-20250514");
     }
 
     #[test]

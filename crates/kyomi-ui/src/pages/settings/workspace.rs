@@ -162,7 +162,7 @@ fn TokenUsageCard(data: WorkspaceSettingsData) -> impl IntoView {
                     <div>
                         <CardTitle>"Token Usage"</CardTitle>
                         <CardDescription>
-                            "Show token counts and estimated cost in chat message thinking headers."
+                            "Show context usage and estimated cost in the chat footer."
                         </CardDescription>
                     </div>
                     <ActionStatus action=save_action/>
@@ -174,7 +174,7 @@ fn TokenUsageCard(data: WorkspaceSettingsData) -> impl IntoView {
                         checked=show_token_usage
                         on_change=Callback::new(move |val: bool| { let _ = save_action.dispatch(val); })
                     />
-                    <span class="text-sm text-foreground">"Display token usage in thinking headers"</span>
+                    <span class="text-sm text-foreground">"Display context usage and cost"</span>
                 </label>
             </CardContent>
         </Card>
