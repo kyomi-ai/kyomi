@@ -142,6 +142,10 @@ pub struct Config {
     /// Custom base URL for the LLM API (e.g., for proxies or OpenAI-compatible endpoints).
     pub llm_base_url: Option<String>,
 
+    /// Model for lightweight tasks (title generation, dashboard summaries).
+    /// Uses the cheapest model for the provider when absent.
+    pub llm_title_model: Option<String>,
+
     // ── Stripe ──────────────────────────────────────────────────────────
     /// Stripe secret key (sk_test_ or sk_live_).
     /// Optional — server starts without it (no billing features).
@@ -365,6 +369,7 @@ impl Config {
             llm_api_key: env::var("LLM_API_KEY").ok(),
             llm_model: env::var("LLM_MODEL").ok(),
             llm_base_url: env::var("LLM_BASE_URL").ok(),
+            llm_title_model: env::var("LLM_TITLE_MODEL").ok(),
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok(),
             stripe_publishable_key: env::var("STRIPE_PUBLISHABLE_KEY").ok(),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET").ok(),
@@ -442,6 +447,7 @@ impl Config {
             llm_api_key: None,
             llm_model: None,
             llm_base_url: None,
+            llm_title_model: None,
             stripe_secret_key: None,
             stripe_publishable_key: None,
             stripe_webhook_secret: None,

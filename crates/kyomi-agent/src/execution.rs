@@ -726,11 +726,15 @@ async fn generate_title_inner(
             .flatten();
 
         if let Some(tm) = title_model {
+            // 1. Workspace-level title_model takes priority.
             ws_config.model = Some(tm);
+        } else if let Some(ref server_tm) = app_config.llm_title_model {
+            // 2. Server-level LLM_TITLE_MODEL env var.
+            ws_config.model = Some(server_tm.clone());
         } else {
+            // 3. Fall back to cheapest model for the provider.
             let provider_kind = match ws_config.provider {
                 WorkspaceAiProvider::Kyomi => {
-                    // Resolve the actual provider kind from server env config.
                     resolve_provider_config(app_config)
                         .map(|c| c.provider)
                         .ok()
@@ -856,6 +860,8 @@ async fn generate_dashboard_summary_inner(
 
     if let Some(tm) = title_model {
         ws_config.model = Some(tm);
+    } else if let Some(ref server_tm) = app_config.llm_title_model {
+        ws_config.model = Some(server_tm.clone());
     } else {
         let provider_kind = match ws_config.provider {
             WorkspaceAiProvider::Kyomi => {

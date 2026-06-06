@@ -931,7 +931,7 @@ pub fn ChatPage() -> impl IntoView {
                                 "I'm ready to help you explore this chart:\n\n{}\n\nWhat would you like to know about it?",
                                 ctx.chart_markdown
                             ),
-                            timestamp: String::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
                             pinned: false,
                             sent_by: None,
                             thinking_events: Vec::new(),
@@ -957,7 +957,7 @@ pub fn ChatPage() -> impl IntoView {
                             ),
                             message_type: "assistant".to_string(),
                             content: "This chart link has expired or is no longer available. You can still ask me anything about your data!".to_string(),
-                            timestamp: String::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
                             pinned: false,
                             sent_by: None,
                             thinking_events: Vec::new(),
@@ -976,7 +976,7 @@ pub fn ChatPage() -> impl IntoView {
                             ),
                             message_type: "assistant".to_string(),
                             content: "This chart link has expired or is no longer available. You can still ask me anything about your data!".to_string(),
-                            timestamp: String::new(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
                             pinned: false,
                             sent_by: None,
                             thinking_events: Vec::new(),
@@ -1040,7 +1040,7 @@ pub fn ChatPage() -> impl IntoView {
                             "I'm ready to help you explore this chart:\n\n{}\n\nWhat would you like to know about it?",
                             markdown
                         ),
-                        timestamp: String::new(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
                         pinned: false,
                         sent_by: None,
                         thinking_events: Vec::new(),
@@ -1070,7 +1070,7 @@ pub fn ChatPage() -> impl IntoView {
                         - \"Monitor our conversion rate and tell me if it changes significantly\"\n\
                         - \"Check our inventory levels daily and warn me if anything is running low\"\n\n\
                         Just describe what you want to monitor, and I'll set it up for you.".to_string(),
-                    timestamp: String::new(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
                     pinned: false,
                     sent_by: None,
                     thinking_events: Vec::new(),
@@ -1383,7 +1383,7 @@ pub fn ChatPage() -> impl IntoView {
                         message_id: generate_user_message_id().replace("user-", "error-"),
                         message_type: "assistant".to_string(),
                         content: error_content,
-                        timestamp: String::new(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
                         pinned: false,
                         sent_by: None,
                         thinking_events: Vec::new(),

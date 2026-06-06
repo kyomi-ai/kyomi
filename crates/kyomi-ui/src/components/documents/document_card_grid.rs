@@ -203,6 +203,7 @@ fn DocumentCard(
     // ChildrenFn requires Fn (not FnOnce), so non-Copy values must be accessed
     // via StoredValue (which is Copy) rather than moved directly into the closure.
     let edit_href_stored = StoredValue::new(edit_href);
+    let navigate = StoredValue::new(leptos_router::hooks::use_navigate());
     let delete_id_stored = StoredValue::new(delete_id);
     let delete_title_stored = StoredValue::new(delete_title);
     let dashboard_for_add_stored = StoredValue::new(dashboard);
@@ -335,18 +336,20 @@ fn DocumentCard(
                     placement=Placement::BOTTOM_END
                     class="min-w-[10rem] rounded-md border border-border bg-popover text-popover-foreground shadow-lg p-1"
                 >
-                    // Edit — navigates to edit URL
-                    <a
-                        href=move || edit_href_stored.get_value()
+                    // Edit — client-side navigation
+                    <button
                         class="menu-item"
                         on:click=move |ev: leptos::ev::MouseEvent| {
+                            ev.prevent_default();
                             ev.stop_propagation();
                             set_kebab_open.set(false);
+                            let href = edit_href_stored.get_value();
+                            navigate.get_value()(&href, Default::default());
                         }
                     >
                         <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
                         "Edit"
-                    </a>
+                    </button>
 
                     // Add to Collection — only when callback provided and collections available
                     {if has_available_collections {
