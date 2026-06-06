@@ -443,10 +443,11 @@ fn KyomiModelPanel(
         }
     });
 
-    let save_action = Action::new(move |model: &String| {
+    let save_action = Action::new(move |(model, ctx_len): &(String, Option<u64>)| {
         let model = model.clone();
+        let ctx_len = *ctx_len;
         async move {
-            match update_workspace_model(model, None).await {
+            match update_workspace_model(model, ctx_len).await {
                 Ok(()) => {
                     toast_success("Default chat model saved.");
                     refresh.try_run(());
@@ -527,7 +528,11 @@ fn KyomiModelPanel(
                                     if !save_action.pending().get_untracked() {
                                         set_model_choice.set(val.clone());
                                         if val != CUSTOM_MODEL_SENTINEL {
-                                            save_action.dispatch(val);
+                                            let ctx_len = models_resource
+                                                .get()
+                                                .and_then(|r| r.ok())
+                                                .and_then(|list| list.iter().find(|m| m.id == val).and_then(|m| m.context_length));
+                                            save_action.dispatch((val, ctx_len));
                                         }
                                     }
                                 }
@@ -551,7 +556,7 @@ fn KyomiModelPanel(
                         on:blur=move |_| {
                             let val = effective_model.get_untracked();
                             if !save_action.pending().get_untracked() && !val.trim().is_empty() {
-                                save_action.dispatch(val);
+                                save_action.dispatch((val, None));
                             }
                         }
                     />
@@ -742,6 +747,20 @@ fn ByokPanel(
         }
     });
 
+    let save_model_action = Action::new(move |(model, ctx_len): &(String, Option<u64>)| {
+        let model = model.clone();
+        let ctx_len = *ctx_len;
+        async move {
+            match update_workspace_model(model, ctx_len).await {
+                Ok(()) => {
+                    toast_success("Default model saved.");
+                    refresh.try_run(());
+                }
+                Err(e) => toast_error(format!("Failed to save model: {e}")),
+            }
+        }
+    });
+
     let save_title_model_action = Action::new(move |model: &String| {
         let model = model.clone();
         async move {
@@ -817,8 +836,6 @@ fn ByokPanel(
             Ok(_) => {
                 toast_success("AI configuration saved.");
                 set_api_key.set(String::new());
-                // The stored key is now valid — drop the last-tested fallback
-                // and refetch models against the persisted credentials.
                 set_last_tested_key.set(None);
                 set_refetch_models_version.update(|v| *v += 1);
                 refresh.try_run(());
@@ -1006,7 +1023,19 @@ fn ByokPanel(
                                         options=Signal::derive(move || model_opts.clone())
                                         disabled=Signal::derive(move || !is_admin)
                                         searchable=true
-                                        on_change=move |val| set_model_choice.set(val)
+                                        on_change=move |val| {
+                                            set_model_choice.set(val.clone());
+                                            if !val.is_empty()
+                                                && val != CUSTOM_MODEL_SENTINEL
+                                                && !save_model_action.pending().get_untracked()
+                                            {
+                                                let ctx_len = models_resource
+                                                    .get()
+                                                    .and_then(|r| r.ok())
+                                                    .and_then(|list| list.iter().find(|m| m.id == val).and_then(|m| m.context_length));
+                                                save_model_action.dispatch((val, ctx_len));
+                                            }
+                                        }
                                         placeholder="Select a model..."
                                     />
                                     {fetch_error.map(|msg| view! {

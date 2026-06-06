@@ -243,6 +243,7 @@ pub async fn execute_agent_chat(
     let model_name = client.model().to_string();
     let provider_context_window = client.context_window();
 
+
     // 4. Create agent config with context-appropriate tool filter.
     //
     // Tool filtering mirrors the Python backend:
