@@ -685,7 +685,7 @@ pub async fn get_user_learnings_for_watch(
     );
 
     format!(
-        "\n\n## 🧠 Your Knowledge Base (Personal Preferences)\n\n\
+        "\n\n## Your Knowledge Base (Personal Preferences)\n\n\
          **Your accumulated knowledge from past investigations:**\n\
          These personal preferences were learned from previous conversations. \
          Apply them automatically when relevant.\n\n\
@@ -775,7 +775,7 @@ pub async fn get_workspace_learnings_for_watch(
 
     format!(
         "<relevant_workspace_learnings>\n\
-         🧠 **Case Notes from Past Team Investigations:**\n\
+         **Case Notes from Past Team Investigations:**\n\
          The following insights from previous workspace investigations are relevant. \
          Apply them when analyzing data.\n\n\
          {learning_text}\n\n\
