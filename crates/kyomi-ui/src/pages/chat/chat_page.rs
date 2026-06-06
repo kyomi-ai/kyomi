@@ -160,31 +160,9 @@ fn generate_user_message_id() -> String {
     }
 }
 
-/// Format a token count in compact form for the chat footer.
-///
-/// - `< 1000`: raw number (e.g. `847`)
-/// - `>= 1000 && < 1_000_000`: `X.XK` (e.g. `13.7K`)
-/// - `>= 1_000_000`: `X.XM`
-fn format_compact_tokens(n: u64) -> String {
-    if n < 1_000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    }
-}
-
-/// Format cost for the chat footer.
-///
-/// Sub-dollar amounts use 4 decimal places (`$0.0102`).
-/// Amounts >= $1.00 use 2 decimal places (`$1.23`).
+/// Format cost for the chat footer — always 2 decimal places.
 fn format_footer_cost(cost: f64) -> String {
-    if cost < 1.0 {
-        format!("${:.4}", cost)
-    } else {
-        format!("${:.2}", cost)
-    }
+    format!("${:.2}", cost)
 }
 
 // ─── Chat Page Component ────────────────────────────────────────────────────
@@ -1942,31 +1920,22 @@ pub fn ChatPage() -> impl IntoView {
                         // Persistent footer: context usage + cumulative cost.
                         // Shown when token usage display is enabled, messages exist,
                         // and there is data to show.
-                        <Show when=move || {
-                            show_token_usage.get()
-                                && !messages.get().is_empty()
-                                && (cumulative_cost.get() > 0.0
-                                    || latest_context.get().is_some_and(|tu| tu.context_tokens > 0))
-                        }>
-                            <div class="flex-shrink-0 px-4 md:px-6 py-1.5 bg-background">
-                                <div class="flex items-center justify-end text-xs text-muted-foreground font-mono">
+                        // Footer: fixed height to prevent layout shift.
+                        // Shows context % and cost when available.
+                        <Show when=move || show_token_usage.get() && !messages.get().is_empty()>
+                            <div class="flex-shrink-0 px-4 md:px-6 h-7 flex items-center justify-end bg-background">
+                                <span class="text-xs text-muted-foreground font-mono">
                                     {move || {
                                         let mut parts = Vec::new();
-                                        if let Some(tu) = latest_context.get() {
-                                            if tu.context_tokens > 0 && tu.context_window > 0 {
-                                                let pct = (tu.context_tokens as f64
-                                                    / tu.context_window as f64
-                                                    * 100.0)
-                                                    .min(100.0);
-                                                parts.push(format!(
-                                                    "{} ({:.0}%)",
-                                                    format_compact_tokens(tu.context_tokens),
-                                                    pct
-                                                ));
-                                            } else if tu.context_tokens > 0 {
-                                                parts
-                                                    .push(format_compact_tokens(tu.context_tokens));
-                                            }
+                                        if let Some(tu) = latest_context.get()
+                                            && tu.context_tokens > 0
+                                            && tu.context_window > 0
+                                        {
+                                            let pct = (tu.context_tokens as f64
+                                                / tu.context_window as f64
+                                                * 100.0)
+                                                .min(100.0);
+                                            parts.push(format!("{:.0}%", pct));
                                         }
                                         let cost = cumulative_cost.get();
                                         if cost > 0.0 {
@@ -1974,7 +1943,7 @@ pub fn ChatPage() -> impl IntoView {
                                         }
                                         parts.join(" \u{00B7} ")
                                     }}
-                                </div>
+                                </span>
                             </div>
                         </Show>
                     </div>
