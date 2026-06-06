@@ -244,7 +244,7 @@ pub async fn create_user(
 ///
 /// When `config` is provided and contains Stripe keys (SaaS mode):
 /// - Creates workspace with `cloud` tier, `trialing` status, 30-day trial
-/// - Seeds $5 AI credit balance to get started
+/// - Seeds $1 AI credit balance to get started
 /// - Creates a Stripe customer and stores the `stripe_customer_id`
 ///
 /// When `config` is `None` or Stripe is not configured:
@@ -271,7 +271,7 @@ pub async fn create_workspace_for_user(
         .is_some_and(|k| !k.is_empty());
 
     // Self-hosted: team tier with active status (no trial, no billing).
-    // SaaS with Stripe: cloud tier with 30-day trial and $5 AI credits.
+    // SaaS with Stripe: cloud tier with 30-day trial and $1 AI credits.
     //   Stripe is the source of truth for subscription status — it will be
     //   updated after the Stripe subscription is created below.
     // SaaS without Stripe: cloud tier with 30-day trial (app-managed fallback), no credits.
@@ -280,7 +280,7 @@ pub async fn create_workspace_for_user(
             ("team", "active", "active", None, 0.0_f64, Some(999_999_i32))
         } else {
             let trial = chrono::Utc::now() + chrono::Duration::days(30);
-            let credits = if has_stripe { 5.0 } else { 0.0 };
+            let credits = if has_stripe { 1.0 } else { 0.0 };
             ("cloud", "trial", "trialing", Some(trial), credits, None)
         };
 
