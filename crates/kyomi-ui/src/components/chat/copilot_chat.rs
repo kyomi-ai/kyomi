@@ -14,7 +14,6 @@ use leptos::prelude::*;
 use super::chat_engine::{ChatEngine, ChatEngineConfig, SessionMode};
 use super::websocket_client::WebSocketContext;
 use super::{AgentThinking, ChatInput};
-use crate::cache::store::SyncStore;
 use crate::components::dashboard::MarkdownRenderer;
 use crate::components::{EmptyState, Spinner};
 
@@ -97,16 +96,6 @@ pub fn CopilotChat(
     let empty_title_stored = StoredValue::new(empty_title);
     let empty_description_stored = StoredValue::new(empty_description);
     let placeholder_stored = StoredValue::new(placeholder);
-
-    // ── Workspace setting: show token usage ──────────────────────────
-    let sync_store = expect_context::<SyncStore>();
-    let show_token_usage = Signal::derive(move || {
-        sync_store
-            .workspace_settings()
-            .get()
-            .map(|ws| ws.show_token_usage)
-            .unwrap_or(false)
-    });
 
     // ── Set up scroll ─────────────────────────────────────────────────
     let message_list_ref = NodeRef::<leptos::html::Div>::new();
@@ -226,7 +215,6 @@ pub fn CopilotChat(
                                                 thinking_events=thinking_events_sig
                                                 is_active=thinking_active_sig
                                                 token_usage=thinking_token_usage_signal
-                                                show_token_usage=show_token_usage
                                             />
                                         </div>
                                     </Show>
