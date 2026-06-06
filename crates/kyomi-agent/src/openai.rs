@@ -163,6 +163,7 @@ fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
 /// vLLM, and any service that implements the OpenAI chat completions spec.
 pub struct OpenAIProvider {
     base: crate::provider::ProviderBase,
+    ctx_window: u32,
 }
 
 impl OpenAIProvider {
@@ -185,6 +186,7 @@ impl OpenAIProvider {
                 base_url,
                 OPENAI_API_URL,
             )?,
+            ctx_window: 0,
         })
     }
 
@@ -201,7 +203,22 @@ impl OpenAIProvider {
                 DEFAULT_MODEL,
                 base_url,
             )?,
+            ctx_window: 0,
         })
+    }
+
+    /// Set the context window size (called by the factory when known).
+    pub fn set_context_window(&mut self, size: u32) {
+        self.ctx_window = size;
+    }
+
+    /// Return the context window size.
+    pub fn context_window(&self) -> u32 {
+        if self.ctx_window > 0 {
+            self.ctx_window
+        } else {
+            get_context_window(self.base.model())
+        }
     }
 
     /// Return the model name this provider is configured with.

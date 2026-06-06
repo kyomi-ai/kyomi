@@ -241,6 +241,7 @@ pub async fn execute_agent_chat(
     };
     // Read the authoritative model name from the provider (not from config defaults).
     let model_name = client.model().to_string();
+    let provider_context_window = client.context_window();
 
     // 4. Create agent config with context-appropriate tool filter.
     //
@@ -349,13 +350,12 @@ pub async fn execute_agent_chat(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // 10. Create thinking tracker.
-    // When context_window is 0 (caller did not set it), fall back to the
-    // provider-level lookup so the UI can still show utilisation for
-    // known hardcoded models (Anthropic, Gemini, common OpenAI models).
+    // Context window comes from the provider (which gets it from the workspace
+    // config or falls back to hardcoded values per model).
     let resolved_context_window = if config.context_window > 0 {
         config.context_window
     } else {
-        crate::provider::get_context_window(&model_name, provider_kind, 0)
+        provider_context_window
     };
     let tracker = AgentThinkingTracker::new(
         config.session_id.clone(),

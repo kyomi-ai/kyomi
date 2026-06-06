@@ -446,7 +446,7 @@ fn KyomiModelPanel(
     let save_action = Action::new(move |model: &String| {
         let model = model.clone();
         async move {
-            match update_workspace_model(model).await {
+            match update_workspace_model(model, None).await {
                 Ok(()) => {
                     toast_success("Default chat model saved.");
                     refresh.try_run(());

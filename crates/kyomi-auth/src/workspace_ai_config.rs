@@ -99,6 +99,9 @@ pub struct WorkspaceAiConfig {
     /// When `None`, title generation falls back to the cheapest model for the
     /// configured provider.
     pub title_model: Option<String>,
+    /// Context window size for the configured model in tokens (0 = unknown).
+    /// Stored in `settings.custom_settings.context_window`.
+    pub context_window: u32,
 }
 
 impl WorkspaceAiConfig {
@@ -230,12 +233,15 @@ pub async fn load(
         }
     };
 
+    let context_window = read_context_window(&row.settings);
+
     Ok(WorkspaceAiConfig {
         provider,
         model,
         api_key,
         base_url,
         title_model,
+        context_window,
     })
 }
 
@@ -400,6 +406,15 @@ pub fn read_title_model(settings: &Option<serde_json::Value>) -> Option<String> 
     read_custom_settings_string(settings, "title_model")
 }
 
+fn read_context_window(settings: &Option<serde_json::Value>) -> u32 {
+    settings
+        .as_ref()
+        .and_then(|s| s.get("custom_settings"))
+        .and_then(|cs| cs.get("context_window"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32
+}
+
 /// Load the `title_model` setting for a workspace directly from the database.
 ///
 /// Fetches only the `settings` JSON column — cheaper than a full [`load`]
@@ -543,6 +558,7 @@ mod tests {
             api_key: None,
             base_url: None,
             title_model: None,
+        context_window: 0,
         };
         assert!(!cfg.is_byok());
     }
@@ -560,6 +576,7 @@ mod tests {
                 api_key: Some("sk-...".into()),
                 base_url: None,
                 title_model: None,
+            context_window: 0,
             };
             assert!(cfg.is_byok(), "expected BYOK for {p:?}");
         }

@@ -49,6 +49,9 @@ pub trait LLMProvider: Send + Sync {
 
     /// Return the model identifier (e.g., "claude-haiku-4-5-20251001").
     fn model(&self) -> &str;
+
+    /// Return the model's context window size in tokens (0 = unknown).
+    fn context_window(&self) -> u32 { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +190,8 @@ pub struct LLMProviderConfig {
     pub model: Option<String>,
     /// Custom base URL (e.g., for proxies or OpenAI-compatible APIs).
     pub base_url: Option<String>,
+    /// Context window size in tokens (0 = unknown, use hardcoded lookup).
+    pub context_window: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,12 +208,15 @@ impl LLMProvider for AnthropicClient {
         max_tokens: u32,
         user_names: &HashMap<String, String>,
     ) -> kyomi_core::Result<LLMResponse> {
-        // Delegate to the existing concrete method.
         AnthropicClient::complete(self, messages, tools, temperature, max_tokens, user_names).await
     }
 
     fn model(&self) -> &str {
         AnthropicClient::model(self)
+    }
+
+    fn context_window(&self) -> u32 {
+        crate::anthropic::get_context_window(self.model())
     }
 }
 
@@ -228,6 +236,10 @@ impl LLMProvider for OpenAIProvider {
     fn model(&self) -> &str {
         OpenAIProvider::model(self)
     }
+
+    fn context_window(&self) -> u32 {
+        self.context_window()
+    }
 }
 
 #[async_trait]
@@ -245,6 +257,10 @@ impl LLMProvider for GeminiProvider {
 
     fn model(&self) -> &str {
         GeminiProvider::model(self)
+    }
+
+    fn context_window(&self) -> u32 {
+        crate::gemini::get_context_window(self.model())
     }
 }
 
@@ -269,8 +285,11 @@ pub fn create_provider(
             Ok(Box::new(client))
         }
         ProviderKind::OpenAI => {
-            let client =
+            let mut client =
                 crate::openai::OpenAIProvider::new(config.api_key, config.model, config.base_url)?;
+            if config.context_window > 0 {
+                client.set_context_window(config.context_window);
+            }
             Ok(Box::new(client))
         }
         ProviderKind::Gemini => {
@@ -344,6 +363,7 @@ pub fn create_provider_from_workspace(
                 api_key,
                 model: ws_config.model.clone(),
                 base_url: ws_config.base_url.clone(),
+                context_window: ws_config.context_window,
             }
         }
     };
@@ -376,6 +396,7 @@ pub fn resolve_provider_config(
             api_key: api_key.to_string(),
             model: config.llm_model.clone(),
             base_url: config.llm_base_url.clone(),
+            context_window: 0,
         });
     }
 
@@ -395,6 +416,7 @@ pub fn resolve_provider_config(
             api_key: api_key.to_string(),
             model: config.llm_model.clone(),
             base_url: config.llm_base_url.clone(),
+            context_window: 0,
         });
     }
 
@@ -562,6 +584,7 @@ mod tests {
             api_key: "sk-test".into(),
             model: None,
             base_url: None,
+            context_window: 0,
         };
         let provider = create_provider(config).expect("should create OpenAI provider");
         assert_eq!(provider.model(), crate::openai::DEFAULT_MODEL);
@@ -574,6 +597,7 @@ mod tests {
             api_key: "sk-test".into(),
             model: Some("gpt-4o".into()),
             base_url: None,
+            context_window: 0,
         };
         let provider = create_provider(config).expect("should create OpenAI provider");
         assert_eq!(provider.model(), "gpt-4o");
@@ -586,6 +610,7 @@ mod tests {
             api_key: "test-key".into(),
             model: None,
             base_url: None,
+            context_window: 0,
         };
         let provider = create_provider(config).expect("should create Gemini provider");
         assert_eq!(provider.model(), crate::gemini::DEFAULT_MODEL);
@@ -598,6 +623,7 @@ mod tests {
             api_key: "test-key".into(),
             model: Some("gemini-2.0-pro".into()),
             base_url: None,
+            context_window: 0,
         };
         let provider = create_provider(config).expect("should create Gemini provider");
         assert_eq!(provider.model(), "gemini-2.0-pro");
@@ -670,6 +696,7 @@ mod tests {
             api_key: None,
             base_url: None,
             title_model: None,
+            context_window: 0,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -692,6 +719,7 @@ mod tests {
             api_key: None,
             base_url: None,
             title_model: None,
+            context_window: 0,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -714,6 +742,7 @@ mod tests {
             api_key: Some("sk-ws-byok".into()),
             base_url: None,
             title_model: None,
+            context_window: 0,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback)
@@ -732,6 +761,7 @@ mod tests {
             api_key: Some("AIza-test".into()),
             base_url: None,
             title_model: None,
+            context_window: 0,
         };
 
         let provider = create_provider_from_workspace(&ws, &fallback).unwrap();
@@ -749,6 +779,7 @@ mod tests {
             api_key: None,
             base_url: None,
             title_model: None,
+            context_window: 0,
         };
 
         let err = match create_provider_from_workspace(&ws, &fallback) {
