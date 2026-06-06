@@ -22,7 +22,7 @@ use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, Too
 // ---------------------------------------------------------------------------
 
 /// Anthropic Messages API endpoint.
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_API_URL: &str = "https://api.anthropic.com";
 
 /// Required API version header.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -35,7 +35,6 @@ pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// Model used for lightweight audit tasks (e.g., learning validation).
 pub const AUDIT_MODEL: &str = "claude-haiku-4-5-20251001";
-
 
 // ---------------------------------------------------------------------------
 // Context Window
@@ -318,8 +317,7 @@ impl AnthropicClient {
         maybe_log_llm("request", &body);
 
         // Call with retry using shared exponential backoff utility.
-        let response_json =
-            kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
+        let response_json = kyomi_core::retry::retry_with_backoff(|| self.call_api(&body)).await?;
 
         // Log response if LOG_LLM_CONTEXT is enabled
         maybe_log_llm("response", &response_json);
@@ -329,14 +327,12 @@ impl AnthropicClient {
     }
 
     /// Send a single HTTP request to the Anthropic Messages API.
-    async fn call_api(
-        &self,
-        body: &serde_json::Value,
-    ) -> kyomi_core::Result<serde_json::Value> {
+    async fn call_api(&self, body: &serde_json::Value) -> kyomi_core::Result<serde_json::Value> {
+        let url = format!("{}/v1/messages", self.base.base_url.trim_end_matches('/'));
         let response = self
             .base
             .client
-            .post(&self.base.base_url)
+            .post(&url)
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("anthropic-beta", PROMPT_CACHING_BETA)
@@ -345,9 +341,7 @@ impl AnthropicClient {
             .send()
             .await
             .map_err(|e| {
-                kyomi_core::Error::ServiceUnavailable(format!(
-                    "Anthropic API request failed: {e}"
-                ))
+                kyomi_core::Error::ServiceUnavailable(format!("Anthropic API request failed: {e}"))
             })?;
 
         let status = response.status();
@@ -402,9 +396,7 @@ impl AnthropicClient {
             .get("content")
             .and_then(|c| c.as_array())
             .ok_or_else(|| {
-                kyomi_core::Error::Internal(
-                    "Anthropic API response missing 'content' array".into(),
-                )
+                kyomi_core::Error::Internal("Anthropic API response missing 'content' array".into())
             })?;
 
         let mut text_parts: Vec<&str> = Vec::new();
@@ -485,6 +477,7 @@ impl AnthropicClient {
                 Some(tool_calls)
             },
             cost: Some(cost),
+            thinking_content: None,
         })
     }
 
@@ -508,6 +501,7 @@ impl AnthropicClient {
                 .and_then(|u| u.get("cache_read_input_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
+            reasoning_tokens: 0,
         }
     }
 }
@@ -524,7 +518,10 @@ pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
         model,
         usage,
         get_model_pricing,
-        crate::pricing::ModelPricing { input: 1.00, output: 5.00 },
+        crate::pricing::ModelPricing {
+            input: 1.00,
+            output: 5.00,
+        },
         "anthropic",
     )
 }
@@ -551,17 +548,13 @@ mod tests {
     fn convert_system_message() {
         let messages = vec![Message::system("You are helpful."), Message::user("hi")];
         let names = HashMap::new();
-        let (system, msgs) =
-            AnthropicClient::convert_messages_to_anthropic(&messages, &names);
+        let (system, msgs) = AnthropicClient::convert_messages_to_anthropic(&messages, &names);
 
         // System prompt extracted with cache_control.
         let system = system.unwrap();
         assert_eq!(system[0]["type"], "text");
         assert_eq!(system[0]["text"], "You are helpful.");
-        assert_eq!(
-            system[0]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
+        assert_eq!(system[0]["cache_control"], json!({"type": "ephemeral"}));
 
         // Only user message in the messages array.
         assert_eq!(msgs.len(), 1);
@@ -685,10 +678,7 @@ mod tests {
         assert_eq!(result[0]["description"], "Search for tables.");
         assert_eq!(result[0]["input_schema"]["type"], "object");
         // Single tool should get cache_control (it is the last tool).
-        assert_eq!(
-            result[0]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
+        assert_eq!(result[0]["cache_control"], json!({"type": "ephemeral"}));
     }
 
     #[test]
@@ -716,10 +706,7 @@ mod tests {
         // Only last tool should have cache_control.
         assert!(result[0].get("cache_control").is_none());
         assert!(result[1].get("cache_control").is_none());
-        assert_eq!(
-            result[2]["cache_control"],
-            json!({"type": "ephemeral"})
-        );
+        assert_eq!(result[2]["cache_control"], json!({"type": "ephemeral"}));
     }
 
     // -- Cost calculation tests ---------------------------------------------
@@ -731,6 +718,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
         // 1M input * $3/M + 1M output * $15/M = $18.00
@@ -744,6 +732,7 @@ mod tests {
             output_tokens: 100_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-haiku-4-5-20251001", &usage);
         // 0.5M * $1/M + 0.1M * $5/M = $0.50 + $0.50 = $1.00
@@ -757,6 +746,7 @@ mod tests {
             output_tokens: 50_000,
             cache_creation_input_tokens: 200_000,
             cache_read_input_tokens: 500_000,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
         // input: 100K/1M * $3 = $0.30
@@ -774,6 +764,7 @@ mod tests {
             output_tokens: 10_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-opus-4-20250514", &usage);
         // 0.1M * $15/M + 0.01M * $75/M = $1.50 + $0.75 = $2.25
@@ -787,6 +778,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-3-5-haiku-20241022", &usage);
         // 1M * $0.80/M = $0.80
@@ -800,6 +792,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-unknown-model", &usage);
         // Fallback is Haiku 4.5: 1M * $1/M + 1M * $5/M = $6.00
@@ -971,7 +964,8 @@ mod tests {
     #[test]
     fn client_custom_model() {
         let client =
-            AnthropicClient::new("test-key".into(), Some("claude-haiku-4-5-20251001".into())).unwrap();
+            AnthropicClient::new("test-key".into(), Some("claude-haiku-4-5-20251001".into()))
+                .unwrap();
         assert_eq!(client.model(), "claude-haiku-4-5-20251001");
     }
 
@@ -1016,7 +1010,10 @@ mod tests {
         let messages = vec![
             Message::system("prompt"),
             Message::user("show revenue by region"),
-            Message::assistant_with_tool_calls("Let me search for revenue tables first.", tool_calls),
+            Message::assistant_with_tool_calls(
+                "Let me search for revenue tables first.",
+                tool_calls,
+            ),
             Message::user("continue"),
         ];
         let names = HashMap::new();
@@ -1029,7 +1026,10 @@ mod tests {
         // text block + 2 tool_use blocks = 3 total.
         assert_eq!(content.len(), 3);
         assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "Let me search for revenue tables first.");
+        assert_eq!(
+            content[0]["text"],
+            "Let me search for revenue tables first."
+        );
         assert_eq!(content[1]["type"], "tool_use");
         assert_eq!(content[1]["id"], "toolu_1");
         assert_eq!(content[1]["name"], "search_catalog");
@@ -1059,10 +1059,7 @@ mod tests {
 
     #[test]
     fn format_user_message_api_source_formatting() {
-        let msg = Message::user_with_id(
-            "[source: api] Query my data",
-            "user-xxxx-yyyy-zzzz",
-        );
+        let msg = Message::user_with_id("[source: api] Query my data", "user-xxxx-yyyy-zzzz");
         let mut names = HashMap::new();
         names.insert("user-xxxx-yyyy-zzzz".to_string(), "Bob Jones".to_string());
         let result = crate::provider::format_user_message(&msg, &names);
@@ -1116,7 +1113,8 @@ mod tests {
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 100, "output_tokens": 30}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         assert_eq!(result.finish_reason, "tool_use");
         assert!(result.tool_calls.is_some());
         assert_eq!(result.tool_calls.as_ref().unwrap().len(), 1);
@@ -1129,7 +1127,8 @@ mod tests {
             "stop_reason": "max_tokens",
             "usage": {"input_tokens": 50000, "output_tokens": 4096}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         assert_eq!(result.finish_reason, "max_tokens");
         assert!(result.tool_calls.is_none());
     }
@@ -1140,7 +1139,8 @@ mod tests {
             "content": [{"type": "text", "text": "Hello"}],
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         assert_eq!(result.finish_reason, "unknown");
     }
 
@@ -1157,7 +1157,8 @@ mod tests {
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 500, "output_tokens": 100}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         assert_eq!(result.content, "I'll search and query.");
         let tool_calls = result.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 2);
@@ -1180,7 +1181,8 @@ mod tests {
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 50, "output_tokens": 10}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         // Unknown blocks are silently skipped; text blocks concatenated.
         assert_eq!(result.content, "Hello world");
     }
@@ -1196,7 +1198,8 @@ mod tests {
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 200, "output_tokens": 30}
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         assert_eq!(result.content, ""); // No text content.
         assert!(result.tool_calls.is_some());
         assert_eq!(result.tool_calls.as_ref().unwrap().len(), 1);
@@ -1216,7 +1219,8 @@ mod tests {
                 "cache_read_input_tokens": 8000
             }
         });
-        let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
+        let result =
+            AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response).unwrap();
         assert_eq!(result.usage.input_tokens, 1000);
         assert_eq!(result.usage.output_tokens, 500);
         assert_eq!(result.usage.cache_creation_input_tokens, 2000);
@@ -1261,6 +1265,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 1_000_000,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
         // Cache write: 1M / 1M * $3 * 1.25 = $3.75
@@ -1274,6 +1279,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 1_000_000,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
         // Cache read: 1M / 1M * $3 * 0.1 = $0.30
@@ -1296,7 +1302,11 @@ mod tests {
                     arguments: json!({"query": "revenue monthly"}),
                 }],
             ),
-            Message::tool_result("tc_1", "search_catalog", r#"{"tables": ["finance.revenue"]}"#),
+            Message::tool_result(
+                "tc_1",
+                "search_catalog",
+                r#"{"tables": ["finance.revenue"]}"#,
+            ),
             Message::assistant("Here is the monthly revenue data."),
         ];
         let names = HashMap::new();
@@ -1304,7 +1314,10 @@ mod tests {
 
         // System extracted.
         assert!(system.is_some());
-        assert_eq!(system.unwrap()[0]["text"], "You are a helpful data analyst.");
+        assert_eq!(
+            system.unwrap()[0]["text"],
+            "You are a helpful data analyst."
+        );
 
         // 4 messages in output: user, assistant+tool, tool_result(user role), assistant.
         assert_eq!(msgs.len(), 4);
@@ -1360,7 +1373,10 @@ mod tests {
     #[test]
     fn extract_error_message_empty_message() {
         let body = r#"{"error": {"type": "server_error", "message": ""}}"#;
-        assert_eq!(crate::provider::extract_error_message(body), Some(String::new()));
+        assert_eq!(
+            crate::provider::extract_error_message(body),
+            Some(String::new())
+        );
     }
 
     // -- Contract: client with_base_url for testing -------------------------
@@ -1375,5 +1391,4 @@ mod tests {
         .unwrap();
         assert_eq!(client.model(), DEFAULT_MODEL);
     }
-
 }

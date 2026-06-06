@@ -96,6 +96,7 @@ mod tests {
             output_tokens: output,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            reasoning_tokens: 0,
         }
     }
 
@@ -122,6 +123,7 @@ mod tests {
             output_tokens: 50_000,
             cache_creation_input_tokens: 200_000,
             cache_read_input_tokens: 500_000,
+            reasoning_tokens: 0,
         };
         let cost = calculate_cost(&pricing, &usage);
         // input: 100K/1M * $3 = $0.30

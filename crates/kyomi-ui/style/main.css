@@ -268,15 +268,25 @@ html {
   right: 0;
   z-index: 10;
   opacity: 0;
-  pointer-events: none;
   transition: opacity 0.15s ease 0.2s;
 }
 
-.chart-card:hover > div:first-child,
+/* Header children are non-interactive when hidden so invisible buttons
+ * don't swallow clicks, but the container itself receives hover events
+ * — it IS the hover zone (only the top strip of the card). */
+.chart-card > div:first-child > * {
+  pointer-events: none;
+}
+
+.chart-card > div:first-child:hover,
 .chart-card:focus-within > div:first-child {
   opacity: 1;
-  pointer-events: auto;
   transition-delay: 0s;
+}
+
+.chart-card > div:first-child:hover > *,
+.chart-card:focus-within > div:first-child > * {
+  pointer-events: auto;
 }
 
 .chart-card > div:not(:first-child) {

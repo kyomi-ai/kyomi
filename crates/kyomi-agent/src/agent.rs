@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::provider::LLMProvider;
-use crate::tools::{ToolContext, ToolFilter, ToolRegistry, FINAL_TOOL_NAMES};
+use crate::tools::{FINAL_TOOL_NAMES, ToolContext, ToolFilter, ToolRegistry};
 use crate::types::{Message, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -76,10 +76,7 @@ impl Default for AgentConfig {
             max_iterations: 25,
             temperature: None,
             max_tokens: 4096,
-            final_tool_names: FINAL_TOOL_NAMES
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            final_tool_names: FINAL_TOOL_NAMES.iter().map(|s| s.to_string()).collect(),
             log_context: false,
             // Default: chat context — exclude copilot-only and MCP-only tools.
             // This is the safe default matching the Python backend's behaviour.
@@ -265,9 +262,7 @@ impl CustomAgent {
         for iteration in 0..self.config.max_iterations {
             // Check cancellation.
             if cancel_token.is_cancelled() {
-                return Err(kyomi_core::Error::Internal(
-                    "Request cancelled".into(),
-                ));
+                return Err(kyomi_core::Error::Internal("Request cancelled".into()));
             }
 
             self.state.global_iteration += 1;
@@ -312,9 +307,7 @@ impl CustomAgent {
 
             // Check cancellation after LLM response.
             if cancel_token.is_cancelled() {
-                return Err(kyomi_core::Error::Internal(
-                    "Request cancelled".into(),
-                ));
+                return Err(kyomi_core::Error::Internal("Request cancelled".into()));
             }
 
             // Track token usage.
@@ -325,6 +318,17 @@ impl CustomAgent {
                     response.usage.output_tokens,
                     response.cost,
                 );
+            }
+
+            // Fire thinking callback with structured reasoning content
+            // (e.g., OpenAI o-series reasoning_content/reasoning fields).
+            // This is separate from content-based thinking (the "Thinking..."
+            // callback that fires when content accompanies tool calls).
+            if let Some(ref thinking) = response.thinking_content
+                && !thinking.is_empty()
+                && let Some(ref cb) = self.callbacks.on_thinking
+            {
+                cb(thinking);
             }
 
             // No tool calls -- this is the final response.
@@ -339,9 +343,7 @@ impl CustomAgent {
                 {
                     warn!(error = %error_msg, "ChartML validation failed, asking LLM to fix");
                     // Store as ephemeral retry context — NOT in self.state.messages.
-                    chartml_retry_messages.push(
-                        Message::assistant(response.content.clone()),
-                    );
+                    chartml_retry_messages.push(Message::assistant(response.content.clone()));
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -350,7 +352,9 @@ impl CustomAgent {
                 }
 
                 // Push final response to state so persist_after_chat saves it.
-                self.state.messages.push(Message::assistant(&response.content));
+                self.state
+                    .messages
+                    .push(Message::assistant(&response.content));
                 return Ok(response.content);
             }
 
@@ -378,9 +382,7 @@ impl CustomAgent {
 
             // Check cancellation before tool execution.
             if cancel_token.is_cancelled() {
-                return Err(kyomi_core::Error::Internal(
-                    "Request cancelled".into(),
-                ));
+                return Err(kyomi_core::Error::Internal("Request cancelled".into()));
             }
 
             // Execute each tool call.
@@ -400,9 +402,7 @@ impl CustomAgent {
 
             // Check cancellation after tool execution.
             if cancel_token.is_cancelled() {
-                return Err(kyomi_core::Error::Internal(
-                    "Request cancelled".into(),
-                ));
+                return Err(kyomi_core::Error::Internal("Request cancelled".into()));
             }
 
             // Check if assistant content has ChartML blocks -> validate (YAML + SQL) -> return if valid.
@@ -423,7 +423,9 @@ impl CustomAgent {
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
-                self.state.messages.push(Message::assistant(&response.content));
+                self.state
+                    .messages
+                    .push(Message::assistant(&response.content));
                 return Ok(response.content);
             }
 
@@ -461,8 +463,10 @@ impl CustomAgent {
             max_iterations = self.config.max_iterations,
             "agent loop exhausted max iterations"
         );
-        let fallback = "I apologize, but I've reached my maximum number of iterations for this request. \
-             Please try rephrasing your question or breaking it into smaller parts.".to_string();
+        let fallback =
+            "I apologize, but I've reached my maximum number of iterations for this request. \
+             Please try rephrasing your question or breaking it into smaller parts."
+                .to_string();
         self.state.messages.push(Message::assistant(&fallback));
         Ok(fallback)
     }
@@ -591,13 +595,9 @@ impl CustomAgent {
         }
 
         // Step 2: SQL dry-run via shared utility (same code path as dashboard tools).
-        crate::tools::query_utils::validate_chartml_sql(
-            &self.tool_context.query_context(),
-            text,
-        )
-        .await
+        crate::tools::query_utils::validate_chartml_sql(&self.tool_context.query_context(), text)
+            .await
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -641,7 +641,9 @@ fn has_chartml_blocks(text: &str) -> bool {
 /// any block fails validation.
 fn validate_chartml_blocks(text: &str) -> Option<String> {
     static CHARTML_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CHARTML_RE.get_or_init(|| Regex::new(r"```chartml\s*\n([\s\S]*?)\n```").expect("valid regex literal"));
+    let re = CHARTML_RE.get_or_init(|| {
+        Regex::new(r"```chartml\s*\n([\s\S]*?)\n```").expect("valid regex literal")
+    });
     let mut errors = Vec::new();
 
     let mut found_any = false;
@@ -657,9 +659,7 @@ fn validate_chartml_blocks(text: &str) -> Option<String> {
                 let mapping = value.as_mapping();
                 let data_key = serde_yaml::Value::String("data".to_string());
                 let visualize_key = serde_yaml::Value::String("visualize".to_string());
-                let has_data = mapping
-                    .map(|m| m.contains_key(&data_key))
-                    .unwrap_or(false);
+                let has_data = mapping.map(|m| m.contains_key(&data_key)).unwrap_or(false);
                 let has_visualize = mapping
                     .map(|m| m.contains_key(&visualize_key))
                     .unwrap_or(false);
@@ -668,10 +668,7 @@ fn validate_chartml_blocks(text: &str) -> Option<String> {
                     errors.push(format!("Block {}: missing required key 'data'", i + 1));
                 }
                 if !has_visualize {
-                    errors.push(format!(
-                        "Block {}: missing required key 'visualize'",
-                        i + 1
-                    ));
+                    errors.push(format!("Block {}: missing required key 'visualize'", i + 1));
                 }
             }
             Err(e) => {
@@ -721,10 +718,7 @@ mod tests {
     #[test]
     fn metadata_prefix_time_only() {
         let result = build_metadata_prefix(Some("2025-01-15T10:30:00+11:00"), None);
-        assert_eq!(
-            result,
-            "[user_local_time: 2025-01-15T10:30:00+11:00] "
-        );
+        assert_eq!(result, "[user_local_time: 2025-01-15T10:30:00+11:00] ");
     }
 
     #[test]
@@ -786,9 +780,7 @@ mod tests {
         let text = "Chart:\n```chartml\ndata:\n  query: SELECT 1\n```";
         let result = validate_chartml_blocks(text);
         assert!(result.is_some());
-        assert!(
-            result.unwrap().contains("missing required key 'visualize'")
-        );
+        assert!(result.unwrap().contains("missing required key 'visualize'"));
     }
 
     #[test]
@@ -901,12 +893,8 @@ Chart 2:\n```chartml\ntitle: Bad\n```";
         assert_eq!(context.len(), 5); // system + summary + ack + 2 recent
         assert_eq!(context[0].content, "You are helpful.");
         assert!(context[1].content.contains("Prior Conversation Context"));
-        assert!(context[1]
-            .content
-            .contains("User asked about revenue"));
-        assert!(context[2]
-            .content
-            .contains("I understand the context"));
+        assert!(context[1].content.contains("User asked about revenue"));
+        assert!(context[2].content.contains("I understand the context"));
         assert_eq!(context[3].content, "Recent message");
         assert_eq!(context[4].content, "Recent response");
     }
@@ -1032,8 +1020,12 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     #[test]
     fn has_chartml_blocks_case_sensitive() {
         // Must be exactly ```chartml, not ```ChartML.
-        assert!(!has_chartml_blocks("```ChartML\ndata:\n  query: SELECT 1\n```"));
-        assert!(!has_chartml_blocks("```CHARTML\ndata:\n  query: SELECT 1\n```"));
+        assert!(!has_chartml_blocks(
+            "```ChartML\ndata:\n  query: SELECT 1\n```"
+        ));
+        assert!(!has_chartml_blocks(
+            "```CHARTML\ndata:\n  query: SELECT 1\n```"
+        ));
     }
 
     #[test]
@@ -1153,9 +1145,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     #[test]
     fn agent_callbacks_can_set_on_token_usage() {
         let callbacks = AgentCallbacks {
-            on_token_usage: Some(Box::new(
-                |_input: u32, _output: u32, _cost: Option<f64>| {},
-            )),
+            on_token_usage: Some(Box::new(|_input: u32, _output: u32, _cost: Option<f64>| {})),
             ..Default::default()
         };
         assert!(callbacks.on_token_usage.is_some());
@@ -1164,9 +1154,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     #[test]
     fn agent_callbacks_can_set_on_tool_start() {
         let callbacks = AgentCallbacks {
-            on_tool_start: Some(Box::new(
-                |_name: &str, _args: &serde_json::Value| {},
-            )),
+            on_tool_start: Some(Box::new(|_name: &str, _args: &serde_json::Value| {})),
             ..Default::default()
         };
         assert!(callbacks.on_tool_start.is_some());
@@ -1175,9 +1163,7 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
     #[test]
     fn agent_callbacks_can_set_on_tool_end() {
         let callbacks = AgentCallbacks {
-            on_tool_end: Some(Box::new(
-                |_name: &str, _result: &str, _success: bool| {},
-            )),
+            on_tool_end: Some(Box::new(|_name: &str, _result: &str, _success: bool| {})),
             ..Default::default()
         };
         assert!(callbacks.on_tool_end.is_some());
@@ -1191,5 +1177,4 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
         };
         assert!(callbacks.on_preparing_response.is_some());
     }
-
 }

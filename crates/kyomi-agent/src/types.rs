@@ -192,6 +192,11 @@ pub struct LLMResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
     /// Estimated cost in USD for this API call.
     pub cost: Option<f64>,
+    /// Reasoning/thinking content from the model (e.g., OpenAI o-series
+    /// `reasoning`/`reasoning_content`, Anthropic extended thinking blocks).
+    /// Separated from `content` so it can be streamed to the thinking tracker
+    /// without polluting the user-visible response.
+    pub thinking_content: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +216,10 @@ pub struct AgentTokenUsage {
     pub cache_creation_input_tokens: u32,
     /// Tokens read from the prompt cache (charged at 0.1x input price).
     pub cache_read_input_tokens: u32,
+    /// Reasoning tokens consumed by o-series models.
+    /// This is a subset of `output_tokens`, not additional — tracked separately
+    /// for cost transparency.
+    pub reasoning_tokens: u32,
 }
 
 impl AgentTokenUsage {
@@ -422,6 +431,7 @@ mod tests {
             output_tokens: 500,
             cache_creation_input_tokens: 100,
             cache_read_input_tokens: 200,
+            reasoning_tokens: 0,
         };
         assert_eq!(usage.total_tokens(), 2000);
     }
@@ -642,6 +652,7 @@ mod tests {
             output_tokens: 200,
             cache_creation_input_tokens: 1000,
             cache_read_input_tokens: 3000,
+            reasoning_tokens: 0,
         };
         // total is 500 + 200 = 700 (cache tokens NOT included).
         assert_eq!(usage.total_tokens(), 700);
@@ -727,6 +738,7 @@ mod tests {
             output_tokens: 300,
             cache_creation_input_tokens: 5000,
             cache_read_input_tokens: 12000,
+            reasoning_tokens: 0,
         };
         let json = serde_json::to_string(&usage).unwrap();
         let restored: AgentTokenUsage = serde_json::from_str(&json).unwrap();
