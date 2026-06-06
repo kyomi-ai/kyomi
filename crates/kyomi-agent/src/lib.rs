@@ -58,7 +58,7 @@ pub use anthropic::{AnthropicClient, AUDIT_MODEL, DEFAULT_MODEL};
 pub use pricing::calculate_cost;
 pub use execution::{
     deliver_response, execute_agent_chat, generate_dashboard_summary,
-    generate_session_title, AgentExecutionConfig,
+    generate_session_title, AgentExecutionConfig, DashboardSummaryParams,
     AgentExecutionEnv, AgentExecutionResult,
 };
 pub use thinking::{AgentThinkingEvent, AgentThinkingTracker, ThinkingEventType};

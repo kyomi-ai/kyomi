@@ -417,7 +417,7 @@ impl OpenAIProvider {
         let mut request = self
             .base
             .client
-            .post(&format!("{}/chat/completions", self.base.base_url.trim_end_matches('/')))
+            .post(format!("{}/chat/completions", self.base.base_url.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", self.base.api_key))
             .header("Content-Type", "application/json");
 

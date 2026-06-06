@@ -348,8 +348,8 @@ pub async fn update_dashboard(
     if let Some(ref c) = content
         && !c.is_empty()
         && kyomi_auth::dashboard_service::extract_summary(c).is_none()
+        && let Some(ws_manager) = ac.ctx.ws_manager.clone()
     {
-        if let Some(ws_manager) = ac.ctx.ws_manager.clone() {
             let title_for_summary = match &title {
                 Some(t) => t.clone(),
                 None => {
@@ -362,16 +362,17 @@ pub async fn update_dashboard(
                 }
             };
             kyomi_agent::generate_dashboard_summary(
-                ac.ctx.db.clone(),
-                ws_manager,
-                dashboard_id.clone(),
-                ac.auth.user_id.clone(),
-                ac.ws_id.clone(),
-                title_for_summary,
-                c.clone(),
-                ac.ctx.config.clone(),
+                kyomi_agent::DashboardSummaryParams {
+                    db: ac.ctx.db.clone(),
+                    ws_manager,
+                    dashboard_id: dashboard_id.clone(),
+                    user_id: ac.auth.user_id.clone(),
+                    workspace_id: ac.ws_id.clone(),
+                    title: title_for_summary,
+                    content: c.clone(),
+                    app_config: ac.ctx.config.clone(),
+                },
             );
-        }
     }
 
     if let Some(ws_manager) = &ac.ctx.ws_manager {

@@ -816,37 +816,35 @@ async fn generate_title_inner(
 // Dashboard summary generation
 // ---------------------------------------------------------------------------
 
+/// Parameters for dashboard summary generation.
+pub struct DashboardSummaryParams {
+    pub db: DbPool,
+    pub ws_manager: WebSocketManager,
+    pub dashboard_id: String,
+    pub user_id: String,
+    pub workspace_id: String,
+    pub title: String,
+    pub content: String,
+    pub app_config: Arc<kyomi_core::Config>,
+}
+
 /// Generate a dashboard summary in the background (fire-and-forget).
-pub fn generate_dashboard_summary(
-    db: DbPool,
-    ws_manager: WebSocketManager,
-    dashboard_id: String,
-    user_id: String,
-    workspace_id: String,
-    title: String,
-    content: String,
-    app_config: Arc<kyomi_core::Config>,
-) {
+pub fn generate_dashboard_summary(params: DashboardSummaryParams) {
+    let dashboard_id = params.dashboard_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = generate_dashboard_summary_inner(
-            &db, &ws_manager, &dashboard_id, &user_id, &workspace_id,
-            &title, &content, &app_config,
-        ).await {
+        if let Err(e) = generate_dashboard_summary_inner(params).await {
             warn!(dashboard_id = %dashboard_id, error = %e, "Failed to generate dashboard summary");
         }
     });
 }
 
 async fn generate_dashboard_summary_inner(
-    db: &DbPool,
-    ws_manager: &WebSocketManager,
-    dashboard_id: &str,
-    user_id: &str,
-    workspace_id: &str,
-    title: &str,
-    content: &str,
-    app_config: &kyomi_core::Config,
+    params: DashboardSummaryParams,
 ) -> kyomi_core::Result<()> {
+    let DashboardSummaryParams {
+        ref db, ref ws_manager, ref dashboard_id, ref user_id,
+        ref workspace_id, ref title, ref content, ref app_config,
+    } = params;
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
     if content.trim().is_empty() {

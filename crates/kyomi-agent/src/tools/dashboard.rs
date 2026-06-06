@@ -393,14 +393,16 @@ impl AgentTool for CreateDashboardTool {
             && kyomi_auth::dashboard_service::extract_summary(content).is_none()
         {
             crate::execution::generate_dashboard_summary(
-                ctx.db.clone(),
-                ctx.ws_manager.clone(),
-                dashboard_id.clone(),
-                ctx.user_id.clone(),
-                ctx.workspace_id.clone(),
-                title.trim().to_string(),
-                content.to_string(),
-                ctx.config.clone(),
+                crate::execution::DashboardSummaryParams {
+                    db: ctx.db.clone(),
+                    ws_manager: ctx.ws_manager.clone(),
+                    dashboard_id: dashboard_id.clone(),
+                    user_id: ctx.user_id.clone(),
+                    workspace_id: ctx.workspace_id.clone(),
+                    title: title.trim().to_string(),
+                    content: content.to_string(),
+                    app_config: ctx.config.clone(),
+                },
             );
         }
 
@@ -616,14 +618,16 @@ impl AgentTool for ModifyDashboardTool {
             // Generate dashboard summary if none exists.
             if kyomi_auth::dashboard_service::extract_summary(c).is_none() {
                 crate::execution::generate_dashboard_summary(
-                    ctx.db.clone(),
-                    ctx.ws_manager.clone(),
-                    dashboard_id.to_string(),
-                    ctx.user_id.clone(),
-                    ctx.workspace_id.clone(),
-                    effective_title,
-                    c.to_string(),
-                    ctx.config.clone(),
+                    crate::execution::DashboardSummaryParams {
+                        db: ctx.db.clone(),
+                        ws_manager: ctx.ws_manager.clone(),
+                        dashboard_id: dashboard_id.to_string(),
+                        user_id: ctx.user_id.clone(),
+                        workspace_id: ctx.workspace_id.clone(),
+                        title: effective_title,
+                        content: c.to_string(),
+                        app_config: ctx.config.clone(),
+                    },
                 );
             }
         }
