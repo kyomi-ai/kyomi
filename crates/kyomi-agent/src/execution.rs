@@ -826,6 +826,8 @@ pub struct DashboardSummaryParams {
     pub title: String,
     pub content: String,
     pub app_config: Arc<kyomi_core::Config>,
+    /// Document type: `"dashboard"` or `"knowledge"`.
+    pub doc_type: String,
 }
 
 /// Generate a dashboard summary in the background (fire-and-forget).
@@ -844,6 +846,7 @@ async fn generate_dashboard_summary_inner(
     let DashboardSummaryParams {
         ref db, ref ws_manager, ref dashboard_id, ref user_id,
         ref workspace_id, ref title, ref content, ref app_config,
+        ref doc_type,
     } = params;
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
@@ -895,10 +898,16 @@ async fn generate_dashboard_summary_inner(
 
     let client = create_provider_from_workspace(&ws_config, app_config)?;
 
-    let system_prompt = "Generate a concise ~20 word summary of this dashboard based on its \
-                         title and content. The summary should describe what the dashboard \
-                         shows and its purpose. Return ONLY the summary text, nothing else. \
-                         No quotes, no prefixes.";
+    let doc_type_label = if doc_type == "knowledge" { "document" } else { "dashboard" };
+    let system_prompt = format!(
+        "Generate a concise ~20 word summary of this {doc_type_label}. \
+         Jump straight into describing the content \u{2014} do NOT start with \
+         \"This dashboard\", \"This document\", or similar framing. \
+         Use a descriptive noun phrase or short sentence. \
+         Good: \"Monthly revenue trends across regions with YoY comparison\" \
+         Bad: \"This dashboard tracks monthly revenue trends\" \
+         Return ONLY the summary text, nothing else. No quotes."
+    );
 
     let max = crate::compaction::floor_char_boundary(content, 4000);
     let truncated_content = &content[..max];
