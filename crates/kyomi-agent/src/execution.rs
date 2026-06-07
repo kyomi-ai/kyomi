@@ -937,6 +937,135 @@ async fn generate_dashboard_summary_inner(
         kyomi_types::sync::SyncActionType::Update,
     ).await;
     info!(dashboard_id = %dashboard_id, summary = %summary, "Generated dashboard summary");
+
+    // -------------------------------------------------------------------------
+    // Collection auto-tagging — evaluate whether the dashboard belongs to any
+    // workspace collections and tag it automatically.
+    // -------------------------------------------------------------------------
+    {
+        #[derive(sqlx::FromRow)]
+        struct CollectionInfo {
+            id: String,
+            name: String,
+            description: Option<String>,
+        }
+
+        let collections: Vec<CollectionInfo> = kyomi_core::db_fetch_all!(
+            db,
+            CollectionInfo,
+            "SELECT id, name, description FROM collections WHERE workspace_id = $1",
+            workspace_id
+        )
+        .map_err(|e| warn!(
+            %workspace_id,
+            error = %e,
+            "Failed to fetch collections for auto-tagging"
+        ))
+        .ok()
+        .unwrap_or_default();
+
+        if !collections.is_empty() {
+            let collection_list = collections
+                .iter()
+                .map(|c| {
+                    let desc = c.description.as_deref().unwrap_or("No description");
+                    format!("- ID: {}, Name: {}, Description: {}", c.id, c.name, desc)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let tagging_prompt = format!(
+                "Given this dashboard:\nTitle: {title}\nSummary: {summary}\n\n\
+                 Which of these collections does it belong to?\n{collection_list}\n\n\
+                 Return ONLY a JSON array of collection IDs that match. \
+                 Only include collections where the dashboard clearly fits. \
+                 If none match, return an empty array []. \
+                 Example: [\"uuid-1\", \"uuid-2\"]"
+            );
+
+            let tag_messages = vec![
+                crate::types::Message::system(
+                    "You are a classifier. Given a dashboard and a list of collections, \
+                     return a JSON array of collection IDs where the dashboard belongs. \
+                     Be selective — only include strong matches. Return valid JSON only.",
+                ),
+                crate::types::Message::user(&tagging_prompt),
+            ];
+
+            let tag_response = client
+                .complete(&tag_messages, &[], Some(0.0), 256, &HashMap::new())
+                .await;
+
+            match tag_response {
+                Ok(response) => {
+                    let raw = response.content.trim();
+                    // Extract JSON array — handle cases where LLM wraps in markdown code blocks
+                    let json_str = raw
+                        .strip_prefix("```json")
+                        .or_else(|| raw.strip_prefix("```"))
+                        .and_then(|s| s.strip_suffix("```"))
+                        .unwrap_or(raw)
+                        .trim();
+
+                    match serde_json::from_str::<Vec<String>>(json_str) {
+                        Ok(ids) => {
+                            let valid_collection_ids: std::collections::HashSet<&str> =
+                                collections.iter().map(|c| c.id.as_str()).collect();
+
+                            for collection_id in &ids {
+                                if !valid_collection_ids.contains(collection_id.as_str()) {
+                                    continue;
+                                }
+                                match kyomi_auth::collection_service::add_dashboard(
+                                    db,
+                                    collection_id,
+                                    dashboard_id,
+                                    workspace_id,
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        info!(
+                                            collection_id = %collection_id,
+                                            dashboard_id = %dashboard_id,
+                                            "Auto-tagged dashboard with collection"
+                                        );
+                                    }
+                                    Err(kyomi_core::Error::BadRequest(_)) => {
+                                        // Already in collection — skip silently
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            collection_id = %collection_id,
+                                            dashboard_id = %dashboard_id,
+                                            error = %e,
+                                            "Failed to auto-tag dashboard with collection"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            warn!(
+                                dashboard_id = %dashboard_id,
+                                raw_response = %raw,
+                                "Failed to parse collection tagging response as JSON array"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        dashboard_id = %dashboard_id,
+                        error = %e,
+                        "Collection tagging LLM call failed"
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
