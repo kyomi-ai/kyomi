@@ -45,14 +45,14 @@ pub fn KnowledgePage() -> impl IntoView {
     let (collections_open, set_collections_open) = signal(false);
     let params = use_query_map();
     let initial_collection = params
-        .get()
+        .get_untracked()
         .get("collection")
         .filter(|s| !s.is_empty());
     let (active_collection_id, set_active_collection_id) = signal(initial_collection);
 
     // Sync active_collection_id back to the URL so refreshes restore the filter.
     Effect::new(move |_| {
-        let collection_id = active_collection_id.get();
+        let Some(collection_id) = active_collection_id.try_get() else { return };
         if let Some(window) = web_sys::window() {
             let pathname = window.location().pathname().unwrap_or_default();
             let new_url = match &collection_id {
