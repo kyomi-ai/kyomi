@@ -132,12 +132,13 @@ impl BillingService {
         Self
     }
 
-    /// Get the monthly AI budget in USD for a given tier and user limit.
+    /// Get the monthly AI budget in USD for a given tier and user count.
     ///
     /// Delegates to `kyomi_core::capability::get_credits_limit()` — single
-    /// source of truth for budget values (read from env vars).
-    pub fn get_ai_budget_for_tier(tier: kyomi_core::SubscriptionTier, user_limit: Option<i32>) -> f64 {
-        kyomi_core::capability::get_credits_limit(tier, user_limit)
+    /// source of truth for budget values (read from env vars). Budget scales
+    /// as `per_user_rate × user_count`.
+    pub fn get_ai_budget_for_tier(tier: kyomi_core::SubscriptionTier, user_count: Option<i32>) -> f64 {
+        kyomi_core::capability::get_credits_limit(tier, user_count)
     }
 
     /// Calculate which monthly billing period we are currently in.
@@ -290,8 +291,14 @@ impl BillingService {
             kyomi_core::Error::NotFound(format!("Workspace {workspace_id} not found"))
         })?;
 
+        // Count actual active workspace users so the budget scales dynamically.
+        let user_count = crate::workspace_service::count_workspace_users(db, workspace_id).await?;
+
         // Get budget for this tier, plus any purchased bundle balance
-        let tier_budget_usd = Self::get_ai_budget_for_tier(ws.subscription_tier, ws.user_limit);
+        let tier_budget_usd = Self::get_ai_budget_for_tier(
+            ws.subscription_tier,
+            Some(i32::try_from(user_count).unwrap_or(i32::MAX)),
+        );
         let bundle_purchased_usd = ws.ai_bundle_balance_usd;
         let budget_usd = tier_budget_usd + bundle_purchased_usd;
 
@@ -699,10 +706,10 @@ mod tests {
 
     #[test]
     fn test_get_ai_budget_delegates_to_capability() {
-        // All tiers now use the same Cloud budget. Verify BillingService delegates
-        // correctly and all tiers return the same value.
+        // All tiers use the same per-user rate. Verify BillingService delegates
+        // correctly and all tiers return equal values for the same user count.
         use kyomi_core::capability::get_credits_limit;
-        let expected = get_credits_limit(SubscriptionTier::Free, None);
+        let single_user = get_credits_limit(SubscriptionTier::Free, None);
 
         for tier in [
             SubscriptionTier::Free,
@@ -715,15 +722,16 @@ mod tests {
         ] {
             let budget = BillingService::get_ai_budget_for_tier(tier, None);
             assert!(
-                (budget - expected).abs() < f64::EPSILON,
-                "All tiers should return the same budget, but {tier:?} returned {budget} (expected {expected})"
+                (budget - single_user).abs() < f64::EPSILON,
+                "All tiers with None user_count should return per-user rate, but {tier:?} returned {budget} (expected {single_user})"
             );
         }
-        // user_limit should not affect the budget in single-tier model
-        let with_limit = BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(8));
+        // Budget scales with user count — 8 users = 8× single-user rate.
+        let with_count = BillingService::get_ai_budget_for_tier(SubscriptionTier::Team, Some(8));
         assert!(
-            (with_limit - expected).abs() < f64::EPSILON,
-            "user_limit should not affect budget"
+            (with_count - single_user * 8.0).abs() < f64::EPSILON,
+            "Budget should scale with user count: expected {}, got {with_count}",
+            single_user * 8.0
         );
     }
 
