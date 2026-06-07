@@ -1486,6 +1486,14 @@ pub fn ChatPage() -> impl IntoView {
             .unwrap_or(false)
     });
 
+    let is_self_hosted = Signal::derive(move || {
+        user_ctx_resource
+            .get()
+            .and_then(|r| r.ok())
+            .map(|ctx| ctx.is_self_hosted)
+            .unwrap_or(false)
+    });
+
     let current_user_id = Signal::derive(move || {
         user_ctx_resource
             .get()
@@ -1937,9 +1945,12 @@ pub fn ChatPage() -> impl IntoView {
                                                 .min(100.0);
                                             parts.push(format!("{:.0}%", pct));
                                         }
-                                        let cost = cumulative_cost.get();
-                                        if cost > 0.0 {
-                                            parts.push(format_footer_cost(cost));
+                                        // Only show cost in self-hosted mode.
+                                        if is_self_hosted.get() {
+                                            let cost = cumulative_cost.get();
+                                            if cost > 0.0 {
+                                                parts.push(format_footer_cost(cost));
+                                            }
                                         }
                                         parts.join(" \u{00B7} ")
                                     }}
