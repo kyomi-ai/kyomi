@@ -72,8 +72,10 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
     // datasources: always visible
     tabs.push("datasources");
 
-    // ai: always visible. BYOK is per-user; model selector is admin-gated in-page.
-    tabs.push("ai");
+    // ai: self-hosted only (SaaS uses Kyomi-managed AI, no user configuration)
+    if ctx.is_self_hosted {
+        tabs.push("ai");
+    }
 
     // analytics: admin only, not self-hosted, billing enabled
     if is_admin && !ctx.is_self_hosted && ctx.billing_enabled {
