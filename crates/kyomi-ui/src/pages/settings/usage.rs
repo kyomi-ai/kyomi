@@ -252,7 +252,7 @@ fn WorkspaceUsageCard(
                     <Icon icon=phosphor_leptos::SPARKLE size="20px"/>
                     "Workspace AI Usage"
                 </CardTitle>
-                <CardDescription>"AI credit consumption across the workspace."</CardDescription>
+                <CardDescription>"AI usage across the workspace."</CardDescription>
             </CardHeader>
             <CardContent>
                 <div class="space-y-4">
@@ -279,10 +279,10 @@ fn WorkspaceUsageCard(
                             <Icon icon=phosphor_leptos::PACKAGE size="16px" attr:class="text-muted-foreground"/>
                             <div>
                                 <div class="text-sm font-medium text-foreground">
-                                    "Token Bundle Balance"
+                                    "AI Credit Balance"
                                 </div>
                                 <div class="text-xs text-muted-foreground">
-                                    "Non-expiring. Draw down as AI requests are made."
+                                    "Purchased credits. Non-expiring."
                                 </div>
                             </div>
                         </div>
@@ -300,7 +300,7 @@ fn WorkspaceUsageCard(
                     })}
                     {(!is_owner).then(|| view! {
                         <p class="text-xs text-muted-foreground">
-                            "Contact your workspace owner to purchase additional AI token bundles."
+                            "Contact your workspace owner to purchase additional AI credits."
                         </p>
                     })}
                 </div>
