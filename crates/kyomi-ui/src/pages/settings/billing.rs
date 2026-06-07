@@ -8,7 +8,7 @@
 //! Features:
 //! - Current plan card (Cloud — $5/user/month, status badge, renewal info)
 //! - User seats card (adjust seat count, min 1)
-//! - AI Credits card (BYOK key status, token bundle balance, purchase)
+//! - AI Credits card (included AI budget, top-up purchase)
 //! - Analytics card (event usage, bundle balance, purchase)
 //! - Invoice history table
 //! - Stripe portal link ("Manage Billing")
@@ -600,7 +600,7 @@ fn BillingContent(
                             <CardTitle>"Current Plan"</CardTitle>
                             <CardDescription class="mt-1">
                                 {if is_subscribed || is_app_trial {
-                                    format!("Cloud Plan \u{2014} ${:.0}/user/month", PRICE_PER_USER)
+                                    format!("Cloud Plan \u{2014} ${:.0}/user/month \u{00b7} AI included", PRICE_PER_USER)
                                 } else {
                                     "Free Plan".to_string()
                                 }}
@@ -731,7 +731,7 @@ fn BillingContent(
                                     })
                                 }).unwrap_or_else(|| "Trial active".to_string())
                             } else {
-                                "Includes a 30-day free trial. All features included.".to_string()
+                                "Includes a 30-day free trial with $1 AI credit. All features included.".to_string()
                             };
                             view! {
                                 <div class="mt-4">
@@ -1039,7 +1039,7 @@ fn SeatCapCard(
 // AI Credits Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Price per AI token bundle (matches AI_BUNDLE_CREDIT_USD default).
+/// Price per AI credit bundle (matches AI_BUNDLE_CREDIT_USD default).
 const AI_BUNDLE_PRICE: f64 = 10.0;
 
 /// Predefined quantity options for bundle purchases.
@@ -1064,21 +1064,21 @@ fn AiCreditsCard(
                     "AI Credits"
                 </CardTitle>
                 <CardDescription>
-                    "Purchase token bundles to power Kyomi AI. Workspace BYOK (bring your own key) is configured under Settings \u{2192} AI."
+                    "AI is included in your plan. Purchase additional credits if you need more capacity."
                 </CardDescription>
             </CardHeader>
             <CardContent>
                 <div class="space-y-4">
-                    // Token bundle balance
+                    // AI credit balance
                     <div class="bg-muted/50 border border-border rounded-lg p-4">
                         <div class="flex justify-between items-center text-sm">
-                            <span class="text-muted-foreground">"Token Bundle Balance"</span>
+                            <span class="text-muted-foreground">"AI Credit Balance"</span>
                             <span class="font-medium text-foreground">
                                 {format!("${:.2} remaining", balance_dollars)}
                             </span>
                         </div>
                         <p class="text-xs text-muted-foreground mt-2">
-                            "Token bundles never expire."
+                            "Purchased credits never expire."
                         </p>
                     </div>
 
@@ -1099,7 +1099,7 @@ fn AiCreditsCard(
                             {move || {
                                 let q = ai_quantity.get();
                                 let total = AI_BUNDLE_PRICE * q as f64;
-                                format!("{q} \u{00d7} ${:.0} = ${:.0} of AI credits", AI_BUNDLE_PRICE, total)
+                                format!("{q} \u{00d7} ${:.0} = ${:.0} in additional AI credits", AI_BUNDLE_PRICE, total)
                             }}
                         </span>
                     </div>
@@ -1114,7 +1114,7 @@ fn AiCreditsCard(
                         {move || if handle_purchase_ai.pending().get() { "Loading...".to_string() } else {
                             let q = ai_quantity.get();
                             let total = AI_BUNDLE_PRICE * q as f64;
-                            format!("Buy AI Tokens \u{2014} ${:.0}", total)
+                            format!("Buy AI Credits \u{2014} ${:.0}", total)
                         }}
                     </Button>
                 </div>
