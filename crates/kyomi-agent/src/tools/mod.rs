@@ -26,6 +26,7 @@ pub mod forecast;
 pub mod knowledge;
 pub mod query_utils;
 pub mod resources;
+pub mod validate_chartml;
 pub mod watch;
 pub mod workspace;
 
@@ -66,6 +67,7 @@ pub const WATCH_TOOLS: &[&str] = &[
     "forecast_data",
     "list_knowledge_files",
     "read_knowledge_file",
+    "validate_chartml",
 ];
 
 // ---------------------------------------------------------------------------
@@ -430,6 +432,9 @@ pub fn create_default_registry() -> ToolRegistry {
     // ChartML spec tool
     registry.register(Arc::new(chartml::GetChartMLSpecTool));
 
+    // ChartML validation tool
+    registry.register(Arc::new(validate_chartml::ValidateChartmlTool));
+
     // Dashboard tools
     registry.register(Arc::new(dashboard::SearchDashboardsTool));
     registry.register(Arc::new(dashboard::GetDashboardInfoTool));
@@ -695,7 +700,7 @@ mod tests {
         let registry = create_default_registry();
         let filter = ToolFilter::default();
         let tools = registry.get_tools(&filter);
-        assert_eq!(tools.len(), 35);
+        assert_eq!(tools.len(), 36);
 
         // Verify all expected tools are registered
         let expected = [
@@ -711,6 +716,7 @@ mod tests {
             "edit_knowledge_file",
             "get_workspace_info",
             "get_chartml_spec",
+            "validate_chartml",
             "search_dashboards",
             "get_dashboard_info",
             "create_dashboard",
@@ -807,8 +813,8 @@ mod contract_tests {
         let tools = registry.get_tools(&ToolFilter::default());
         assert_eq!(
             tools.len(),
-            35,
-            "Expected 35 tools, got {}. Names: {:?}",
+            36,
+            "Expected 36 tools, got {}. Names: {:?}",
             tools.len(),
             tools.iter().map(|t| t.name()).collect::<Vec<_>>()
         );
@@ -829,6 +835,7 @@ mod contract_tests {
             "edit_knowledge_file",
             "get_workspace_info",
             "get_chartml_spec",
+            "validate_chartml",
             "search_dashboards",
             "get_dashboard_info",
             "create_dashboard",
@@ -1028,6 +1035,7 @@ mod contract_tests {
             "read_knowledge_file",
             "get_workspace_info",
             "get_chartml_spec",
+            "validate_chartml",
             "search_dashboards",
             "get_dashboard_info",
             "search_watches",
@@ -1199,7 +1207,7 @@ mod contract_tests {
         }
 
         // Chat context should exclude 4 copilot + 5 MCP = 9 tools
-        assert_eq!(tools.len(), 35 - 9);
+        assert_eq!(tools.len(), 36 - 9);
     }
 
     #[test]
@@ -1226,7 +1234,7 @@ mod contract_tests {
                 "Copilot filter should not include MCP tool '{mcp_name}'"
             );
         }
-        assert_eq!(tools.len(), 35 - 5); // Only MCP excluded
+        assert_eq!(tools.len(), 36 - 5); // Only MCP excluded
     }
 
     #[test]
@@ -1252,7 +1260,7 @@ mod contract_tests {
                 "MCP filter should not include copilot tool '{copilot_name}'"
             );
         }
-        assert_eq!(tools.len(), 35 - 4); // Only copilot excluded
+        assert_eq!(tools.len(), 36 - 4); // Only copilot excluded
 
         // Regression guard for KYO-15: the real DB-mutating `update_watch`
         // must stay visible to MCP, and the draft-only copilot variant must
@@ -1342,7 +1350,7 @@ mod contract_tests {
         let filter = ToolFilter::default();
         let definitions = registry.get_tool_definitions(&filter);
 
-        assert_eq!(definitions.len(), 35);
+        assert_eq!(definitions.len(), 36);
         for def in &definitions {
             assert!(!def.name.is_empty(), "Tool definition has empty name");
             assert!(
