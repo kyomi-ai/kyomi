@@ -3,8 +3,7 @@
 //! Direct HTTP client for the Google Gemini API.
 //!
 //! Calls `POST {base_url}/models/{model}:generateContent` using `reqwest`.
-//! Handles retry logic with exponential backoff, token usage tracking, and
-//! cost estimation.
+//! Handles retry logic with exponential backoff and token usage tracking.
 //!
 //! This is a direct HTTP implementation because no official Google Gemini Rust
 //! SDK exists that fits our needs. It gives full control over tool schemas,
@@ -13,7 +12,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::types::{AgentTokenUsage, LLMResponse, Message, MessageRole, Tool, ToolCall};
 
@@ -28,65 +27,12 @@ const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta
 pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
 
 // ---------------------------------------------------------------------------
-// Context Window
-// ---------------------------------------------------------------------------
-
-/// Context window size in tokens for Gemini models.
-///
-/// Uses substring matching. Returns 0 for unknown models.
-pub fn get_context_window(model: &str) -> u32 {
-    if model.contains("gemini-2.5-pro")
-        || model.contains("gemini-2.5-flash")
-        || model.contains("gemini-2.0-flash")
-    {
-        1_048_576
-    } else {
-        0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Model Pricing
-// ---------------------------------------------------------------------------
-
-/// Look up pricing for a Gemini model using substring matching.
-/// Uses the lower tier (under 200k context) for simplicity.
-fn get_model_pricing(model: &str) -> crate::pricing::ModelPricing {
-    if model.contains("gemini-2.5-pro") {
-        crate::pricing::ModelPricing {
-            input: 1.25,
-            output: 10.00,
-        }
-    } else if model.contains("gemini-2.5-flash") {
-        crate::pricing::ModelPricing {
-            input: 0.15,
-            output: 0.60,
-        }
-    } else if model.contains("gemini-2.0-flash") {
-        crate::pricing::ModelPricing {
-            input: 0.10,
-            output: 0.40,
-        }
-    } else {
-        // Fallback: use gemini-2.0-flash pricing for unknown models.
-        warn!(
-            model = model,
-            "unknown Gemini model for cost calculation, using gemini-2.0-flash pricing as fallback"
-        );
-        crate::pricing::ModelPricing {
-            input: 0.10,
-            output: 0.40,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // GeminiProvider
 // ---------------------------------------------------------------------------
 
 /// HTTP client for the Google Gemini API.
 ///
-/// Handles message conversion, retry logic, and cost estimation.
+/// Handles message conversion and retry logic.
 pub struct GeminiProvider {
     base: crate::provider::ProviderBase,
 }
@@ -463,14 +409,10 @@ impl GeminiProvider {
             }
         };
 
-        // Calculate cost.
-        let cost = calculate_cost(model, &usage);
-
         info!(
             model = model,
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
-            cost = format!("${cost:.6}"),
             finish_reason = %finish_reason,
             "Gemini API call complete"
         );
@@ -484,7 +426,7 @@ impl GeminiProvider {
             } else {
                 Some(tool_calls)
             },
-            cost: Some(cost),
+            cost: None,
             thinking_content: None,
         })
     }
@@ -506,27 +448,6 @@ impl GeminiProvider {
             reasoning_tokens: 0,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Cost Calculation (free function, testable independently)
-// ---------------------------------------------------------------------------
-
-/// Calculate estimated cost in USD for a Gemini API call.
-/// Delegates to [`crate::pricing::calculate_cost_with_fallback`]. Gemini's
-/// `get_model_pricing` always returns a value (fallback built in), so the
-/// dummy fallback here is never reached.
-pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
-    crate::pricing::calculate_cost_with_fallback(
-        model,
-        usage,
-        |m| Some(get_model_pricing(m)),
-        crate::pricing::ModelPricing {
-            input: 0.0,
-            output: 0.0,
-        },
-        "gemini",
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -886,7 +807,7 @@ mod tests {
         assert_eq!(result.usage.cache_creation_input_tokens, 0);
         assert_eq!(result.usage.cache_read_input_tokens, 0);
         assert!(result.tool_calls.is_none());
-        assert!(result.cost.is_some());
+        assert!(result.cost.is_none());
     }
 
     #[test]
@@ -1124,114 +1045,6 @@ mod tests {
         assert_eq!(result.usage.cache_read_input_tokens, 0);
     }
 
-    // -- Cost calculation tests ---------------------------------------------
-
-    #[test]
-    fn cost_calculation_gemini_25_flash() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-2.5-flash", &usage);
-        // 1M * $0.15/M + 1M * $0.60/M = $0.75
-        assert!((cost - 0.75).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_gemini_25_pro() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-2.5-pro", &usage);
-        // 1M * $1.25/M + 1M * $10.00/M = $11.25
-        assert!((cost - 11.25).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_gemini_20_flash() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-2.0-flash", &usage);
-        // 1M * $0.10/M + 1M * $0.40/M = $0.50
-        assert!((cost - 0.50).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_unknown_model_uses_fallback() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-unknown-model", &usage);
-        // Fallback is gemini-2.0-flash: 1M * $0.10/M + 1M * $0.40/M = $0.50
-        assert!((cost - 0.50).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_zero_tokens() {
-        let usage = AgentTokenUsage::default();
-        let cost = calculate_cost("gemini-2.5-flash", &usage);
-        assert!((cost - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cost_calculation_input_only() {
-        let usage = AgentTokenUsage {
-            input_tokens: 500_000,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-2.5-flash", &usage);
-        // 0.5M * $0.15/M = $0.075
-        assert!((cost - 0.075).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_output_only() {
-        let usage = AgentTokenUsage {
-            input_tokens: 0,
-            output_tokens: 100_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-2.5-flash", &usage);
-        // 0.1M * $0.60/M = $0.06
-        assert!((cost - 0.06).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_substring_matching() {
-        // Model names with version suffixes should still match via substring.
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("gemini-2.5-pro-latest", &usage);
-        // Should match gemini-2.5-pro: 1M * $1.25/M = $1.25
-        assert!((cost - 1.25).abs() < 0.001);
-    }
-
     // -- Response parsing: missing candidates is error ----------------------
 
     #[test]
@@ -1346,17 +1159,4 @@ mod tests {
         assert_eq!(contents[3]["role"], "model");
     }
 
-    // -- Model pricing hierarchy test ---------------------------------------
-
-    #[test]
-    fn model_pricing_pro_is_most_expensive() {
-        let pro = get_model_pricing("gemini-2.5-pro");
-        let flash_25 = get_model_pricing("gemini-2.5-flash");
-        let flash_20 = get_model_pricing("gemini-2.0-flash");
-
-        assert!(pro.input > flash_25.input);
-        assert!(pro.output > flash_25.output);
-        assert!(flash_25.input > flash_20.input);
-        assert!(flash_25.output > flash_20.output);
-    }
 }

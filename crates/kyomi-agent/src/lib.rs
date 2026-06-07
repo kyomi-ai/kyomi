@@ -41,7 +41,6 @@ pub mod openai;
 pub mod markdown_to_typst;
 pub mod pdf_export;
 pub mod pdf_typst;
-pub mod pricing;
 pub mod prompt;
 pub mod provider;
 pub mod scheduler;
@@ -55,7 +54,6 @@ pub mod web_push;
 pub use adapter::ChatAgentAdapter;
 pub use agent::{AgentCallbacks, AgentConfig, AgentState, CustomAgent};
 pub use anthropic::{AnthropicClient, AUDIT_MODEL, DEFAULT_MODEL};
-pub use pricing::calculate_cost;
 pub use execution::{
     deliver_response, execute_agent_chat, generate_dashboard_summary,
     generate_session_title, AgentExecutionConfig, DashboardSummaryParams,
