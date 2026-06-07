@@ -350,17 +350,22 @@ pub async fn update_dashboard(
         && kyomi_auth::dashboard_service::extract_summary(c).is_none()
         && let Some(ws_manager) = ac.ctx.ws_manager.clone()
     {
-            let title_for_summary = match &title {
-                Some(t) => t.clone(),
-                None => {
-                    kyomi_auth::dashboard_service::get_dashboard(ac.db(), &dashboard_id, &ac.ws_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|d| d.title)
-                        .unwrap_or_default()
-                }
-            };
+            let fetched = kyomi_auth::dashboard_service::get_dashboard(
+                ac.db(), &dashboard_id, &ac.ws_id,
+            )
+            .await
+            .map_err(|e| tracing::warn!(dashboard_id = %dashboard_id, error = %e, "failed to fetch dashboard for summary"))
+            .ok()
+            .flatten();
+
+            let title_for_summary = title
+                .clone()
+                .or_else(|| fetched.as_ref().map(|d| d.title.clone()))
+                .unwrap_or_default();
+            let doc_type_for_summary = fetched
+                .map(|d| d.doc_type)
+                .unwrap_or_else(|| "dashboard".to_string());
+
             kyomi_agent::generate_dashboard_summary(
                 kyomi_agent::DashboardSummaryParams {
                     db: ac.ctx.db.clone(),
@@ -371,6 +376,7 @@ pub async fn update_dashboard(
                     title: title_for_summary,
                     content: c.clone(),
                     app_config: ac.ctx.config.clone(),
+                    doc_type: doc_type_for_summary,
                 },
             );
     }

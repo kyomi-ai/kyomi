@@ -402,6 +402,7 @@ impl AgentTool for CreateDashboardTool {
                     title: title.trim().to_string(),
                     content: content.to_string(),
                     app_config: ctx.config.clone(),
+                    doc_type: "dashboard".to_string(),
                 },
             );
         }
@@ -627,6 +628,7 @@ impl AgentTool for ModifyDashboardTool {
                         title: effective_title,
                         content: c.to_string(),
                         app_config: ctx.config.clone(),
+                        doc_type: "dashboard".to_string(),
                     },
                 );
             }
