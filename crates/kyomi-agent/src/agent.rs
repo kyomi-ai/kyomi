@@ -28,6 +28,41 @@ use crate::tools::{ToolContext, ToolFilter, ToolRegistry};
 use crate::types::{Message, Tool, ToolCall};
 
 // ---------------------------------------------------------------------------
+// ChartML validation logging
+// ---------------------------------------------------------------------------
+
+/// SQL to record a ChartML validation failure for prompt-tuning analysis.
+pub(crate) const CHARTML_VALIDATION_LOG_INSERT_SQL: &str =
+    "INSERT INTO chartml_validation_log \
+     (session_id, workspace_id, user_id, raw_response, error_message, error_type, \
+      retry_attempt, component, model) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)";
+
+/// SQL to back-fill `retry_succeeded` once a session finishes.
+///
+/// Only rows that are still `NULL` (written during the current session) are
+/// updated, so a single UPDATE covers all retries for the session at once.
+pub(crate) const CHARTML_VALIDATION_LOG_UPDATE_SQL: &str =
+    "UPDATE chartml_validation_log SET retry_succeeded = $1 \
+     WHERE session_id = $2 AND workspace_id = $3 AND retry_succeeded IS NULL";
+
+/// Classify a ChartML validation error string into a coarse category.
+///
+/// The categories correspond to the `error_type` column and are used for
+/// aggregation in prompt-tuning queries.
+pub(crate) fn classify_chartml_error(error: &str) -> &'static str {
+    if error.contains("invalid YAML") {
+        "yaml_parse"
+    } else if error.contains("missing required key") {
+        "missing_key"
+    } else if error.contains("SQL error") || error.contains("sql error") {
+        "sql_error"
+    } else {
+        "unknown"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Callback type aliases (to satisfy clippy::type_complexity)
 // ---------------------------------------------------------------------------
 
@@ -338,6 +373,14 @@ impl CustomAgent {
                     && let Some(error_msg) = self.validate_chartml_blocks(&response.content).await
                 {
                     warn!(error = %error_msg, "ChartML validation failed, asking LLM to fix");
+                    // Log validation failure for prompt-tuning analysis.
+                    self.log_chartml_validation_error(
+                        &response.content,
+                        &error_msg,
+                        chartml_retry_messages.len() as i32 / 2,
+                        "chat",
+                    )
+                    .await;
                     // Store as ephemeral retry context — NOT in self.state.messages.
                     chartml_retry_messages.push(Message::assistant(response.content.clone()));
                     chartml_retry_messages.push(Message::user(format!(
@@ -345,6 +388,19 @@ impl CustomAgent {
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
                     )));
                     continue;
+                }
+
+                // Validation passed — mark any previous retries for this session as succeeded.
+                if let Some(ref sid) = self.tool_context.session_id {
+                    if let Err(e) = kyomi_core::db_execute!(
+                        self.tool_context.db,
+                        CHARTML_VALIDATION_LOG_UPDATE_SQL,
+                        true,
+                        sid,
+                        &self.tool_context.workspace_id
+                    ) {
+                        warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
+                    }
                 }
 
                 // Push final response to state so persist_after_chat saves it.
@@ -403,6 +459,14 @@ impl CustomAgent {
                     // The assistant message (with tool calls) is already persisted
                     // above, but the error instruction stays ephemeral.
                     warn!(error = %error_msg, "ChartML validation failed in tool response, asking LLM to fix");
+                    // Log validation failure for prompt-tuning analysis.
+                    self.log_chartml_validation_error(
+                        &response.content,
+                        &error_msg,
+                        chartml_retry_messages.len() as i32,
+                        "chat",
+                    )
+                    .await;
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -410,7 +474,20 @@ impl CustomAgent {
                     continue;
                 }
 
-                // Validation passed — return as final response.
+                // Validation passed — mark any previous retries for this session as succeeded.
+                if let Some(ref sid) = self.tool_context.session_id {
+                    if let Err(e) = kyomi_core::db_execute!(
+                        self.tool_context.db,
+                        CHARTML_VALIDATION_LOG_UPDATE_SQL,
+                        true,
+                        sid,
+                        &self.tool_context.workspace_id
+                    ) {
+                        warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
+                    }
+                }
+
+                // Return as final response.
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
@@ -427,6 +504,20 @@ impl CustomAgent {
             max_iterations = self.config.max_iterations,
             "agent loop exhausted max iterations"
         );
+
+        // Mark any pending ChartML validation rows as not succeeded.
+        if let Some(ref sid) = self.tool_context.session_id {
+            if let Err(e) = kyomi_core::db_execute!(
+                self.tool_context.db,
+                CHARTML_VALIDATION_LOG_UPDATE_SQL,
+                false,
+                sid,
+                &self.tool_context.workspace_id
+            ) {
+                warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
+            }
+        }
+
         let fallback =
             "I apologize, but I've reached my maximum number of iterations for this request. \
              Please try rephrasing your question or breaking it into smaller parts."
@@ -561,6 +652,42 @@ impl CustomAgent {
         // Step 2: SQL dry-run via shared utility (same code path as dashboard tools).
         crate::tools::query_utils::validate_chartml_sql(&self.tool_context.query_context(), text)
             .await
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal: validation logging
+    // -----------------------------------------------------------------------
+
+    /// Persist a ChartML validation failure to the database for prompt tuning.
+    ///
+    /// This is fire-and-forget observability — errors are logged at `warn!`
+    /// level and never propagated to the caller.
+    async fn log_chartml_validation_error(
+        &self,
+        raw_response: &str,
+        error_msg: &str,
+        retry_attempt: i32,
+        component: &str,
+    ) {
+        let error_type = classify_chartml_error(error_msg);
+        let session_id = self.tool_context.session_id.as_deref().unwrap_or("");
+        let model = self.client.model();
+
+        if let Err(e) = kyomi_core::db_execute!(
+            self.tool_context.db,
+            CHARTML_VALIDATION_LOG_INSERT_SQL,
+            session_id,
+            &self.tool_context.workspace_id,
+            &self.tool_context.user_id,
+            raw_response,
+            error_msg,
+            error_type,
+            retry_attempt,
+            component,
+            model
+        ) {
+            warn!(error = %e, "Failed to log ChartML validation error");
+        }
     }
 }
 
@@ -1119,5 +1246,49 @@ Chart 2:\n```chartml\ndata:\n  query: SELECT 2\nvisualize:\n  type: line\n```";
             ..Default::default()
         };
         assert!(callbacks.on_preparing_response.is_some());
+    }
+
+    // -- classify_chartml_error tests ----------------------------------------
+
+    #[test]
+    fn classify_chartml_error_types() {
+        assert_eq!(
+            classify_chartml_error("Block 1: invalid YAML at line 3"),
+            "yaml_parse"
+        );
+        assert_eq!(
+            classify_chartml_error("Block 1: missing required key 'data'"),
+            "missing_key"
+        );
+        assert_eq!(
+            classify_chartml_error("Block 1: SQL error: syntax error near SELECT"),
+            "sql_error"
+        );
+        assert_eq!(
+            classify_chartml_error("Block 1: sql error: unexpected token"),
+            "sql_error"
+        );
+        assert_eq!(classify_chartml_error("some unknown error"), "unknown");
+    }
+
+    // -- CHARTML_VALIDATION_LOG_INSERT_SQL sanity checks ---------------------
+
+    #[test]
+    fn chartml_validation_log_insert_sql_targets_correct_table() {
+        assert!(
+            CHARTML_VALIDATION_LOG_INSERT_SQL
+                .contains("INSERT INTO chartml_validation_log")
+        );
+        assert!(CHARTML_VALIDATION_LOG_INSERT_SQL.contains("error_type"));
+        assert!(CHARTML_VALIDATION_LOG_INSERT_SQL.contains("raw_response"));
+    }
+
+    #[test]
+    fn chartml_validation_log_update_sql_targets_correct_table() {
+        assert!(
+            CHARTML_VALIDATION_LOG_UPDATE_SQL
+                .contains("UPDATE chartml_validation_log")
+        );
+        assert!(CHARTML_VALIDATION_LOG_UPDATE_SQL.contains("retry_succeeded"));
     }
 }
