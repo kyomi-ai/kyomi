@@ -11,6 +11,7 @@
 //! - Uses Card, Alert, Skeleton
 
 use leptos::prelude::*;
+use leptos_router::components::Redirect;
 
 use phosphor_leptos::Icon;
 use crate::components::{
@@ -89,31 +90,41 @@ pub fn UsagePage() -> impl IntoView {
             <h2 class="text-xl font-display text-foreground mb-6">"Usage"</h2>
             <Transition fallback=move || view! { <UsageLoadingSkeleton/> }>
                 {move || Suspend::new(async move {
-                    let is_owner = user_ctx.await.map(|c| c.is_owner).unwrap_or(false);
-                    match usage_resource.await {
-                        Ok(data) => view! { <UsageContent data=data is_owner=is_owner/> }.into_any(),
-                        Err(_) => {
-                            // Don't leak raw SQL or internal errors to the UI.
-                            view! {
-                                <UsageContent is_owner=is_owner data=UsageData {
-                                    percentage_used: 0.0,
-                                    warning_level: None,
-                                    allowed: true,
-                                    blocked: false,
-                                    ai_reset_date: None,
-                                    trial_ends_at: None,
-                                    per_user: crate::server_fns::usage::PerUserUsage {
+                    let ctx_result = user_ctx.await;
+                    let is_self_hosted = ctx_result
+                        .as_ref()
+                        .map(|c| c.is_self_hosted)
+                        .unwrap_or(false);
+
+                    if is_self_hosted {
+                        let is_owner = ctx_result.map(|c| c.is_owner).unwrap_or(false);
+                        match usage_resource.await {
+                            Ok(data) => view! { <UsageContent data=data is_owner=is_owner/> }.into_any(),
+                            Err(_) => {
+                                // Don't leak raw SQL or internal errors to the UI.
+                                view! {
+                                    <UsageContent is_owner=is_owner data=UsageData {
                                         percentage_used: 0.0,
-                                        fair_share_percentage: 100.0,
-                                    },
-                                    by_feature: std::collections::HashMap::new(),
-                                    ai_bundle_balance_usd: 0.0,
-                                    analytics_events_used: 0,
-                                    analytics_events_included: ANALYTICS_EVENTS_INCLUDED,
-                                    analytics_bundle_events: 0,
-                                }/>
-                            }.into_any()
+                                        warning_level: None,
+                                        allowed: true,
+                                        blocked: false,
+                                        ai_reset_date: None,
+                                        trial_ends_at: None,
+                                        per_user: crate::server_fns::usage::PerUserUsage {
+                                            percentage_used: 0.0,
+                                            fair_share_percentage: 100.0,
+                                        },
+                                        by_feature: std::collections::HashMap::new(),
+                                        ai_bundle_balance_usd: 0.0,
+                                        analytics_events_used: 0,
+                                        analytics_events_included: ANALYTICS_EVENTS_INCLUDED,
+                                        analytics_bundle_events: 0,
+                                    }/>
+                                }.into_any()
+                            }
                         }
+                    } else {
+                        view! { <Redirect path="/settings/profile"/> }.into_any()
                     }
                 })}
             </Transition>
