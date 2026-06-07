@@ -13,7 +13,7 @@
 //! - Workspace: admin only, hidden in personal mode
 //! - Data Sources: always visible
 //! - Analytics: admin only, hidden in self-hosted
-//! - Usage: hidden in self-hosted
+//! - Usage: self-hosted only (SaaS hides usage — AI is included)
 //! - Billing: owner only, hidden in self-hosted
 //! - Team: team tier + admin, hidden in personal mode
 
@@ -82,8 +82,8 @@ fn visible_tabs(ctx: &UserContext) -> Vec<&'static str> {
         tabs.push("analytics");
     }
 
-    // usage: not self-hosted, billing enabled
-    if !ctx.is_self_hosted && ctx.billing_enabled {
+    // usage: self-hosted only (SaaS hides usage — AI is included)
+    if ctx.is_self_hosted {
         tabs.push("usage");
     }
 
