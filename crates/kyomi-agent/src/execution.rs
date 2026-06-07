@@ -456,9 +456,8 @@ pub async fn execute_agent_chat(
         let total_tokens = (input_tokens + output_tokens) as i32;
         // BYOK: `cost_estimate = 0.0` (not billed against Kyomi credits) and
         //       `provider_cost_usd = total_cost` so we keep observability into
-        //       the real upstream provider spend. `total_cost` already comes
-        //       from the tracker, which aggregates per-call costs computed
-        //       from token counts × the provider's pricing table.
+        //       the real upstream provider spend. `total_cost` comes from the
+        //       tracker, which accumulates the `cost` field from each LLM response.
         // Kyomi: `cost_estimate = total_cost * markup` (billed) and
         //       `provider_cost_usd = NULL` — `cost_estimate` already reflects
         //       the real cost, so the extra column would be redundant.

@@ -216,7 +216,8 @@ impl LLMProvider for AnthropicClient {
     }
 
     fn context_window(&self) -> u32 {
-        crate::anthropic::get_context_window(self.model())
+        // All Claude models share a 200,000-token context window.
+        200_000
     }
 }
 
@@ -257,10 +258,6 @@ impl LLMProvider for GeminiProvider {
 
     fn model(&self) -> &str {
         GeminiProvider::model(self)
-    }
-
-    fn context_window(&self) -> u32 {
-        crate::gemini::get_context_window(self.model())
     }
 }
 
@@ -489,31 +486,6 @@ pub fn maybe_log_llm(provider_name: &str, label: &str, payload: &serde_json::Val
         Err(e) => {
             tracing::warn!(error = %e, path = %filename, "Failed to create LLM log file");
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Context window lookup
-// ---------------------------------------------------------------------------
-
-/// Return the context window size (in tokens) for a model and provider.
-///
-/// Used to display context utilisation percentage in the thinking tracker.
-/// When `extra_context_window` is non-zero (e.g. from an OpenRouter model
-/// list), it takes precedence over the hardcoded per-provider value.
-/// Returns 0 when the context window is unknown.
-pub fn get_context_window(
-    model: &str,
-    provider: ProviderKind,
-    extra_context_window: u32,
-) -> u32 {
-    if extra_context_window > 0 {
-        return extra_context_window;
-    }
-    match provider {
-        ProviderKind::Anthropic => crate::anthropic::get_context_window(model),
-        ProviderKind::OpenAI => crate::openai::get_context_window(model),
-        ProviderKind::Gemini => crate::gemini::get_context_window(model),
     }
 }
 

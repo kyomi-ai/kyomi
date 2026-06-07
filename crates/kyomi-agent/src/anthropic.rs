@@ -3,8 +3,8 @@
 //! Direct HTTP client for the Anthropic Messages API.
 //!
 //! Calls `POST https://api.anthropic.com/v1/messages` using `reqwest`.
-//! Handles prompt caching, retry logic with exponential backoff, token usage
-//! tracking, and cost estimation.
+//! Handles prompt caching, retry logic with exponential backoff, and token
+//! usage tracking.
 //!
 //! This is a direct HTTP implementation because no official Anthropic Rust SDK
 //! exists. It gives full control over prompt caching headers, tool schemas,
@@ -37,58 +37,12 @@ pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 pub const AUDIT_MODEL: &str = "claude-haiku-4-5-20251001";
 
 // ---------------------------------------------------------------------------
-// Context Window
-// ---------------------------------------------------------------------------
-
-/// Context window size in tokens for all Claude models.
-///
-/// All current Claude models share the same 200,000-token context window.
-/// Returns 0 for unknown models.
-pub fn get_context_window(_model: &str) -> u32 {
-    200_000
-}
-
-// ---------------------------------------------------------------------------
-// Model Pricing
-// ---------------------------------------------------------------------------
-
-/// Look up pricing for a model. Returns `None` for unknown models.
-fn get_model_pricing(model: &str) -> Option<crate::pricing::ModelPricing> {
-    // Normalize model name (handle duplicate prefixes from misconfiguration).
-    let clean = model.replace("claude-claude-", "claude-");
-
-    match clean.as_str() {
-        "claude-opus-4-20250514" => Some(crate::pricing::ModelPricing {
-            input: 15.00,
-            output: 75.00,
-        }),
-        "claude-sonnet-4-5-20250929" => Some(crate::pricing::ModelPricing {
-            input: 3.00,
-            output: 15.00,
-        }),
-        "claude-sonnet-4-6" => Some(crate::pricing::ModelPricing {
-            input: 3.00,
-            output: 15.00,
-        }),
-        "claude-haiku-4-5-20251001" => Some(crate::pricing::ModelPricing {
-            input: 1.00,
-            output: 5.00,
-        }),
-        "claude-3-5-haiku-20241022" => Some(crate::pricing::ModelPricing {
-            input: 0.80,
-            output: 4.00,
-        }),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // AnthropicClient
 // ---------------------------------------------------------------------------
 
 /// HTTP client for the Anthropic Messages API.
 ///
-/// Handles message conversion, prompt caching, retry logic, and cost estimation.
+/// Handles message conversion, prompt caching, and retry logic.
 /// Uses `reqwest` for HTTP calls and supports non-streaming mode (matching
 /// the Python backend's behavior).
 pub struct AnthropicClient {
@@ -453,16 +407,12 @@ impl AnthropicClient {
             .unwrap_or("unknown")
             .to_string();
 
-        // Calculate cost.
-        let cost = calculate_cost(model, &usage);
-
         info!(
             model = model,
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             cache_write = usage.cache_creation_input_tokens,
             cache_read = usage.cache_read_input_tokens,
-            cost = format!("${cost:.6}"),
             finish_reason = %finish_reason,
             "Anthropic API call complete"
         );
@@ -476,7 +426,7 @@ impl AnthropicClient {
             } else {
                 Some(tool_calls)
             },
-            cost: Some(cost),
+            cost: None,
             thinking_content: None,
         })
     }
@@ -504,26 +454,6 @@ impl AnthropicClient {
             reasoning_tokens: 0,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Cost Calculation (free function, testable independently)
-// ---------------------------------------------------------------------------
-
-/// Calculate estimated cost in USD for an Anthropic API call.
-/// Delegates to [`crate::pricing::calculate_cost_with_fallback`] with Haiku 4.5 pricing
-/// as the fallback for unknown models.
-pub fn calculate_cost(model: &str, usage: &AgentTokenUsage) -> f64 {
-    crate::pricing::calculate_cost_with_fallback(
-        model,
-        usage,
-        get_model_pricing,
-        crate::pricing::ModelPricing {
-            input: 1.00,
-            output: 5.00,
-        },
-        "anthropic",
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -709,117 +639,6 @@ mod tests {
         assert_eq!(result[2]["cache_control"], json!({"type": "ephemeral"}));
     }
 
-    // -- Cost calculation tests ---------------------------------------------
-
-    #[test]
-    fn cost_calculation_sonnet() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
-        // 1M input * $3/M + 1M output * $15/M = $18.00
-        assert!((cost - 18.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_haiku() {
-        let usage = AgentTokenUsage {
-            input_tokens: 500_000,
-            output_tokens: 100_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-haiku-4-5-20251001", &usage);
-        // 0.5M * $1/M + 0.1M * $5/M = $0.50 + $0.50 = $1.00
-        assert!((cost - 1.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_with_cache_tokens() {
-        let usage = AgentTokenUsage {
-            input_tokens: 100_000,
-            output_tokens: 50_000,
-            cache_creation_input_tokens: 200_000,
-            cache_read_input_tokens: 500_000,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
-        // input: 100K/1M * $3 = $0.30
-        // cache write: 200K/1M * $3 * 1.25 = $0.75
-        // cache read: 500K/1M * $3 * 0.1 = $0.15
-        // output: 50K/1M * $15 = $0.75
-        // total = $1.95
-        assert!((cost - 1.95).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_opus() {
-        let usage = AgentTokenUsage {
-            input_tokens: 100_000,
-            output_tokens: 10_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-opus-4-20250514", &usage);
-        // 0.1M * $15/M + 0.01M * $75/M = $1.50 + $0.75 = $2.25
-        assert!((cost - 2.25).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_legacy_haiku() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-3-5-haiku-20241022", &usage);
-        // 1M * $0.80/M = $0.80
-        assert!((cost - 0.80).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_unknown_model_uses_fallback() {
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 1_000_000,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-unknown-model", &usage);
-        // Fallback is Haiku 4.5: 1M * $1/M + 1M * $5/M = $6.00
-        assert!((cost - 6.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_zero_tokens() {
-        let usage = AgentTokenUsage::default();
-        let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
-        assert!((cost - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn cost_calculation_duplicate_prefix_normalized() {
-        // Tests the model name normalization (claude-claude- -> claude-).
-        let usage = AgentTokenUsage {
-            input_tokens: 1_000_000,
-            output_tokens: 0,
-            ..Default::default()
-        };
-        let cost = calculate_cost("claude-claude-sonnet-4-5-20250929", &usage);
-        // Should match Sonnet pricing: 1M * $3/M = $3.00
-        // (The normalization happens in get_model_pricing, so the lookup succeeds.)
-        assert!((cost - 3.0).abs() < 0.001);
-    }
-
     // -- Response parsing tests ---------------------------------------------
 
     #[test]
@@ -842,7 +661,7 @@ mod tests {
         assert_eq!(result.usage.input_tokens, 100);
         assert_eq!(result.usage.output_tokens, 20);
         assert!(result.tool_calls.is_none());
-        assert!(result.cost.is_some());
+        assert!(result.cost.is_none());
     }
 
     #[test]
@@ -967,28 +786,6 @@ mod tests {
             AnthropicClient::new("test-key".into(), Some("claude-haiku-4-5-20251001".into()))
                 .unwrap();
         assert_eq!(client.model(), "claude-haiku-4-5-20251001");
-    }
-
-    // -- Model pricing tests ------------------------------------------------
-
-    #[test]
-    fn model_pricing_all_known_models() {
-        assert!(get_model_pricing("claude-opus-4-20250514").is_some());
-        assert!(get_model_pricing("claude-sonnet-4-5-20250929").is_some());
-        assert!(get_model_pricing("claude-haiku-4-5-20251001").is_some());
-        assert!(get_model_pricing("claude-3-5-haiku-20241022").is_some());
-    }
-
-    #[test]
-    fn model_pricing_unknown_returns_none() {
-        assert!(get_model_pricing("gpt-4").is_none());
-        assert!(get_model_pricing("unknown").is_none());
-    }
-
-    #[test]
-    fn model_pricing_normalize_duplicate_prefix() {
-        // claude-claude- prefix should be normalized to claude-.
-        assert!(get_model_pricing("claude-claude-sonnet-4-5-20250929").is_some());
     }
 
     // -- Contract: Assistant message with BOTH text and tool_calls -----------
@@ -1225,8 +1022,7 @@ mod tests {
         assert_eq!(result.usage.output_tokens, 500);
         assert_eq!(result.usage.cache_creation_input_tokens, 2000);
         assert_eq!(result.usage.cache_read_input_tokens, 8000);
-        // Cost should be calculated.
-        assert!(result.cost.unwrap() > 0.0);
+        assert!(result.cost.is_none());
     }
 
     // -- Contract: parse_response missing content array ----------------------
@@ -1239,51 +1035,6 @@ mod tests {
         });
         let result = AnthropicClient::parse_response("claude-sonnet-4-5-20250929", &response);
         assert!(result.is_err());
-    }
-
-    // -- Contract: Model pricing consistency ---------------------------------
-
-    #[test]
-    fn model_pricing_opus_is_most_expensive() {
-        let opus = get_model_pricing("claude-opus-4-20250514").unwrap();
-        let sonnet = get_model_pricing("claude-sonnet-4-5-20250929").unwrap();
-        let haiku = get_model_pricing("claude-haiku-4-5-20251001").unwrap();
-
-        // Opus should be more expensive than Sonnet which is more expensive than Haiku.
-        assert!(opus.input > sonnet.input);
-        assert!(opus.output > sonnet.output);
-        assert!(sonnet.input > haiku.input);
-        assert!(sonnet.output > haiku.output);
-    }
-
-    // -- Contract: Cost calculation with only cache tokens -------------------
-
-    #[test]
-    fn cost_calculation_only_cache_write_tokens() {
-        let usage = AgentTokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 1_000_000,
-            cache_read_input_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
-        // Cache write: 1M / 1M * $3 * 1.25 = $3.75
-        assert!((cost - 3.75).abs() < 0.001);
-    }
-
-    #[test]
-    fn cost_calculation_only_cache_read_tokens() {
-        let usage = AgentTokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 1_000_000,
-            reasoning_tokens: 0,
-        };
-        let cost = calculate_cost("claude-sonnet-4-5-20250929", &usage);
-        // Cache read: 1M / 1M * $3 * 0.1 = $0.30
-        assert!((cost - 0.30).abs() < 0.001);
     }
 
     // -- Contract: Conversion of full conversation flow ----------------------
