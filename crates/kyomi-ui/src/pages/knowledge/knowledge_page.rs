@@ -30,6 +30,7 @@ use crate::server_fns::collections::{CollectionItem, list_collections};
 use crate::server_fns::dashboards::DashboardListItem;
 use crate::server_fns::knowledge::{create_knowledge_doc, delete_knowledge_doc};
 use leptos::prelude::*;
+use leptos_router::hooks::use_query_map;
 use phosphor_leptos::{Icon, IconWeight};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,7 +43,27 @@ use phosphor_leptos::{Icon, IconWeight};
 pub fn KnowledgePage() -> impl IntoView {
     // ── Collection sidebar integration points ───────────────────────────
     let (collections_open, set_collections_open) = signal(false);
-    let (active_collection_id, set_active_collection_id) = signal(Option::<String>::None);
+    let params = use_query_map();
+    let initial_collection = params
+        .get()
+        .get("collection")
+        .filter(|s| !s.is_empty());
+    let (active_collection_id, set_active_collection_id) = signal(initial_collection);
+
+    // Sync active_collection_id back to the URL so refreshes restore the filter.
+    Effect::new(move |_| {
+        let collection_id = active_collection_id.get();
+        if let Some(window) = web_sys::window() {
+            let pathname = window.location().pathname().unwrap_or_default();
+            let new_url = match &collection_id {
+                Some(id) => format!("{pathname}?collection={id}"),
+                None => pathname,
+            };
+            let _ = window.history().and_then(|h| {
+                h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&new_url))
+            });
+        }
+    });
 
     // ── Search + sort signals ───────────────────────────────────────────
     let (query_signal, set_query_signal) = signal(Option::<String>::None);
