@@ -445,11 +445,20 @@ impl OpenAIProvider {
         // Extract usage.
         let usage = Self::parse_usage(response);
 
+        // Extract cost from OpenRouter responses (`usage.cost` in USD).
+        // Direct API providers (Anthropic, Gemini, plain OpenAI) don't return
+        // this field, so it remains None for those callers.
+        let cost = response
+            .get("usage")
+            .and_then(|u| u.get("cost"))
+            .and_then(|v| v.as_f64());
+
         info!(
             model = model,
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             reasoning_tokens = usage.reasoning_tokens,
+            cost = ?cost,
             finish_reason = %finish_reason,
             "OpenAI API call complete"
         );
@@ -459,7 +468,7 @@ impl OpenAIProvider {
             finish_reason,
             usage,
             tool_calls,
-            cost: None,
+            cost,
             thinking_content,
         })
     }
@@ -1288,5 +1297,51 @@ mod tests {
         let tc = &response.tool_calls.unwrap()[0];
         assert!(tc.arguments.is_object());
         assert!(tc.arguments.as_object().unwrap().is_empty());
+    }
+
+    // -- Cost extraction tests -------------------------------------------------
+
+    #[test]
+    fn parse_response_cost_from_openrouter() {
+        let response = json!({
+            "choices": [{"message": {"content": "Hello"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+                "cost": 0.00014
+            }
+        });
+        let response = OpenAIProvider::parse_response("anthropic/claude-sonnet-4", &response).unwrap();
+        assert_eq!(response.cost, Some(0.00014));
+    }
+
+    #[test]
+    fn parse_response_cost_absent_for_direct_openai() {
+        let response = json!({
+            "choices": [{"message": {"content": "Hello"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14
+            }
+        });
+        let response = OpenAIProvider::parse_response("gpt-4o", &response).unwrap();
+        assert!(response.cost.is_none());
+    }
+
+    #[test]
+    fn parse_response_cost_zero_is_some() {
+        // Free models on OpenRouter report cost: 0
+        let response = json!({
+            "choices": [{"message": {"content": "Hello"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "cost": 0.0
+            }
+        });
+        let response = OpenAIProvider::parse_response("meta-llama/llama-3-8b", &response).unwrap();
+        assert_eq!(response.cost, Some(0.0));
     }
 }
