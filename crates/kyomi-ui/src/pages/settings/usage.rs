@@ -203,35 +203,18 @@ fn UsageContent(data: UsageData, is_owner: bool) -> impl IntoView {
             // Feature Breakdown card
             <FeatureBreakdownCard by_feature=by_feature/>
 
-            // Warning alert when near limit
+            // Warning alert when at limit
             {data.warning_level.as_ref().map(|level| {
-                let (variant, message) = match level.as_str() {
-                    "blocked" => (
-                        AlertVariant::Error,
-                        "AI budget exhausted. Add an AI token bundle or connect your own API key to continue.".to_string(),
-                    ),
-                    "critical" => (
-                        AlertVariant::Warning,
-                        format!(
-                            "AI budget critically low ({:.1}% used). Consider purchasing an AI token bundle to avoid interruption.",
-                            percentage,
-                        ),
-                    ),
-                    "warning" => (
-                        AlertVariant::Warning,
-                        format!(
-                            "AI budget at {:.1}%. Consider purchasing an AI token bundle.",
-                            percentage,
-                        ),
-                    ),
-                    _ => return view! { <div/> }.into_any(),
-                };
-
-                view! {
-                    <Alert variant=variant>
-                        <AlertDescription>{message}</AlertDescription>
-                    </Alert>
-                }.into_any()
+                match level.as_str() {
+                    "blocked" => view! {
+                        <Alert variant=AlertVariant::Error>
+                            <AlertDescription>
+                                "You have exceeded AI usage limits"
+                            </AlertDescription>
+                        </Alert>
+                    }.into_any(),
+                    _ => ().into_any(),
+                }
             })}
         </div>
     }
@@ -300,7 +283,7 @@ fn WorkspaceUsageCard(
                     {is_exhausted.then(|| view! {
                         <div class="rounded-md bg-error/10 border border-error/30 px-3 py-2">
                             <p class="text-xs text-error-foreground">
-                                "AI budget exhausted. Add an AI token bundle or connect your own API key to continue."
+                                "You have exceeded AI usage limits"
                             </p>
                         </div>
                     })}
