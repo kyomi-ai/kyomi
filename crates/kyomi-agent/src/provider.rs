@@ -322,6 +322,13 @@ pub fn create_provider_from_workspace(
 ) -> kyomi_core::Result<Box<dyn LLMProvider>> {
     use kyomi_auth::workspace_ai_config::WorkspaceAiProvider;
 
+    // SaaS mode: always use Kyomi-managed credentials regardless of any
+    // workspace-level BYOK configuration. Existing BYOK configs are
+    // preserved in the database but unused at runtime.
+    if !fallback_config.self_hosted {
+        return create_provider(resolve_provider_config(fallback_config)?);
+    }
+
     let llm_config = match ws_config.provider {
         WorkspaceAiProvider::Kyomi => {
             // Server-side keys: server controls the model entirely.
@@ -718,7 +725,9 @@ mod tests {
         use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
 
         // Deliberately empty fallback — BYOK must not read from it.
+        // self_hosted = true: BYOK is only available in self-hosted mode.
         let mut fallback = kyomi_core::Config::test_config();
+        fallback.self_hosted = true;
         fallback.llm_provider = None;
         fallback.llm_api_key = None;
         fallback.anthropic_api_key = None;
@@ -741,7 +750,9 @@ mod tests {
     fn workspace_factory_byok_gemini_default_model() {
         use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
 
-        let fallback = kyomi_core::Config::test_config();
+        // self_hosted = true: BYOK is only available in self-hosted mode.
+        let mut fallback = kyomi_core::Config::test_config();
+        fallback.self_hosted = true;
         let ws = WorkspaceAiConfig {
             provider: WorkspaceAiProvider::Gemini,
             model: None,
@@ -759,7 +770,9 @@ mod tests {
     fn workspace_factory_byok_without_key_errors() {
         use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
 
-        let fallback = kyomi_core::Config::test_config();
+        // self_hosted = true: BYOK is only available in self-hosted mode.
+        let mut fallback = kyomi_core::Config::test_config();
+        fallback.self_hosted = true;
         let ws = WorkspaceAiConfig {
             provider: WorkspaceAiProvider::Anthropic,
             model: None,
@@ -777,6 +790,33 @@ mod tests {
             err.to_string().contains("no stored API key"),
             "expected missing-key error, got: {err}"
         );
+    }
+
+    #[test]
+    fn workspace_factory_saas_mode_forces_kyomi_managed() {
+        use kyomi_auth::workspace_ai_config::{WorkspaceAiConfig, WorkspaceAiProvider};
+
+        // SaaS mode: self_hosted = false (default in test_config)
+        let mut fallback = kyomi_core::Config::test_config();
+        fallback.self_hosted = false;
+        fallback.anthropic_api_key = Some("sk-ant-server".into());
+        fallback.llm_model = Some("claude-sonnet-4-20250514".into());
+
+        // Workspace has BYOK config (OpenAI with its own key)
+        let ws = WorkspaceAiConfig {
+            provider: WorkspaceAiProvider::OpenAI,
+            model: Some("gpt-4o".into()),
+            api_key: Some("sk-ws-byok-key".into()),
+            base_url: None,
+            title_model: None,
+            context_window: 0,
+        };
+
+        // SaaS mode should ignore BYOK and use server config
+        let provider = create_provider_from_workspace(&ws, &fallback)
+            .expect("SaaS mode should use server-managed provider");
+        // Server config resolves to Anthropic with claude-sonnet-4-20250514
+        assert_eq!(provider.model(), "claude-sonnet-4-20250514");
     }
 
     #[test]

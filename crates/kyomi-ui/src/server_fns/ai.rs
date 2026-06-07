@@ -19,10 +19,13 @@
 //!   credentials. Never writes to the DB and never logs the key. The 10s
 //!   timeout prevents a slow upstream from tying up a server thread.
 //!
-//! **SaaS-only**: all three server fns return a clear error when running in
-//! self-hosted mode. BYOK in self-hosted already has a workspace-secrets
-//! encryption-unavailable guard; this top-level gate keeps the feature off
-//! entirely until we ship a self-hosted story.
+//! **SaaS vs self-hosted gating**:
+//!
+//! * [`get_workspace_ai_config`] — SaaS only (self-hosted uses env config).
+//! * [`update_workspace_ai_config`] — SaaS only; rejects non-Kyomi providers
+//!   (BYOK is disabled in SaaS mode).
+//! * [`test_workspace_ai_config`] — self-hosted only (no BYOK in SaaS).
+//! * [`list_workspace_ai_models`] — self-hosted only (no BYOK in SaaS).
 
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -106,7 +109,7 @@ fn require_workspace_admin(
     Ok(())
 }
 
-/// Reject self-hosted deployments. Workspace BYOK is a SaaS-only feature.
+/// Reject self-hosted deployments. Workspace AI config management is a SaaS UI surface.
 #[cfg(feature = "ssr")]
 fn require_saas(ctx: &super::ServerContext) -> Result<(), ServerFnError> {
     if ctx.config.self_hosted {
@@ -199,6 +202,15 @@ pub async fn update_workspace_ai_config(
         kyomi_auth::workspace_ai_config::WorkspaceAiProvider::from_str(&provider)
             .into_sfn()?;
 
+    // SaaS mode: only Kyomi-managed provider is allowed — BYOK is disabled.
+    if !ac.ctx.config.self_hosted
+        && parsed_provider != kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
+    {
+        return Err(ServerFnError::new(
+            "Bring-your-own-key is not available in SaaS mode. AI is included in your plan.",
+        ));
+    }
+
     let input = kyomi_auth::workspace_ai_config::UpdateWorkspaceAiConfigInput {
         provider: parsed_provider,
         api_key,
@@ -243,7 +255,12 @@ pub async fn test_workspace_ai_config(
 ) -> Result<TestAiConfigResult, ServerFnError> {
     let auth = extract_auth().await?;
     let ctx = extract_context()?;
-    require_saas(&ctx)?;
+    // BYOK key testing is only available in self-hosted mode.
+    if !ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "API key testing is not available in SaaS mode. AI is included in your plan.",
+        ));
+    }
     require_workspace_admin(&auth)?;
 
     // `model` is accepted for forward-compat (and to match the update shape)
@@ -424,7 +441,7 @@ fn extract_error_message(body: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// List models available from a BYOK provider, filtered to chat-completion
-/// capable entries. Admin/owner only. SaaS only.
+/// capable entries. Admin/owner only. Self-hosted only.
 ///
 /// API key resolution:
 /// * If `api_key` is `Some(non-empty)` after trimming, that candidate key is
@@ -444,7 +461,12 @@ pub async fn list_workspace_ai_models(
     base_url: Option<String>,
 ) -> Result<Vec<AiModelInfo>, ServerFnError> {
     let ac = AuthenticatedContext::extract().await?;
-    require_saas(&ac.ctx)?;
+    // BYOK model listing is only available in self-hosted mode.
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new(
+            "Custom provider model listing is not available in SaaS mode.",
+        ));
+    }
     require_workspace_admin(&ac.auth)?;
 
     if provider == "kyomi" {

@@ -213,7 +213,7 @@ pub async fn execute_agent_chat(
         if let Some(ref model) = config.model_name {
             ws_config.model = Some(model.clone());
         }
-        let is_byok = ws_config.is_byok();
+        let is_byok = ws_config.is_byok() && app_config.self_hosted;
         let client = create_provider_from_workspace(&ws_config, app_config)?;
         let provider_kind = match ws_config.provider {
             kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
@@ -230,7 +230,8 @@ pub async fn execute_agent_chat(
         let provider_kind = if matches!(
             ws_config.provider,
             kyomi_auth::workspace_ai_config::WorkspaceAiProvider::Kyomi
-        ) {
+        ) || !app_config.self_hosted
+        {
             resolve_provider_config(app_config)
                 .map(|c| c.provider)
                 .unwrap_or(provider_kind)
