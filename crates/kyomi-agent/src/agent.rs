@@ -391,16 +391,16 @@ impl CustomAgent {
                 }
 
                 // Validation passed — mark any previous retries for this session as succeeded.
-                if let Some(ref sid) = self.tool_context.session_id {
-                    if let Err(e) = kyomi_core::db_execute!(
+                if let Some(ref sid) = self.tool_context.session_id
+                    && let Err(e) = kyomi_core::db_execute!(
                         self.tool_context.db,
                         CHARTML_VALIDATION_LOG_UPDATE_SQL,
                         true,
                         sid,
                         &self.tool_context.workspace_id
-                    ) {
-                        warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
-                    }
+                    )
+                {
+                    warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
                 }
 
                 // Push final response to state so persist_after_chat saves it.
@@ -475,16 +475,16 @@ impl CustomAgent {
                 }
 
                 // Validation passed — mark any previous retries for this session as succeeded.
-                if let Some(ref sid) = self.tool_context.session_id {
-                    if let Err(e) = kyomi_core::db_execute!(
+                if let Some(ref sid) = self.tool_context.session_id
+                    && let Err(e) = kyomi_core::db_execute!(
                         self.tool_context.db,
                         CHARTML_VALIDATION_LOG_UPDATE_SQL,
                         true,
                         sid,
                         &self.tool_context.workspace_id
-                    ) {
-                        warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
-                    }
+                    )
+                {
+                    warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
                 }
 
                 // Return as final response.
@@ -506,16 +506,16 @@ impl CustomAgent {
         );
 
         // Mark any pending ChartML validation rows as not succeeded.
-        if let Some(ref sid) = self.tool_context.session_id {
-            if let Err(e) = kyomi_core::db_execute!(
+        if let Some(ref sid) = self.tool_context.session_id
+            && let Err(e) = kyomi_core::db_execute!(
                 self.tool_context.db,
                 CHARTML_VALIDATION_LOG_UPDATE_SQL,
                 false,
                 sid,
                 &self.tool_context.workspace_id
-            ) {
-                warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
-            }
+            )
+        {
+            warn!(error = %e, "Failed to update ChartML validation retry_succeeded");
         }
 
         let fallback =
