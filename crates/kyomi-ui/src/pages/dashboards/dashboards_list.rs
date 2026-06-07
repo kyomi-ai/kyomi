@@ -42,6 +42,7 @@ use crate::server_fns::collections::{
 };
 use crate::server_fns::dashboards::{DashboardListItem, create_dashboard, delete_dashboard};
 use leptos::prelude::*;
+use leptos_router::hooks::use_query_map;
 use phosphor_leptos::{Icon, IconWeight};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +55,40 @@ use phosphor_leptos::{Icon, IconWeight};
 pub fn DashboardsListPage() -> impl IntoView {
     // ── Collection sidebar integration points ───────────────────────────
     let (collections_open, set_collections_open) = signal(false);
-    let (active_collection_id, set_active_collection_id) = signal(Option::<String>::None);
+
+    // Read initial collection filter from URL query param (?collection=<id>)
+    // so that reloading or sharing the URL restores the active collection.
+    let query = use_query_map();
+    let initial_collection = query
+        .get_untracked()
+        .get("collection")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let (active_collection_id, set_active_collection_id) = signal(initial_collection);
+
+    // Keep the URL in sync with the active collection so the user can
+    // bookmark or share the filtered view. Uses replaceState (not
+    // pushState) to avoid polluting browser history on every chip click.
+    Effect::new(move |_| {
+        let collection_id = active_collection_id.get();
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                let path = if let Some(ref id) = collection_id {
+                    format!("/dashboards?collection={id}")
+                } else {
+                    "/dashboards".to_string()
+                };
+                let _ = window.history().and_then(|h| {
+                    h.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path))
+                });
+            }
+        }
+        // On the server side (SSR), collection_id is read but not used —
+        // replaceState is a browser-only API. The cfg guard above ensures
+        // the web_sys calls are stripped from the server binary.
+        let _ = collection_id;
+    });
 
     // ── Search + sort signals ───────────────────────────────────────────
     let (query_signal, set_query_signal) = signal(Option::<String>::None);
