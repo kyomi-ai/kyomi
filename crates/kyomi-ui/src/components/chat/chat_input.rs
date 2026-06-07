@@ -163,7 +163,7 @@ pub fn ChatInput(
     // Effective placeholder: different when credits are exhausted.
     // Matches React: Chat.jsx line 1668 — placeholder changes when creditsExhausted.
     let effective_placeholder = if credits_exhausted {
-        "AI features disabled - upgrade to continue".to_string()
+        "AI usage limit reached".to_string()
     } else {
         placeholder
     };
@@ -176,7 +176,7 @@ pub fn ChatInput(
                 view! {
                     <Alert variant=AlertVariant::Warning class="mb-4">
                         <AlertDescription class="text-center">
-                            "AI credits exhausted. Add an AI token bundle or connect your own API key."
+                            "You have exceeded AI usage limits"
                         </AlertDescription>
                     </Alert>
                 }.into_any()
@@ -244,7 +244,7 @@ pub fn ChatInput(
                     aria-label="Send message"
                     title=move || {
                         if credits_exhausted {
-                            "AI budget exhausted"
+                            "You have exceeded AI usage limits"
                         } else if !is_connected() {
                             "Waiting for connection..."
                         } else {

@@ -556,7 +556,7 @@ pub fn WatchesPage() -> impl IntoView {
                                 on:click=handle_create_watch
                                 disabled=MaybeProp::derive(move || Some(!is_ai_enabled))
                                 aria_label=if !is_ai_enabled {
-                                    if is_credits_exhausted { "AI budget exhausted for this billing period".to_string() }
+                                    if is_credits_exhausted { "You have exceeded AI usage limits".to_string() }
                                     else { "AI features are not available".to_string() }
                                 } else { "Create Watch".to_string() }
                             >
@@ -572,8 +572,7 @@ pub fn WatchesPage() -> impl IntoView {
                                     <Alert variant=AlertVariant::Warning>
                                         <Icon icon=phosphor_leptos::WARNING_CIRCLE attr:class="h-4 w-4" />
                                         <AlertDescription>
-                                            "Your AI budget is exhausted for this billing period. Existing watches will not run until your budget resets. "
-                                            <a href="/settings/billing" class="underline transition-colors hover:text-foreground">"Upgrade your plan"</a>
+                                            "You have exceeded AI usage limits"
                                         </AlertDescription>
                                     </Alert>
                                 </div>
@@ -592,7 +591,7 @@ pub fn WatchesPage() -> impl IntoView {
                             let watches = watches_signal.get();
                             if watches.is_empty() {
                                 let desc = if is_credits_exhausted {
-                                    "Your AI budget is exhausted. Wait for it to reset or upgrade your plan to create watches."
+                                    "You have exceeded AI usage limits"
                                 } else {
                                     "Create your first watch to start monitoring your data proactively."
                                 };

@@ -375,10 +375,8 @@ impl BillingService {
 
     /// Check if AI usage is allowed for a workspace.
     ///
-    /// Returns warning levels based on usage percentage:
-    /// - 0-79%:  OK (no warning)
-    /// - 80-89%: Warning
-    /// - 90-99%: Critical warning
+    /// Returns whether usage is allowed or blocked:
+    /// - <100%:  OK
     /// - 100%+:  Blocked
     pub async fn check_ai_usage_allowed(
         &self,
@@ -403,32 +401,7 @@ impl BillingService {
                 blocked: true,
                 warning_level: Some("blocked".to_string()),
                 percentage_used: percentage,
-                message: Some(format!(
-                    "AI budget exhausted ({percentage:.1}% used). \
-                     Add an AI token bundle or connect your own API key."
-                )),
-            })
-        } else if percentage >= 90.0 {
-            Ok(UsageAllowed {
-                allowed: true,
-                blocked: false,
-                warning_level: Some("critical".to_string()),
-                percentage_used: percentage,
-                message: Some(format!(
-                    "AI budget critically low ({percentage:.1}% used). \
-                     Consider purchasing an AI token bundle to avoid interruption."
-                )),
-            })
-        } else if percentage >= 80.0 {
-            Ok(UsageAllowed {
-                allowed: true,
-                blocked: false,
-                warning_level: Some("warning".to_string()),
-                percentage_used: percentage,
-                message: Some(format!(
-                    "AI budget at {percentage:.1}%. \
-                     You may want to purchase additional AI credits soon."
-                )),
+                message: Some("You have exceeded AI usage limits".to_string()),
             })
         } else {
             Ok(UsageAllowed {

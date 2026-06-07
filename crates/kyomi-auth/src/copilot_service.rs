@@ -86,9 +86,7 @@ pub async fn prepare_copilot_message(
 
     if !capabilities.ai_chat_enabled {
         return Err(kyomi_core::Error::Internal(
-            "AI features are not available. Your budget may be exhausted or your plan \
-             doesn't include this feature."
-                .to_string(),
+            "You have exceeded AI usage limits".to_string(),
         ));
     }
 
