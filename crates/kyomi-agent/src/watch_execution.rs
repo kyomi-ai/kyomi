@@ -1221,10 +1221,36 @@ async fn execute_watch_inner(
     for retry_num in 0..=MAX_VALIDATION_RETRIES {
         match validate_watch_response(&raw_response) {
             Ok(data) => {
+                // Mark any prior validation retries as succeeded.
+                let _ = kyomi_core::db_execute!(
+                    db,
+                    crate::agent::CHARTML_VALIDATION_LOG_UPDATE_SQL,
+                    true,
+                    &*session_id,
+                    &watch.workspace_id
+                );
                 validated_data = Some(data);
                 break;
             }
             Err(error_msg) => {
+                // Log validation failure for prompt-tuning analysis.
+                let error_type = crate::agent::classify_chartml_error(&error_msg);
+                if let Err(e) = kyomi_core::db_execute!(
+                    db,
+                    crate::agent::CHARTML_VALIDATION_LOG_INSERT_SQL,
+                    &*session_id,
+                    &watch.workspace_id,
+                    &watch.created_by,
+                    &*raw_response,
+                    &error_msg,
+                    error_type,
+                    retry_num as i32,
+                    "watch",
+                    agent_result.model.as_deref()
+                ) {
+                    warn!(error = %e, "Failed to log ChartML validation error");
+                }
+
                 if retry_num < MAX_VALIDATION_RETRIES {
                     warn!(
                         watch_id = %watch_id,
@@ -1303,6 +1329,14 @@ async fn execute_watch_inner(
                                 error = %e,
                                 "Retry agent call failed"
                             );
+                            // Mark validation retries as failed.
+                            let _ = kyomi_core::db_execute!(
+                                db,
+                                crate::agent::CHARTML_VALIDATION_LOG_UPDATE_SQL,
+                                false,
+                                &*session_id,
+                                &watch.workspace_id
+                            );
                             // Use fallback
                             validated_data = Some(WatchResponseData {
                                 should_alert: false,
@@ -1321,6 +1355,14 @@ async fn execute_watch_inner(
                         attempts = MAX_VALIDATION_RETRIES + 1,
                         error = %error_msg,
                         "Watch response validation failed after all attempts"
+                    );
+                    // Mark validation retries as failed.
+                    let _ = kyomi_core::db_execute!(
+                        db,
+                        crate::agent::CHARTML_VALIDATION_LOG_UPDATE_SQL,
+                        false,
+                        &*session_id,
+                        &watch.workspace_id
                     );
                     validated_data = Some(WatchResponseData {
                         should_alert: false,

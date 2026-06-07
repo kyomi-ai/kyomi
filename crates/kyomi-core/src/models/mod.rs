@@ -9,6 +9,7 @@
 pub mod agent_learning;
 pub mod api_token;
 pub mod api_usage_log;
+pub mod chartml_validation_log;
 pub mod auth_method;
 pub mod chart;
 pub mod chat_message;
@@ -37,6 +38,7 @@ pub mod workspace_invitation;
 pub use agent_learning::AgentLearning;
 pub use api_token::ApiToken;
 pub use api_usage_log::ApiUsageLog;
+pub use chartml_validation_log::ChartMLValidationLog;
 pub use auth_method::UserAuthMethod;
 pub use chart::Chart;
 pub use collection::{Collection, CollectionDashboard};
