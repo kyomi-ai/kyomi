@@ -171,25 +171,29 @@ pub fn kyomi_theme(is_dark: bool) -> Theme {
         width: 1.5,
     });
 
-    // ----- table chrome -----
+    // ----- table chrome: editorial figure -----
     //
-    // Derived from the same editorial palette used for the rest of the
-    // theme so rendered `<table>`s in chart exports match the chart chrome
-    // they sit alongside. The row background uses the page-matched
-    // `page_bg` for a transparent-feeling surface, the alternating stripe
-    // and the cell borders both use `grid` (warm neutral in both modes —
-    // `#EDE9E0` on light, `#2E2925` on dark), and cell text uses the primary
-    // so headers and body read at the same weight as axis labels. Cell
-    // padding and font size are CSS string values — kept modest so tables
-    // don't dominate a chart figure.
-    t.table_header_bg = grid.into();
-    t.table_header_text = text_primary.into();
-    t.table_row_bg = page_bg.into();
-    t.table_row_bg_alt = grid.into();
+    // Tables are typeset like figures in a research paper — clean horizontal
+    // rules, no zebra stripes, uppercase tracked headers in muted color,
+    // transparent backgrounds. The chart-card provides the outer container
+    // (border, radius, shadow); the table itself is borderless and flush.
+    //
+    // Header baseline uses the axis-line color (strong editorial rule) while
+    // row dividers use the grid color (warm, restrained). This mirrors the
+    // axis/gridline hierarchy in the chart chrome.
+    t.table_header_bg = "transparent".into();
+    t.table_header_text = text_secondary.into();
+    t.table_header_font_weight = "500".into();
+    t.table_header_letter_spacing = "0.08em".into();
+    t.table_header_text_transform = "uppercase".into();
+    t.table_header_border = axis.into();
+    t.table_row_bg = "transparent".into();
+    t.table_row_bg_alt = "transparent".into();
     t.table_border = grid.into();
     t.table_text = text_primary.into();
-    t.table_cell_padding = "8px 12px".into();
-    t.table_font_size = "13px".into();
+    t.table_cell_padding = "10px 16px".into();
+    t.table_font_size = "12px".into();
+    t.table_border_radius = "0".into();
 
     t
 }
