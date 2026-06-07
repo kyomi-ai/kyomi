@@ -301,6 +301,32 @@ html {
   padding: 0;
 }
 
+/* Tables don't need the chartml-rendered title (the Instrument Serif heading
+ * inside the chart) — the markdown heading above the chart-card already
+ * names the content. The hover ChartHeaderBar with refresh/actions stays. */
+.chart-card:has(.chartml-table) .chart-title {
+  display: none;
+}
+
+/* Chartml table: editorial figure overrides.
+ * The chartml table's own border is hidden (chart-card provides the
+ * container chrome). border-color: transparent keeps the 1px layout
+ * space but makes it invisible inside chart-card's overflow:hidden.
+ *
+ * Row hover and last-row border need !important because chartml sets
+ * inline styles that win over class-based rules. */
+.chartml-table {
+  border-color: transparent !important;
+}
+
+.chartml-table-row:hover {
+  background: var(--color-accent) !important;
+}
+
+.chartml-table-body > .chartml-table-row:last-child > .chartml-table-cell {
+  border-bottom: none !important;
+}
+
 /* Chart title — prevent long titles from overflowing their container at
  * narrow card widths. Rendered by chartml-leptos inside the chart area. */
 .chart-card .chart-title {
@@ -455,12 +481,19 @@ html {
   --chartml-bg: #FAFAF8;
   --chartml-annotation: #9C9790;
 
-  /* Table chrome — matches kyomi_theme() table_* fields */
-  --chartml-table-header-bg: #EDE9E0;
-  --chartml-table-header-text: #1C1917;
-  --chartml-table-row-bg: #FAFAF8;
-  --chartml-table-row-bg-alt: #EDE9E0;
+  /* Table chrome — editorial figure style, matches kyomi_theme() table_* fields.
+   * Transparent backgrounds, no zebra stripes, uppercase tracked headers,
+   * axis-line baseline under header, warm gridline dividers between rows. */
+  --chartml-table-header-bg: transparent;
+  --chartml-table-header-text: #6B6660;
+  --chartml-table-header-font-weight: 500;
+  --chartml-table-header-letter-spacing: 0.08em;
+  --chartml-table-header-text-transform: uppercase;
+  --chartml-table-header-border: #1C1917;
+  --chartml-table-row-bg: transparent;
+  --chartml-table-row-bg-alt: transparent;
   --chartml-table-border: #EDE9E0;
+  --chartml-table-border-radius: 0;
   --chartml-table-text: #1C1917;
 
   /* Typography — title */
@@ -892,11 +925,16 @@ html {
   --chartml-axis-line: #A8A29E;
   --chartml-bg: #12100F;
   --chartml-annotation: #78716C;
-  --chartml-table-header-bg: #2E2925;
-  --chartml-table-header-text: #F5F3EF;
-  --chartml-table-row-bg: #12100F;
-  --chartml-table-row-bg-alt: #2E2925;
+  --chartml-table-header-bg: transparent;
+  --chartml-table-header-text: #A8A29E;
+  --chartml-table-header-font-weight: 500;
+  --chartml-table-header-letter-spacing: 0.08em;
+  --chartml-table-header-text-transform: uppercase;
+  --chartml-table-header-border: #A8A29E;
+  --chartml-table-row-bg: transparent;
+  --chartml-table-row-bg-alt: transparent;
   --chartml-table-border: #2E2925;
+  --chartml-table-border-radius: 0;
   --chartml-table-text: #F5F3EF;
 }
 

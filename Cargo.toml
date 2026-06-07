@@ -148,7 +148,7 @@ chartml-chart-cartesian = "5"
 chartml-chart-pie = "5"
 chartml-chart-scatter = "5"
 chartml-chart-metric = "5.0.3"
-chartml-chart-table = "5.0.4"
+chartml-chart-table = "5.0.5"
 chartml-datafusion = "5"
 chartml-leptos = "5.1"
 
@@ -252,7 +252,9 @@ lto = false
 codegen-units = 16
 opt-level = "s"
 
-# Uncomment to use a local checkout of kyomi-connect for development:
+# Uncomment to use local checkouts for development:
 # [patch.crates-io]
+# chartml-core = { path = "../chartml/crates/chartml-core" }
+# chartml-chart-table = { path = "../chartml/crates/chartml-chart-table" }
 # kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }
 # kyomi-datasource = { path = "../kyomi-connect/crates/kyomi-datasource" }
