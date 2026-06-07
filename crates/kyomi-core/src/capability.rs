@@ -115,11 +115,12 @@ fn parse_tier(s: &str) -> Option<SubscriptionTier> {
 
 /// Get the monthly AI credit budget in USD.
 ///
-/// Cloud plan — all tiers use the same budget from `AI_BUDGET_CLOUD` env var.
-pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64 {
-    let _ = (tier, user_limit);
+/// Cloud plan — budget scales with workspace size: `per_user_rate × user_count`.
+/// Defaults to a single-user budget when `user_count` is `None` or zero.
+pub fn get_credits_limit(tier: SubscriptionTier, user_count: Option<i32>) -> f64 {
+    let _ = tier;
     let cfg = &crate::ai_budget::CONFIG;
-    cfg.cloud
+    cfg.per_user * user_count.unwrap_or(1).max(1) as f64
 }
 
 /// Compute credit usage info from `workspace.ai_credits_used_usd`.
@@ -129,8 +130,10 @@ pub fn get_credits_limit(tier: SubscriptionTier, user_limit: Option<i32>) -> f64
 /// `BillingService::calculate_credits_info()` and pass the result to
 /// `compute_capabilities_with_credits()`.
 pub fn get_credits_info(workspace: &Workspace, tier: SubscriptionTier) -> CapabilityCredits {
-    // Total budget = tier budget (from AI_BUDGET_CLOUD) + purchased bundle balance
-    let limit = get_credits_limit(tier, workspace.user_limit) + workspace.ai_bundle_balance_usd;
+    // Fallback: no DB access to query active user count, so default to single-user
+    // budget as a conservative lower bound. For the accurate multi-user budget,
+    // callers should use BillingService::calculate_credits_info().
+    let limit = get_credits_limit(tier, None) + workspace.ai_bundle_balance_usd;
     let used = workspace.ai_credits_used_usd;
     let remaining = (limit - used).max(0.0);
     let exhausted = limit == 0.0 || used >= limit;
@@ -425,16 +428,26 @@ mod tests {
     #[test]
     fn test_credits_limit_cloud_plan() {
         use SubscriptionTier::*;
-        // All tiers return the same budget — verify they're equal to each other.
-        let free_limit = get_credits_limit(Free, None);
-        assert!((get_credits_limit(Basic, None) - free_limit).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Starter, None) - free_limit).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Pro, None) - free_limit).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Team, Some(5)) - free_limit).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Team, None) - free_limit).abs() < f64::EPSILON);
-        assert!((get_credits_limit(Enterprise, None) - free_limit).abs() < f64::EPSILON);
-        // User limit param is ignored — Team with extra users gets same budget.
-        assert!((get_credits_limit(Team, Some(20)) - free_limit).abs() < f64::EPSILON);
+        // None and Some(1) both mean single-user budget — they must be equal.
+        let single_user = get_credits_limit(Free, None);
+        assert!((get_credits_limit(Free, Some(1)) - single_user).abs() < f64::EPSILON);
+
+        // All tiers with the same user_count return the same budget.
+        assert!((get_credits_limit(Basic, None) - single_user).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Starter, None) - single_user).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Pro, None) - single_user).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Team, None) - single_user).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Enterprise, None) - single_user).abs() < f64::EPSILON);
+
+        // Budget scales with user count: 5 users = 5× single-user budget.
+        let five_users = get_credits_limit(Free, Some(5));
+        assert!((five_users - single_user * 5.0).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Team, Some(5)) - five_users).abs() < f64::EPSILON);
+
+        // Budget scales with user count: 20 users = 20× single-user budget.
+        let twenty_users = get_credits_limit(Free, Some(20));
+        assert!((twenty_users - single_user * 20.0).abs() < f64::EPSILON);
+        assert!((get_credits_limit(Team, Some(20)) - twenty_users).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -457,7 +470,12 @@ mod tests {
 
     #[test]
     fn test_credits_info_exhausted() {
-        let ws = test_workspace(SubscriptionTier::Free, 1.0);
+        // Single-user workspace budget = per_user_rate × 1. Spend more than
+        // the budget to verify exhaustion. Use a value well above $5 so this
+        // test stays valid across reasonable per_user_rate changes.
+        let per_user_rate = crate::ai_budget::CONFIG.per_user;
+        let over_budget = per_user_rate * 2.0; // 2× single-user rate — definitely exhausted
+        let ws = test_workspace(SubscriptionTier::Free, over_budget);
         let info = get_credits_info(&ws, SubscriptionTier::Free);
         assert!(info.exhausted);
         assert!((info.remaining_usd - 0.0).abs() < f64::EPSILON);

@@ -7,14 +7,15 @@
 //! via `compute_capabilities_self_hosted()`.
 //!
 //! Environment variables:
-//! - `AI_BUDGET_CLOUD` — monthly USD budget for the Cloud plan
+//! - `AI_BUDGET_PER_USER` — monthly USD budget per active workspace user (default: $5.00)
 
 use std::sync::LazyLock;
 
 /// Parsed budget configuration, loaded once from environment.
 pub struct AiBudgetConfig {
-    /// Single Cloud plan budget in USD. If 0, only BYOK or purchased bundles provide credits.
-    pub cloud: f64,
+    /// Per-user monthly budget in USD. Total workspace budget = per_user × active_user_count.
+    /// If 0, only BYOK or purchased bundles provide credits.
+    pub per_user: f64,
 }
 
 fn env_f64(key: &str, default: f64) -> f64 {
@@ -26,10 +27,10 @@ fn env_f64(key: &str, default: f64) -> f64 {
 
 /// Global budget configuration. Loaded once from env vars.
 ///
-/// Defaults to `0.0` — SaaS deployments MUST set `AI_BUDGET_CLOUD`.
+/// Defaults to `5.0` ($5/user/month). Override with `AI_BUDGET_PER_USER`.
 /// Self-hosted mode never reads these values.
 pub static CONFIG: LazyLock<AiBudgetConfig> = LazyLock::new(|| AiBudgetConfig {
-    cloud: env_f64("AI_BUDGET_CLOUD", 0.0),
+    per_user: env_f64("AI_BUDGET_PER_USER", 5.0),
 });
 
 #[cfg(test)]
