@@ -38,8 +38,6 @@ pub struct SubscriptionInfo {
     /// Trial expiration timestamp (ISO 8601). Present when status is "trialing".
     pub trial_ends_at: Option<String>,
     pub user_limit: Option<i32>,
-    /// AI token bundle balance in cents (e.g. 1500 = $15.00). Non-expiring.
-    pub ai_token_balance_cents: Option<i64>,
     /// Number of analytics events consumed this month.
     pub analytics_events_used: Option<i64>,
     /// Remaining purchased analytics event bundle balance (non-expiring).
@@ -267,17 +265,6 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         }
     };
 
-    // AI bundle balance remaining comes from the billing service, which
-    // computes it from authoritative live usage records. Using the stale
-    // `ai_credits_used_usd` cache column here produced a stuck "$X.XX
-    // remaining" display that never decreased as users actually consumed
-    // credits — see the Billing Service comment for the full story.
-    let ai_remaining_usd = kyomi_auth::billing_service::BillingService::new()
-        .get_bundle_remaining_usd(ac.db(), &ac.ws_id)
-        .await
-        .into_sfn()?;
-    let ai_token_balance_cents = (ai_remaining_usd * 100.0) as i64;
-
     // Analytics events this month from Redis (same pattern as usage.rs).
     // Falls back to 0 if Redis is unavailable.
     let analytics_events_used: i64 = if let Some(ref redis_url) = ac.ctx.config.redis_url {
@@ -321,7 +308,6 @@ pub async fn get_subscription_info() -> Result<SubscriptionInfo, ServerFnError> 
         ai_reset_date,
         trial_ends_at: trial_ends_at_rfc,
         user_limit: workspace.user_limit,
-        ai_token_balance_cents: Some(ai_token_balance_cents),
         analytics_events_used: Some(analytics_events_used),
         analytics_bundle_balance: Some(analytics_bundle_balance),
         active_members,
@@ -617,6 +603,12 @@ pub async fn purchase_ai_bundle(quantity: u32) -> Result<EmbeddedCheckoutSession
     }
 
     let ac = AuthenticatedContext::extract().await?;
+
+    // AI bundle purchases are not available in managed (SaaS) mode — AI is included.
+    if !ac.ctx.config.self_hosted {
+        return Err(ServerFnError::new("AI bundle purchases are not available. AI is included in your plan."));
+    }
+
     require_workspace_owner(&ac.auth)?;
 
     let stripe_service = require_stripe(&ac.ctx.config)?;

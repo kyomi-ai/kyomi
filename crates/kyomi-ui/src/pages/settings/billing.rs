@@ -8,7 +8,6 @@
 //! Features:
 //! - Current plan card (Cloud — $5/user/month, status badge, renewal info)
 //! - User seats card (adjust seat count, min 1)
-//! - AI Credits card (included AI budget, top-up purchase)
 //! - Analytics card (event usage, bundle balance, purchase)
 //! - Invoice history table
 //! - Stripe portal link ("Manage Billing")
@@ -327,30 +326,6 @@ pub fn BillingPage() -> impl IntoView {
         }
     });
 
-    let handle_purchase_ai = Action::new({
-        move |quantity: &u32| {
-            let q = *quantity;
-            async move {
-                set_checkout_loading.set(true);
-                set_error.set(None);
-                match purchase_ai_bundle(q).await {
-                    Ok(session) => {
-                        open_embedded_checkout(
-                            &session.client_secret,
-                            &session.session_id,
-                            checkout_ctx,
-                        )
-                        .await;
-                    }
-                    Err(e) => {
-                        set_error.set(Some(format!("Failed to start AI bundle purchase: {e}")));
-                        set_checkout_loading.set(false);
-                    }
-                }
-            }
-        }
-    });
-
     let handle_purchase_analytics = Action::new({
         move |quantity: &u32| {
             let q = *quantity;
@@ -493,7 +468,6 @@ pub fn BillingPage() -> impl IntoView {
                                                 checkout_loading=checkout_loading
                                                 handle_subscribe=handle_subscribe
                                                 handle_manage_billing=handle_manage_billing
-                                                handle_purchase_ai=handle_purchase_ai
                                                 handle_purchase_analytics=handle_purchase_analytics
                                                 dialog_open=dialog_open
                                                 set_dialog_title=set_dialog_title
@@ -552,7 +526,6 @@ fn BillingContent(
     checkout_loading: ReadSignal<bool>,
     handle_subscribe: Action<u64, ()>,
     handle_manage_billing: Action<(), ()>,
-    handle_purchase_ai: Action<u32, ()>,
     handle_purchase_analytics: Action<u32, ()>,
     dialog_open: RwSignal<bool>,
     set_dialog_title: WriteSignal<String>,
@@ -569,8 +542,7 @@ fn BillingContent(
     let active_members = info.active_members;
     let user_limit = info.user_limit;
 
-    // Fields for AI and analytics sections
-    let ai_token_balance = info.ai_token_balance_cents.unwrap_or(0);
+    // Fields for analytics section
     let analytics_events_used = info.analytics_events_used.unwrap_or(0).max(0) as u64;
     let analytics_bundle_balance = info.analytics_bundle_balance.unwrap_or(0);
 
@@ -827,16 +799,6 @@ fn BillingContent(
                 }
             })}
 
-            // AI Credits Card (visible for subscribed users)
-            {is_subscribed.then(|| {
-                view! {
-                    <AiCreditsCard
-                        token_balance_cents=ai_token_balance
-                        handle_purchase_ai=handle_purchase_ai
-                    />
-                }
-            })}
-
             // Analytics Card (visible for subscribed users)
             {is_subscribed.then(|| {
                 view! {
@@ -1036,96 +998,13 @@ fn SeatCapCard(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AI Credits Card
+// Analytics Card
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Price per AI credit bundle (matches AI_BUNDLE_CREDIT_USD default).
-const AI_BUNDLE_PRICE: f64 = 10.0;
-
-/// Predefined quantity options for bundle purchases.
 /// Quantity options for bundle purchase StaticSelect.
 const BUNDLE_QUANTITY_OPTIONS: [(&str, &str); 5] = [
     ("1", "1"), ("2", "2"), ("3", "3"), ("5", "5"), ("10", "10"),
 ];
-
-#[component]
-fn AiCreditsCard(
-    token_balance_cents: i64,
-    handle_purchase_ai: Action<u32, ()>,
-) -> impl IntoView {
-    let balance_dollars = token_balance_cents as f64 / 100.0;
-    let (ai_quantity, set_ai_quantity) = signal(1u32);
-
-    view! {
-        <Card>
-            <CardHeader>
-                <CardTitle class="flex items-center gap-2">
-                    <Icon icon=phosphor_leptos::SPARKLE size="20px"/>
-                    "AI Credits"
-                </CardTitle>
-                <CardDescription>
-                    "AI is included in your plan. Purchase additional credits if you need more capacity."
-                </CardDescription>
-            </CardHeader>
-            <CardContent>
-                <div class="space-y-4">
-                    // AI credit balance
-                    <div class="bg-muted/50 border border-border rounded-lg p-4">
-                        <div class="flex justify-between items-center text-sm">
-                            <span class="text-muted-foreground">"AI Credit Balance"</span>
-                            <span class="font-medium text-foreground">
-                                {format!("${:.2} remaining", balance_dollars)}
-                            </span>
-                        </div>
-                        <p class="text-xs text-muted-foreground mt-2">
-                            "Purchased credits never expire."
-                        </p>
-                    </div>
-
-                    // Quantity selector + price summary
-                    <div class="flex items-center gap-3">
-                        <label class="text-sm text-muted-foreground">"Quantity"</label>
-                        <div class="w-20">
-                            <crate::components::StaticSelect
-                                value="1".to_string()
-                                options=BUNDLE_QUANTITY_OPTIONS.to_vec()
-                                on_change=move |val: String| {
-                                    let q: u32 = val.parse().unwrap_or(1);
-                                    set_ai_quantity.set(q);
-                                }
-                            />
-                        </div>
-                        <span class="text-sm text-foreground">
-                            {move || {
-                                let q = ai_quantity.get();
-                                let total = AI_BUNDLE_PRICE * q as f64;
-                                format!("{q} \u{00d7} ${:.0} = ${:.0} in additional AI credits", AI_BUNDLE_PRICE, total)
-                            }}
-                        </span>
-                    </div>
-
-                    // Purchase button
-                    <Button
-                        variant=ButtonVariant::Outline
-                        class="w-full"
-                        disabled=Signal::derive(move || handle_purchase_ai.pending().get())
-                        on:click=move |_| { handle_purchase_ai.dispatch(ai_quantity.get_untracked()); }
-                    >
-                        {move || if handle_purchase_ai.pending().get() { "Loading...".to_string() } else {
-                            let q = ai_quantity.get();
-                            let total = AI_BUNDLE_PRICE * q as f64;
-                            format!("Buy AI Credits \u{2014} ${:.0}", total)
-                        }}
-                    </Button>
-                </div>
-            </CardContent>
-        </Card>
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Analytics Card
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Format a large number with comma separators (e.g. 100000 -> "100,000").
 pub(crate) fn format_number(n: u64) -> String {
