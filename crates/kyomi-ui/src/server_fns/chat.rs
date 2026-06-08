@@ -1074,6 +1074,36 @@ pub async fn update_message_content(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Thinking event details (full reasoning text on demand)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch the full untruncated reasoning text for a thinking event.
+///
+/// Returns `None` if no full text was stored (the event was short enough to
+/// fit within the 200-char display limit).
+#[server(prefix = "/leptos-api")]
+pub async fn get_thinking_event_detail(
+    message_id: String,
+    event_id: String,
+) -> Result<Option<String>, ServerFnError> {
+    let ac = AuthenticatedContext::extract().await?;
+    let encryption_key = ac.encryption_key()?;
+
+    let text = kyomi_auth::chat_service::get_thinking_event_detail(
+        ac.db(),
+        &encryption_key,
+        &message_id,
+        &event_id,
+        &ac.auth.user_id,
+        &ac.ws_id,
+    )
+    .await
+    .into_sfn()?;
+
+    Ok(text)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helpers — delegate to shared extractors in parent module
 // ─────────────────────────────────────────────────────────────────────────────
 

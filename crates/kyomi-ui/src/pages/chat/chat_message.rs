@@ -159,11 +159,12 @@ pub fn ChatMessage(
 
         // Determine whether to show the AgentThinking panel.
         // Matches React logic: show if we have thinking data OR this is the active streaming message.
+        let message_id_for_show_thinking = message_id_for_thinking.clone();
         let should_show_thinking = move || {
             let ts = thinking_state.get();
             let has_thinking_data = !ts.events.is_empty();
             let is_active_message = is_streaming.get()
-                && active_message_id.get().as_deref() == Some(&message_id_for_thinking);
+                && active_message_id.get().as_deref() == Some(&message_id_for_show_thinking);
             has_thinking_data || is_active_message
         };
 
@@ -225,6 +226,7 @@ pub fn ChatMessage(
                             thinking_events=thinking_events_signal
                             is_active=thinking_is_active_signal
                             token_usage=thinking_token_usage
+                            message_id=Signal::stored(message_id_for_thinking.clone())
                         />
                     </Show>
 

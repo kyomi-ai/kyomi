@@ -8,10 +8,12 @@
 //! Ported from `apps/frontend/src/components/AgentThinking.jsx` (240 lines React).
 //! CSS classes are copied verbatim from the React source.
 
+use std::collections::HashMap;
 use leptos::prelude::*;
 use phosphor_leptos::Icon;
 use super::thinking::{ThinkingEvent, TokenUsage};
 use super::tool_schema_renderer;
+use crate::server_fns::chat::get_thinking_event_detail;
 
 /// Rendering variant for the agent thinking panel.
 ///
@@ -174,6 +176,9 @@ pub fn AgentThinking(
     /// Token usage information (prompt + completion counts).
     #[prop(into, default = Signal::stored(None))]
     token_usage: Signal<Option<TokenUsage>>,
+    /// Message ID — needed for fetching full reasoning text on demand.
+    #[prop(into, default = Signal::stored(String::new()))]
+    message_id: Signal<String>,
     /// Optional start time in milliseconds (from `js_sys::Date::now()`).
     /// When provided, the live timer measures elapsed time from this value
     /// instead of from the moment the component mounts. This prevents the
@@ -283,6 +288,10 @@ pub fn AgentThinking(
         if is_active.get() { elapsed_time.get() } else { total_duration.get() }
     });
 
+    // Tracks expanded full-text state per event_id: None = collapsed,
+    // Some(text) = fetched and showing full text.
+    let (expanded_texts, set_expanded_texts) = signal(HashMap::<String, String>::new());
+
     // -- Content renderer (shared across variants) --
     let render_content = move || {
         view! {
@@ -349,6 +358,8 @@ pub fn AgentThinking(
                         let icon = get_event_icon(&event.event_type);
                         let title = event.title.clone();
                         let description = event.description.clone();
+                        let has_full_text = event.has_full_text;
+                        let event_id = event.event_id.clone();
                         let duration_ms = event.duration_ms;
                         let timestamp = format_timestamp(&event.timestamp);
 
@@ -374,10 +385,58 @@ pub fn AgentThinking(
                                         </span>
                                     </div>
                                     {description.map(|desc| {
+                                        let eid = event_id.clone();
+                                        let is_expanded_text = {
+                                            let eid = eid.clone();
+                                            Signal::derive(move || expanded_texts.get().contains_key(&eid))
+                                        };
+                                        let full_text_content = {
+                                            let eid = eid.clone();
+                                            Signal::derive(move || expanded_texts.get().get(&eid).cloned())
+                                        };
                                         view! {
-                                            <p class="text-xs text-muted-foreground mt-0.5">
-                                                {desc}
+                                            <p class="text-xs text-muted-foreground mt-0.5 whitespace-pre-wrap">
+                                                {move || {
+                                                    if is_expanded_text.get() {
+                                                        full_text_content.get().unwrap_or_else(|| desc.clone())
+                                                    } else {
+                                                        desc.clone()
+                                                    }
+                                                }}
                                             </p>
+                                            {if has_full_text {
+                                                let eid_toggle = eid.clone();
+                                                let eid_fetch = eid.clone();
+                                                Some(view! {
+                                                    <button
+                                                        class="text-xs text-primary hover:underline mt-0.5 cursor-pointer"
+                                                        on:click=move |e| {
+                                                            e.stop_propagation();
+                                                            let eid = eid_toggle.clone();
+                                                            if expanded_texts.get_untracked().contains_key(&eid) {
+                                                                set_expanded_texts.update(|m| { m.remove(&eid); });
+                                                            } else {
+                                                                let eid_inner = eid_fetch.clone();
+                                                                let mid = message_id.get_untracked();
+                                                                leptos::task::spawn_local(async move {
+                                                                    match get_thinking_event_detail(mid, eid_inner.clone()).await {
+                                                                        Ok(Some(text)) => {
+                                                                            set_expanded_texts.try_update(|m| { m.insert(eid_inner, text); });
+                                                                        }
+                                                                        _ => {
+                                                                            set_expanded_texts.try_update(|m| { m.insert(eid_inner, "Full text not available".into()); });
+                                                                        }
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    >
+                                                        {move || if is_expanded_text.get() { "less" } else { "more" }}
+                                                    </button>
+                                                })
+                                            } else {
+                                                None
+                                            }}
                                         }
                                     })}
                                     // Tool schema/result rendering

@@ -122,6 +122,10 @@ pub struct AgentThinkingEvent {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// True when the description was truncated and the full text is available
+    /// on demand from the `thinking_event_details` table.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_full_text: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +161,10 @@ pub struct AgentThinkingTracker {
     /// Handles both standalone (direct local) and multi-replica (Redis pub/sub)
     /// delivery automatically.
     ws_manager: WebSocketManager,
+    /// Full (untruncated) reasoning text for events that exceeded the 200-char
+    /// display limit. Keyed by event_id; persisted to `thinking_event_details`
+    /// after the agent loop completes.
+    full_texts: HashMap<String, String>,
 }
 
 impl AgentThinkingTracker {
@@ -190,6 +198,7 @@ impl AgentThinkingTracker {
             last_input_tokens: 0,
             context_window,
             ws_manager,
+            full_texts: HashMap::new(),
         }
     }
 
@@ -212,19 +221,21 @@ impl AgentThinkingTracker {
     /// The WebSocket manager handles both standalone (direct local delivery)
     /// and multi-replica (Redis pub/sub) modes automatically.
     async fn send_event(&self, event: &AgentThinkingEvent, is_update: bool) {
-        let thinking_data = serde_json::json!({
-            "event": {
-                "event_id": event.event_id,
-                "event_type": event.event_type,
-                "timestamp": event.timestamp,
-                "title": event.title,
-                "description": event.description,
-                "data": event.data,
-                "duration_ms": event.duration_ms,
-                "is_update": is_update,
-                "context_type": self.context_type,
-            }
+        let mut event_obj = serde_json::json!({
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "timestamp": event.timestamp,
+            "title": event.title,
+            "description": event.description,
+            "data": event.data,
+            "duration_ms": event.duration_ms,
+            "is_update": is_update,
+            "context_type": self.context_type,
         });
+        if event.has_full_text {
+            event_obj["has_full_text"] = serde_json::Value::Bool(true);
+        }
+        let thinking_data = serde_json::json!({ "event": event_obj });
 
         for uid in &self.workspace_user_ids {
             kyomi_auth::websocket::helpers::send_agent_thinking(
@@ -269,6 +280,7 @@ impl AgentThinkingTracker {
             description: Some(description.to_string()),
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
         let event = self.add_event(event);
         self.send_event(&event, false).await;
@@ -278,21 +290,30 @@ impl AgentThinkingTracker {
     ///
     /// The thought text is cleaned (memory blocks removed, prefixes stripped,
     /// generic patterns skipped) before recording. If cleaning produces
-    /// nothing useful, no event is emitted.
+    /// nothing useful, no event is emitted. When the full text exceeds the
+    /// 200-char display limit, it is stashed for later persistence to the
+    /// `thinking_event_details` table.
     pub async fn agent_thought(&mut self, thought: &str) {
-        let Some(text) = clean_thought(thought) else {
+        let Some(cleaned) = clean_thought(thought) else {
             return;
         };
+        let has_full_text = cleaned.full_text.is_some();
         let event = AgentThinkingEvent {
             event_type: ThinkingEventType::AgentThought,
             timestamp: chrono::Utc::now().to_rfc3339(),
             title: "Planning".to_string(),
             event_id: None,
-            description: Some(text),
+            description: Some(cleaned.display),
             data: None,
             duration_ms: None,
+            has_full_text,
         };
         let event = self.add_event(event);
+        if let Some(full_text) = cleaned.full_text
+            && let Some(ref eid) = event.event_id
+        {
+            self.full_texts.insert(eid.clone(), full_text);
+        }
         self.send_event(&event, false).await;
     }
 
@@ -327,6 +348,7 @@ impl AgentThinkingTracker {
                 "status": "processing",
             })),
             duration_ms: None,
+            has_full_text: false,
         };
 
         let event = self.add_event(event);
@@ -409,6 +431,7 @@ impl AgentThinkingTracker {
                 "status": "completed",
             })),
             duration_ms,
+            has_full_text: false,
         };
 
         self.events[event_index] = updated_event.clone();
@@ -429,6 +452,7 @@ impl AgentThinkingTracker {
             description: None,
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
         let event = self.add_event(event);
         self.send_event(&event, false).await;
@@ -444,6 +468,7 @@ impl AgentThinkingTracker {
             description: None,
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
         let event = self.add_event(event);
         self.send_event(&event, false).await;
@@ -460,6 +485,7 @@ impl AgentThinkingTracker {
             description: Some(format!("Analysis completed in {total_duration}ms")),
             data: Some(serde_json::json!({"result": result})),
             duration_ms: Some(total_duration),
+            has_full_text: false,
         };
         let event = self.add_event(event);
         self.send_event(&event, false).await;
@@ -512,7 +538,7 @@ impl AgentThinkingTracker {
         self.events
             .iter()
             .map(|event| {
-                serde_json::json!({
+                let mut obj = serde_json::json!({
                     "event_id": event.event_id,
                     "event_type": event.event_type,
                     "timestamp": event.timestamp,
@@ -520,9 +546,21 @@ impl AgentThinkingTracker {
                     "description": event.description,
                     "data": event.data,
                     "duration_ms": event.duration_ms,
-                })
+                });
+                if event.has_full_text {
+                    obj["has_full_text"] = serde_json::Value::Bool(true);
+                }
+                obj
             })
             .collect()
+    }
+
+    /// Full reasoning texts that were truncated for display.
+    ///
+    /// Returns `(event_id, full_text)` pairs for persistence to the
+    /// `thinking_event_details` table.
+    pub fn full_texts_for_storage(&self) -> &HashMap<String, String> {
+        &self.full_texts
     }
 
     /// Read-only access to the recorded events.
@@ -560,12 +598,19 @@ impl AgentThinkingTracker {
 // Free functions
 // ---------------------------------------------------------------------------
 
+/// Result of cleaning a thought — truncated display text plus optional full text.
+struct CleanedThought {
+    display: String,
+    full_text: Option<String>,
+}
+
 /// Clean up LLM thinking text for user-facing display.
 ///
 /// Removes `<memory>` blocks, strips common filler prefixes, skips
 /// generic patterns (action/observation markers), and truncates to a
-/// reasonable length.
-fn clean_thought(thought: &str) -> Option<String> {
+/// reasonable length. When the cleaned text exceeds 200 characters,
+/// `full_text` contains the untruncated version for on-demand retrieval.
+fn clean_thought(thought: &str) -> Option<CleanedThought> {
     // 1. Remove <memory>...</memory> blocks.
     static MEMORY_RE: OnceLock<Regex> = OnceLock::new();
     let re = MEMORY_RE.get_or_init(|| Regex::new(r"(?is)<memory>.*?</memory>").expect("valid regex literal"));
@@ -605,9 +650,14 @@ fn clean_thought(thought: &str) -> Option<String> {
         }
     }
 
-    // 4. Truncate to 200 characters.
-    if cleaned.len() > 200 {
-        // Find a safe char boundary for truncation.
+    // 4. Reject overly short results.
+    if cleaned.trim().len() <= 10 {
+        return None;
+    }
+
+    // 5. Truncate to 200 characters for streaming display.
+    let full_text = if cleaned.len() > 200 {
+        let full = cleaned.clone();
         let boundary = cleaned
             .char_indices()
             .take_while(|(i, _)| *i < 200)
@@ -615,14 +665,12 @@ fn clean_thought(thought: &str) -> Option<String> {
             .map(|(i, c)| i + c.len_utf8())
             .unwrap_or(200);
         cleaned = format!("{}...", &cleaned[..boundary]);
-    }
+        Some(full)
+    } else {
+        None
+    };
 
-    // 5. Reject overly short results.
-    if cleaned.trim().len() <= 10 {
-        return None;
-    }
-
-    Some(cleaned)
+    Some(CleanedThought { display: cleaned, full_text })
 }
 
 /// Format tool input/output for structured frontend rendering.
@@ -718,7 +766,7 @@ mod tests {
     #[test]
     fn clean_thought_removes_memory_blocks() {
         let input = "Before <memory>secret stuff</memory> after the block";
-        let result = clean_thought(input).unwrap();
+        let result = clean_thought(input).unwrap().display;
         assert!(!result.contains("memory"));
         assert!(!result.contains("secret stuff"));
         assert!(result.contains("Before"));
@@ -728,7 +776,7 @@ mod tests {
     #[test]
     fn clean_thought_removes_multiline_memory_blocks() {
         let input = "Start\n<memory>\nline1\nline2\n</memory>\nEnd of thought here";
-        let result = clean_thought(input).unwrap();
+        let result = clean_thought(input).unwrap().display;
         assert!(!result.contains("line1"));
         assert!(result.contains("Start"));
         assert!(result.contains("End of thought"));
@@ -736,26 +784,26 @@ mod tests {
 
     #[test]
     fn clean_thought_strips_prefix_thought() {
-        let result = clean_thought("Thought: analyze the revenue data for Q4").unwrap();
+        let result = clean_thought("Thought: analyze the revenue data for Q4").unwrap().display;
         assert_eq!(result, "analyze the revenue data for Q4");
     }
 
     #[test]
     fn clean_thought_strips_prefix_let_me() {
-        let result = clean_thought("Let me check the sales table structure").unwrap();
+        let result = clean_thought("Let me check the sales table structure").unwrap().display;
         assert_eq!(result, "check the sales table structure");
     }
 
     #[test]
     fn clean_thought_strips_prefix_i_need_to() {
-        let result = clean_thought("I need to query the database for metrics").unwrap();
+        let result = clean_thought("I need to query the database for metrics").unwrap().display;
         assert_eq!(result, "query the database for metrics");
     }
 
     #[test]
     fn clean_thought_strips_only_first_matching_prefix() {
         // "I will " prefix matches, but "I need to" inside remaining text is kept.
-        let result = clean_thought("I will check if I need to do more").unwrap();
+        let result = clean_thought("I will check if I need to do more").unwrap().display;
         assert_eq!(result, "check if I need to do more");
     }
 
@@ -788,10 +836,12 @@ mod tests {
     #[test]
     fn clean_thought_truncates_long_text() {
         let long_text = "A".repeat(300);
-        let result = clean_thought(&long_text).unwrap();
+        let cleaned = clean_thought(&long_text).unwrap();
         // 200 chars + "..."
-        assert!(result.ends_with("..."));
-        assert!(result.len() <= 204); // 200 + "..."
+        assert!(cleaned.display.ends_with("..."));
+        assert!(cleaned.display.len() <= 204); // 200 + "..."
+        assert!(cleaned.full_text.is_some());
+        assert_eq!(cleaned.full_text.unwrap().len(), 300);
     }
 
     #[test]
@@ -799,10 +849,11 @@ mod tests {
         // Mix in some multi-byte characters near the 200-char boundary.
         let mut text = "A".repeat(198);
         text.push_str("\u{00e9}\u{00e9}\u{00e9}\u{00e9}\u{00e9}"); // e-acute (2-byte UTF-8)
-        let result = clean_thought(&text).unwrap();
-        assert!(result.ends_with("..."));
+        let cleaned = clean_thought(&text).unwrap();
+        assert!(cleaned.display.ends_with("..."));
         // The result should be valid UTF-8 (no panics).
-        assert!(result.len() > 100);
+        assert!(cleaned.display.len() > 100);
+        assert!(cleaned.full_text.is_some());
     }
 
     #[test]
@@ -1045,6 +1096,7 @@ mod tests {
             description: None,
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert!(json.get("event_id").is_none());
@@ -1066,6 +1118,7 @@ mod tests {
             description: Some("Working on it...".to_string()),
             data: Some(serde_json::json!({"tool_name": "query_datasource"})),
             duration_ms: Some(150),
+            has_full_text: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_id"], "123-001");
@@ -1084,6 +1137,7 @@ mod tests {
             description: Some("Completed in 500ms".to_string()),
             data: Some(serde_json::json!({"result": "success"})),
             duration_ms: Some(500),
+            has_full_text: false,
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentThinkingEvent = serde_json::from_str(&json).unwrap();
@@ -1168,6 +1222,7 @@ mod tests {
                 description: Some("Analyzing your question".to_string()),
                 data: None,
                 duration_ms: None,
+                has_full_text: false,
             },
             AgentThinkingEvent {
                 event_type: ThinkingEventType::ToolExecutionStart,
@@ -1177,6 +1232,7 @@ mod tests {
                 description: Some("Working on it...".to_string()),
                 data: Some(serde_json::json!({"tool_name": "query_datasource"})),
                 duration_ms: None,
+                has_full_text: false,
             },
             AgentThinkingEvent {
                 event_type: ThinkingEventType::AgentComplete,
@@ -1186,6 +1242,7 @@ mod tests {
                 description: Some("Completed in 5000ms".to_string()),
                 data: Some(serde_json::json!({"result": "done"})),
                 duration_ms: Some(5000),
+                has_full_text: false,
             },
         ];
 
@@ -1321,37 +1378,37 @@ mod tests {
 
     #[test]
     fn clean_thought_strips_prefix_i_will() {
-        let result = clean_thought("I will query the orders table next").unwrap();
+        let result = clean_thought("I will query the orders table next").unwrap().display;
         assert_eq!(result, "query the orders table next");
     }
 
     #[test]
     fn clean_thought_strips_prefix_now_ill() {
-        let result = clean_thought("Now I'll check if the dates match").unwrap();
+        let result = clean_thought("Now I'll check if the dates match").unwrap().display;
         assert_eq!(result, "check if the dates match");
     }
 
     #[test]
     fn clean_thought_strips_prefix_next_ill() {
-        let result = clean_thought("Next, I'll validate the SQL query").unwrap();
+        let result = clean_thought("Next, I'll validate the SQL query").unwrap().display;
         assert_eq!(result, "validate the SQL query");
     }
 
     #[test]
     fn clean_thought_strips_prefix_response() {
-        let result = clean_thought("Response: here is the data analysis").unwrap();
+        let result = clean_thought("Response: here is the data analysis").unwrap().display;
         assert_eq!(result, "here is the data analysis");
     }
 
     #[test]
     fn clean_thought_strips_prefix_i_should() {
-        let result = clean_thought("I should look at the revenue table").unwrap();
+        let result = clean_thought("I should look at the revenue table").unwrap().display;
         assert_eq!(result, "look at the revenue table");
     }
 
     #[test]
     fn clean_thought_strips_prefix_ill_first() {
-        let result = clean_thought("I'll first check the table schema").unwrap();
+        let result = clean_thought("I'll first check the table schema").unwrap().display;
         assert_eq!(result, "check the table schema");
     }
 
@@ -1360,7 +1417,7 @@ mod tests {
     #[test]
     fn clean_thought_memory_block_case_insensitive() {
         let input = "Start <MEMORY>should be removed</MEMORY> end of thought here";
-        let result = clean_thought(input).unwrap();
+        let result = clean_thought(input).unwrap().display;
         assert!(!result.contains("should be removed"));
         assert!(result.contains("Start"));
     }
@@ -1368,7 +1425,7 @@ mod tests {
     #[test]
     fn clean_thought_multiple_memory_blocks() {
         let input = "A <memory>block1</memory> B <memory>block2</memory> C end of thought here";
-        let result = clean_thought(input).unwrap();
+        let result = clean_thought(input).unwrap().display;
         assert!(!result.contains("block1"));
         assert!(!result.contains("block2"));
         assert!(result.contains("A"));
@@ -1388,6 +1445,7 @@ mod tests {
             description: Some("desc".into()),
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "agent_start");
@@ -1403,6 +1461,7 @@ mod tests {
             description: None,
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "agent_decision");
@@ -1418,6 +1477,7 @@ mod tests {
             description: Some("Tool failed".into()),
             data: Some(serde_json::json!({"error": "timeout"})),
             duration_ms: None,
+            has_full_text: false,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "error");
@@ -1478,6 +1538,7 @@ mod tests {
             description: None,
             data: None,
             duration_ms: None,
+            has_full_text: false,
         };
 
         let storage = serde_json::json!({

@@ -44,6 +44,9 @@ pub struct ThinkingEvent {
     /// Optional duration in milliseconds (for completed events).
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// True when the full reasoning text is available on demand.
+    #[serde(default)]
+    pub has_full_text: bool,
 }
 
 /// Token usage information from the agent.
