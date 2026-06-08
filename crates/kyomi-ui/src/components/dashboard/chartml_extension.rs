@@ -271,15 +271,15 @@ fn render_one_chart(
     let current_chart_type = Memo::new(move |_| {
         type_override
             .get()
-            .or_else(|| initial_type_stored.get_value())
+            .or_else(|| initial_type_stored.try_get_value().flatten())
     });
     let current_orientation = Memo::new(move |_| match orientation_override.get() {
         Some(o) => o,
-        None => initial_orient_stored.get_value(),
+        None => initial_orient_stored.try_get_value().flatten(),
     });
     let current_mode = Memo::new(move |_| match mode_override.get() {
         Some(m) => m,
-        None => initial_mode_stored.get_value(),
+        None => initial_mode_stored.try_get_value().flatten(),
     });
 
     // Derive effective YAML spec with overrides applied
@@ -411,10 +411,10 @@ fn render_one_chart(
                     let ct = current_chart_type.get();
                     let co = current_orientation.get();
                     let cm = current_mode.get();
-                    let type_cb = on_type_stored.get_value();
-                    let orient_cb = on_orient_stored.get_value();
-                    let mode_cb = on_mode_stored.get_value();
-                    let refresh_cb = on_refresh_stored.get_value();
+                    let Some(type_cb) = on_type_stored.try_get_value() else { return ().into_any() };
+                    let Some(orient_cb) = on_orient_stored.try_get_value() else { return ().into_any() };
+                    let Some(mode_cb) = on_mode_stored.try_get_value() else { return ().into_any() };
+                    let Some(refresh_cb) = on_refresh_stored.try_get_value() else { return ().into_any() };
                     let last_sig = Signal::derive(move || last_refreshed.get());
                     let refreshing_sig = Signal::derive(move || is_refreshing.get());
                     view! {
@@ -435,7 +435,7 @@ fn render_one_chart(
                             last_updated=last_sig
                             is_refreshing=refreshing_sig
                         />
-                    }
+                    }.into_any()
                 }}
                 <ChartMLChart
                     spec=Signal::derive(move || effective_spec.get())
@@ -453,7 +453,7 @@ fn render_one_chart(
                 on:mousedown=move |ev: leptos::ev::MouseEvent| {
                     ev.prevent_default();
                     ev.stop_propagation();
-                    let resize_cb = on_resize_stored.get_value();
+                    let Some(resize_cb) = on_resize_stored.try_get_value() else { return };
                     start_resize(ev, ResizeAxis::Width, resize_cb, drag_cleanup);
                 }
             />
@@ -463,7 +463,7 @@ fn render_one_chart(
                 on:mousedown=move |ev: leptos::ev::MouseEvent| {
                     ev.prevent_default();
                     ev.stop_propagation();
-                    let resize_cb = on_resize_stored.get_value();
+                    let Some(resize_cb) = on_resize_stored.try_get_value() else { return };
                     start_resize(ev, ResizeAxis::Height, resize_cb, drag_cleanup);
                 }
             />
@@ -473,7 +473,7 @@ fn render_one_chart(
                 on:mousedown=move |ev: leptos::ev::MouseEvent| {
                     ev.prevent_default();
                     ev.stop_propagation();
-                    let resize_cb = on_resize_stored.get_value();
+                    let Some(resize_cb) = on_resize_stored.try_get_value() else { return };
                     start_resize(ev, ResizeAxis::Both, resize_cb, drag_cleanup);
                 }
             />

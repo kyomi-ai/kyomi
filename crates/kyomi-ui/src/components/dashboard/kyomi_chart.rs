@@ -165,15 +165,15 @@ pub fn KyomiChart(
         type_override
             .try_get()
             .flatten()
-            .or_else(|| initial_type_stored.get_value())
+            .or_else(|| initial_type_stored.try_get_value().flatten())
     });
     let current_orientation = Memo::new(move |_| match orientation_override.try_get().flatten() {
         Some(o) => o,
-        None => initial_orient_stored.get_value(),
+        None => initial_orient_stored.try_get_value().flatten(),
     });
     let current_mode = Memo::new(move |_| match mode_override.try_get().flatten() {
         Some(m) => m,
-        None => initial_mode_stored.get_value(),
+        None => initial_mode_stored.try_get_value().flatten(),
     });
 
     // ------------------------------------------------------------------
@@ -216,10 +216,7 @@ pub fn KyomiChart(
     // Driven by `ChartMLChart`'s `on_refreshed` callback after each
     // fetch + transform + render completes. On cache hits this reflects
     // when the data was originally fetched from the server, not "now".
-    let (last_refreshed, set_last_refreshed) = signal(None::<f64>);
-    let on_refreshed_cb = Callback::new(move |ms: f64| {
-        set_last_refreshed.set(Some(ms));
-    });
+    let (last_refreshed, _set_last_refreshed) = signal(None::<f64>);
 
     // ------------------------------------------------------------------
     // 7. Determine which header-bar features to show (parity fix #13)
@@ -273,7 +270,7 @@ pub fn KyomiChart(
         let bi = block_index;
         let ai = array_index;
         Callback::new(move |()| {
-            if let Some(cb) = edit_cb.get_value() {
+            if let Some(cb) = edit_cb.try_get_value().flatten() {
                 cb.run((bi, ai));
             }
         })
@@ -282,27 +279,27 @@ pub fn KyomiChart(
         let bi = block_index;
         let ai = array_index;
         Callback::new(move |()| {
-            if let Some(cb) = delete_cb.get_value() {
+            if let Some(cb) = delete_cb.try_get_value().flatten() {
                 cb.run((bi, ai));
             }
         })
     };
     let on_save_cb = Callback::new(move |()| {
-        if let Some(cb) = save_cb.get_value() {
-            let chart_yaml = yaml_for_save_stored.get_value();
+        if let Some(cb) = save_cb.try_get_value().flatten() {
+            let Some(chart_yaml) = yaml_for_save_stored.try_get_value() else { return };
             let chart_md = format!("```chartml\n{}\n```", chart_yaml);
             cb.run(chart_md);
         }
     });
     let on_info_cb = Callback::new(move |()| {
-        if let Some(cb) = info_cb.get_value() {
-            let chart_yaml = yaml_for_info_stored.get_value();
+        if let Some(cb) = info_cb.try_get_value().flatten() {
+            let Some(chart_yaml) = yaml_for_info_stored.try_get_value() else { return };
             cb.run(chart_yaml);
         }
     });
     let on_ask_cb = Callback::new(move |()| {
-        if let Some(cb) = ask_cb.get_value() {
-            let chart_yaml = yaml_for_ask_stored.get_value();
+        if let Some(cb) = ask_cb.try_get_value().flatten() {
+            let Some(chart_yaml) = yaml_for_ask_stored.try_get_value() else { return };
             let chart_md = format!("```chartml\n{}\n```", chart_yaml);
             cb.run(chart_md);
         }
@@ -332,20 +329,16 @@ pub fn KyomiChart(
                 let co = current_orientation.try_get().unwrap_or_default();
                 let cm = current_mode.try_get().unwrap_or_default();
 
-                let type_cb = on_type_change_stored.get_value();
-                let orient_cb = on_orientation_change_stored.get_value();
-                let mode_cb = on_mode_change_stored.get_value();
-                let refresh_cb = on_refresh_stored.get_value();
-                let edit_action = on_edit_stored.get_value();
-                let delete_action = on_delete_stored.get_value();
-                let save_action = on_save_stored.get_value();
-                let info_action = on_info_stored.get_value();
-                let ask_action = on_ask_stored.get_value();
+                let Some(type_cb) = on_type_change_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(orient_cb) = on_orientation_change_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(mode_cb) = on_mode_change_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(refresh_cb) = on_refresh_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(edit_action) = on_edit_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(delete_action) = on_delete_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(save_action) = on_save_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(info_action) = on_info_stored.try_get_value() else { return view! { <div/> }.into_any(); };
+                let Some(ask_action) = on_ask_stored.try_get_value() else { return view! { <div/> }.into_any(); };
                 let last_sig = Signal::derive(move || last_refreshed.try_get().flatten());
-                // ChartMLChart owns its own loading state. The header bar's
-                // spinner exists for legacy fetch paths and is always false here;
-                // future work could wire `ResolverHooks::on_progress` through
-                // context to drive it.
                 let refreshing_sig = Signal::derive(|| false);
                 view! {
                     <ChartHeaderBar
@@ -371,7 +364,7 @@ pub fn KyomiChart(
                         last_updated=last_sig
                         is_refreshing=refreshing_sig
                     />
-                }
+                }.into_any()
             }}
             // `min-height` reserves the rendered chart's vertical space so the
             // ChartMLChart loading placeholder doesn't cause a layout shift when
@@ -381,7 +374,8 @@ pub fn KyomiChart(
                     spec=spec_signal
                     chartml=chartml
                     refresh_trigger=combined_refresh
-                    on_refreshed=on_refreshed_cb
+                    // on_refreshed omitted: Callback::run() panics on disposed StoredValue
+                    // when async chart render completes after component disposal
                 />
             </div>
         </div>

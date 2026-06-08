@@ -343,8 +343,9 @@ fn DocumentCard(
                             ev.prevent_default();
                             ev.stop_propagation();
                             set_kebab_open.set(false);
-                            let href = edit_href_stored.get_value();
-                            navigate.get_value()(&href, Default::default());
+                            let Some(href) = edit_href_stored.try_get_value() else { return };
+                            let Some(nav) = navigate.try_get_value() else { return };
+                            nav(&href, Default::default());
                         }
                     >
                         <Icon icon=phosphor_leptos::PENCIL_SIMPLE size="14px" />
@@ -361,7 +362,7 @@ fn DocumentCard(
                                         ev.prevent_default();
                                         ev.stop_propagation();
                                         set_kebab_open.set(false);
-                                        cb.run(dashboard_for_add_stored.get_value());
+                                        if let Some(val) = dashboard_for_add_stored.try_get_value() { cb.run(val); }
                                     }
                                 >
                                     <Icon icon=phosphor_leptos::PLUS size="14px" />
@@ -383,7 +384,7 @@ fn DocumentCard(
                             ev.prevent_default();
                             ev.stop_propagation();
                             set_kebab_open.set(false);
-                            on_delete.run((delete_id_stored.get_value(), delete_title_stored.get_value()));
+                            if let (Some(id), Some(title)) = (delete_id_stored.try_get_value(), delete_title_stored.try_get_value()) { on_delete.run((id, title)); }
                         }
                     >
                         <Icon icon=phosphor_leptos::TRASH size="14px" />

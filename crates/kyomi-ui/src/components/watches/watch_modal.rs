@@ -175,7 +175,9 @@ pub fn WatchModal(
     let initial_tab_stored = StoredValue::new(initial_tab);
     Effect::new(move |_| {
         if open.get() {
-            set_config_tab.set(initial_tab_stored.get_value());
+            if let Some(tab) = initial_tab_stored.try_get_value() {
+                set_config_tab.set(tab);
+            }
         }
     });
 
@@ -857,7 +859,7 @@ pub fn WatchModal(
                         <WatchCopilot
                             watch_config_json=watch_config_json
                             is_editing=is_editing
-                            editing_watch_name=editing_watch_name.get_value()
+                            editing_watch_name=editing_watch_name.try_get_value().unwrap_or_default()
                             on_watch_update=apply_watch_update
                             active=Signal::derive(move || open.get())
                         />

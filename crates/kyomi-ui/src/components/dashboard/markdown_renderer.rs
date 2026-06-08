@@ -754,10 +754,9 @@ pub fn MarkdownRenderer(
     let extra_class = class.unwrap_or_default();
 
     let segments = Memo::new(move |_| {
-        let raw = content.get();
-        // When streaming, strip incomplete chartml blocks to prevent YAML parse errors
+        let Some(raw) = content.try_get() else { return Vec::new() };
         let cleaned = match is_streaming {
-            Some(streaming_sig) if streaming_sig.get() => {
+            Some(streaming_sig) if streaming_sig.try_get().unwrap_or(false) => {
                 clean_streaming_markdown(&raw)
             }
             _ => raw,
@@ -781,13 +780,19 @@ pub fn MarkdownRenderer(
         <div class=format!("prose-kyomi grid grid-cols-12 gap-4{}", if extra_class.is_empty() { String::new() } else { format!(" {extra_class}") })>
             <For
                 each=move || {
-                    segments.get().into_iter().enumerate().collect::<Vec<_>>()
+                    segments.try_get().unwrap_or_default().into_iter().enumerate().collect::<Vec<_>>()
                 }
                 key=|(i, seg)| {
                     use std::hash::{Hash, Hasher};
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     i.hash(&mut hasher);
-                    seg.hash(&mut hasher);
+                    match seg {
+                        ContentSegment::ChartML { block_index, .. } => {
+                            "chartml".hash(&mut hasher);
+                            block_index.hash(&mut hasher);
+                        }
+                        other => other.hash(&mut hasher),
+                    }
                     hasher.finish()
                 }
                 children=move |(_, segment)| {
@@ -806,11 +811,11 @@ pub fn MarkdownRenderer(
                             }.into_any()
                         }
                         ContentSegment::ChartML { yamls, block_index } => {
-                            let edit = edit_cb.get_value();
-                            let delete = delete_cb.get_value();
-                            let save = save_cb.get_value();
-                            let info = info_cb.get_value();
-                            let ask = ask_cb.get_value();
+                            let Some(edit) = edit_cb.try_get_value() else { return view! { <div/> }.into_any() };
+                            let Some(delete) = delete_cb.try_get_value() else { return view! { <div/> }.into_any() };
+                            let Some(save) = save_cb.try_get_value() else { return view! { <div/> }.into_any() };
+                            let Some(info) = info_cb.try_get_value() else { return view! { <div/> }.into_any() };
+                            let Some(ask) = ask_cb.try_get_value() else { return view! { <div/> }.into_any() };
                             // Emit each chart as its own grid item directly into the
                             // outer grid (no nested `grid grid-cols-12` wrapper) so
                             // siblings from different ChartML segments can share rows.

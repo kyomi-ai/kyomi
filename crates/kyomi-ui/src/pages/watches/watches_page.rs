@@ -696,11 +696,11 @@ pub fn WatchesPage() -> impl IntoView {
                                         .unwrap_or_default();
                                     let selected: Option<WatchExecutionItem> = execution_detail_data.get().flatten();
                                     let selected_stored = StoredValue::new(selected);
-                                    let wp = watch_prompt_val.get_value();
+                                    let wp = watch_prompt_val.try_get_value().unwrap_or_default();
                                     view! {
                                         <ExecutionLogViewer
                                             executions=execs
-                                            selected_execution=Signal::derive(move || selected_stored.get_value())
+                                            selected_execution=Signal::derive(move || selected_stored.try_get_value().flatten())
                                             on_select_execution=on_select_execution
                                             is_loading=Signal::derive(move || is_loading)
                                             watch_prompt=wp

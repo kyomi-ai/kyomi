@@ -602,7 +602,7 @@ fn SyncEngineStarter(
                 return;
             }
             // Already started for this workspace — nothing to do.
-            if started_for.get_value().as_deref() == Some(wid.as_str()) {
+            if started_for.try_get_value().flatten().as_deref() == Some(wid.as_str()) {
                 return;
             }
             let Some(ws) = ws_ctx.as_ref().cloned() else {

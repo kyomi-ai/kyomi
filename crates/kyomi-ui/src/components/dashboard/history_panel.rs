@@ -199,7 +199,7 @@ pub fn HistoryPanel(
     let versions_resource = Resource::new(
         move || (fetch_trigger.get(), version_counter.get()),
         move |(_trigger, _counter)| {
-            let did = dashboard_id.get_value();
+            let did = dashboard_id.try_get_value().unwrap_or_default();
             async move {
                 list_versions(did).await
             }
@@ -242,7 +242,7 @@ pub fn HistoryPanel(
     // ── Handlers ────────────────────────────────────────────────────────
 
     let handle_preview_version = move |version_number: i32| {
-        let did = dashboard_id.get_value();
+        let Some(did) = dashboard_id.try_get_value() else { return };
         set_error.set(None);
         leptos::task::spawn_local(async move {
             match get_version(did, version_number).await {
@@ -264,7 +264,7 @@ pub fn HistoryPanel(
     };
 
     let handle_view_diff = move |from_version: i32, to_version: i32| {
-        let did = dashboard_id.get_value();
+        let Some(did) = dashboard_id.try_get_value() else { return };
         set_is_diff_loading.set(true);
         set_error.set(None);
         leptos::task::spawn_local(async move {
@@ -284,7 +284,7 @@ pub fn HistoryPanel(
     };
 
     let handle_restore = move |ver_num: i32| {
-        let did = dashboard_id.get_value();
+        let Some(did) = dashboard_id.try_get_value() else { return };
         set_is_restoring.set(true);
         set_confirm_version.set(None);
         set_error.set(None);

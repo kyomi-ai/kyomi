@@ -154,7 +154,7 @@ fn ChartTypeSelector(
                 class="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 on:click=move |_| set_open.update(|v| *v = !*v)
             >
-                {icons::chart_type_icon(&current.get_value())}
+                {icons::chart_type_icon(&current.try_get_value().unwrap_or_default())}
                 <Icon icon=phosphor_leptos::CARET_DOWN size="12px" />
             </button>
 
@@ -169,7 +169,7 @@ fn ChartTypeSelector(
                     let chart_type = t.to_string();
                     let ct_for_click = chart_type.clone();
                     let ct_for_class = chart_type.clone();
-                    let is_active = current.get_value() == chart_type;
+                    let is_active = current.try_get_value().unwrap_or_default() == chart_type;
                     view! {
                         <button
                             class=if is_active {
@@ -477,7 +477,7 @@ pub fn ChartHeaderBar(
                 // Type selector — hidden below @xs (< 320px); visible from @xs up.
                 // At narrow tier the user changes type via the overflow menu instead.
                 {if show_type_selector {
-                    ct.get_value().map(|current| {
+                    ct.try_get_value().flatten().map(|current| {
                         let on_type = on_type_change.unwrap_or(Callback::new(|_| {}));
                         view! {
                             <div class="hidden @xs:flex">
@@ -491,7 +491,7 @@ pub fn ChartHeaderBar(
 
                 // Orientation chip (bar charts)
                 {show_orientation_chip.then(|| {
-                    let is_horizontal = co.get_value().as_deref() == Some("horizontal");
+                    let is_horizontal = co.try_get_value().flatten().as_deref() == Some("horizontal");
                     let on_orient = on_orientation_change.unwrap_or(Callback::new(|_| {}));
                     view! {
                         <ModifierChip
@@ -511,8 +511,8 @@ pub fn ChartHeaderBar(
 
                 // Mode chip (bar: grouped, area: normalized)
                 {show_mode_chip.then(|| {
-                    let chart_type_val = ct.get_value().unwrap_or_default();
-                    let current_mode = cm.get_value();
+                    let chart_type_val = ct.try_get_value().flatten().unwrap_or_default();
+                    let current_mode = cm.try_get_value().flatten();
                     let on_m = on_mode_change.unwrap_or(Callback::new(|_| {}));
                     let (label, short_label, mode_value) = if chart_type_val == "area" {
                         ("Normalized", "Norm", "normalized")
@@ -650,7 +650,7 @@ pub fn ChartHeaderBar(
                                 // (< 320px), where the type selector is hidden in the toolbar.
                                 // A separator below the list divides it from the action items.
                                 {show_type_selector.then(|| {
-                                    let current_ct = ct.get_value().unwrap_or_default();
+                                    let current_ct = ct.try_get_value().flatten().unwrap_or_default();
                                     view! {
                                         <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             {CHART_TYPES.iter().map(|(t, label)| {
@@ -658,7 +658,7 @@ pub fn ChartHeaderBar(
                                                 let ct_for_click = chart_type.clone();
                                                 let ct_for_class = chart_type.clone();
                                                 let is_active = current_ct == chart_type;
-                                                let cb = type_cb.get_value();
+                                                let cb = type_cb.try_get_value().flatten();
                                                 view! {
                                                     <button
                                                         class=if is_active {
@@ -692,7 +692,7 @@ pub fn ChartHeaderBar(
                                 // `document.body`), so CSS container queries can't
                                 // reach the `@container` ancestor from here.
                                 {(show_edit).then(|| {
-                                    edit_cb.get_value().map(|cb| view! {
+                                    edit_cb.try_get_value().flatten().map(|cb| view! {
                                         <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
@@ -707,7 +707,7 @@ pub fn ChartHeaderBar(
 
                                 // Save to Dashboard — visible in menu only at Narrow tier.
                                 {(show_save_to_dashboard).then(|| {
-                                    save_cb.get_value().map(|cb| view! {
+                                    save_cb.try_get_value().flatten().map(|cb| view! {
                                         <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
@@ -722,7 +722,7 @@ pub fn ChartHeaderBar(
 
                                 // Ask about this chart — visible in menu only at Narrow tier.
                                 {(show_ask_about).then(|| {
-                                    ask_cb.get_value().map(|cb| view! {
+                                    ask_cb.try_get_value().flatten().map(|cb| view! {
                                         <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
@@ -737,7 +737,7 @@ pub fn ChartHeaderBar(
 
                                 // Chart Info — visible in menu only at Narrow tier.
                                 {(show_info).then(|| {
-                                    info_cb.get_value().map(|cb| view! {
+                                    info_cb.try_get_value().flatten().map(|cb| view! {
                                         <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
@@ -752,7 +752,7 @@ pub fn ChartHeaderBar(
 
                                 // Delete — always lives in the kebab when available.
                                 {show_delete.then(|| {
-                                    delete_cb.get_value().map(|cb| view! {
+                                    delete_cb.try_get_value().flatten().map(|cb| view! {
                                         <button
                                             class="w-full text-left px-3 py-2 text-sm text-destructive transition-colors hover:bg-destructive/10"
                                             on:click=move |_| { cb.run(()); set_menu_open.set(false); }

@@ -158,7 +158,7 @@ pub fn SignupCompletePage() -> impl IntoView {
                     // Navigate to onboarding after 1.5 seconds (keeps WASM in memory)
                     #[cfg(target_arch = "wasm32")]
                     {
-                        let nav = navigate.get_value();
+                        let Some(nav) = navigate.try_get_value() else { return };
                         gloo_timers::future::TimeoutFuture::new(1500).await;
                         nav("/onboarding", Default::default());
                     }

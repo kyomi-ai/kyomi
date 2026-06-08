@@ -138,7 +138,7 @@ pub fn CatalogTree(
                                 on_toggle=Callback::new(toggle_node)
                                 on_table_click=on_table_click
                                 on_column_click=on_column_click
-                                on_table_info=stored_table_info.get_value()
+                                on_table_info=stored_table_info.try_get_value().flatten()
                             />
                         }.into_any()
                     }
@@ -180,7 +180,7 @@ fn CatalogTreeView(
             // Tree nodes
             {move || {
                 let query = search_query.get().to_lowercase();
-                let filtered: Vec<_> = tree.get_value()
+                let filtered: Vec<_> = tree.try_get_value().unwrap_or_default()
                     .into_iter()
                     .filter(|node| query.is_empty() || node_matches_search(node, &query))
                     .collect();

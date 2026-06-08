@@ -240,14 +240,18 @@ pub fn ChatInput(
                                     let mut text = String::new();
                                     if let Some(sig) = context_tokens
                                         && let Some((tokens, window)) = sig.get()
-                                        && tokens > 0 && window > 0
+                                        && tokens > 0
                                     {
-                                        let pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
-                                        text = format!(
-                                            "{} ({:.0}%)",
-                                            format_compact_tokens(tokens),
-                                            pct
-                                        );
+                                        if window > 0 {
+                                            let pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+                                            text = format!(
+                                                "{} ({:.0}%)",
+                                                format_compact_tokens(tokens),
+                                                pct
+                                            );
+                                        } else {
+                                            text = format_compact_tokens(tokens);
+                                        }
                                     }
                                     if let Some(cost_sig) = context_cost
                                         && let Some(cost_str) = cost_sig.get()

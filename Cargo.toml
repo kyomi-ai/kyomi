@@ -254,6 +254,7 @@ opt-level = "s"
 
 # Uncomment to use local checkouts for development:
 # [patch.crates-io]
+# chartml-leptos = { path = "../chartml/crates/chartml-leptos" }
 # chartml-core = { path = "../chartml/crates/chartml-core" }
 # chartml-chart-table = { path = "../chartml/crates/chartml-chart-table" }
 # kyomi-connect-protocol = { path = "../kyomi-connect/crates/kyomi-connect-protocol" }

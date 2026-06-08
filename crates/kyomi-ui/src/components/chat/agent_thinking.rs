@@ -211,7 +211,7 @@ pub fn AgentThinking(
             if is_active.get() {
                 let already_running = interval_handle.with_value(|h| h.is_some());
                 if !already_running {
-                    let start = timer_start.get_value().unwrap_or_else(|| {
+                    let start = timer_start.try_get_value().flatten().unwrap_or_else(|| {
                         let now = js_sys::Date::now();
                         timer_start.set_value(Some(now));
                         now

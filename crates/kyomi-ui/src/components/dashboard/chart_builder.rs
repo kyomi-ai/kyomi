@@ -597,7 +597,7 @@ pub fn ChartBuilderModal(
     // ── Reset state when the modal opens with new yaml ──────────────────
     Effect::new(move || {
         if open.try_get().unwrap_or(false) {
-            let yaml = existing_yaml_stored.get_value();
+            let yaml = existing_yaml_stored.try_get_value().flatten();
             let new_ast = initial_ast(yaml.as_deref());
 
             // Derive Visual-tab series state (seeded with one blank if empty)
@@ -1021,7 +1021,7 @@ pub fn ChartBuilderModal(
                                 <div class="flex-1 min-h-0">
                                     <SqlEditorSection
                                         content=sql_sig.into()
-                                        on_change=sql_on_change.get_value()
+                                        on_change=sql_on_change.try_get_value().unwrap_or_else(|| std::sync::Arc::new(|_| {}))
                                     />
                                 </div>
 
@@ -1551,7 +1551,7 @@ pub fn ChartBuilderModal(
                                             <div class="flex-1 min-h-0">
                                                 <YamlEditorSection
                                                     content=Signal::derive(move || yaml_text.get())
-                                                    on_change=yaml_on_change.get_value()
+                                                    on_change=yaml_on_change.try_get_value().unwrap_or_else(|| std::sync::Arc::new(|_| {}))
                                                 />
                                             </div>
                                         </div>

@@ -147,7 +147,7 @@ pub fn KnowledgePage() -> impl IntoView {
 
     let handle_create = move |_| {
         set_creating.set(true);
-        let nav = navigate_create.get_value();
+        let Some(nav) = navigate_create.try_get_value() else { return };
         leptos::task::spawn_local(async move {
             match create_knowledge_doc("Untitled Document".to_string(), None).await {
                 Ok(doc_id) => {

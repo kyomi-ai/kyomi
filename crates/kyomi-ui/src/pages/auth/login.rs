@@ -174,8 +174,8 @@ pub fn LoginPage(
                             if let Some(window) = web_sys::window() {
                                 let _ = window.location().set_href(&dest);
                             }
-                        } else {
-                            navigate.get_value()(&dest, Default::default());
+                        } else if let Some(nav) = navigate.try_get_value() {
+                            nav(&dest, Default::default());
                         }
                     }
                 }
@@ -212,7 +212,9 @@ pub fn LoginPage(
             match result {
                 Ok(SignupResult::AccountCreated { redirect }) => {
                     #[cfg(target_arch = "wasm32")]
-                    navigate.get_value()(&redirect, Default::default());
+                    if let Some(nav) = navigate.try_get_value() {
+                        nav(&redirect, Default::default());
+                    }
                     let _ = &redirect; // suppress unused warning on SSR
                 }
                 Ok(SignupResult::VerificationRequired { message }) => {
@@ -327,7 +329,7 @@ pub fn LoginPage(
             LoginView::Signup | LoginView::CheckEmail { .. } => {
                 "Get started with Kyomi".to_string()
             }
-            _ => LOGIN_SUBTITLES[subtitle_idx.get_value()].to_string(),
+            _ => LOGIN_SUBTITLES[subtitle_idx.try_get_value().unwrap_or(0)].to_string(),
         }
     });
 
@@ -437,8 +439,8 @@ pub fn LoginPage(
                             if let Some(window) = web_sys::window() {
                                 let _ = window.location().set_href(&dest);
                             }
-                        } else {
-                            navigate.get_value()(&dest, Default::default());
+                        } else if let Some(nav) = navigate.try_get_value() {
+                            nav(&dest, Default::default());
                         }
                     }
                 }

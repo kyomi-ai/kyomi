@@ -145,9 +145,9 @@ pub fn CopilotChat(
                     {move || {
                         // EmptyState's `icon` is `Option<ChildrenFn>` via `#[prop(optional)]`,
                         // so we must branch: pass the icon prop only when Some.
-                        let title = empty_title_stored.get_value();
-                        let description = empty_description_stored.get_value();
-                        if let Some(icon_fn) = empty_icon_stored.get_value() {
+                        let Some(title) = empty_title_stored.try_get_value() else { return ().into_any() };
+                        let Some(description) = empty_description_stored.try_get_value() else { return ().into_any() };
+                        if let Some(icon_fn) = empty_icon_stored.try_get_value().flatten() {
                             view! {
                                 <EmptyState
                                     icon=icon_fn
@@ -242,7 +242,7 @@ pub fn CopilotChat(
 
                                     // Optional per-assistant-message action slot
                                     {(!is_user).then(move || {
-                                        let action = assistant_action_stored.get_value();
+                                        let action = assistant_action_stored.try_get_value().flatten();
                                         action.map(|render_fn| {
                                             render_fn(content_for_action.clone())
                                         })
@@ -272,7 +272,7 @@ pub fn CopilotChat(
                 show_stop_button=chat_state.show_stop_button
                 can_cancel=chat_state.can_cancel
                 connection_state=connection_state
-                placeholder=placeholder_stored.get_value()
+                placeholder=placeholder_stored.try_get_value().unwrap_or_default()
             />
         </div>
     }

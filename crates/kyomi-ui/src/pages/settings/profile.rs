@@ -717,7 +717,7 @@ fn CopyButton(text: String) -> impl IntoView {
         set_copied.set(true);
         #[cfg(target_arch = "wasm32")]
         {
-            let text = _text_stored.get_value();
+            let Some(text) = _text_stored.try_get_value() else { return };
             leptos::task::spawn_local(async move {
                 if let Some(window) = web_sys::window() {
                     let clipboard = window.navigator().clipboard();
