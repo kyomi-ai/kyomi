@@ -23,16 +23,16 @@ use crate::server_fns::collections::{
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/// Preset colors matching React DashboardsList.jsx.
+/// Preset collection colors — warm editorial palette matching DESIGN.md.
 const PRESET_COLORS: &[(&str, &str)] = &[
-    ("Amber", "#d97706"),
-    ("Blue", "#3b82f6"),
-    ("Green", "#22c55e"),
-    ("Red", "#ef4444"),
-    ("Purple", "#8b5cf6"),
-    ("Pink", "#ec4899"),
-    ("Cyan", "#06b6d4"),
-    ("Orange", "#f97316"),
+    ("Amber", "#D97706"),
+    ("Sienna", "#A0522D"),
+    ("Sage", "#6B8F71"),
+    ("Slate", "#5C6C8A"),
+    ("Dusty Rose", "#B07080"),
+    ("Clay", "#B8704A"),
+    ("Lichen", "#4F8080"),
+    ("Dusk", "#7E6B8A"),
 ];
 
 /// Default sidebar width in pixels.
@@ -61,7 +61,7 @@ fn CollectionRow(
     let coll_id_for_outer = coll_id.clone();
     let coll_id_for_btn = coll_id.clone();
     let coll_id_for_click = coll_id.clone();
-    let color = collection.color.clone().unwrap_or_else(|| "#d97706".to_string());
+    let color = collection.color.clone().unwrap_or_else(|| "#D97706".to_string());
     let color_style = format!("background-color: {color}");
     let name = collection.name.clone();
     let count = collection.dashboards.len();
@@ -291,7 +291,7 @@ fn ColorPicker(
                     type="text"
                     prop:value=move || value.get()
                     class="flex-1 px-3 py-1 rounded-md border border-input bg-transparent text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono text-sm"
-                    placeholder="#d97706"
+                    placeholder="#D97706"
                     on:input=move |ev| {
                         on_change.run(event_target_value(&ev));
                     }
@@ -327,7 +327,7 @@ fn CollectionModal(
 
     let (name, set_name) = signal(String::new());
     let (description, set_description) = signal(String::new());
-    let (color, set_color) = signal("#d97706".to_string());
+    let (color, set_color) = signal("#D97706".to_string());
     let (is_public, set_is_public) = signal(false);
 
     // Reactively reset form fields whenever the `editing` signal changes.
@@ -338,12 +338,12 @@ fn CollectionModal(
         if let Some(c) = ed {
             set_name.set(c.name.clone());
             set_description.set(c.description.clone().unwrap_or_default());
-            set_color.set(c.color.clone().unwrap_or_else(|| "#d97706".to_string()));
+            set_color.set(c.color.clone().unwrap_or_else(|| "#D97706".to_string()));
             set_is_public.set(c.is_public);
         } else {
             set_name.set(String::new());
             set_description.set(String::new());
-            set_color.set("#d97706".to_string());
+            set_color.set("#D97706".to_string());
             set_is_public.set(false);
         }
     });

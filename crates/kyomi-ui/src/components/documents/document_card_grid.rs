@@ -237,7 +237,7 @@ fn DocumentCard(
                     // Collection Badges
                     {if !collections.is_empty() {
                         let badges = collections.iter().map(|collection| {
-                            let color = collection.color.clone().unwrap_or_else(|| "#d97706".to_string());
+                            let color = collection.color.clone().unwrap_or_else(|| "#D97706".to_string());
                             let bg_color = format!("background-color: {color}20; color: {color};");
                             let dot_color = format!("background-color: {color};");
                             let name = collection.name.clone();

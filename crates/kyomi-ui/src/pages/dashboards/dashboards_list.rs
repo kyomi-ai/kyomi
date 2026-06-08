@@ -361,7 +361,7 @@ pub fn DashboardsListPage() -> impl IntoView {
                             colls.into_iter().map(|coll| {
                                 let coll_id = coll.collection_id.clone();
                                 let coll_id_check = coll_id.clone();
-                                let color = coll.color.clone().unwrap_or_else(|| "#d97706".to_string());
+                                let color = coll.color.clone().unwrap_or_else(|| "#D97706".to_string());
                                 let dot_style = format!("background-color: {color};");
                                 let name = coll.name.clone();
 
@@ -628,7 +628,7 @@ fn AddToCollectionModal(
                                         let coll_id = collection.collection_id.clone();
                                         let coll_name = collection.name.clone();
                                         let coll_desc = collection.description.clone();
-                                        let coll_color = collection.color.clone().unwrap_or_else(|| "#d97706".to_string());
+                                        let coll_color = collection.color.clone().unwrap_or_else(|| "#D97706".to_string());
                                         let dot_style = format!("background-color: {coll_color};");
                                         let is_public = collection.is_public;
                                         let db_id = db_id.clone();
