@@ -340,7 +340,7 @@ pub fn KyomiChart(
                 let save_action = on_save_stored.get_value();
                 let info_action = on_info_stored.get_value();
                 let ask_action = on_ask_stored.get_value();
-                let last_sig = Signal::derive(move || last_refreshed.get());
+                let last_sig = Signal::derive(move || last_refreshed.try_get().flatten());
                 // ChartMLChart owns its own loading state. The header bar's
                 // spinner exists for legacy fetch paths and is always false here;
                 // future work could wire `ResolverHooks::on_progress` through
