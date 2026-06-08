@@ -160,9 +160,6 @@ pub fn ChatMessage(
         // Determine whether to show the AgentThinking panel.
         // Matches React logic: show if we have thinking data OR this is the active streaming message.
         let message_id_for_show_thinking = message_id_for_thinking.clone();
-        // try_get: these signals may be disposed during page navigation while
-        // the reactive graph is still re-evaluating (charts in chat messages
-        // trigger cascading disposal updates).
         let should_show_thinking = move || {
             let Some(ts) = thinking_state.try_get() else { return false };
             let has_thinking_data = !ts.events.is_empty();
