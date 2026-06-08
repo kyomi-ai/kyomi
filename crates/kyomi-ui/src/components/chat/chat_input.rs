@@ -238,26 +238,25 @@ pub fn ChatInput(
                             <div class="text-xs text-muted-foreground font-mono">
                                 {move || {
                                     let mut text = String::new();
-                                    if let Some(sig) = context_tokens {
-                                        if let Some((tokens, window)) = sig.get() {
-                                            if tokens > 0 && window > 0 {
-                                                let pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
-                                                text = format!(
-                                                    "context: {:.0}% ({} / {})",
-                                                    pct,
-                                                    format_compact_tokens(tokens),
-                                                    format_compact_tokens(window)
-                                                );
-                                            }
-                                        }
+                                    if let Some(sig) = context_tokens
+                                        && let Some((tokens, window)) = sig.get()
+                                        && tokens > 0 && window > 0
+                                    {
+                                        let pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+                                        text = format!(
+                                            "context: {:.0}% ({} / {})",
+                                            pct,
+                                            format_compact_tokens(tokens),
+                                            format_compact_tokens(window)
+                                        );
                                     }
-                                    if let Some(cost_sig) = context_cost {
-                                        if let Some(cost_str) = cost_sig.get() {
-                                            if !text.is_empty() {
-                                                text.push_str(&format!(" \u{00B7} {}", cost_str));
-                                            } else {
-                                                text = cost_str;
-                                            }
+                                    if let Some(cost_sig) = context_cost
+                                        && let Some(cost_str) = cost_sig.get()
+                                    {
+                                        if !text.is_empty() {
+                                            text.push_str(&format!(" \u{00B7} {}", cost_str));
+                                        } else {
+                                            text = cost_str;
                                         }
                                     }
                                     text
