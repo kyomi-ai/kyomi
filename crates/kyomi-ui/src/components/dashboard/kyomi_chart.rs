@@ -149,8 +149,8 @@ pub fn KyomiChart(
     let refresh_all = use_context::<RefreshAllSignal>();
 
     let combined_refresh = Signal::derive(move || {
-        let l = local_refresh.get();
-        let g = refresh_all.map(|s| s.get()).unwrap_or(0);
+        let l = local_refresh.try_get().unwrap_or(0);
+        let g = refresh_all.and_then(|s| s.try_get()).unwrap_or(0);
         l.wrapping_add(g)
     });
 
@@ -163,14 +163,15 @@ pub fn KyomiChart(
 
     let current_chart_type = Memo::new(move |_| {
         type_override
-            .get()
+            .try_get()
+            .flatten()
             .or_else(|| initial_type_stored.get_value())
     });
-    let current_orientation = Memo::new(move |_| match orientation_override.get() {
+    let current_orientation = Memo::new(move |_| match orientation_override.try_get().flatten() {
         Some(o) => o,
         None => initial_orient_stored.get_value(),
     });
-    let current_mode = Memo::new(move |_| match mode_override.get() {
+    let current_mode = Memo::new(move |_| match mode_override.try_get().flatten() {
         Some(m) => m,
         None => initial_mode_stored.get_value(),
     });
@@ -184,9 +185,9 @@ pub fn KyomiChart(
     // dashboard viewer's behavior.
     let yaml_for_spec = yaml.clone();
     let effective_yaml = Memo::new(move |_| {
-        let t_ovr = type_override.get();
-        let o_ovr = orientation_override.get();
-        let m_ovr = mode_override.get();
+        let t_ovr = type_override.try_get().flatten();
+        let o_ovr = orientation_override.try_get().flatten();
+        let m_ovr = mode_override.try_get().flatten();
 
         let with_overrides = if t_ovr.is_none() && o_ovr.is_none() && m_ovr.is_none() {
             yaml_for_spec.clone()
@@ -199,7 +200,7 @@ pub fn KyomiChart(
             )
         };
 
-        let params = parameters.get();
+        let params = parameters.try_get().unwrap_or_default();
         if params.is_empty() {
             with_overrides
         } else {
@@ -207,7 +208,7 @@ pub fn KyomiChart(
         }
     });
 
-    let spec_signal = Signal::derive(move || effective_yaml.get());
+    let spec_signal = Signal::derive(move || effective_yaml.try_get().unwrap_or_default());
 
     // ------------------------------------------------------------------
     // 6. Last-refreshed timestamp (parity fix #18)
@@ -327,9 +328,9 @@ pub fn KyomiChart(
             // Header bar re-renders when type/orientation/mode override signals
             // change. All other callbacks are stable `StoredValue`s.
             {move || {
-                let ct = current_chart_type.get();
-                let co = current_orientation.get();
-                let cm = current_mode.get();
+                let ct = current_chart_type.try_get().flatten();
+                let co = current_orientation.try_get().unwrap_or_default();
+                let cm = current_mode.try_get().unwrap_or_default();
 
                 let type_cb = on_type_change_stored.get_value();
                 let orient_cb = on_orientation_change_stored.get_value();

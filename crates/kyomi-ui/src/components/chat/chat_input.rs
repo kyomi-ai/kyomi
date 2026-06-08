@@ -244,10 +244,9 @@ pub fn ChatInput(
                                     {
                                         let pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
                                         text = format!(
-                                            "context: {:.0}% ({} / {})",
-                                            pct,
+                                            "{} ({:.0}%)",
                                             format_compact_tokens(tokens),
-                                            format_compact_tokens(window)
+                                            pct
                                         );
                                     }
                                     if let Some(cost_sig) = context_cost

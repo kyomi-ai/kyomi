@@ -160,7 +160,7 @@ fn ChartTypeSelector(
 
             <crate::components::popover::Popover
                 trigger_ref=trigger_ref
-                open=Signal::derive(move || open.get())
+                open=Signal::derive(move || open.try_get().unwrap_or(false))
                 on_close=Callback::new(move |()| set_open.set(false))
                 placement=crate::components::popover::Placement::BOTTOM_START
                 class="w-40 bg-popover border border-border rounded-md shadow-lg py-1 overflow-y-auto"
@@ -542,7 +542,7 @@ pub fn ChartHeaderBar(
                     on_refresh.map(|on_ref| {
                         let spin_class = move || {
                             let spinning = is_refreshing
-                                .map(|s| s.get())
+                                .and_then(|s| s.try_get())
                                 .unwrap_or(false);
                             if spinning {
                                 "p-1.5 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring animate-spin"
@@ -641,7 +641,7 @@ pub fn ChartHeaderBar(
 
                             <crate::components::popover::Popover
                                 trigger_ref=menu_trigger_ref
-                                open=Signal::derive(move || menu_open.get())
+                                open=Signal::derive(move || menu_open.try_get().unwrap_or(false))
                                 on_close=Callback::new(move |()| set_menu_open.set(false))
                                 placement=crate::components::popover::Placement::BOTTOM_END
                                 class="w-48 bg-popover border border-border rounded-md shadow-lg py-1 overflow-y-auto"
@@ -652,7 +652,7 @@ pub fn ChartHeaderBar(
                                 {show_type_selector.then(|| {
                                     let current_ct = ct.get_value().unwrap_or_default();
                                     view! {
-                                        <Show when=move || is_narrow.get()>
+                                        <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             {CHART_TYPES.iter().map(|(t, label)| {
                                                 let chart_type = t.to_string();
                                                 let ct_for_click = chart_type.clone();
@@ -693,7 +693,7 @@ pub fn ChartHeaderBar(
                                 // reach the `@container` ancestor from here.
                                 {(show_edit).then(|| {
                                     edit_cb.get_value().map(|cb| view! {
-                                        <Show when=move || is_narrow.get()>
+                                        <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
@@ -708,7 +708,7 @@ pub fn ChartHeaderBar(
                                 // Save to Dashboard — visible in menu only at Narrow tier.
                                 {(show_save_to_dashboard).then(|| {
                                     save_cb.get_value().map(|cb| view! {
-                                        <Show when=move || is_narrow.get()>
+                                        <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
@@ -723,7 +723,7 @@ pub fn ChartHeaderBar(
                                 // Ask about this chart — visible in menu only at Narrow tier.
                                 {(show_ask_about).then(|| {
                                     ask_cb.get_value().map(|cb| view! {
-                                        <Show when=move || is_narrow.get()>
+                                        <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
@@ -738,7 +738,7 @@ pub fn ChartHeaderBar(
                                 // Chart Info — visible in menu only at Narrow tier.
                                 {(show_info).then(|| {
                                     info_cb.get_value().map(|cb| view! {
-                                        <Show when=move || is_narrow.get()>
+                                        <Show when=move || is_narrow.try_get().unwrap_or(false)>
                                             <button
                                                 class="w-full flex items-center gap-2 px-3 py-2 text-sm text-popover-foreground transition-colors hover:bg-secondary"
                                                 on:click=move |_| { cb.run(()); set_menu_open.set(false); }
