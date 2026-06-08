@@ -1943,3 +1943,91 @@ fn session_row_to_detail(row: SessionWithUserRow) -> SessionMetadata {
         platform_thread_key: row.platform_thread_key,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Thinking event details (full untruncated reasoning text)
+// ---------------------------------------------------------------------------
+
+/// Batch-insert full reasoning texts for thinking events that exceeded the
+/// 200-char display limit. Each entry is encrypted with AES-256-GCM.
+pub async fn store_thinking_event_details(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    message_id: &str,
+    full_texts: &std::collections::HashMap<String, String>,
+) -> kyomi_core::Result<()> {
+    if full_texts.is_empty() {
+        return Ok(());
+    }
+    for (event_id, full_text) in full_texts {
+        let id = uuid::Uuid::new_v4().to_string();
+        let encrypted = match encryption::encrypt(full_text, encryption_key) {
+            Ok(enc) => enc,
+            Err(e) => {
+                tracing::warn!(
+                    message_id = %message_id,
+                    event_id = %event_id,
+                    "Failed to encrypt thinking event detail: {e}"
+                );
+                continue;
+            }
+        };
+        if let Err(e) = kyomi_core::db_execute!(
+            db,
+            "INSERT INTO thinking_event_details (id, message_id, event_id, full_text) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (message_id, event_id) DO NOTHING",
+            &id,
+            message_id,
+            event_id.as_str(),
+            &encrypted
+        ) {
+            tracing::warn!(
+                message_id = %message_id,
+                event_id = %event_id,
+                "Failed to store thinking event detail: {e}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Retrieve the full untruncated reasoning text for a single thinking event.
+///
+/// Authorization: joins through `chat_messages` and `chat_sessions` to verify
+/// the requesting user owns (or has shared access to) the session.
+pub async fn get_thinking_event_detail(
+    db: &DbPool,
+    encryption_key: &[u8; 32],
+    message_id: &str,
+    event_id: &str,
+    user_id: &str,
+    workspace_id: &str,
+) -> kyomi_core::Result<Option<String>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        full_text: String,
+    }
+    let row = kyomi_core::db_fetch_optional!(
+        db,
+        Row,
+        "SELECT ted.full_text FROM thinking_event_details ted \
+         JOIN chat_messages cm ON cm.message_id = ted.message_id \
+         JOIN chat_sessions cs ON cs.session_id = cm.session_id \
+         WHERE ted.message_id = $1 AND ted.event_id = $2 \
+           AND cs.user_id = $3 AND cs.workspace_id = $4",
+        message_id,
+        event_id,
+        user_id,
+        workspace_id
+    )
+    .map_err(|e| kyomi_core::Error::Internal(format!("failed to fetch thinking detail: {e}")))?;
+
+    match row {
+        Some(r) => {
+            let decrypted = encryption::decrypt(&r.full_text, encryption_key)?;
+            Ok(Some(decrypted))
+        }
+        None => Ok(None),
+    }
+}

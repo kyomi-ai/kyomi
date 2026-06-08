@@ -424,9 +424,10 @@ pub async fn execute_agent_chat(
     };
 
     // 14. Get thinking events and token usage from tracker.
-    let (thinking_events, token_usage, input_tokens, output_tokens, total_cost) = {
+    let (thinking_events, full_texts, token_usage, input_tokens, output_tokens, total_cost) = {
         let t = tracker.lock().await;
         let events = t.get_events_for_storage();
+        let ft = t.full_texts_for_storage().clone();
         let inp = t.total_input_tokens();
         let out = t.total_output_tokens();
         let cost = t.total_cost();
@@ -440,7 +441,7 @@ pub async fn execute_agent_chat(
             "context_tokens": ctx,
             "context_window": ctx_win,
         });
-        (events, Some(usage), inp, out, cost)
+        (events, ft, Some(usage), inp, out, cost)
     };
 
     // 14b. Log usage to api_usage_log for billing.
@@ -511,6 +512,20 @@ pub async fn execute_agent_chat(
         .await
         {
             tracing::warn!(error = %e, "Failed to attach metadata to assistant message (non-fatal)");
+        }
+    }
+
+    // 15b. Persist full (untruncated) reasoning texts for on-demand retrieval.
+    if !full_texts.is_empty() {
+        if let Err(e) = chat_service::store_thinking_event_details(
+            db,
+            encryption_key,
+            &assistant_message_id,
+            &full_texts,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "Failed to store thinking event details (non-fatal)");
         }
     }
 
