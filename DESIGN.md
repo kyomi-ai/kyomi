@@ -109,6 +109,23 @@ Each semantic color has background and border variants for alerts:
 - **Semantic colors:** Use transparent backgrounds (e.g., `rgba(21, 128, 61, 0.12)` for success)
 - **Strategy:** Swap CSS custom properties via `[data-theme="dark"]` selector
 
+### Collection Colors
+
+Preset colors for collection dots and badge pills. Warm editorial palette — earthy, desaturated tones that recede behind content and let the amber accent stay the only loud voice. Defined in `collections_sidebar.rs::PRESET_COLORS`.
+
+| Name | Hex | Character |
+|------|-----|-----------|
+| Amber (default) | `#D97706` | Brand accent — always the default for new collections |
+| Sienna | `#A0522D` | Warm reddish-brown, earthy |
+| Sage | `#6B8F71` | Muted warm green |
+| Slate | `#5C6C8A` | Dusty warm blue |
+| Dusty Rose | `#B07080` | Warm muted pink |
+| Clay | `#B8704A` | Terracotta, warm orange |
+| Lichen | `#4F8080` | Warm muted teal |
+| Dusk | `#7E6B8A` | Warm muted purple |
+
+Badge pills render at 12% opacity background with full-color text and dot. On dark mode surfaces, use 15% opacity for visibility.
+
 ### Chart Colors
 
 Chart palettes live in `kyomi_palette()` in `crates/kyomi-ui/src/components/dashboard/markdown_renderer.rs`. Four options are available; new users and new workspaces default to **kyomi**.
@@ -1124,3 +1141,4 @@ The current PDF template uses cold generic grays. Replace with warm design syste
 | 2026-04-19 | Unified right-panel pattern: Editorial Margin + shared `<RightPanel>` | Copilot / collections / catalog / version-history were each re-implementing the same chrome with drift (different widths, animations, bg, headers). The old `bg-muted` + `border-l + border-t` slab looked like tacked-on chrome and violated the "one continuous warm surface" principle. Editorial Margin keeps the panel on `bg-background` separated only by a hairline, with an amber italic `§` Instrument Serif title as the shared editorial anchor. Nobody in BI does this. Mobile retains `bg-muted` + `shadow-lg` because the sheet signal is load-bearing with no adjacent content. Decision captured via `/design-consultation` — KYO-47. |
 | 2026-06-05 | Document Card redesign: Editorial Document Library | Dashboard and knowledge list cards transformed from generic CRUD grid (DM Sans titles, View/Edit button footer, always-visible action icons) to editorial document library (Instrument Serif titles, clickable card surface, kebab menu for secondary actions, summary excerpts, card lift on hover). The old cards looked like any admin panel; the new pattern extends the editorial voice from the dashboard viewer to the front door. Kebab menu chosen over floating action icons because secondary actions (edit, delete, collection) don't warrant permanent visual weight. |
 | 2026-06-05 | Watch Card consistency pass: labeled buttons, no kebab | Watch cards get Instrument Serif titles and hover lift for consistency, but keep explicit action buttons (Edit, Logs, Run) because watches have two equally important primary actions (edit config, view logs) that both open modals — no single "click the card" destination. Delete stays as a quiet ghost icon at the far right. Kebab rejected — four actions don't justify the complexity. Toggle switch stays always-visible because enable/disable is a quick-action control. |
+| 2026-06-08 | Collection colors: warm editorial palette replacing Tailwind defaults | The old presets (blue-500, green-500, red-500, violet-500, pink-500, cyan-500, orange-500) were cold, saturated Tailwind defaults that clashed with Kyomi's warm surfaces. Replaced with earthy, desaturated tones (Sienna, Sage, Slate, Dusty Rose, Clay, Lichen, Dusk) that recede behind content and let the amber accent remain the only loud voice. |
