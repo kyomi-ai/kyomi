@@ -330,7 +330,8 @@ pub fn ChartHeaderBar(
     #[cfg(target_arch = "wasm32")]
     if let Some(last_sig) = last_updated {
         Effect::new(move |_| {
-            if last_sig.get().is_none() {
+            let Some(last_val) = last_sig.try_get() else { return };
+            if last_val.is_none() {
                 return;
             }
             use wasm_bindgen::prelude::*;
@@ -436,8 +437,9 @@ pub fn ChartHeaderBar(
                     // Full text: shown at @md+ (448px+).
                     <span class="hidden @md:inline text-xs text-muted-foreground truncate">
                         {move || {
-                            let now = now_ms.get();
-                            let text = sig.get()
+                            let now = now_ms.try_get().unwrap_or(0.0);
+                            let text = sig.try_get()
+                                .flatten()
                                 .map(|ts| format_relative_time(ts, now))
                                 .unwrap_or_default();
                             if text.is_empty() {
@@ -451,16 +453,18 @@ pub fn ChartHeaderBar(
                     <span
                         class="hidden @xs:flex @md:hidden items-center gap-1 text-xs text-muted-foreground"
                         title={move || {
-                            let now = now_ms.get();
-                            sig.get()
+                            let now = now_ms.try_get().unwrap_or(0.0);
+                            sig.try_get()
+                                .flatten()
                                 .map(|ts| format!("Last refreshed {}", format_relative_time(ts, now)))
                                 .unwrap_or_default()
                         }}
                     >
                         <Icon icon=phosphor_leptos::CLOCK size="14px" />
                         {move || {
-                            let now = now_ms.get();
-                            sig.get()
+                            let now = now_ms.try_get().unwrap_or(0.0);
+                            sig.try_get()
+                                .flatten()
                                 .map(|ts| format_relative_time_compact(ts, now))
                                 .unwrap_or_default()
                         }}
