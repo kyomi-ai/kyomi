@@ -516,17 +516,16 @@ pub async fn execute_agent_chat(
     }
 
     // 15b. Persist full (untruncated) reasoning texts for on-demand retrieval.
-    if !full_texts.is_empty() {
-        if let Err(e) = chat_service::store_thinking_event_details(
+    if !full_texts.is_empty()
+        && let Err(e) = chat_service::store_thinking_event_details(
             db,
             encryption_key,
             &assistant_message_id,
             &full_texts,
         )
         .await
-        {
-            tracing::warn!(error = %e, "Failed to store thinking event details (non-fatal)");
-        }
+    {
+        tracing::warn!(error = %e, "Failed to store thinking event details (non-fatal)");
     }
 
     info!(

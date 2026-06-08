@@ -309,10 +309,10 @@ impl AgentThinkingTracker {
             has_full_text,
         };
         let event = self.add_event(event);
-        if let Some(full_text) = cleaned.full_text {
-            if let Some(ref eid) = event.event_id {
-                self.full_texts.insert(eid.clone(), full_text);
-            }
+        if let Some(full_text) = cleaned.full_text
+            && let Some(ref eid) = event.event_id
+        {
+            self.full_texts.insert(eid.clone(), full_text);
         }
         self.send_event(&event, false).await;
     }
