@@ -226,11 +226,6 @@ fn parse_workspace_settings(data: &serde_json::Value) -> crate::types::Workspace
         .unwrap_or("kyomi")
         .to_string();
 
-    let show_token_usage = custom
-        .and_then(|cs| cs.get("show_token_usage"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
     let title_model = custom
         .and_then(|cs| cs.get("title_model"))
         .and_then(|v| v.as_str())
@@ -240,7 +235,6 @@ fn parse_workspace_settings(data: &serde_json::Value) -> crate::types::Workspace
         workspace_name,
         default_model,
         chart_palette,
-        show_token_usage,
         title_model,
     }
 }

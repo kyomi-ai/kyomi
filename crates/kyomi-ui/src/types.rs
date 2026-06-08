@@ -70,8 +70,6 @@ pub struct WorkspaceSettingsData {
     #[serde(default)]
     pub default_model: Option<String>,
     pub chart_palette: String,
-    #[serde(default)]
-    pub show_token_usage: bool,
     /// Optional model used specifically for session title generation.
     ///
     /// When `None`, title generation falls back to the cheapest model for the

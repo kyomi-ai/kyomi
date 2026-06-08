@@ -13,6 +13,16 @@ use phosphor_leptos::Icon;
 use crate::components::alert::{Alert, AlertDescription, AlertVariant};
 use crate::components::checkbox::Checkbox;
 
+fn format_compact_tokens(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
 /// Chat input component with auto-expanding textarea, send/stop buttons, and
 /// connection status.
 ///
@@ -58,6 +68,12 @@ pub fn ChatInput(
     /// Maximum height for the auto-expanding textarea in pixels.
     #[prop(default = 200)]
     max_height: u32,
+    /// Context token usage: (context_tokens, context_window). None when not available.
+    #[prop(into, optional)]
+    context_tokens: Option<Signal<Option<(u64, u64)>>>,
+    /// Formatted cost string (self-hosted only). None in SaaS mode.
+    #[prop(into, optional)]
+    context_cost: Option<Signal<Option<String>>>,
 ) -> impl IntoView {
     let (input_value, set_input_value) = signal(String::new());
     let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
@@ -192,25 +208,64 @@ pub fn ChatInput(
                 </div>
             </Show>
 
-            // Skip AI checkbox (optional, hidden when credits exhausted)
-            <Show when=move || show_skip_ai && !credits_exhausted>
-                {move || {
-                    skip_ai.map(|skip_signal| {
-                        let checked = Signal::derive(move || skip_signal.get());
-                        view! {
-                            <div class="mb-2 flex items-center gap-2">
-                                <Checkbox
-                                    checked=checked
-                                    on_change=Callback::new(move |v: bool| skip_signal.set(v))
-                                />
-                                <label class="text-sm text-muted-foreground cursor-pointer">
-                                    "Skip AI response"
-                                </label>
+            // Info row: Skip AI (left) + Context info (right)
+            {
+                let has_context = context_tokens.map(|sig| Signal::derive(move || sig.get().is_some())).unwrap_or(Signal::derive(|| false));
+                let show_row = Signal::derive(move || (show_skip_ai && !credits_exhausted) || has_context.get());
+                view! {
+                    <Show when=move || show_row.get()>
+                        <div class="mb-2 flex items-center justify-between">
+                            // Left: Skip AI checkbox
+                            <div class="flex items-center gap-2">
+                                <Show when=move || show_skip_ai && !credits_exhausted>
+                                    {move || {
+                                        skip_ai.map(|skip_signal| {
+                                            let checked = Signal::derive(move || skip_signal.get());
+                                            view! {
+                                                <Checkbox
+                                                    checked=checked
+                                                    on_change=Callback::new(move |v: bool| skip_signal.set(v))
+                                                />
+                                                <label class="text-sm text-muted-foreground cursor-pointer">
+                                                    "Skip AI response"
+                                                </label>
+                                            }
+                                        })
+                                    }}
+                                </Show>
                             </div>
-                        }
-                    })
-                }}
-            </Show>
+                            // Right: Context info
+                            <div class="text-xs text-muted-foreground font-mono">
+                                {move || {
+                                    let mut text = String::new();
+                                    if let Some(sig) = context_tokens
+                                        && let Some((tokens, window)) = sig.get()
+                                        && tokens > 0 && window > 0
+                                    {
+                                        let pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+                                        text = format!(
+                                            "context: {:.0}% ({} / {})",
+                                            pct,
+                                            format_compact_tokens(tokens),
+                                            format_compact_tokens(window)
+                                        );
+                                    }
+                                    if let Some(cost_sig) = context_cost
+                                        && let Some(cost_str) = cost_sig.get()
+                                    {
+                                        if !text.is_empty() {
+                                            text.push_str(&format!(" \u{00B7} {}", cost_str));
+                                        } else {
+                                            text = cost_str;
+                                        }
+                                    }
+                                    text
+                                }}
+                            </div>
+                        </div>
+                    </Show>
+                }
+            }
 
             // Input area with textarea and send/stop button.
             // The textarea is always rendered — disabled when credits_exhausted.

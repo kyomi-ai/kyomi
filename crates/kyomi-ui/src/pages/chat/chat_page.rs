@@ -326,14 +326,6 @@ pub fn ChatPage() -> impl IntoView {
             .and_then(|ws| ws.default_model)
     });
 
-    let show_token_usage = Signal::derive(move || {
-        sync_store
-            .workspace_settings()
-            .get()
-            .map(|ws| ws.show_token_usage)
-            .unwrap_or(false)
-    });
-
     // ── Refs for smart scroll ───────────────────────────────────────────
     let messages_end_ref = NodeRef::<leptos::html::Div>::new();
     let messages_container_ref = NodeRef::<leptos::html::Div>::new();
@@ -1913,6 +1905,7 @@ pub fn ChatPage() -> impl IntoView {
                         <Show when=move || !messages.get().is_empty()>
                             // Chat input area — wired to send_message and cancel handlers.
                             // Skip AI checkbox is built into ChatInput (show_skip_ai + skip_ai props).
+                            // Context usage + cost are shown inline above the textarea.
                             <ChatInput
                                 on_send=on_send
                                 on_cancel=on_cancel
@@ -1922,40 +1915,18 @@ pub fn ChatPage() -> impl IntoView {
                                 credits_exhausted=credits_exhausted.get()
                                 show_skip_ai=current_session_id.get().is_some()
                                 skip_ai=skip_ai_response
+                                context_tokens=Signal::derive(move || {
+                                    latest_context.get().map(|tu| (tu.context_tokens, tu.context_window))
+                                })
+                                context_cost=Signal::derive(move || {
+                                    if is_self_hosted.get() {
+                                        let cost = cumulative_cost.get();
+                                        if cost > 0.0 { Some(format_footer_cost(cost)) } else { None }
+                                    } else {
+                                        None
+                                    }
+                                })
                             />
-                        </Show>
-
-                        // Persistent footer: context usage + cumulative cost.
-                        // Shown when token usage display is enabled, messages exist,
-                        // and there is data to show.
-                        // Footer: fixed height to prevent layout shift.
-                        // Shows context % and cost when available.
-                        <Show when=move || show_token_usage.get() && !messages.get().is_empty()>
-                            <div class="flex-shrink-0 px-4 md:px-6 h-7 flex items-center justify-end bg-background">
-                                <span class="text-xs text-muted-foreground font-mono">
-                                    {move || {
-                                        let mut parts = Vec::new();
-                                        if let Some(tu) = latest_context.get()
-                                            && tu.context_tokens > 0
-                                            && tu.context_window > 0
-                                        {
-                                            let pct = (tu.context_tokens as f64
-                                                / tu.context_window as f64
-                                                * 100.0)
-                                                .min(100.0);
-                                            parts.push(format!("{:.0}%", pct));
-                                        }
-                                        // Only show cost in self-hosted mode.
-                                        if is_self_hosted.get() {
-                                            let cost = cumulative_cost.get();
-                                            if cost > 0.0 {
-                                                parts.push(format_footer_cost(cost));
-                                            }
-                                        }
-                                        parts.join(" \u{00B7} ")
-                                    }}
-                                </span>
-                            </div>
                         </Show>
                     </div>
                 </div>
