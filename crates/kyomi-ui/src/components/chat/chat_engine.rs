@@ -623,10 +623,9 @@ fn setup_ws_subscriptions(
         });
 
         // Transition to streaming state if still in Sending.
-        if let Some(state) = chat_state_thinking.state().try_get_untracked() {
-            if state == ChatState::Sending {
+        if let Some(state) = chat_state_thinking.state().try_get_untracked()
+            && state == ChatState::Sending {
                 chat_state_thinking.start_streaming(&msg_message_id);
-            }
         }
 
         // Process thinking event via ThinkingManager.
@@ -669,10 +668,9 @@ fn setup_ws_subscriptions(
         };
 
         // State recovery: if state is Idle, force start_streaming.
-        if let Some(stream_state) = chat_state_stream.state().try_get_untracked() {
-            if stream_state == ChatState::Idle {
+        if let Some(stream_state) = chat_state_stream.state().try_get_untracked()
+            && stream_state == ChatState::Idle {
                 chat_state_stream.start_streaming(&msg_message_id);
-            }
         }
 
         messages.try_update(|msgs| {
