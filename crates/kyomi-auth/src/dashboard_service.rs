@@ -1647,28 +1647,34 @@ pub fn spawn_rechunk_document(
 
 // ─── Sync helpers ─────────────────────────────────────────────────────────────
 
-/// List all dashboards (doc_type = 'dashboard') for a workspace, returning
-/// list-level metadata as JSON values for the sync bootstrap protocol.
+/// List all dashboards (doc_type = 'dashboard') for a workspace that the user
+/// can see, returning list-level metadata as JSON values for the sync bootstrap
+/// protocol. Only docs owned by the user or in a public collection are included.
 pub async fn list_dashboards_for_sync(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Vec<serde_json::Value>> {
-    list_docs_for_sync(db, workspace_id, "dashboard").await
+    list_docs_for_sync(db, workspace_id, user_id, "dashboard").await
 }
 
-/// List all knowledge documents (doc_type = 'knowledge') for a workspace,
-/// returning list-level metadata as JSON values for the sync bootstrap protocol.
+/// List all knowledge documents (doc_type = 'knowledge') for a workspace that
+/// the user can see, returning list-level metadata as JSON values for the sync
+/// bootstrap protocol. Only docs owned by the user or in a public collection are
+/// included.
 pub async fn list_knowledge_for_sync(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
 ) -> Result<Vec<serde_json::Value>> {
-    list_docs_for_sync(db, workspace_id, "knowledge").await
+    list_docs_for_sync(db, workspace_id, user_id, "knowledge").await
 }
 
 /// Shared implementation for list_dashboards_for_sync / list_knowledge_for_sync.
 async fn list_docs_for_sync(
     db: &DbPool,
     workspace_id: &str,
+    user_id: &str,
     doc_type: &str,
 ) -> Result<Vec<serde_json::Value>> {
     #[derive(sqlx::FromRow)]
@@ -1687,11 +1693,14 @@ async fn list_docs_for_sync(
     }
 
     let recent_cutoff = Utc::now() - Duration::days(30);
+    let is_pg = db.is_postgres();
 
     // Build SQL with LEFT JOIN on dashboard_views to include view metrics.
-    // Parameter numbering: $1 = workspace_id, $2 = recent_cutoff, $3 = doc_type.
+    // Parameter numbering: $1 = workspace_id, $2 = recent_cutoff, $3 = doc_type,
+    // $4 = user_id (injected via visibility_predicate).
     // SUM(CASE WHEN ...) avoids FILTER (WHERE ...) which is Postgres-only.
-    let sql = r#"
+    let vis = visibility_predicate(4, is_pg);
+    let sql = format!(r#"
         SELECT d.dashboard_id, d.user_id, d.workspace_id, d.title, d.content,
                d.last_change_summary,
                CAST(d.updated_at AS TEXT) AS updated_at,
@@ -1709,17 +1718,18 @@ async fn list_docs_for_sync(
             WHERE workspace_id = $1
             GROUP BY dashboard_id
         ) v ON d.dashboard_id = v.dashboard_id
-        WHERE d.workspace_id = $1 AND d.doc_type = $3
+        WHERE d.workspace_id = $1 AND d.doc_type = $3{vis}
         ORDER BY d.updated_at DESC
-    "#;
+    "#);
 
     let rows: Vec<DocSyncRow> = kyomi_core::db_fetch_all!(
         db,
         DocSyncRow,
-        sql,
+        &sql,
         workspace_id,
         recent_cutoff,
-        doc_type
+        doc_type,
+        user_id
     )
     .map_err(|e| {
         kyomi_core::Error::Internal(format!("failed to list {doc_type} docs for sync: {e}"))
@@ -1753,6 +1763,31 @@ async fn list_docs_for_sync(
         .collect();
 
     Ok(values)
+}
+
+/// Check whether a dashboard is in any public collection.
+///
+/// Used by the live-sync broadcast path to decide whether to send a doc-mutation
+/// event to all workspace members (public) or only to the document owner
+/// (private).  Returns `false` on any database error so that failures default
+/// to the safer, narrower delivery.
+pub(crate) async fn is_doc_publicly_visible(db: &DbPool, dashboard_id: &str) -> bool {
+    let is_pg = db.is_postgres();
+    let bool_val = sql_compat::bool_true(is_pg);
+    let sql = format!(
+        "SELECT 1 AS n FROM collection_dashboards cd \
+         JOIN collections c ON cd.collection_id = c.id \
+         WHERE cd.dashboard_id = $1 AND c.is_public = {bool_val} \
+         LIMIT 1"
+    );
+
+    kyomi_core::db_fetch_optional!(db, (i32,), &sql, dashboard_id)
+        .map_err(|e| {
+            tracing::warn!(dashboard_id, error = %e, "is_doc_publicly_visible query failed");
+        })
+        .ok()
+        .flatten()
+        .is_some()
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

@@ -344,18 +344,20 @@ async fn handle_sync_bootstrap(
     tracing::debug!(user_id, workspace_id, "Handling sync_bootstrap");
 
     // 1. Fetch all Tier 1 metadata.
-    let dashboards = kyomi_auth::dashboard_service::list_dashboards_for_sync(db, workspace_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(user_id, workspace_id, error = %e, "list_dashboards_for_sync failed");
-            vec![]
-        });
-    let knowledge = kyomi_auth::dashboard_service::list_knowledge_for_sync(db, workspace_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(user_id, workspace_id, error = %e, "list_knowledge_for_sync failed");
-            vec![]
-        });
+    let dashboards =
+        kyomi_auth::dashboard_service::list_dashboards_for_sync(db, workspace_id, user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(user_id, workspace_id, error = %e, "list_dashboards_for_sync failed");
+                vec![]
+            });
+    let knowledge =
+        kyomi_auth::dashboard_service::list_knowledge_for_sync(db, workspace_id, user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(user_id, workspace_id, error = %e, "list_knowledge_for_sync failed");
+                vec![]
+            });
     let sessions = kyomi_auth::chat_service::list_sessions_for_sync(db, workspace_id)
         .await
         .unwrap_or_else(|e| {

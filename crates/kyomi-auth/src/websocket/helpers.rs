@@ -813,7 +813,18 @@ pub async fn broadcast_dashboard_sync(
         data,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    send_sync_action(manager, workspace_id, &sync_action, None).await;
+
+    // Route based on visibility: public docs go to all workspace members;
+    // private docs go only to the document owner.
+    let is_public =
+        crate::dashboard_service::is_doc_publicly_visible(db, dashboard_id).await;
+    if is_public {
+        send_sync_action(manager, workspace_id, &sync_action, None).await;
+    } else {
+        let msg = WebSocketMessage::new(MessageType::SyncAction)
+            .with_data(serde_json::to_value(&sync_action).unwrap_or_default());
+        manager.send_to_user(user_id, msg).await;
+    }
 }
 
 /// Broadcast a watch mutation to all workspace members.
