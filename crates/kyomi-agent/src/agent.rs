@@ -370,25 +370,37 @@ impl CustomAgent {
 
             // No tool calls -- this is the final response.
             if response.tool_calls.is_none() {
+                // Some models (e.g. MiMo) put the full answer in the reasoning
+                // field and leave content empty. Use reasoning as the response
+                // so the user sees something rather than a blank message.
+                // Only when the model chose to stop (not truncated by max_tokens).
+                let content = if response.content.is_empty()
+                    && response.finish_reason == "end_turn"
+                {
+                    response.thinking_content.unwrap_or_default()
+                } else {
+                    response.content
+                };
+
                 if let Some(ref cb) = self.callbacks.on_preparing_response {
                     cb();
                 }
 
                 // Validate ChartML blocks if present (YAML + SQL dry-run).
-                if has_chartml_blocks(&response.content)
-                    && let Some(error_msg) = self.validate_chartml_blocks(&response.content).await
+                if has_chartml_blocks(&content)
+                    && let Some(error_msg) = self.validate_chartml_blocks(&content).await
                 {
                     warn!(error = %error_msg, "ChartML validation failed, asking LLM to fix");
                     // Log validation failure for prompt-tuning analysis.
                     self.log_chartml_validation_error(
-                        &response.content,
+                        &content,
                         &error_msg,
                         chartml_retry_messages.len() as i32 / 2,
                         "chat",
                     )
                     .await;
                     // Store as ephemeral retry context — NOT in self.state.messages.
-                    chartml_retry_messages.push(Message::assistant(response.content.clone()));
+                    chartml_retry_messages.push(Message::assistant(content));
                     chartml_retry_messages.push(Message::user(format!(
                         "\u{1f916} SYSTEM: Automatic ChartML validation failed. The user has NOT seen your response yet. \
                          Please fix the following errors and then repeat your FULL response:\n\n{error_msg}"
@@ -410,10 +422,8 @@ impl CustomAgent {
                 }
 
                 // Push final response to state so persist_after_chat saves it.
-                self.state
-                    .messages
-                    .push(Message::assistant(&response.content));
-                return Ok(response.content);
+                self.state.messages.push(Message::assistant(&content));
+                return Ok(content);
             }
 
             // Has tool calls -- process them.
