@@ -1048,10 +1048,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn mcp_capability_denied_for_free_tier() {
+    fn mcp_capability_allowed_for_free_tier() {
         let user = test_auth_user("free");
         let result = check_mcp_capability(&user, false);
-        assert!(result.is_err(), "Free tier should not have MCP access");
+        assert!(result.is_ok(), "Free tier has MCP access");
     }
 
     #[test]
@@ -1207,11 +1207,11 @@ mod tests {
         };
         let tools = registry.get_tools(&filter);
 
-        // 28 total - 3 copilot-only = 25 MCP tools
+        // 36 total - 4 copilot-only = 32 MCP tools
         assert_eq!(
             tools.len(),
-            25,
-            "MCP should have 25 tools (28 total - 3 copilot-only)"
+            32,
+            "MCP should have 32 tools (36 total - 4 copilot-only)"
         );
     }
 
