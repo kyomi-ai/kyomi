@@ -111,6 +111,7 @@ pub async fn list_collections(
     let collections = kyomi_auth::collection_service::list_collections(
         ac.db(),
         &ac.ws_id,
+        &ac.auth.user_id,
         doc_type.as_deref(),
     )
     .await
@@ -179,7 +180,7 @@ pub async fn update_collection(
 
     // Re-fetch to get updated state with dashboards
     let collection =
-        kyomi_auth::collection_service::get_collection(ac.db(), &collection_id, &ac.ws_id)
+        kyomi_auth::collection_service::get_collection(ac.db(), &collection_id, &ac.ws_id, &ac.auth.user_id)
             .await
             .into_sfn()?;
 
