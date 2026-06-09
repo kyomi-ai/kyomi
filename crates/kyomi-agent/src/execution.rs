@@ -990,6 +990,7 @@ async fn generate_dashboard_summary_inner(
                                     collection_id,
                                     dashboard_id,
                                     workspace_id,
+                                    user_id,
                                     None,
                                 )
                                 .await

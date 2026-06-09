@@ -480,6 +480,7 @@ pub async fn add_dashboard(
     collection_id: &str,
     dashboard_id: &str,
     workspace_id: &str,
+    user_id: &str,
     position: Option<i32>,
 ) -> Result<()> {
     uuid::Uuid::parse_str(collection_id)
@@ -510,6 +511,20 @@ pub async fn add_dashboard(
     if !dash_exists {
         return Err(kyomi_core::Error::NotFound(
             "Dashboard not found".into(),
+        ));
+    }
+
+    // Verify the requesting user owns the dashboard
+    let is_owner = row_exists(
+        db,
+        "SELECT 1 FROM dashboards WHERE dashboard_id = $1 AND user_id = $2",
+        &[dashboard_id, user_id],
+    )
+    .await?;
+
+    if !is_owner {
+        return Err(kyomi_core::Error::Forbidden(
+            "Only the document owner can add it to a collection".into(),
         ));
     }
 
