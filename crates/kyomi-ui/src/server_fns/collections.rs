@@ -218,6 +218,7 @@ pub async fn add_dashboard_to_collection(
         &collection_id,
         &dashboard_id,
         &ac.ws_id,
+        &ac.auth.user_id,
         None, // position — append to end
     )
     .await
