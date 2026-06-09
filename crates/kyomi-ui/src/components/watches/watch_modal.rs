@@ -174,10 +174,9 @@ pub fn WatchModal(
     // Reset tab when modal opens
     let initial_tab_stored = StoredValue::new(initial_tab);
     Effect::new(move |_| {
-        if open.get() {
-            if let Some(tab) = initial_tab_stored.try_get_value() {
+        if open.get()
+            && let Some(tab) = initial_tab_stored.try_get_value() {
                 set_config_tab.set(tab);
-            }
         }
     });
 
